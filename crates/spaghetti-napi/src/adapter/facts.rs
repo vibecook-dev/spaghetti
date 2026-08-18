@@ -586,6 +586,41 @@ impl ActorRunRevisionFact {
         }
         Ok(())
     }
+
+    /// Canonical value identity for one actor-run revision. Source occurrence
+    /// remains separate provenance; replaying the same normalized actor value
+    /// from another record must retain one durable/scoped join identity.
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.actor-run/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        encoded.push(match self.role {
+            ActorRunRole::Root => 1,
+            ActorRunRole::Child => 2,
+        });
+        push_optional_component(
+            &mut encoded,
+            self.parent_actor_run
+                .as_ref()
+                .map(|key| key.as_bytes().as_slice()),
+        );
+        push_optional_component(
+            &mut encoded,
+            self.native_session_id.as_deref().map(str::as_bytes),
+        );
+        push_optional_component(
+            &mut encoded,
+            self.native_actor_id.as_deref().map(str::as_bytes),
+        );
+        push_optional_component(
+            &mut encoded,
+            self.native_actor_type.as_deref().map(str::as_bytes),
+        );
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
 }
 
 /// Orthogonal affiliation dimensions. An actor may simultaneously belong to
@@ -637,13 +672,59 @@ impl ActorAffiliationRevisionFact {
         }
         Ok(())
     }
+
+    /// Canonical value identity for one affiliation revision. This realizes
+    /// RFC 012C's explicit revision-key axis: relation identity remains the
+    /// fact key while state, qualification, and normalized attributes select
+    /// the replaceable semantic revision.
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.actor-affiliation/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.affiliation.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        encoded.push(match self.dimension {
+            ActorAffiliationDimension::Team => 1,
+            ActorAffiliationDimension::Workflow => 2,
+        });
+        push_component(&mut encoded, self.target.as_bytes());
+        push_optional_component(
+            &mut encoded,
+            self.member.as_ref().map(|key| key.as_bytes().as_slice()),
+        );
+        push_optional_component(
+            &mut encoded,
+            self.native_target_id.as_deref().map(str::as_bytes),
+        );
+        push_optional_component(
+            &mut encoded,
+            self.native_member_id.as_deref().map(str::as_bytes),
+        );
+        encoded.push(match self.state {
+            ActorAffiliationState::Present => 1,
+            ActorAffiliationState::Removed => 2,
+            ActorAffiliationState::Unknown => 3,
+        });
+        match &self.effective_at {
+            Some(timestamp) => {
+                encoded.push(1);
+                push_component(&mut encoded, timestamp.value.as_bytes());
+                encoded.push(timestamp_quality_revision_tag(timestamp.quality));
+            }
+            None => encoded.push(0),
+        }
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
 }
 
 fn validate_runtime_semantic_text(field: &str, value: Option<&str>) -> Result<(), AdapterError> {
-    if value.is_some_and(|value| value.is_empty() || value.len() > MAX_RUNTIME_SEMANTIC_TEXT_BYTES)
-    {
+    if value.is_some_and(|value| {
+        value.is_empty() || value.len() > MAX_RUNTIME_SEMANTIC_TEXT_BYTES || value.trim() != value
+    }) {
         return Err(AdapterError::invalid_contract(format!(
-            "runtime semantic {field} must contain 1..={MAX_RUNTIME_SEMANTIC_TEXT_BYTES} bytes when present"
+            "runtime semantic {field} must contain 1..={MAX_RUNTIME_SEMANTIC_TEXT_BYTES} canonical bytes when present"
         )));
     }
     Ok(())
@@ -1462,6 +1543,16 @@ impl Fact {
             Self::UnknownRecord { .. } => None,
         }
     }
+
+    fn required_value_semantic_revision_key(
+        &self,
+    ) -> Result<Option<[u8; FACT_HASH_BYTES]>, AdapterError> {
+        match self {
+            Self::ActorRunRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::ActorAffiliationRevision(revision) => revision.semantic_revision_key().map(Some),
+            _ => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1593,15 +1684,23 @@ impl FactBatch {
     }
 
     /// Emit a replaceable native fact whose stable key may span several source
-    /// records. The source record is the default semantic revision boundary.
+    /// records. The source record is the default semantic revision boundary;
+    /// fact families with a canonical value revision key override that default
+    /// here so adapters cannot accidentally choose a weaker identity.
     pub fn push_native(
         &mut self,
         record: &SourceRecord,
         stable_native_fact_key: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
-        let semantic =
-            self.semantic_revision(record, value.kind(), true, stable_native_fact_key, None)?;
+        let revision_key = value.required_value_semantic_revision_key()?;
+        let semantic = self.semantic_revision(
+            record,
+            value.kind(),
+            true,
+            stable_native_fact_key,
+            revision_key.as_ref().map(|key| key.as_slice()),
+        )?;
         self.push_internal(record, value, Some(semantic))
     }
 
@@ -1614,6 +1713,7 @@ impl FactBatch {
         stable_native_fact_key: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
+        let revision_key = value.required_value_semantic_revision_key()?;
         let semantic_key = self
             .semantic_context
             .as_ref()
@@ -1623,7 +1723,13 @@ impl FactBatch {
                 )
             })?
             .object_scoped_native_fact_key(record.generation, stable_native_fact_key)?;
-        let semantic = self.semantic_revision(record, value.kind(), true, &semantic_key, None)?;
+        let semantic = self.semantic_revision(
+            record,
+            value.kind(),
+            true,
+            &semantic_key,
+            revision_key.as_ref().map(|key| key.as_slice()),
+        )?;
         self.push_internal(record, value, Some(semantic))
     }
 
@@ -1638,6 +1744,14 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
+        if value
+            .required_value_semantic_revision_key()?
+            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
+        {
+            return Err(AdapterError::invalid_contract(
+                "fact family requires its canonical value semantic revision key",
+            ));
+        }
         let semantic_key = self
             .semantic_context
             .as_ref()
@@ -1718,6 +1832,14 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
+        if value
+            .required_value_semantic_revision_key()?
+            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
+        {
+            return Err(AdapterError::invalid_contract(
+                "fact family requires its canonical value semantic revision key",
+            ));
+        }
         let semantic = self.semantic_revision(
             record,
             value.kind(),
@@ -1737,12 +1859,13 @@ impl FactBatch {
         deterministic_semantic_subkey: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
+        let revision_key = value.required_value_semantic_revision_key()?;
         let semantic = self.semantic_revision(
             record,
             value.kind(),
             false,
             deterministic_semantic_subkey,
-            None,
+            revision_key.as_ref().map(|key| key.as_slice()),
         )?;
         self.push_internal(record, value, Some(semantic))
     }
@@ -1756,6 +1879,14 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
+        if value
+            .required_value_semantic_revision_key()?
+            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
+        {
+            return Err(AdapterError::invalid_contract(
+                "fact family requires its canonical value semantic revision key",
+            ));
+        }
         let semantic = self.semantic_revision(
             record,
             value.kind(),
@@ -1961,11 +2092,17 @@ impl FactBatch {
                     .semantic_revision
                     .is_some_and(|semantic| semantic.fact_revision_id == *revision)
             });
-            let idempotent_usage_revision =
+            let idempotent_value_revision =
                 existing.zip(incoming).is_some_and(|(existing, incoming)| {
-                    matches!(existing.value, Fact::UsageRevisionV2(_))
-                        && matches!(incoming.value, Fact::UsageRevisionV2(_))
-                        && existing.value == incoming.value
+                    matches!(
+                        (&existing.value, &incoming.value),
+                        (Fact::UsageRevisionV2(_), Fact::UsageRevisionV2(_))
+                            | (Fact::ActorRunRevision(_), Fact::ActorRunRevision(_))
+                            | (
+                                Fact::ActorAffiliationRevision(_),
+                                Fact::ActorAffiliationRevision(_)
+                            )
+                    ) && existing.value == incoming.value
                         && existing
                             .semantic_revision
                             .zip(incoming.semantic_revision)
@@ -1975,7 +2112,7 @@ impl FactBatch {
                                         == incoming.semantic_revision_ref
                             })
                 });
-            if !idempotent_usage_revision {
+            if !idempotent_value_revision {
                 return Err(AdapterError::invalid_contract(
                     "fact batch merge repeats a canonical fact revision",
                 ));
@@ -2260,6 +2397,124 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn actor_and_affiliation_revisions_use_canonical_value_identity() {
+        let first_record = record();
+        let second_record = SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 1,
+                stream_id: 2,
+                object_id: 3,
+                observed_at: 5,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            SourceCursor::append_offset(3),
+            SourceCursor::append_offset(6),
+            1,
+            b"{}".to_vec(),
+        );
+        let keys = FactBatch::new_with_semantic_context(4, 2, semantic_context()).unwrap();
+        let session = keys.canonical_entity_key("session", b"session-1").unwrap();
+        let root = keys
+            .canonical_root_actor_run_key(b"session-1", None)
+            .unwrap();
+        let child = keys.canonical_entity_key("run", b"child-1").unwrap();
+        let actor = ActorRunRevisionFact {
+            actor_run: child,
+            session,
+            role: ActorRunRole::Child,
+            parent_actor_run: Some(root),
+            native_session_id: Some("session-1".to_string()),
+            native_actor_id: Some("child-1".to_string()),
+            native_actor_type: Some("subagent".to_string()),
+        };
+        let actor_key = actor.semantic_revision_key().unwrap();
+
+        let mut first = FactBatch::new_with_semantic_context(2, 2, semantic_context()).unwrap();
+        first
+            .push_native(
+                &first_record,
+                b"child-1",
+                Fact::ActorRunRevision(actor.clone()),
+            )
+            .unwrap();
+        let mut second = FactBatch::new_with_semantic_context(2, 2, semantic_context()).unwrap();
+        second
+            .push_native(
+                &second_record,
+                b"child-1",
+                Fact::ActorRunRevision(actor.clone()),
+            )
+            .unwrap();
+        let first_semantic = first.facts()[0].semantic_revision.unwrap();
+        let second_semantic = second.facts()[0].semantic_revision.unwrap();
+        assert_ne!(
+            first_semantic.source_record_id,
+            second_semantic.source_record_id
+        );
+        assert_eq!(first_semantic.fact_id, second_semantic.fact_id);
+        assert_eq!(
+            first_semantic.fact_revision_id,
+            second_semantic.fact_revision_id
+        );
+        assert_eq!(
+            first_semantic.fact_revision_id,
+            FactRevisionId::derive(&first_semantic.fact_id, 1, &actor_key).unwrap()
+        );
+        first.append(second).unwrap();
+        assert_eq!(first.facts().len(), 1, "exact actor replay is idempotent");
+
+        let mut changed_actor = actor.clone();
+        changed_actor.native_actor_type = Some("workflow-child".to_string());
+        assert_ne!(
+            actor.semantic_revision_key().unwrap(),
+            changed_actor.semantic_revision_key().unwrap()
+        );
+        let mut forged = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        assert!(forged
+            .push_native_with_revision(
+                &first_record,
+                b"child-1",
+                b"source-owned-weaker-key",
+                Fact::ActorRunRevision(actor.clone()),
+            )
+            .is_err());
+        assert!(forged
+            .push_derived_with_revision(
+                &first_record,
+                b"child-1",
+                b"source-owned-weaker-key",
+                Fact::ActorRunRevision(actor.clone()),
+            )
+            .is_err());
+
+        let affiliation = ActorAffiliationRevisionFact {
+            affiliation: keys
+                .canonical_entity_key("actor_affiliation", b"child-1/team/team-1")
+                .unwrap(),
+            actor_run: child,
+            session,
+            dimension: ActorAffiliationDimension::Team,
+            target: keys.canonical_entity_key("team", b"team-1").unwrap(),
+            member: None,
+            native_target_id: Some("team-1".to_string()),
+            native_member_id: None,
+            state: ActorAffiliationState::Present,
+            effective_at: None,
+        };
+        let mut removed = affiliation.clone();
+        removed.state = ActorAffiliationState::Removed;
+        assert_ne!(
+            affiliation.semantic_revision_key().unwrap(),
+            removed.semantic_revision_key().unwrap()
+        );
+        let mut whitespace = affiliation;
+        whitespace.native_target_id = Some(" team-1".to_string());
+        assert!(whitespace.semantic_revision_key().is_err());
     }
 
     #[test]

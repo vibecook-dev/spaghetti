@@ -10501,6 +10501,12 @@ fn actor_replacement_snapshot_is_valid(
                 .semantic_revision_ref
                 .semantic_reference_contract_version
                 == semantic_reference_contract_version
+                && entity
+                    .revision
+                    .semantic_revision_key()
+                    .ok()
+                    .and_then(|key| FactRevisionId::derive(&entity.semantic.fact_id, 1, &key).ok())
+                    == Some(entity.semantic.fact_revision_id)
         })
         && actor_run_replacement_digest(&snapshot.entities).ok() == Some(snapshot.semantic_digest)
 }
@@ -10524,6 +10530,12 @@ fn affiliation_replacement_snapshot_is_valid(
                 .semantic_revision_ref
                 .semantic_reference_contract_version
                 == semantic_reference_contract_version
+                && entity
+                    .revision
+                    .semantic_revision_key()
+                    .ok()
+                    .and_then(|key| FactRevisionId::derive(&entity.semantic.fact_id, 1, &key).ok())
+                    == Some(entity.semantic.fact_revision_id)
         })
         && actor_affiliation_replacement_digest(&snapshot.entities).ok()
             == Some(snapshot.semantic_digest)
@@ -10597,6 +10609,15 @@ fn scoped_actor_run_state(
         .validate()
         .map_err(|_| ScopedProjectionError::InvalidActorContext)?;
     let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    if FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+        != semantic.fact_revision_id
+    {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
     Ok(ScopedActorRunProjectionState {
         object_token,
         generation: evidence.generation,
@@ -10617,6 +10638,15 @@ fn scoped_actor_affiliation_state(
         .validate()
         .map_err(|_| ScopedProjectionError::InvalidActorContext)?;
     let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    if FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+        != semantic.fact_revision_id
+    {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
     Ok(ScopedActorAffiliationProjectionState {
         object_token,
         generation: evidence.generation,
@@ -17962,11 +17992,11 @@ mod projection_tests {
         };
         assert_eq!(
             bytes_hex(actor_id.as_bytes()),
-            "fcb56c54aca063a18b7083f9fa7564b5c74bc8f95483d38d44191f7b4fa92e88"
+            "f5ec0b332875d620805287d3ce2721600a0b8cb35a05003beca7217625902f69"
         );
         assert_eq!(
             bytes_hex(affiliation_id.as_bytes()),
-            "5823d4d72c86cafc2f2c6dd0f10361d7c9e11e6f9bc45dea5ffbe5a2bfb2bd75"
+            "a889952920abaedaa973fd2d372aa6bc2faa483cd8be57b0c568ff34036f7fd0"
         );
         assert!(matches!(
             projected[2],
@@ -18278,11 +18308,11 @@ mod projection_tests {
         assert_eq!(forward_affiliations.entity_count, 2);
         assert_eq!(
             bytes_hex(forward_actors.semantic_digest.as_bytes()),
-            "6e5329e0925afc8404990f16a3ee3d14e6a1d1dc96a0c5a10a89602cf6bb4906"
+            "4ae181a02b5eda5a9bf5711cd3d0af2277b52fca3fe7d30eb23f59ce330605d6"
         );
         assert_eq!(
             bytes_hex(forward_affiliations.semantic_digest.as_bytes()),
-            "93255130910cefd4f2c2435d4915d47f083d23ad3f9cd131ed1d55ca273fb5d6"
+            "47d03bdf40c4dab51293ab4e1fa16fc72169d66382274bfdf6fd8fba4483f668"
         );
         assert_eq!(
             forward_actors.semantic_digest,

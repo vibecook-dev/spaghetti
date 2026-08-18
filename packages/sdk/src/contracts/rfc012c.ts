@@ -108,6 +108,7 @@ export interface ActorRunExample {
   family: typeof ACTOR_RUN_FAMILY;
   family_version: typeof ACTOR_RUN_FAMILY_VERSION;
   revision: ActorRunRevision;
+  semantic_revision_key_hex: string;
   fact_id: OpaqueContractReference;
   source_record_id: OpaqueContractReference;
   semantic_revision_ref: SemanticRevisionRef;
@@ -117,6 +118,7 @@ export interface ActorAffiliationExample {
   family: typeof ACTOR_AFFILIATION_FAMILY;
   family_version: typeof ACTOR_AFFILIATION_FAMILY_VERSION;
   revision: ActorAffiliationRevision;
+  semantic_revision_key_hex: string;
   fact_id: OpaqueContractReference;
   source_record_id: OpaqueContractReference;
   semantic_revision_ref: SemanticRevisionRef;
@@ -477,6 +479,7 @@ function parseActorExample(value: unknown): ActorRunExample {
     family: ACTOR_RUN_FAMILY,
     family_version: ACTOR_RUN_FAMILY_VERSION,
     revision: parseActorRunRevision(input.revision),
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, 'actor semantic_revision_key_hex'),
     fact_id: parseOpaqueContractReference(input.fact_id, 'actor fact id'),
     source_record_id: parseOpaqueContractReference(input.source_record_id, 'actor source record id'),
     semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
@@ -495,6 +498,7 @@ function parseAffiliationExample(value: unknown): ActorAffiliationExample {
     family: ACTOR_AFFILIATION_FAMILY,
     family_version: ACTOR_AFFILIATION_FAMILY_VERSION,
     revision: parseActorAffiliationRevision(input.revision),
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, 'affiliation semantic_revision_key_hex'),
     fact_id: parseOpaqueContractReference(input.fact_id, 'affiliation fact id'),
     source_record_id: parseOpaqueContractReference(input.source_record_id, 'affiliation source record id'),
     semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),

@@ -8,7 +8,7 @@ use rusqlite::{params, Transaction};
 
 use crate::adapter::{
     ActorAffiliationDimension, ActorAffiliationState, ActorRunRole, ConsistencyPolicy, Fact,
-    FactBatch, FactEnvelope, QualifiedTimestamp, TimestampQuality,
+    FactBatch, FactEnvelope, FactRevisionId, QualifiedTimestamp, TimestampQuality,
 };
 
 use super::commit::ProjectionCommitContext;
@@ -31,14 +31,7 @@ pub(super) fn apply_runtime_semantic_v2_facts(
         .any(|envelope| matches!(envelope.value, Fact::ActorAffiliationRevision(_)));
     let owns_affiliation_snapshot = context.consistency == ConsistencyPolicy::SnapshotReplace
         && !context.skip_unowned_replace_document(has_affiliation_fact);
-    if owns_affiliation_snapshot {
-        transaction
-            .execute(
-                "DELETE FROM runtime_actor_affiliations_v2 WHERE source_object_id = ?1",
-                [sqlite_u64(context.source_object_id, "source object id")?],
-            )
-            .map_err(|error| sqlite_error("retract replaced actor affiliation snapshot", error))?;
-    } else if context.replaces_prior_generation {
+    if !owns_affiliation_snapshot && context.replaces_prior_generation {
         transaction
             .execute(
                 "DELETE FROM runtime_actor_affiliations_v2 WHERE source_object_id = ?1 AND source_generation <> ?2",
@@ -68,6 +61,15 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                     EngineError::InvalidCommit(format!("invalid actor-run fact: {error}"))
                 })?;
                 let semantic = required_semantic_revision(envelope, "actor-run")?;
+                require_value_semantic_revision(
+                    semantic,
+                    &fact.semantic_revision_key().map_err(|error| {
+                        EngineError::InvalidCommit(format!(
+                            "invalid actor-run semantic revision: {error}"
+                        ))
+                    })?,
+                    "actor-run",
+                )?;
                 let affected = transaction
                     .execute(
                         r#"
@@ -85,17 +87,37 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                         ON CONFLICT(actor_run_key) DO UPDATE SET
                             semantic_fact_id = excluded.semantic_fact_id,
                             fact_revision_id = excluded.fact_revision_id,
-                            source_record_id = excluded.source_record_id,
+                            source_record_id = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_runs_v2.fact_revision_id
+                              THEN runtime_actor_runs_v2.source_record_id
+                              ELSE excluded.source_record_id
+                            END,
                             session_key = excluded.session_key,
                             role = excluded.role,
                             parent_actor_run_key = excluded.parent_actor_run_key,
                             native_session_id = excluded.native_session_id,
                             native_actor_id = excluded.native_actor_id,
                             native_actor_type = excluded.native_actor_type,
-                            fact_id = excluded.fact_id,
-                            source_object_id = excluded.source_object_id,
-                            source_generation = excluded.source_generation,
-                            cursor_end = excluded.cursor_end,
+                            fact_id = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_runs_v2.fact_revision_id
+                              THEN runtime_actor_runs_v2.fact_id
+                              ELSE excluded.fact_id
+                            END,
+                            source_object_id = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_runs_v2.fact_revision_id
+                              THEN runtime_actor_runs_v2.source_object_id
+                              ELSE excluded.source_object_id
+                            END,
+                            source_generation = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_runs_v2.fact_revision_id
+                              THEN runtime_actor_runs_v2.source_generation
+                              ELSE excluded.source_generation
+                            END,
+                            cursor_end = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_runs_v2.fact_revision_id
+                              THEN runtime_actor_runs_v2.cursor_end
+                              ELSE excluded.cursor_end
+                            END,
                             last_commit_seq = excluded.last_commit_seq
                         WHERE excluded.source_object_id = runtime_actor_runs_v2.source_object_id
                           AND (
@@ -104,6 +126,10 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                               excluded.source_generation = runtime_actor_runs_v2.source_generation
                               AND excluded.cursor_end >= runtime_actor_runs_v2.cursor_end
                             )
+                          )
+                          AND (
+                            excluded.fact_revision_id <> runtime_actor_runs_v2.fact_revision_id
+                            OR excluded.source_generation = runtime_actor_runs_v2.source_generation
                           )
                         "#,
                         params![
@@ -134,6 +160,15 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                     EngineError::InvalidCommit(format!("invalid actor-affiliation fact: {error}"))
                 })?;
                 let semantic = required_semantic_revision(envelope, "actor-affiliation")?;
+                require_value_semantic_revision(
+                    semantic,
+                    &fact.semantic_revision_key().map_err(|error| {
+                        EngineError::InvalidCommit(format!(
+                            "invalid actor-affiliation semantic revision: {error}"
+                        ))
+                    })?,
+                    "actor-affiliation",
+                )?;
                 let affected = transaction
                     .execute(
                         r#"
@@ -151,7 +186,11 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                         ON CONFLICT(affiliation_key) DO UPDATE SET
                             semantic_fact_id = excluded.semantic_fact_id,
                             fact_revision_id = excluded.fact_revision_id,
-                            source_record_id = excluded.source_record_id,
+                            source_record_id = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_affiliations_v2.fact_revision_id
+                              THEN runtime_actor_affiliations_v2.source_record_id
+                              ELSE excluded.source_record_id
+                            END,
                             actor_run_key = excluded.actor_run_key,
                             session_key = excluded.session_key,
                             dimension = excluded.dimension,
@@ -162,10 +201,26 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                             state = excluded.state,
                             effective_at = excluded.effective_at,
                             effective_at_quality = excluded.effective_at_quality,
-                            fact_id = excluded.fact_id,
-                            source_object_id = excluded.source_object_id,
-                            source_generation = excluded.source_generation,
-                            cursor_end = excluded.cursor_end,
+                            fact_id = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_affiliations_v2.fact_revision_id
+                              THEN runtime_actor_affiliations_v2.fact_id
+                              ELSE excluded.fact_id
+                            END,
+                            source_object_id = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_affiliations_v2.fact_revision_id
+                              THEN runtime_actor_affiliations_v2.source_object_id
+                              ELSE excluded.source_object_id
+                            END,
+                            source_generation = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_affiliations_v2.fact_revision_id
+                              THEN runtime_actor_affiliations_v2.source_generation
+                              ELSE excluded.source_generation
+                            END,
+                            cursor_end = CASE
+                              WHEN excluded.fact_revision_id = runtime_actor_affiliations_v2.fact_revision_id
+                              THEN runtime_actor_affiliations_v2.cursor_end
+                              ELSE excluded.cursor_end
+                            END,
                             last_commit_seq = excluded.last_commit_seq
                         WHERE excluded.source_object_id = runtime_actor_affiliations_v2.source_object_id
                           AND (
@@ -174,6 +229,10 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                               excluded.source_generation = runtime_actor_affiliations_v2.source_generation
                               AND excluded.cursor_end >= runtime_actor_affiliations_v2.cursor_end
                             )
+                          )
+                          AND (
+                            excluded.fact_revision_id <> runtime_actor_affiliations_v2.fact_revision_id
+                            OR excluded.source_generation = runtime_actor_affiliations_v2.source_generation
                           )
                         "#,
                         params![
@@ -240,6 +299,24 @@ fn required_semantic_revision<'a>(
         )));
     }
     Ok(semantic)
+}
+
+fn require_value_semantic_revision(
+    semantic: &crate::adapter::FactSemanticRevision,
+    revision_key: &[u8],
+    fact_name: &str,
+) -> Result<(), EngineError> {
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, revision_key).map_err(|error| {
+        EngineError::InvalidCommit(format!(
+            "invalid {fact_name} semantic revision identity: {error}"
+        ))
+    })?;
+    if semantic.fact_revision_id != expected {
+        return Err(EngineError::InvalidCommit(format!(
+            "{fact_name} semantic revision does not match its normalized value"
+        )));
+    }
+    Ok(())
 }
 
 fn require_accepted(affected: usize, fact_name: &str) -> Result<(), EngineError> {

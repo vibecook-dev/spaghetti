@@ -64,6 +64,7 @@ struct ActorExampleWire {
     family: String,
     family_version: u32,
     revision: ActorRunRevisionFact,
+    semantic_revision_key_hex: String,
     fact_id: CanonicalFactId,
     source_record_id: SourceRecordId,
     semantic_revision_ref: SemanticRevisionRef,
@@ -80,6 +81,7 @@ struct AffiliationExampleWire {
     family: String,
     family_version: u32,
     revision: ActorAffiliationRevisionFact,
+    semantic_revision_key_hex: String,
     fact_id: CanonicalFactId,
     source_record_id: SourceRecordId,
     semantic_revision_ref: SemanticRevisionRef,
@@ -290,20 +292,6 @@ fn emit_native(
     batch.facts()[0].semantic_revision.unwrap()
 }
 
-fn emit_native_revision(
-    context: &FactSemanticContext,
-    record: &SourceRecord,
-    stable_key: &[u8],
-    revision_key: &[u8],
-    value: Fact,
-) -> FactSemanticRevision {
-    let mut batch = fixture_batch(context.clone());
-    batch
-        .push_native_with_revision(record, stable_key, revision_key, value)
-        .unwrap();
-    batch.facts()[0].semantic_revision.unwrap()
-}
-
 fn emit_usage(
     context: &FactSemanticContext,
     record: &SourceRecord,
@@ -337,7 +325,7 @@ fn actor_example(
     revision: ActorRunRevisionFact,
     stable_key: &[u8],
 ) -> ActorExampleWire {
-    revision.validate().unwrap();
+    let semantic_revision_key = revision.semantic_revision_key().unwrap();
     let semantic = emit_native(
         context,
         record,
@@ -348,6 +336,7 @@ fn actor_example(
         family: ACTOR_RUN_FAMILY.to_string(),
         family_version: FAMILY_VERSION,
         revision,
+        semantic_revision_key_hex: hex_digest(&semantic_revision_key),
         fact_id: semantic.fact_id,
         source_record_id: semantic.source_record_id,
         semantic_revision_ref: semantic.semantic_revision_ref,
@@ -359,20 +348,19 @@ fn affiliation_example(
     record: &SourceRecord,
     revision: ActorAffiliationRevisionFact,
     stable_key: &[u8],
-    revision_key: &[u8],
 ) -> AffiliationExampleWire {
-    revision.validate().unwrap();
-    let semantic = emit_native_revision(
+    let semantic_revision_key = revision.semantic_revision_key().unwrap();
+    let semantic = emit_native(
         context,
         record,
         stable_key,
-        revision_key,
         Fact::ActorAffiliationRevision(revision.clone()),
     );
     AffiliationExampleWire {
         family: ACTOR_AFFILIATION_FAMILY.to_string(),
         family_version: FAMILY_VERSION,
         revision,
+        semantic_revision_key_hex: hex_digest(&semantic_revision_key),
         fact_id: semantic.fact_id,
         source_record_id: semantic.source_record_id,
         semantic_revision_ref: semantic.semantic_revision_ref,
@@ -462,7 +450,6 @@ fn expected_fixture() -> RuntimeContractFixtureWire {
             effective_at: None,
         },
         b"fixture-child-actor/team/fixture-team-1",
-        b"affiliation-state-present",
     );
     let workflow_revision = ActorAffiliationRevisionFact {
         affiliation: workflow_affiliation,
@@ -481,7 +468,6 @@ fn expected_fixture() -> RuntimeContractFixtureWire {
         &record,
         workflow_revision.clone(),
         b"fixture-child-actor/workflow/fixture-workflow-1",
-        b"affiliation-state-present",
     );
     let child_workflow_removed = affiliation_example(
         &context,
@@ -491,7 +477,6 @@ fn expected_fixture() -> RuntimeContractFixtureWire {
             ..workflow_revision
         },
         b"fixture-child-actor/workflow/fixture-workflow-1",
-        b"affiliation-state-removed",
     );
 
     let native_message = emit_usage(
@@ -597,6 +582,24 @@ fn committed_fixture() -> RuntimeContractFixtureWire {
 }
 
 fn assert_usage_revision_identity(example: &UsageExampleWire) {
+    let recomputed = example.revision.semantic_revision_key().unwrap();
+    assert_eq!(hex_digest(&recomputed), example.semantic_revision_key_hex);
+    let expected_ref = SemanticRevisionRef::new(
+        crate::adapter::FactRevisionId::derive(&example.fact_id, 1, &recomputed).unwrap(),
+    );
+    assert_eq!(expected_ref, example.semantic_revision_ref);
+}
+
+fn assert_actor_revision_identity(example: &ActorExampleWire) {
+    let recomputed = example.revision.semantic_revision_key().unwrap();
+    assert_eq!(hex_digest(&recomputed), example.semantic_revision_key_hex);
+    let expected_ref = SemanticRevisionRef::new(
+        crate::adapter::FactRevisionId::derive(&example.fact_id, 1, &recomputed).unwrap(),
+    );
+    assert_eq!(expected_ref, example.semantic_revision_ref);
+}
+
+fn assert_affiliation_revision_identity(example: &AffiliationExampleWire) {
     let recomputed = example.revision.semantic_revision_key().unwrap();
     assert_eq!(hex_digest(&recomputed), example.semantic_revision_key_hex);
     let expected_ref = SemanticRevisionRef::new(
@@ -746,6 +749,31 @@ fn usage_semantic_revision_keys_are_recomputed_from_constructors() {
     ] {
         assert_usage_revision_identity(example);
     }
+}
+
+#[test]
+fn actor_semantic_revision_keys_are_recomputed_from_constructors() {
+    let fixture = expected_fixture();
+    for example in [&fixture.actors.root, &fixture.actors.child] {
+        assert_actor_revision_identity(example);
+    }
+    for example in [
+        &fixture.affiliations.child_team_present,
+        &fixture.affiliations.child_workflow_present,
+        &fixture.affiliations.child_workflow_removed,
+    ] {
+        assert_affiliation_revision_identity(example);
+    }
+    assert_ne!(
+        fixture
+            .affiliations
+            .child_workflow_present
+            .semantic_revision_key_hex,
+        fixture
+            .affiliations
+            .child_workflow_removed
+            .semantic_revision_key_hex
+    );
 }
 
 #[test]

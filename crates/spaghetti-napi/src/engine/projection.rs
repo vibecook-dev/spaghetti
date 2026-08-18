@@ -1510,9 +1510,16 @@ fn persist_facts(
             !redundant_activity_owners.contains_key(envelope.id.as_bytes().as_slice())
         })
         .collect::<Vec<_>>();
-    let (usage_v2_facts, ordinary_facts): (Vec<_>, Vec<_>) = durable_facts
+    let (usage_v2_facts, remaining_facts): (Vec<_>, Vec<_>) = durable_facts
         .into_iter()
         .partition(|(envelope, _)| matches!(envelope.value, Fact::UsageRevisionV2(_)));
+    let (revisioned_entity_facts, ordinary_facts): (Vec<_>, Vec<_>) =
+        remaining_facts.into_iter().partition(|(envelope, _)| {
+            matches!(
+                envelope.value,
+                Fact::ActorRunRevision(_) | Fact::ActorAffiliationRevision(_)
+            )
+        });
     persist_fact_rows(
         transaction,
         &ordinary_facts,
@@ -1521,7 +1528,23 @@ fn persist_facts(
         source_object_id,
         source_generation,
         commit_seq,
-        false,
+        SemanticRevisionConflict::Reject,
+    )?;
+    replace_revisioned_entity_generation_fact_rows(
+        transaction,
+        &revisioned_entity_facts,
+        source_object_id,
+        source_generation,
+    )?;
+    persist_fact_rows(
+        transaction,
+        &revisioned_entity_facts,
+        source_instance_id,
+        source_stream_id,
+        source_object_id,
+        source_generation,
+        commit_seq,
+        SemanticRevisionConflict::RefreshExisting,
     )?;
     persist_fact_rows(
         transaction,
@@ -1531,7 +1554,7 @@ fn persist_facts(
         source_object_id,
         source_generation,
         commit_seq,
-        true,
+        SemanticRevisionConflict::Ignore,
     )?;
 
     // A cursor-valid same-generation append cannot revisit an already
@@ -1578,6 +1601,61 @@ fn persist_facts(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticRevisionConflict {
+    Reject,
+    Ignore,
+    RefreshExisting,
+}
+
+fn replace_revisioned_entity_generation_fact_rows(
+    transaction: &Transaction<'_>,
+    fact_rows: &[(&FactEnvelope, &EncodedFactPayload)],
+    source_object_id: i64,
+    source_generation: i64,
+) -> Result<(), EngineError> {
+    for (envelope, _) in fact_rows {
+        let semantic = envelope.semantic_revision.as_ref().ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "revisioned actor fact is missing its semantic revision".to_string(),
+            )
+        })?;
+        let existing = transaction
+            .query_row(
+                r#"
+                SELECT fact_id, fact_kind, source_object_id, source_generation
+                FROM fact_records
+                WHERE semantic_fact_revision_id = ?1
+                "#,
+                [semantic.fact_revision_id.as_bytes().as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| sqlite_error("read revisioned actor replay owner", error))?;
+        let Some((fact_id, fact_kind, existing_object_id, existing_generation)) = existing else {
+            continue;
+        };
+        if fact_kind != envelope.value.kind() {
+            return Err(EngineError::InvalidCommit(
+                "canonical actor revision changed fact family".to_string(),
+            ));
+        }
+        if existing_object_id == source_object_id && existing_generation != source_generation {
+            transaction
+                .execute("DELETE FROM fact_records WHERE fact_id = ?1", [fact_id])
+                .map_err(|error| sqlite_error("replace revisioned actor generation", error))?;
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn persist_fact_rows(
     transaction: &Transaction<'_>,
@@ -1587,14 +1665,24 @@ fn persist_fact_rows(
     source_object_id: i64,
     source_generation: i64,
     commit_seq: i64,
-    semantic_revision_idempotent: bool,
+    semantic_revision_conflict: SemanticRevisionConflict,
 ) -> Result<(), EngineError> {
     for fact_chunk in fact_rows.chunks(FACT_INSERT_BATCH_ROWS) {
         let row = "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        let semantic_conflict = if semantic_revision_idempotent {
-            "ON CONFLICT(semantic_fact_revision_id) WHERE semantic_fact_revision_id IS NOT NULL DO NOTHING"
-        } else {
-            ""
+        let semantic_conflict = match semantic_revision_conflict {
+            SemanticRevisionConflict::Reject => "",
+            SemanticRevisionConflict::Ignore => {
+                "ON CONFLICT(semantic_fact_revision_id) WHERE semantic_fact_revision_id IS NOT NULL DO NOTHING"
+            }
+            SemanticRevisionConflict::RefreshExisting => {
+                r#"
+                ON CONFLICT(semantic_fact_revision_id)
+                WHERE semantic_fact_revision_id IS NOT NULL
+                DO UPDATE SET
+                    last_commit_seq = excluded.last_commit_seq
+                WHERE fact_records.source_object_id = excluded.source_object_id
+                "#
+            }
         };
         let sql = format!(
             r#"

@@ -44,6 +44,8 @@ test('Rust RFC 012C v1 fixture validates in the portable SDK', () => {
   assert.equal(fixture.actors.child.revision.role, 'child');
   assert.equal(fixture.actors.child.revision.parent_actor_run, fixture.actors.root.revision.actor_run);
   assert.equal(fixture.actors.child.revision.session, fixture.source.session.entity_key);
+  assert.match(fixture.actors.root.semantic_revision_key_hex, /^[0-9a-f]{64}$/);
+  assert.match(fixture.actors.child.semantic_revision_key_hex, /^[0-9a-f]{64}$/);
   assert.equal(fixture.source.session.external_ref.entity_key, fixture.source.session.entity_key);
   assert.match(fixture.source.session.entity_key, /^v1:[A-Za-z0-9_-]{43}$/);
   assert.doesNotMatch(JSON.stringify(fixture), /\/Users\/|~\/|\.db\b|claude-code|codex|grok/);
@@ -53,6 +55,11 @@ test('Rust RFC 012C v1 fixture validates in the portable SDK', () => {
   assert.equal(fixture.affiliations.child_workflow_present.revision.state, 'present');
   assert.equal(fixture.affiliations.child_workflow_present.revision.effective_at, null);
   assert.equal(fixture.affiliations.child_workflow_removed.revision.state, 'removed');
+  assert.match(fixture.affiliations.child_team_present.semantic_revision_key_hex, /^[0-9a-f]{64}$/);
+  assert.notEqual(
+    fixture.affiliations.child_workflow_present.semantic_revision_key_hex,
+    fixture.affiliations.child_workflow_removed.semantic_revision_key_hex,
+  );
   assert.equal(fixture.affiliations.child_team_present.revision.actor_run, fixture.actors.child.revision.actor_run);
   assert.equal(fixture.affiliations.child_workflow_present.revision.actor_run, fixture.actors.child.revision.actor_run);
   assert.equal(
@@ -174,6 +181,18 @@ test('unknown contract majors and malformed opaque references are rejected', () 
   };
   wrapped.actors.root.semantic_revision_ref = ref;
   reject(wrapped, parseRuntimeContractFixture);
+
+  const actorRevisionKey = clone(rawFixture) as {
+    actors: { root: { semantic_revision_key_hex: string } };
+  };
+  actorRevisionKey.actors.root.semantic_revision_key_hex = 'ABC';
+  reject(actorRevisionKey, parseRuntimeContractFixture);
+
+  const affiliationRevisionKey = clone(rawFixture) as {
+    affiliations: { child_team_present: { semantic_revision_key_hex: string } };
+  };
+  affiliationRevisionKey.affiliations.child_team_present.semantic_revision_key_hex = '0'.repeat(63);
+  reject(affiliationRevisionKey, parseRuntimeContractFixture);
 });
 
 test('actor lineage and affiliation enumerations are rejected when invalid', () => {
