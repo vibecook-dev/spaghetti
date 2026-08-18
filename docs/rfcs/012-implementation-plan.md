@@ -598,13 +598,13 @@ bounded negotiated additive response data. The contracts remain free of
 storage, engine queries, source reads, hydration execution, and N-API.
 
 B1 remains `In progress` only at the public exposure gate: no catalog N-API
-query surface should land until engine transport can bind an authorized
-`CatalogPolicyView` to the frozen access-policy digest and B3 provides real
-retained-snapshot/query execution. B2 is independently `In progress` as
-described below. B3 now includes source-neutral plan registration, the initial
-build lineage, and one atomic immutable initial Library publication, but
-retained-snapshot query execution remains open; scheduling and hydration
-execution remain later integration work.
+query surface should land until engine transport can bind a caller-authorized
+policy view to the frozen access-policy digest and the retained-snapshot lane
+has public transport, retention, and expiration authority. B2 is independently
+`In progress` as described below. B3 now includes source-neutral plan
+registration, the initial build lineage, one atomic immutable initial Library
+publication, and a crate-private WITHHELD-only retained-page reader; scheduling
+and hydration execution remain later integration work.
 
 ### B2. Catalog source compositions
 
@@ -801,7 +801,8 @@ proves rollback at every precommit seam and durable idempotency after commit.
 This slice itself cannot accept or synthesize coverage, reducer rows, complete
 or degraded readiness, snapshot IDs, last-complete state, retention,
 pagination, or public query authority. The later third slice now supplies the
-initial atomic publication; retained-snapshot reads remain open.
+initial atomic publication, and the fourth slice supplies the first private
+retained-page reader.
 
 The second bounded B3 slice (`e65a9fd`) adds a store-free, contract-only
 initial-publication assembly envelope. It consumes exact complete Library
@@ -836,7 +837,29 @@ boundary and lost acknowledgements, while a second connection proves
 uncommitted rows remain invisible. This remains initial `Library` publication
 only: no refresh/degraded transition, retention/expiration, query-page
 execution, hydration execution, source reads, or public N-API authority.
-Retained-snapshot read lanes and pagination remain the next B3 gates.
+At that landing, retained-snapshot read lanes and pagination remained the next
+B3 gates.
+
+The fourth bounded B3 slice (`c0ea685`) adds the first checked, crate-private
+retained-page execution without exposing a public catalog API. Ready restart
+now strictly decodes canonical bounded project/session frames and requires the
+exact current RFC 012A model/reference versions even for a source-free
+publication. Its non-serializable read authority shares one authenticated
+snapshot-header identity plus bounded per-row key, length, and payload-digest
+commitments, so another connection, a missing row, or a canonical same-key row
+substitution cannot escape the restart-validated publication. The only v1
+query is engine-derived `All` filtering with opaque entity-key ascending order;
+its keyset continuation binds the exact snapshot, full negotiated selection,
+query fingerprint, sort version, page size, and final row. SQLite reads use the
+existing snapshot/kind/key primary-key range with `page_size + 1`, preflight
+payload lengths before allocation, enforce aggregate page bytes, and remain
+query-only while unrelated commits advance. Projection accepts only a
+WITHHELD policy token bound to the exact Library plan and selection, so native
+and policy-sensitive values cannot be disclosed. An absent snapshot remains an
+internal not-retained error rather than a fabricated `SnapshotExpired` claim.
+Public N-API/SDK exposure, caller-authorized local policy views, richer
+filters/sorts, external-resolution execution, refresh, snapshot retention, and
+expiration authority remain open.
 
 ### B4. Progressive host and UX
 
