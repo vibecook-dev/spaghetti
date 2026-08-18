@@ -3304,6 +3304,29 @@ impl ScopedObservationAsyncSourceOwner {
         self.active.scope_epoch
     }
 
+    /// Recover the epoch and owned bindings when a continuity invalidation
+    /// races the final watcher/source pairing step. The caller first proves
+    /// that the live delivery lane contains the exact re-overflow control;
+    /// dropping the operation guard here releases only the superseded source
+    /// owner's close-barrier obligation.
+    fn into_automatic_rebind_parts(
+        self,
+    ) -> (
+        ScopedObservationEpochState,
+        Vec<ScopedObservationAppendPassBinding>,
+    ) {
+        let Self {
+            handle: _,
+            active,
+            bindings,
+            policy: _,
+            retry_deadlines: _,
+            operation,
+        } = self;
+        drop(operation);
+        (active, bindings)
+    }
+
     /// Run until attachment cancellation, continuity invalidation, or an
     /// attachment-level failure. Delivery queue fullness waits on dequeue-
     /// owned capacity rather than sleeping or invalidating continuity.
@@ -4925,8 +4948,10 @@ impl ScopedObservationAsyncResyncHandoff {
     /// Replacement source/decode failures follow the stopped source owner's
     /// bounded retry policy while the watcher remains supervised. A terminal
     /// first-access failure becomes explicit unavailable relation state; a
-    /// terminal failure after staged progress, re-overflow, or any other
-    /// incomplete replacement remains fail-closed through `observer.failed`.
+    /// terminal failure after staged progress or any other incomplete
+    /// replacement remains fail-closed through `observer.failed`. A new
+    /// continuity invalidation instead supersedes the incomplete stage and
+    /// starts one fresh monotonically increasing replacement epoch.
     pub async fn replay_and_rebind(
         self,
     ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncResyncFailure> {
@@ -4937,6 +4962,8 @@ impl ScopedObservationAsyncResyncHandoff {
             },
             scoped_observation_now_unix_ms,
             scoped_observation_now_unix_ms,
+            |_| {},
+            |_| {},
         )
         .await
     }
@@ -4960,15 +4987,20 @@ impl ScopedObservationAsyncResyncHandoff {
             watcher_factory,
             watcher_observed_at,
             replacement_observed_at,
+            |_| {},
+            |_| {},
         )
         .await
     }
 
-    async fn replay_and_rebind_inner<F, W, R>(
+    #[cfg(test)]
+    pub async fn replay_and_rebind_with_factory_clocks_and_boundaries<F, W, R, S, P>(
         self,
-        mut watcher_factory: F,
-        mut watcher_observed_at: W,
-        mut replacement_observed_at: R,
+        watcher_factory: F,
+        watcher_observed_at: W,
+        replacement_observed_at: R,
+        before_source_binding: S,
+        before_owner_pair_binding: P,
     ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncResyncFailure>
     where
         F: FnMut(
@@ -4977,6 +5009,36 @@ impl ScopedObservationAsyncResyncHandoff {
             + Send,
         W: FnMut() -> i64 + Send,
         R: FnMut() -> i64 + Send,
+        S: FnMut(&ScopedObservationAsyncHandle) + Send,
+        P: FnMut(&ScopedObservationAsyncHandle) + Send,
+    {
+        self.replay_and_rebind_inner(
+            watcher_factory,
+            watcher_observed_at,
+            replacement_observed_at,
+            before_source_binding,
+            before_owner_pair_binding,
+        )
+        .await
+    }
+
+    async fn replay_and_rebind_inner<F, W, R, S, P>(
+        self,
+        mut watcher_factory: F,
+        mut watcher_observed_at: W,
+        mut replacement_observed_at: R,
+        mut before_source_binding: S,
+        mut before_owner_pair_binding: P,
+    ) -> Result<ScopedObservationAsyncOwnerPair, ScopedObservationAsyncResyncFailure>
+    where
+        F: FnMut(
+                ScopedObservationNativeWatchCallback,
+            ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>
+            + Send,
+        W: FnMut() -> i64 + Send,
+        R: FnMut() -> i64 + Send,
+        S: FnMut(&ScopedObservationAsyncHandle) + Send,
+        P: FnMut(&ScopedObservationAsyncHandle) + Send,
     {
         let Self {
             mut watcher,
@@ -4984,7 +5046,7 @@ impl ScopedObservationAsyncResyncHandoff {
             watcher_policy,
         } = self;
         let handle = watcher.handle.clone();
-        let (active, mut bindings, source_policy, exit) = source.into_rebind_parts();
+        let (mut active, mut bindings, source_policy, exit) = source.into_rebind_parts();
         if !matches!(
             exit,
             ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(_)
@@ -4996,76 +5058,108 @@ impl ScopedObservationAsyncResyncHandoff {
             ));
         }
 
-        let mut watcher_future = Box::pin(watcher.run_with_recovery_loop(
-            watcher_policy,
-            &mut watcher_factory,
-            &mut watcher_observed_at,
-        ));
-        let mut replacement_future = Box::pin(scoped_replay_complete_replacement(
-            &handle,
-            active,
-            &bindings,
-            source_policy,
-            &mut replacement_observed_at,
-        ));
-        let outcome = tokio::select! {
-            biased;
-            watcher_exit = &mut watcher_future => {
-                Err(watcher_exit)
-            }
-            replacement = &mut replacement_future => Ok(replacement),
-        };
-        drop(replacement_future);
-        drop(watcher_future);
+        loop {
+            let mut watcher_future = Box::pin(watcher.run_with_recovery_loop(
+                watcher_policy,
+                &mut watcher_factory,
+                &mut watcher_observed_at,
+            ));
+            let mut replacement_future = Box::pin(scoped_replay_complete_replacement(
+                &handle,
+                active,
+                &bindings,
+                source_policy,
+                &mut replacement_observed_at,
+            ));
+            let outcome = tokio::select! {
+                biased;
+                watcher_exit = &mut watcher_future => {
+                    Err(watcher_exit)
+                }
+                replacement = &mut replacement_future => Ok(replacement),
+            };
+            drop(replacement_future);
+            drop(watcher_future);
 
-        let replacement = match outcome {
-            Ok(replacement) => replacement,
-            Err(watcher_exit) => {
-                return Err(scoped_automatic_resync_watcher_failure(
-                    &mut watcher,
-                    watcher_exit,
-                    &mut watcher_observed_at,
-                ));
-            }
-        };
+            let replacement = match outcome {
+                Ok(replacement) => replacement,
+                Err(watcher_exit) => {
+                    return Err(scoped_automatic_resync_watcher_failure(
+                        &mut watcher,
+                        watcher_exit,
+                        &mut watcher_observed_at,
+                    ));
+                }
+            };
 
-        let active = match replacement {
-            Ok(active) => active,
-            Err(error) => {
-                return Err(scoped_finish_automatic_resync_failure(
-                    &mut watcher,
-                    error,
-                    &mut watcher_observed_at,
-                ));
+            active = match replacement {
+                Ok(active) => active,
+                Err(error) => {
+                    return Err(scoped_finish_automatic_resync_failure(
+                        &mut watcher,
+                        error,
+                        &mut watcher_observed_at,
+                    ));
+                }
+            };
+            // A replacement object starts without cursor or decoder state, so the
+            // full replay has already satisfied any one-shot contract-replay
+            // request. Carrying that flag into the new live owner would restart
+            // every later poll at offset zero.
+            for binding in &mut bindings {
+                binding.force_contract_replay = false;
             }
-        };
-        // A replacement object starts without cursor or decoder state, so the
-        // full replay has already satisfied any one-shot contract-replay
-        // request. Carrying that flag into the new live owner would restart
-        // every later poll at offset zero.
-        for binding in &mut bindings {
-            binding.force_contract_replay = false;
-        }
-        let source = match handle.bind_epoch_source_owner(active, bindings, source_policy) {
-            Ok(source) => source,
-            Err(failure) => {
-                let (error, _active, _bindings) = failure.into_parts();
-                return Err(scoped_finish_automatic_resync_failure(
-                    &mut watcher,
-                    ScopedObservationAutomaticResyncError::SourceBinding(error),
-                    &mut watcher_observed_at,
-                ));
-            }
-        };
-        match handle.bind_live_owner_pair(watcher, source, watcher_policy) {
-            Ok(pair) => Ok(pair),
-            Err(failure) => {
-                let (error, mut watcher, _source, _) = failure.into_parts();
-                Err(scoped_finish_automatic_resync_failure(
-                    &mut watcher,
-                    ScopedObservationAutomaticResyncError::OwnerPairBinding(error),
-                    &mut watcher_observed_at,
-                ))
+            before_source_binding(&handle);
+            let source = match handle.bind_epoch_source_owner(active, bindings, source_policy) {
+                Ok(source) => source,
+                Err(failure) => {
+                    let (error, returned_active, returned_bindings) = failure.into_parts();
+                    let reoverflow = error
+                        == ScopedObservationSourceOwnerBindingError::InvalidEpochState
+                        && scoped_automatic_resync_is_exact_reoverflow(
+                            &handle,
+                            &returned_active,
+                            returned_active.scope_epoch,
+                        );
+                    if reoverflow {
+                        active = returned_active;
+                        bindings = returned_bindings;
+                        continue;
+                    }
+                    return Err(scoped_finish_automatic_resync_failure(
+                        &mut watcher,
+                        ScopedObservationAutomaticResyncError::SourceBinding(error),
+                        &mut watcher_observed_at,
+                    ));
+                }
+            };
+            before_owner_pair_binding(&handle);
+            match handle.bind_live_owner_pair(watcher, source, watcher_policy) {
+                Ok(pair) => return Ok(pair),
+                Err(failure) => {
+                    let (error, returned_watcher, returned_source, _) = failure.into_parts();
+                    let reoverflow = error
+                        == ScopedObservationAsyncOwnerPairBindingError::SourceNotLive
+                        && scoped_automatic_resync_is_exact_reoverflow(
+                            &handle,
+                            &returned_source.active,
+                            returned_source.active.scope_epoch,
+                        );
+                    if reoverflow {
+                        let (returned_active, returned_bindings) =
+                            returned_source.into_automatic_rebind_parts();
+                        watcher = returned_watcher;
+                        active = returned_active;
+                        bindings = returned_bindings;
+                        continue;
+                    }
+                    let mut returned_watcher = returned_watcher;
+                    return Err(scoped_finish_automatic_resync_failure(
+                        &mut returned_watcher,
+                        ScopedObservationAutomaticResyncError::OwnerPairBinding(error),
+                        &mut watcher_observed_at,
+                    ));
+                }
             }
         }
     }
@@ -5223,6 +5317,57 @@ where
     C: FnMut() -> i64,
 {
     loop {
+        let started = scoped_begin_automatic_resync(handle, observed_at).await?;
+        let attempted_scope_epoch = started.new_scope_epoch;
+        match scoped_replay_started_replacement(
+            handle,
+            &mut active,
+            bindings,
+            retry_policy,
+            observed_at,
+        )
+        .await
+        {
+            Ok(()) if scoped_automatic_resync_active_is_current(handle, &active) => {
+                return Ok(active);
+            }
+            Ok(())
+                if scoped_automatic_resync_is_exact_reoverflow(
+                    handle,
+                    &active,
+                    attempted_scope_epoch,
+                ) =>
+            {
+                // Completion and another continuity invalidation may race at
+                // the lock boundary. The just-completed epoch is now the last
+                // valid baseline for the next fresh replacement.
+            }
+            Ok(()) => return Err(ScopedObservationAutomaticResyncError::Continuity),
+            Err(ScopedObservationAutomaticResyncError::Continuity)
+                if scoped_automatic_resync_is_exact_reoverflow(
+                    handle,
+                    &active,
+                    attempted_scope_epoch,
+                ) =>
+            {
+                // A re-overflow explicitly supersedes the incomplete
+                // correction epoch. Keep the last completed epoch and the
+                // retained watcher/source authority, then rebuild from an
+                // empty stage in the next monotonically increasing epoch.
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+async fn scoped_begin_automatic_resync<C>(
+    handle: &ScopedObservationAsyncHandle,
+    observed_at: &mut C,
+) -> Result<Arc<ScopedResyncStarted>, ScopedObservationAutomaticResyncError>
+where
+    C: FnMut() -> i64,
+{
+    loop {
         let (waiter, generation) = {
             let drain = handle.shared.lock_drain();
             let waiter = drain.delivery_capacity_waiter();
@@ -5230,7 +5375,7 @@ where
             (waiter, generation)
         };
         match handle.begin_resync(observed_at()) {
-            Ok(_) => break,
+            Ok(started) => return Ok(started),
             Err(ScopedContinuityError::ResyncRequiredNotDelivered) => {
                 if waiter.wait_after_async(generation).await.closed {
                     return Err(ScopedObservationAutomaticResyncError::Closed);
@@ -5242,9 +5387,20 @@ where
             Err(_) => return Err(ScopedObservationAutomaticResyncError::Continuity),
         }
     }
+}
 
+async fn scoped_replay_started_replacement<C>(
+    handle: &ScopedObservationAsyncHandle,
+    active: &mut ScopedObservationEpochState,
+    bindings: &[ScopedObservationAppendPassBinding],
+    retry_policy: ScopedObservationSourceOwnerRetryPolicy,
+    observed_at: &mut C,
+) -> Result<(), ScopedObservationAutomaticResyncError>
+where
+    C: FnMut() -> i64,
+{
     let mut stage = handle
-        .open_scope_resync_stage(&mut active)
+        .open_scope_resync_stage(active)
         .map_err(scoped_automatic_resync_replacement_error)?;
     let pass = handle
         .host()
@@ -5492,8 +5648,8 @@ where
             let generation = waiter.snapshot().generation;
             (waiter, generation)
         };
-        match handle.offer_scope_resync_complete(&mut active, &mut stage, observed_at()) {
-            Ok(_) => return Ok(active),
+        match handle.offer_scope_resync_complete(active, &mut stage, observed_at()) {
+            Ok(_) => return Ok(()),
             Err(error) if scoped_automatic_resync_is_backpressure(error) => {
                 if waiter.wait_after_async(generation).await.closed {
                     return Err(ScopedObservationAutomaticResyncError::Closed);
@@ -5502,6 +5658,44 @@ where
             Err(error) => return Err(scoped_automatic_resync_replacement_error(error)),
         }
     }
+}
+
+fn scoped_automatic_resync_active_is_current(
+    handle: &ScopedObservationAsyncHandle,
+    active: &ScopedObservationEpochState,
+) -> bool {
+    let drain = handle.shared.lock_drain();
+    let delivery = drain.delivery_lane();
+    let state = delivery.state();
+    state.continuity == ScopedObservationContinuity::Valid
+        && state.scope_epoch == active.scope_epoch
+        && valid_replacement_baseline_scope_epoch(delivery) == Some(active.scope_epoch)
+}
+
+fn scoped_automatic_resync_is_exact_reoverflow(
+    handle: &ScopedObservationAsyncHandle,
+    active: &ScopedObservationEpochState,
+    attempted_scope_epoch: u64,
+) -> bool {
+    let drain = handle.shared.lock_drain();
+    let delivery = drain.delivery_lane();
+    let state = delivery.state();
+    let Some(required) = delivery.resync_required() else {
+        return false;
+    };
+    let Some(baseline_snapshot_digest) = valid_replacement_baseline_snapshot_digest(delivery)
+    else {
+        return false;
+    };
+    state.continuity == ScopedObservationContinuity::ResyncRequired
+        && state.scope_epoch == attempted_scope_epoch
+        && delivery.resync_started().is_none()
+        && required.root == active.root
+        && required.invalid_scope_epoch == attempted_scope_epoch
+        && required.baseline_snapshot_digest == baseline_snapshot_digest
+        && (attempted_scope_epoch == active.scope_epoch
+            || active.scope_epoch.checked_add(1) == Some(attempted_scope_epoch))
+        && valid_replacement_baseline_scope_epoch(delivery) == Some(active.scope_epoch)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14061,6 +14255,21 @@ fn valid_replacement_baseline_scope_epoch(delivery: &ScopedObservationDeliveryLa
                 .bootstrap_barrier
                 .as_ref()
                 .map(|barrier| barrier.scope_epoch)
+        })
+}
+
+fn valid_replacement_baseline_snapshot_digest(
+    delivery: &ScopedObservationDeliveryLane,
+) -> Option<ScopedReplacementSnapshotDigest> {
+    delivery
+        .resync_barrier
+        .as_ref()
+        .map(|barrier| barrier.replacement_snapshot_digest)
+        .or_else(|| {
+            delivery
+                .bootstrap_barrier
+                .as_ref()
+                .map(|barrier| barrier.replacement_snapshot_digest)
         })
 }
 

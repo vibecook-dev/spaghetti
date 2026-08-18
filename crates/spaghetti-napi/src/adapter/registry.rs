@@ -835,6 +835,67 @@ mod tests {
         (runtime, handle, pair, target, drops)
     }
 
+    async fn acknowledge_automatic_resync_start(
+        runtime: &mut ScopedObservationAsyncRuntime,
+        invalid_scope_epoch: u64,
+        new_scope_epoch: u64,
+        expected_reason: ScopedResyncReason,
+    ) {
+        let required = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncRequired { control } = &required.envelope.event
+        else {
+            panic!("the bind-boundary race must remain a continuity control");
+        };
+        assert_eq!(required.envelope.scope_epoch, invalid_scope_epoch);
+        assert_eq!(control.invalid_scope_epoch, invalid_scope_epoch);
+        assert_eq!(control.reason, expected_reason);
+        runtime
+            .acknowledge_applied(required.application_receipt())
+            .unwrap();
+
+        let started = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncStarted { control } = &started.envelope.event
+        else {
+            panic!("the bind-boundary race must start one fresh epoch");
+        };
+        assert_eq!(control.old_scope_epoch, invalid_scope_epoch);
+        assert_eq!(control.new_scope_epoch, new_scope_epoch);
+        assert_eq!(started.envelope.scope_epoch, new_scope_epoch);
+        runtime
+            .acknowledge_applied(started.application_receipt())
+            .unwrap();
+    }
+
+    async fn acknowledge_clean_automatic_resync_epoch(
+        runtime: &mut ScopedObservationAsyncRuntime,
+        invalid_scope_epoch: u64,
+        new_scope_epoch: u64,
+        expected_reason: ScopedResyncReason,
+    ) {
+        acknowledge_automatic_resync_start(
+            runtime,
+            invalid_scope_epoch,
+            new_scope_epoch,
+            expected_reason,
+        )
+        .await;
+        let completed = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } = &completed.envelope.event
+        else {
+            panic!(
+                "the recovered bind-boundary race must complete without observer failure: {:?}",
+                completed.envelope.event
+            );
+        };
+        assert_eq!(completed.envelope.scope_epoch, new_scope_epoch);
+        assert_eq!(barrier.scope_epoch, new_scope_epoch);
+        assert!(barrier.root_present);
+        assert!(barrier.explicit_object_errors.is_empty());
+        runtime
+            .acknowledge_applied(completed.application_receipt())
+            .unwrap();
+    }
+
     fn reconcile_missing_relation_poll(
         host: &ScopedObservationAccessHost,
         lease: &ScopedObservationPollLease,
@@ -3486,6 +3547,292 @@ mod tests {
             .unwrap();
         drop(pair);
         assert!(runtime.close().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_automatic_resync_restarts_after_reoverflow_without_failing_observer() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("automatic-resync-reoverflow-root");
+        let mut append_config = AppendDelimitedConfig::json_lines();
+        append_config.max_record_bytes = 16;
+        append_config.max_batch_bytes = 16;
+        append_config.max_records_per_batch = 1;
+        append_config.prefix_anchor_bytes = 8;
+        let (mut runtime, handle, pair, target, drops) = automatic_single_object_pair(
+            &registry,
+            root,
+            b"automatic-resync-reoverflow-session".to_vec(),
+            append_config,
+            128,
+            ScopedObservationSourceOwnerRetryPolicy::new(
+                std::time::Duration::from_millis(50),
+                std::time::Duration::from_millis(50),
+                2,
+            )
+            .unwrap(),
+        )
+        .await;
+
+        // Epoch 2 admits one complete record, then parks on a bounded retry.
+        // Re-overflow must supersede that incomplete stage and rebuild from
+        // offset zero in epoch 3 without terminalizing the retained watcher.
+        std::fs::write(&target, b"rec-01\nretry\n").unwrap();
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
+        handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 70)
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("continuity invalidation must yield a replacement handoff");
+        };
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            || 80,
+            || 90,
+        ));
+
+        let required = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            required.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { .. }
+        ));
+        runtime
+            .acknowledge_applied(required.application_receipt())
+            .unwrap();
+        let started = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            started.envelope.event,
+            ScopedObservationEvent::ObserverResyncStarted { .. }
+        ));
+        assert_eq!(started.envelope.scope_epoch, 2);
+        runtime
+            .acknowledge_applied(started.application_receipt())
+            .unwrap();
+
+        let scheduled = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } = &scheduled.envelope.event else {
+            panic!("the incomplete epoch must expose its relation-local retry");
+        };
+        assert_eq!(scheduled.envelope.scope_epoch, 2);
+        assert_eq!(
+            error.retry,
+            ScopedSourceObjectRetryState::RetryScheduled {
+                failed_attempts: 1,
+                max_attempts: 2,
+                retry_after_ms: 50,
+            }
+        );
+        assert!(error
+            .provenance
+            .last_successful_position
+            .as_ref()
+            .is_some_and(|position| position.monotonic_order == Some(7)));
+
+        let reoverflow = handle
+            .require_resync(ScopedResyncReason::TransportContinuityLoss, 95)
+            .unwrap();
+        assert_eq!(reoverflow.invalid_scope_epoch, 2);
+        std::fs::write(&target, b"rec-02\n").unwrap();
+        runtime
+            .acknowledge_applied(scheduled.application_receipt())
+            .unwrap();
+
+        let required_again = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &required_again.envelope.event,
+            ScopedObservationEvent::ObserverResyncRequired { control }
+                if Arc::ptr_eq(control, &reoverflow)
+        ));
+        assert_eq!(required_again.envelope.scope_epoch, 2);
+        runtime
+            .acknowledge_applied(required_again.application_receipt())
+            .unwrap();
+        let started_again = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncStarted { control } =
+            &started_again.envelope.event
+        else {
+            panic!("the re-overflow must start one fresh replacement epoch");
+        };
+        assert_eq!(control.old_scope_epoch, 2);
+        assert_eq!(control.new_scope_epoch, 3);
+        assert_eq!(started_again.envelope.scope_epoch, 3);
+        runtime
+            .acknowledge_applied(started_again.application_receipt())
+            .unwrap();
+
+        let completed = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } = &completed.envelope.event
+        else {
+            panic!("the fresh epoch must finish without an observer failure");
+        };
+        assert_eq!(completed.envelope.scope_epoch, 3);
+        assert_eq!(barrier.scope_epoch, 3);
+        assert!(barrier.root_present);
+        assert!(barrier.explicit_object_errors.is_empty());
+        assert!(barrier.source_coverage.iter().all(|coverage| {
+            coverage.completeness == CoverageSetCompleteness::Complete
+                && coverage.points.iter().all(|point| {
+                    point.position.as_ref().is_some_and(|position| {
+                        position.kind == CoveragePositionKind::AppendCursor
+                            && position.monotonic_order == Some(7)
+                    })
+                })
+        }));
+        runtime
+            .acknowledge_applied(completed.application_receipt())
+            .unwrap();
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let resumed_task =
+            tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        let resolution = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(watermark) = resolution else {
+            panic!("the epoch-3 owner must service subsequent poll demand");
+        };
+        assert_eq!(watermark.scope_epoch, 3);
+        assert!(watermark.explicit_object_errors.is_empty());
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), resumed_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_automatic_resync_recovers_source_and_pair_binding_reoverflows() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("automatic-resync-bind-race-root");
+        let (mut runtime, handle, pair, target, drops) = automatic_single_object_pair(
+            &registry,
+            root,
+            b"automatic-resync-bind-race-session".to_vec(),
+            AppendDelimitedConfig::json_lines(),
+            128,
+            ScopedObservationSourceOwnerRetryPolicy::default(),
+        )
+        .await;
+
+        std::fs::write(&target, b"rec-01\n").unwrap();
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
+        handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 70)
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("continuity invalidation must yield a replacement handoff");
+        };
+
+        let before_source_binding = Arc::new(AtomicUsize::new(0));
+        let before_owner_pair_binding = Arc::new(AtomicUsize::new(0));
+        let recovery_task = tokio::spawn(
+            handoff.replay_and_rebind_with_factory_clocks_and_boundaries(
+                |_| Err(()),
+                || 80,
+                || 90,
+                {
+                    let before_source_binding = Arc::clone(&before_source_binding);
+                    let target = target.clone();
+                    move |handle| {
+                        if before_source_binding
+                            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            std::fs::write(&target, b"rec-02\n").unwrap();
+                            handle
+                                .require_resync(ScopedResyncReason::ExplicitConsumerRequest, 91)
+                                .unwrap();
+                        }
+                    }
+                },
+                {
+                    let before_owner_pair_binding = Arc::clone(&before_owner_pair_binding);
+                    let target = target.clone();
+                    move |handle| {
+                        if before_owner_pair_binding
+                            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            std::fs::write(&target, b"rec-03\n").unwrap();
+                            handle
+                                .require_resync(ScopedResyncReason::TransportContinuityLoss, 92)
+                                .unwrap();
+                        }
+                    }
+                },
+            ),
+        );
+
+        acknowledge_automatic_resync_start(&mut runtime, 1, 2, ScopedResyncReason::WatcherOverflow)
+            .await;
+        acknowledge_automatic_resync_start(
+            &mut runtime,
+            2,
+            3,
+            ScopedResyncReason::ExplicitConsumerRequest,
+        )
+        .await;
+        acknowledge_clean_automatic_resync_epoch(
+            &mut runtime,
+            3,
+            4,
+            ScopedResyncReason::TransportContinuityLoss,
+        )
+        .await;
+        assert_eq!(before_source_binding.load(Ordering::SeqCst), 1);
+        assert_eq!(before_owner_pair_binding.load(Ordering::SeqCst), 1);
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let resumed_task =
+            tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        let resolution = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(watermark) = resolution else {
+            panic!("the epoch-4 owner must service subsequent poll demand");
+        };
+        assert_eq!(watermark.scope_epoch, 4);
+        assert!(watermark.explicit_object_errors.is_empty());
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), resumed_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
