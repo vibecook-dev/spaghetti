@@ -909,13 +909,34 @@ isolation, and lost-ack replay remain executable. The predecessor snapshot and
 already-issued authority continue serving their exact keyset pages while the
 new authority serves the successor, and file-backed restart authenticates only
 the current snapshot after validating the complete linear predecessor chain.
-Until retirement exists, an internal eight-refresh ceiling bounds retained
-lineage traversal and refuses a ninth refresh without mutation; orphan
-snapshots fail restart. This slice still adds no retirement/deletion lease,
-`SnapshotExpired`, degraded/error refresh, native source execution,
-caller-authorized local policy view, public N-API/SDK catalog surface, or
-richer filters/sorts. Durable retention/retirement evidence is the next
-prerequisite for honest expiration.
+An internal eight-refresh ceiling bounds retained lineage traversal and refuses
+a ninth refresh without mutation; orphan snapshots fail restart. This slice
+itself added no retirement/deletion lease, `SnapshotExpired`, degraded/error
+refresh, native source execution, caller-authorized local policy view, public
+N-API/SDK catalog surface, or richer filters/sorts.
+
+The eighth bounded B3 slice (`c6369e7`) adds schema-v54 and append-only logical
+query-retirement evidence without deleting immutable snapshot headers or
+frames. A typed source-neutral zero-fact command can retire only the exact
+oldest query-retained non-current ancestor under a restart-authenticated plain
+Ready expectation; stale, foreign, current, skipped-prefix, digest-drifted, or
+refreshing lineages fail without mutation. Retirement rows bind the retired
+and exact then-current successor publication/content commitments to their
+administrative owner and form one bounded canonical oldest prefix. Restart
+reconstructs and validates that prefix, including the exact successor that
+existed before each retirement commit, while retained historical authorities
+are loaded on demand from the authenticated ancestry. Page reads validate the
+complete request and continuation before consulting retirement, then classify
+retention and read rows in one SQLite read transaction. Valid retired
+continuations return the frozen typed `SnapshotExpired` response naming the
+current same-plan successor; malformed or foreign cursors remain invalid and
+cannot be relabeled as expired. Crash seams, lost-ack replay, separate-reader
+isolation, refresh-versus-retirement races, stale-authority rejection,
+append-only triggers, and unchanged physical snapshot/frame counts are
+executable. The eight-refresh ceiling remains the durable-lineage bound. This
+slice adds no physical compaction or automatic retention policy, retired
+external-reference resolution, degraded/error refresh, caller-authorized
+local policy view, richer filters/sorts, or public N-API/SDK catalog surface.
 
 ### B4. Progressive host and UX
 
@@ -1399,6 +1420,26 @@ Current landing status (2026-08-18):
   entity count while excluding delivery phase, observation time, and local
   runtime IDs. Empty replacement is explicit and source deletion removes the
   entity before the snapshot is built;
+- commit `8840de2` adds bounded auxiliary `runtime.actor-run` and
+  `runtime.actor-affiliation` state around the still-selected-only
+  `runtime.usage-v2` reducer. Actor and affiliation revisions are pre-scanned
+  before usage regardless of fact order, must keep exact source-object and
+  generation ownership while advancing their append cursor, and have
+  independent entity ceilings; each actor context also caps and canonically
+  orders its semantic revision evidence. A usage occurrence receives an exact
+  actor declaration when available and a dimension-local conservative
+  team/workflow view: ambiguity in one dimension does not erase an independent
+  value in the other, and removed affiliations stop grouping without erasing
+  their revision evidence. Late context revisions do not redeliver unchanged
+  usage or change usage event/semantic identity. Reset and deletion
+  retractions carry the pre-mutation context before all three reducer maps are
+  cleared, while failed replacement objects roll back their auxiliary state
+  without disturbing siblings. Replacement replay may attach newer current
+  context to the stable usage event, but the usage replacement digest
+  deliberately excludes that overlay because actor/affiliation families are
+  not yet selected replacement-integrity contributions. The existing portable
+  usage wire continues to reject enriched context rather than silently widen
+  its frozen shape; this is crate-private reducer and mapper state only;
 - a second bounded, post-reducer delivery lane keeps semantic events and source
   lifecycle controls in independent capacity domains while retaining one
   deterministic total offer order. Projected batches enter it all-or-nothing,
@@ -1415,13 +1456,15 @@ Current landing status (2026-08-18):
   indivisible;
 - an immutable post-delivery mapper now turns those internal values into the
   first sanitized RFC 012D envelope shape. Every mapped value carries the
-  pre-access canonical root session/reference, a complete RFC 012C actor-run
-  reference, explicit actor attribution, affiliation completeness, path-free
-  source occurrence, native/observed time, evidence qualification, and native
-  evidence disposition. Usage routes to its canonical actor; source lifecycle
-  controls route through the root only as `ScopeFallback`, never as semantic
-  root attribution. Typed usage must match the observer root session and carry
-  its durable-equal semantic reference, while controls must not fabricate one.
+  pre-access canonical root session/reference, a canonical RFC 012C actor-run
+  reference using bounded evidence-backed state when available and the
+  pre-existing canonical fallback otherwise, explicit actor attribution,
+  conservative affiliation completeness, path-free source occurrence,
+  native/observed time, evidence qualification, and native evidence
+  disposition. Usage routes to its canonical actor; source lifecycle controls
+  route through the root only as `ScopeFallback`, never as semantic root
+  attribution. Typed usage must match the observer root session and carry its
+  durable-equal semantic reference, while controls must not fabricate one.
   Attachment-local object tokens and admission ordinals are stripped. A
   qualified native session claim is accepted only when its external entity
   reference equals the already-derived root. Lifecycle-owned retractions carry
@@ -1990,10 +2033,10 @@ Current landing status (2026-08-18):
 D1 remains `In progress`: multi-object discovery/cursor orchestration,
 declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption beyond the current runtime families, scoped
-reducers beyond usage-v2,
-coverage-complete durable query exposure, affiliation/actor enrichment and
-envelope variants beyond the current usage/source-lifecycle families, the
-public N-API/SDK iterator transport over the internal async lifecycle runtime,
+reducers beyond usage-v2, coverage-complete durable query exposure, selected
+and portable actor/affiliation replacement integrity, and envelope variants
+beyond the current usage/source-lifecycle families, the public N-API/SDK
+iterator transport over the internal async lifecycle runtime,
 portable dynamic/discovered scope coverage beyond the current exact
 known-object relation/root summary, dynamic/discovered scope membership beyond
 the attachment's current exact known-object grants and family coverage beyond
@@ -2086,15 +2129,16 @@ remain open for the still-missing public lifecycle rather than this internal
 atomicity seam. Delivered internal values now carry the selected event-contract
 version, epoch, observer sequence, mandatory event ID, optional semantic
 revision, phase, stable source coordinate, and typed event. The immutable
-mapper binds those values to the resolved root, emits RFC 012C actor and
-unknown-affiliation context, strips internal ordinals, preserves source
-occurrence and observed/native time, and distinguishes native records, common
-reducer corrections, and engine controls. It rejects cross-root typed events
-and mismatched native-session claims. This freezes the current
-usage/source-lifecycle and initial resync envelope vocabulary but is not yet the
-public multiplexer/facade, complete portable resync/scope manifest, complete
-actor-affiliation reducer, or a portable consumer-ready helper. The internal
-single-consumer drain now owns the bounded delivery lane from host construction,
+mapper binds those values to the resolved root, emits the bounded current RFC
+012C actor and conservative team/workflow context, strips internal ordinals,
+preserves source occurrence and observed/native time, and distinguishes native
+records, common reducer corrections, and engine controls. It rejects
+cross-root typed events and mismatched native-session claims. This freezes the
+current usage/source-lifecycle and initial resync envelope vocabulary but is
+not yet the public multiplexer/facade, complete portable resync/scope manifest,
+selected actor-affiliation replacement family, or a portable consumer-ready
+helper. The internal single-consumer drain now owns the bounded delivery lane
+from host construction,
 distinguishes delivery from application with an exact attachment-bound receipt,
 blocks a second dequeue while application is pending, rejects
 cross-attachment/mismatched acknowledgements, tolerates only explicit
