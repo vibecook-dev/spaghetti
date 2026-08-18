@@ -1216,7 +1216,7 @@ fn sum_exceeds<const N: usize>(limit: u64, values: [u64; N]) -> bool {
     total > limit
 }
 
-fn validate_relation_id(value: &str) -> Result<(), AccessBudgetError> {
+pub(crate) fn validate_relation_id(value: &str) -> Result<(), AccessBudgetError> {
     let valid = !value.is_empty()
         && value.len() <= MAX_RELATION_ID_BYTES
         && value.trim() == value

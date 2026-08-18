@@ -35,13 +35,13 @@ use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
 };
 use crate::source::{
-    confined_relative_path_key, read_stable_file_confined, AccessBudgetError, AccessObjectToken,
-    AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint, AppendDelimitedFile, AppendItem,
-    AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint, DirtyReason, DirtyScope,
-    DriverQuarantine, HintEnqueue, RecordHash, RecordOrigin, Revision, ScopeAccessReport,
-    ScopeAccessRequest, ScopeIdentityInput, SourceCursor, SourceDriverError, SourceMediaType,
-    SourceRecord, SourceRecordState, StableRead, StartupAction, StartupPhase, WatchBeforeScan,
-    MAX_IDENTITY_VALUE_BYTES,
+    confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
+    AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint,
+    AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan,
+    DirtyHint, DirtyReason, DirtyScope, DriverQuarantine, HintEnqueue, RecordHash, RecordOrigin,
+    Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SourceCursor,
+    SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState, StableRead, StartupAction,
+    StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
 };
 
 /// One exact host-approved object locator. The locator is installed during
@@ -290,6 +290,200 @@ pub struct ScopedSourceObjectIdentity {
     pub object_key: CoverageObjectKey,
 }
 
+pub const SCOPED_SOURCE_OBJECT_ERROR_CONTRACT_VERSION: u32 = 1;
+
+/// Stable machine classification for one relation-local observation failure.
+/// Diagnostic strings, native paths, identity inputs, and payload bytes never
+/// cross this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedSourceObjectFailureCode {
+    SourceRetryTransient,
+    SourceUnstable,
+    SourceDatabase,
+    SourceIo,
+    SourceInvalidConfiguration,
+    SourceInvalidCursor,
+    SourcePathEscape,
+    SourceLimitExceeded,
+    DecodeRetryTransient,
+    DecodeRecordPermanent,
+    DecodeStreamFatal,
+}
+
+impl ScopedSourceObjectFailureCode {
+    fn is_retryable(self) -> bool {
+        matches!(
+            self,
+            Self::SourceRetryTransient
+                | Self::SourceUnstable
+                | Self::SourceDatabase
+                | Self::SourceIo
+                | Self::DecodeRetryTransient
+        )
+    }
+
+    fn coverage_code(self) -> &'static str {
+        match self {
+            Self::SourceRetryTransient => "source_retry_transient",
+            Self::SourceUnstable => "source_unstable",
+            Self::SourceDatabase => "source_database",
+            Self::SourceIo => "source_io",
+            Self::SourceInvalidConfiguration => "source_invalid_configuration",
+            Self::SourceInvalidCursor => "source_invalid_cursor",
+            Self::SourcePathEscape => "source_path_escape",
+            Self::SourceLimitExceeded => "source_limit_exceeded",
+            Self::DecodeRetryTransient => "decode_retry_transient",
+            Self::DecodeRecordPermanent => "decode_record_permanent",
+            Self::DecodeStreamFatal => "decode_stream_fatal",
+        }
+    }
+
+    fn event_tag(self) -> u8 {
+        match self {
+            Self::SourceRetryTransient => 1,
+            Self::SourceUnstable => 2,
+            Self::SourceDatabase => 3,
+            Self::SourceIo => 4,
+            Self::SourceInvalidConfiguration => 5,
+            Self::SourceInvalidCursor => 6,
+            Self::SourcePathEscape => 7,
+            Self::SourceLimitExceeded => 8,
+            Self::DecodeRetryTransient => 9,
+            Self::DecodeRecordPermanent => 10,
+            Self::DecodeStreamFatal => 11,
+        }
+    }
+}
+
+/// Last successfully admitted native position known before an object error.
+/// A missing object or a failure before its first stable read has no position,
+/// but still carries generation one rather than inventing a zero sentinel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedSourceObjectErrorProvenance {
+    pub generation: u64,
+    pub last_successful_position: Option<CoveragePosition>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopedSourceObjectRetryState {
+    RetryScheduled {
+        failed_attempts: u32,
+        max_attempts: u32,
+        retry_after_ms: u64,
+    },
+    RetryExhausted {
+        failed_attempts: u32,
+        max_attempts: u32,
+    },
+    NotRetryable {
+        failed_attempts: u32,
+    },
+}
+
+impl ScopedSourceObjectRetryState {
+    fn failed_attempts(self) -> u32 {
+        match self {
+            Self::RetryScheduled {
+                failed_attempts, ..
+            }
+            | Self::RetryExhausted {
+                failed_attempts, ..
+            }
+            | Self::NotRetryable { failed_attempts } => failed_attempts,
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::RetryExhausted { .. } | Self::NotRetryable { .. }
+        )
+    }
+
+    fn retry_delay(self) -> Option<Duration> {
+        match self {
+            Self::RetryScheduled { retry_after_ms, .. } => {
+                Some(Duration::from_millis(retry_after_ms))
+            }
+            Self::RetryExhausted { .. } | Self::NotRetryable { .. } => None,
+        }
+    }
+
+    fn event_tag(self) -> u8 {
+        match self {
+            Self::RetryScheduled { .. } => 1,
+            Self::RetryExhausted { .. } => 2,
+            Self::NotRetryable { .. } => 3,
+        }
+    }
+}
+
+/// One immutable retry/error transition for an exact declared relation. The
+/// source coordinate and coverage position are canonical common identities;
+/// the relation id is declarative metadata rather than a native locator.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedSourceObjectError {
+    pub error_contract_version: u32,
+    pub relation_id: Arc<str>,
+    pub source: ScopedSourceObjectIdentity,
+    pub scope_epoch: u64,
+    pub failure_code: ScopedSourceObjectFailureCode,
+    pub provenance: ScopedSourceObjectErrorProvenance,
+    pub retry: ScopedSourceObjectRetryState,
+}
+
+impl ScopedSourceObjectError {
+    fn validate(&self) -> bool {
+        if self.error_contract_version != SCOPED_SOURCE_OBJECT_ERROR_CONTRACT_VERSION
+            || validate_relation_id(&self.relation_id).is_err()
+            || self.scope_epoch == 0
+            || self.provenance.generation == 0
+            || self
+                .provenance
+                .last_successful_position
+                .as_ref()
+                .is_some_and(|position| {
+                    position.kind != CoveragePositionKind::AppendCursor
+                        || position.monotonic_order.is_none()
+                })
+        {
+            return false;
+        }
+        match self.retry {
+            ScopedSourceObjectRetryState::RetryScheduled {
+                failed_attempts,
+                max_attempts,
+                retry_after_ms,
+            } => {
+                self.failure_code.is_retryable()
+                    && failed_attempts > 0
+                    && failed_attempts < max_attempts
+                    && max_attempts
+                        <= ScopedObservationSourceOwnerRetryPolicy::MAX_TRANSIENT_ATTEMPTS
+                    && retry_after_ms > 0
+                    && retry_after_ms
+                        <= u64::try_from(
+                            ScopedObservationSourceOwnerRetryPolicy::MAX_RETRY_DELAY.as_millis(),
+                        )
+                        .expect("the bounded retry duration fits u64 milliseconds")
+            }
+            ScopedSourceObjectRetryState::RetryExhausted {
+                failed_attempts,
+                max_attempts,
+            } => {
+                self.failure_code.is_retryable()
+                    && failed_attempts == max_attempts
+                    && max_attempts > 0
+                    && max_attempts
+                        <= ScopedObservationSourceOwnerRetryPolicy::MAX_TRANSIENT_ATTEMPTS
+            }
+            ScopedSourceObjectRetryState::NotRetryable { failed_attempts } => {
+                !self.failure_code.is_retryable() && failed_attempts > 0
+            }
+        }
+    }
+}
+
 /// RFC 012A decode coverage for one scoped append object at the observer's
 /// offered boundary. A present/unstable object contributes one point; a known
 /// missing object contributes one explicit absence or deletion. The future
@@ -508,7 +702,14 @@ struct ScopedTakenObservationFrame {
 struct PendingScopedCoverageUpdate {
     through_lane_ordinal: u64,
     access_pass_id: u64,
+    pass_evidence: ScopedCoveragePassEvidence,
     coverage: ScopedOfferedDecodeCoverage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedCoveragePassEvidence {
+    AccessAttempt,
+    RetainedObjectError,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -536,6 +737,7 @@ pub struct ScopedObservationAdmissionLane {
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
     offered_access_pass_ids: BTreeMap<ScopedSourceObjectIdentity, u64>,
+    offered_pass_evidence: BTreeMap<ScopedSourceObjectIdentity, ScopedCoveragePassEvidence>,
 }
 
 impl ScopedObservationAdmissionLane {
@@ -558,6 +760,7 @@ impl ScopedObservationAdmissionLane {
             pending_coverage_updates: VecDeque::new(),
             offered_decode_coverage: BTreeMap::new(),
             offered_access_pass_ids: BTreeMap::new(),
+            offered_pass_evidence: BTreeMap::new(),
         })
     }
 
@@ -747,6 +950,7 @@ impl ScopedObservationAdmissionLane {
                 .checked_sub(1)
                 .expect("scoped lane ordinals start at one"),
             observation.access_pass_id,
+            ScopedCoveragePassEvidence::AccessAttempt,
             coverage,
         );
 
@@ -943,11 +1147,14 @@ impl ScopedObservationAdmissionLane {
         &mut self,
         through_lane_ordinal: u64,
         access_pass_id: u64,
+        pass_evidence: ScopedCoveragePassEvidence,
         coverage: ScopedOfferedDecodeCoverage,
     ) {
         if through_lane_ordinal <= self.offered_lane_ordinal {
             self.offered_access_pass_ids
                 .insert(coverage.source.clone(), access_pass_id);
+            self.offered_pass_evidence
+                .insert(coverage.source.clone(), pass_evidence);
             self.offered_decode_coverage
                 .insert(coverage.source.clone(), coverage);
             return;
@@ -966,6 +1173,7 @@ impl ScopedObservationAdmissionLane {
             })
         {
             pending.access_pass_id = access_pass_id;
+            pending.pass_evidence = pass_evidence;
             pending.coverage = coverage;
             return;
         }
@@ -973,8 +1181,39 @@ impl ScopedObservationAdmissionLane {
             .push_back(PendingScopedCoverageUpdate {
                 through_lane_ordinal,
                 access_pass_id,
+                pass_evidence,
                 coverage,
             });
+    }
+
+    fn record_object_error_coverage(
+        &mut self,
+        object: &ScopedKnownAppendObject,
+        access_pass_id: u64,
+        error: &ScopedSourceObjectError,
+        access_attempted: bool,
+    ) -> Result<(), ScopedAdmissionError> {
+        let membership = object.coverage_membership_identity();
+        if error.source != object.source
+            || error.relation_id.as_ref() != membership.relation_id.as_ref()
+            || self.known_coverage_objects.get(&object.source) != Some(&membership)
+        {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        let coverage = object
+            .prepare_object_error_coverage(error)
+            .map_err(|()| ScopedAdmissionError::InvalidCoverage)?;
+        self.stage_coverage_update(
+            self.offered_lane_ordinal,
+            access_pass_id,
+            if access_attempted {
+                ScopedCoveragePassEvidence::AccessAttempt
+            } else {
+                ScopedCoveragePassEvidence::RetainedObjectError
+            },
+            coverage,
+        );
+        Ok(())
     }
 
     fn apply_coverage_updates_through(&mut self, through_lane_ordinal: u64) {
@@ -989,6 +1228,8 @@ impl ScopedObservationAdmissionLane {
                 .expect("front coverage update was just observed");
             self.offered_access_pass_ids
                 .insert(pending.coverage.source.clone(), pending.access_pass_id);
+            self.offered_pass_evidence
+                .insert(pending.coverage.source.clone(), pending.pass_evidence);
             self.offered_decode_coverage
                 .insert(pending.coverage.source.clone(), pending.coverage);
         }
@@ -1020,12 +1261,19 @@ impl ScopedObservationAdmissionLane {
         self.offered_decode_coverage.get(source)
     }
 
-    fn relation_was_offered_in_pass(&self, relation_id: &str, access_pass_id: u64) -> bool {
+    fn relation_pass_evidence(
+        &self,
+        relation_id: &str,
+        access_pass_id: u64,
+    ) -> Option<ScopedCoveragePassEvidence> {
         self.known_coverage_objects
             .iter()
             .find(|(_, membership)| membership.relation_id.as_ref() == relation_id)
-            .and_then(|(source, _)| self.offered_access_pass_ids.get(source))
-            .is_some_and(|offered_pass_id| *offered_pass_id == access_pass_id)
+            .and_then(|(source, _)| {
+                (self.offered_access_pass_ids.get(source) == Some(&access_pass_id))
+                    .then(|| self.offered_pass_evidence.get(source).copied())
+                    .flatten()
+            })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1313,6 +1561,12 @@ pub enum ScopedProjectedObservation {
         event_id: ScopedObservationEventId,
         reset: ScopedAppendReset,
     },
+    SourceObjectError {
+        source: ScopedSourceObjectIdentity,
+        observed_at: i64,
+        event_id: ScopedObservationEventId,
+        error: Arc<ScopedSourceObjectError>,
+    },
     UsageV2 {
         lane_ordinal: u64,
         event: Box<ScopedUsageV2Event>,
@@ -1352,7 +1606,9 @@ pub enum ScopedProjectedObservation {
 impl ScopedProjectedObservation {
     pub fn event_id(&self) -> ScopedObservationEventId {
         match self {
-            Self::SourcePresence { event_id, .. } | Self::SourceReset { event_id, .. } => *event_id,
+            Self::SourcePresence { event_id, .. }
+            | Self::SourceReset { event_id, .. }
+            | Self::SourceObjectError { event_id, .. } => *event_id,
             Self::UsageV2 { event, .. } => event.event_id,
             Self::ObserverBootstrapComplete { event_id, .. } => *event_id,
             Self::ObserverResyncRequired { event_id, .. } => *event_id,
@@ -1367,6 +1623,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => Some(event.semantic_revision_ref),
             Self::SourcePresence { .. }
             | Self::SourceReset { .. }
+            | Self::SourceObjectError { .. }
             | Self::ObserverBootstrapComplete { .. }
             | Self::ObserverResyncRequired { .. }
             | Self::ObserverResyncStarted { .. }
@@ -1378,6 +1635,7 @@ impl ScopedProjectedObservation {
     pub fn phase(&self) -> ScopedAppendDeliveryPhase {
         match self {
             Self::SourcePresence { phase, .. } | Self::SourceReset { phase, .. } => *phase,
+            Self::SourceObjectError { .. } => ScopedAppendDeliveryPhase::Live,
             Self::UsageV2 { event, .. } => event.phase,
             Self::ObserverBootstrapComplete { .. } => ScopedAppendDeliveryPhase::Bootstrap,
             Self::ObserverResyncRequired { .. } => ScopedAppendDeliveryPhase::Live,
@@ -1389,7 +1647,9 @@ impl ScopedProjectedObservation {
 
     pub fn source(&self) -> &ScopedSourceObjectIdentity {
         match self {
-            Self::SourcePresence { source, .. } | Self::SourceReset { source, .. } => source,
+            Self::SourcePresence { source, .. }
+            | Self::SourceReset { source, .. }
+            | Self::SourceObjectError { source, .. } => source,
             Self::UsageV2 { event, .. } => &event.source.object,
             Self::ObserverBootstrapComplete { source, .. } => source,
             Self::ObserverResyncRequired { source, .. } => source,
@@ -1404,6 +1664,7 @@ impl ScopedProjectedObservation {
             Self::SourcePresence { observed_at, .. } | Self::SourceReset { observed_at, .. } => {
                 *observed_at
             }
+            Self::SourceObjectError { observed_at, .. } => *observed_at,
             Self::UsageV2 { event, .. } => event.observed_at,
             Self::ObserverBootstrapComplete { observed_at, .. } => *observed_at,
             Self::ObserverResyncRequired { observed_at, .. } => *observed_at,
@@ -1569,6 +1830,9 @@ pub enum ScopedObservationEvent {
     },
     SourceReset {
         reset: ScopedAppendReset,
+    },
+    SourceObjectError {
+        error: Arc<ScopedSourceObjectError>,
     },
     UsageV2 {
         fact_id: CanonicalFactId,
@@ -2336,6 +2600,7 @@ impl ScopedObservationConsumerDrain {
             }
             ScopedObservationEvent::SourcePresence { .. }
             | ScopedObservationEvent::SourceReset { .. }
+            | ScopedObservationEvent::SourceObjectError { .. }
             | ScopedObservationEvent::UsageV2 { .. }
             | ScopedObservationEvent::ObserverResyncRequired { .. }
             | ScopedObservationEvent::ObserverResyncStarted { .. }
@@ -2561,6 +2826,7 @@ pub struct ScopedObservationAsyncSourceOwner {
     active: ScopedObservationEpochState,
     bindings: Vec<ScopedObservationAppendPassBinding>,
     policy: ScopedObservationSourceOwnerRetryPolicy,
+    retry_deadlines: BTreeMap<String, tokio::time::Instant>,
     operation: ScopedObservationOperationGuard,
 }
 
@@ -2571,6 +2837,8 @@ impl std::fmt::Debug for ScopedObservationAsyncSourceOwner {
             .field("scope_epoch", &self.active.scope_epoch)
             .field("bindings", &self.bindings)
             .field("policy", &self.policy)
+            .field("object_error_count", &self.active.object_errors.len())
+            .field("scheduled_retry_count", &self.retry_deadlines.len())
             .finish_non_exhaustive()
     }
 }
@@ -2743,7 +3011,7 @@ impl ScopedObservationAsyncHandle {
             let drain = self.shared.lock_drain();
             self.shared
                 .host
-                .validate_epoch_source_owner_binding(&active, &drain, &bindings)
+                .validate_epoch_source_owner_binding(&active, &drain, &bindings, policy)
         };
         if let Err(error) = validation {
             return Err(ScopedObservationSourceOwnerBindFailure {
@@ -2775,11 +3043,24 @@ impl ScopedObservationAsyncHandle {
                 });
             }
         };
+        let retry_now = tokio::time::Instant::now();
+        let retry_deadlines = active
+            .object_errors
+            .iter()
+            .filter_map(|(relation_id, state)| {
+                state
+                    .error
+                    .retry
+                    .retry_delay()
+                    .map(|delay| (relation_id.clone(), retry_now + delay))
+            })
+            .collect();
         Ok(ScopedObservationAsyncSourceOwner {
             handle: self.clone(),
             active,
             bindings,
             policy,
+            retry_deadlines,
             operation,
         })
     }
@@ -2801,11 +3082,11 @@ impl ScopedObservationAsyncSourceOwner {
         self.active.scope_epoch
     }
 
-    /// Run until attachment cancellation or an explicitly classified source
-    /// failure. Delivery queue fullness waits on dequeue-owned capacity rather
-    /// than sleeping or invalidating continuity. Source/decode transients use
-    /// bounded cancellation-aware backoff; other failures return to the
-    /// higher-level per-object/resync orchestrator without killing siblings.
+    /// Run until attachment cancellation or an attachment-level failure.
+    /// Delivery queue fullness waits on dequeue-owned capacity rather than
+    /// sleeping or invalidating continuity. Relation-local source/decode
+    /// failures become explicit coverage plus bounded object retry controls;
+    /// they never terminate or delay healthy sibling relations.
     pub async fn run_until_stopped(self) -> ScopedObservationStoppedSourceOwner {
         self.run_until_stopped_inner(scoped_observation_now_unix_ms)
             .await
@@ -2835,6 +3116,7 @@ impl ScopedObservationAsyncSourceOwner {
             active,
             bindings: _,
             policy: _,
+            retry_deadlines: _,
             operation,
         } = self;
         // Release the close-barrier obligation before the stopped state is
@@ -2847,9 +3129,28 @@ impl ScopedObservationAsyncSourceOwner {
     where
         C: FnMut() -> i64 + Send,
     {
-        let mut transient_attempts = 0_u32;
         loop {
-            let lease = match self.handle.next_poll_pass().await {
+            let mut automatic_ticket = None;
+            let next_deadline = self.retry_deadlines.values().copied().min();
+            let lease_result = if let Some(deadline) = next_deadline {
+                tokio::select! {
+                    biased;
+                    result = self.handle.next_poll_pass() => result,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        match self.handle.host().request_poll() {
+                            Ok(ticket) => {
+                                automatic_ticket = Some(ticket);
+                                self.handle.next_poll_pass().await
+                            }
+                            Err(ScopedObservationPollError::Closed) => Ok(None),
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
+            } else {
+                self.handle.next_poll_pass().await
+            };
+            let lease = match lease_result {
                 Ok(Some(lease)) => lease,
                 Ok(None) | Err(ScopedObservationPollError::Closed) => {
                     return ScopedObservationSourceOwnerRunExit::Cancelled;
@@ -2910,16 +3211,22 @@ impl ScopedObservationAsyncSourceOwner {
                 )
                 .collect::<Vec<_>>();
 
-            match self
-                .handle
-                .execute_epoch_poll_pass(lease, &mut self.active, &requests)
-            {
-                Ok(_) => transient_attempts = 0,
+            let result = Self::execute_object_isolated_poll_pass(
+                &self.handle,
+                &mut self.active,
+                &mut self.retry_deadlines,
+                self.policy,
+                lease,
+                &requests,
+                attempt_time,
+            );
+            drop(automatic_ticket);
+            match result {
+                Ok(_) => {}
                 Err(error) if scoped_source_owner_error_is_cancelled(&error) => {
                     return ScopedObservationSourceOwnerRunExit::Cancelled;
                 }
                 Err(error) if scoped_source_owner_error_is_delivery_backpressure(&error) => {
-                    transient_attempts = 0;
                     tokio::select! {
                         biased;
                         _ = self.handle.shared.host.lifecycle.wait_for_close_request_async() => {
@@ -2932,25 +3239,6 @@ impl ScopedObservationAsyncSourceOwner {
                         }
                     }
                 }
-                Err(error) if scoped_source_owner_error_is_transient(&error) => {
-                    transient_attempts = transient_attempts.saturating_add(1);
-                    if transient_attempts >= self.policy.max_transient_attempts {
-                        return ScopedObservationSourceOwnerRunExit::Failed(
-                            ScopedObservationSourceOwnerRunError::TransientRetryExhausted {
-                                attempts: transient_attempts,
-                                last_error: Box::new(error),
-                            },
-                        );
-                    }
-                    let delay = self.policy.retry_delay(transient_attempts - 1);
-                    tokio::select! {
-                        biased;
-                        _ = self.handle.shared.host.lifecycle.wait_for_close_request_async() => {
-                            return ScopedObservationSourceOwnerRunExit::Cancelled;
-                        }
-                        _ = tokio::time::sleep(delay) => {}
-                    }
-                }
                 Err(error) => {
                     return ScopedObservationSourceOwnerRunExit::Failed(
                         ScopedObservationSourceOwnerRunError::Pass(error),
@@ -2958,6 +3246,245 @@ impl ScopedObservationAsyncSourceOwner {
                 }
             }
         }
+    }
+
+    fn execute_object_isolated_poll_pass(
+        handle: &ScopedObservationAsyncHandle,
+        active: &mut ScopedObservationEpochState,
+        retry_deadlines: &mut BTreeMap<String, tokio::time::Instant>,
+        policy: ScopedObservationSourceOwnerRetryPolicy,
+        lease: ScopedObservationPollLease,
+        requests: &[ScopedObservationAppendPassRequest<'_>],
+        observed_at: i64,
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPassExecutionError> {
+        {
+            let drain = handle.shared.lock_drain();
+            handle
+                .shared
+                .host
+                .validate_epoch_poll_execution(&lease, active, &drain, requests)?;
+        }
+        {
+            let mut drain = handle.shared.lock_drain();
+            handle
+                .shared
+                .host
+                .offer_epoch_poll_pending(active, &mut drain)?;
+        }
+
+        let relation_ids = active.append_objects.keys().cloned().collect::<Vec<_>>();
+        for relation_id in &relation_ids {
+            Self::offer_pending_object_error(handle, active, relation_id)?;
+        }
+        let requests_by_relation = requests
+            .iter()
+            .map(|request| (request.relation_id, request))
+            .collect::<BTreeMap<_, _>>();
+
+        for relation_id in relation_ids {
+            let retained_error = active.object_errors.get(&relation_id).cloned();
+            let retry_not_due = retry_deadlines
+                .get(&relation_id)
+                .is_some_and(|deadline| *deadline > tokio::time::Instant::now());
+            if retained_error
+                .as_ref()
+                .is_some_and(|state| state.error.retry.is_terminal())
+                || retry_not_due
+            {
+                let object = active
+                    .append_objects
+                    .get(&relation_id)
+                    .expect("the exact relation set was prevalidated");
+                active
+                    .admission
+                    .record_object_error_coverage(
+                        object,
+                        lease.access_pass().pass_id(),
+                        retained_error
+                            .as_ref()
+                            .expect("only retained object errors own retry deadlines")
+                            .error
+                            .as_ref(),
+                        false,
+                    )
+                    .map_err(ScopedObservationPassExecutionError::Admission)?;
+                continue;
+            }
+
+            let request = requests_by_relation
+                .get(relation_id.as_str())
+                .expect("the exact relation set was prevalidated");
+            match handle
+                .shared
+                .host
+                .reconcile_epoch_poll_relation(&lease, active, request)
+            {
+                Ok(ScopedObservationRelationPollOutcome::Ready) => {
+                    active.object_errors.remove(&relation_id);
+                    retry_deadlines.remove(&relation_id);
+                    let mut drain = handle.shared.lock_drain();
+                    handle
+                        .shared
+                        .host
+                        .offer_epoch_poll_pending(active, &mut drain)?;
+                }
+                Ok(ScopedObservationRelationPollOutcome::RetryTransient) => {
+                    Self::record_object_error(
+                        handle,
+                        active,
+                        retry_deadlines,
+                        policy,
+                        &lease,
+                        &relation_id,
+                        ScopedObjectFailureClassification::Retryable(
+                            ScopedSourceObjectFailureCode::SourceRetryTransient,
+                        ),
+                        observed_at,
+                    )?;
+                }
+                Err(error) => {
+                    let Some(classification) = scoped_object_failure_classification(&error) else {
+                        return Err(error);
+                    };
+                    Self::record_object_error(
+                        handle,
+                        active,
+                        retry_deadlines,
+                        policy,
+                        &lease,
+                        &relation_id,
+                        classification,
+                        observed_at,
+                    )?;
+                }
+            }
+        }
+
+        let drain = handle.shared.lock_drain();
+        handle
+            .shared
+            .host
+            .complete_epoch_poll(lease, active, &drain)
+            .map_err(Into::into)
+    }
+
+    fn offer_pending_object_error(
+        handle: &ScopedObservationAsyncHandle,
+        active: &mut ScopedObservationEpochState,
+        relation_id: &str,
+    ) -> Result<(), ScopedObservationPassExecutionError> {
+        let Some(state) = active.object_errors.get(relation_id) else {
+            return Ok(());
+        };
+        if state.control_offered {
+            return Ok(());
+        }
+        let error = Arc::clone(&state.error);
+        let observed_at = state.observed_at;
+        let object = active
+            .append_objects
+            .get(relation_id)
+            .expect("a retained object error belongs to the active exact relation set");
+        let mut drain = handle.shared.lock_drain();
+        handle
+            .shared
+            .host
+            .offer_consumer_object_error(&mut drain, object, error, observed_at)?;
+        active
+            .object_errors
+            .get_mut(relation_id)
+            .expect("the pending object error remains owned by the active epoch")
+            .control_offered = true;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_object_error(
+        handle: &ScopedObservationAsyncHandle,
+        active: &mut ScopedObservationEpochState,
+        retry_deadlines: &mut BTreeMap<String, tokio::time::Instant>,
+        policy: ScopedObservationSourceOwnerRetryPolicy,
+        lease: &ScopedObservationPollLease,
+        relation_id: &str,
+        classification: ScopedObjectFailureClassification,
+        observed_at: i64,
+    ) -> Result<(), ScopedObservationPassExecutionError> {
+        let prior_attempts = active
+            .object_errors
+            .get(relation_id)
+            .map_or(0, |state| state.error.retry.failed_attempts());
+        let failed_attempts = prior_attempts
+            .checked_add(1)
+            .expect("bounded object retry attempts cannot overflow");
+        let (failure_code, retry) = match classification {
+            ScopedObjectFailureClassification::Retryable(failure_code)
+                if failed_attempts < policy.max_transient_attempts =>
+            {
+                let retry_delay = policy.retry_delay(failed_attempts - 1);
+                let retry_after_ms = u64::try_from(retry_delay.as_millis())
+                    .expect("the bounded retry duration fits u64 milliseconds");
+                retry_deadlines.insert(
+                    relation_id.to_string(),
+                    tokio::time::Instant::now() + retry_delay,
+                );
+                (
+                    failure_code,
+                    ScopedSourceObjectRetryState::RetryScheduled {
+                        failed_attempts,
+                        max_attempts: policy.max_transient_attempts,
+                        retry_after_ms,
+                    },
+                )
+            }
+            ScopedObjectFailureClassification::Retryable(failure_code) => {
+                retry_deadlines.remove(relation_id);
+                (
+                    failure_code,
+                    ScopedSourceObjectRetryState::RetryExhausted {
+                        failed_attempts,
+                        max_attempts: policy.max_transient_attempts,
+                    },
+                )
+            }
+            ScopedObjectFailureClassification::Terminal(failure_code) => {
+                retry_deadlines.remove(relation_id);
+                (
+                    failure_code,
+                    ScopedSourceObjectRetryState::NotRetryable { failed_attempts },
+                )
+            }
+        };
+        let object = active
+            .append_objects
+            .get(relation_id)
+            .expect("the exact relation set was prevalidated");
+        let error = Arc::new(ScopedSourceObjectError {
+            error_contract_version: SCOPED_SOURCE_OBJECT_ERROR_CONTRACT_VERSION,
+            relation_id: Arc::from(relation_id),
+            source: object.source.clone(),
+            scope_epoch: active.scope_epoch,
+            failure_code,
+            provenance: object.object_error_provenance()?,
+            retry,
+        });
+        debug_assert!(error.validate());
+        active.object_errors.insert(
+            relation_id.to_string(),
+            ScopedSourceObjectErrorRuntime {
+                error: Arc::clone(&error),
+                observed_at,
+                control_offered: false,
+            },
+        );
+        Self::offer_pending_object_error(handle, active, relation_id)?;
+        let object = active
+            .append_objects
+            .get(relation_id)
+            .expect("the exact relation set was prevalidated");
+        active
+            .admission
+            .record_object_error_coverage(object, lease.access_pass().pass_id(), &error, true)
+            .map_err(ScopedObservationPassExecutionError::Admission)
     }
 }
 
@@ -4111,6 +4638,41 @@ impl ScopedObservationEnvelopeMapper {
                         completeness: ContractCompleteness::Complete,
                     },
                     event: ScopedObservationEvent::SourceReset { reset },
+                    native_evidence: ScopedNativeEvidence::EngineControl,
+                }
+            }
+            ScopedProjectedObservation::SourceObjectError {
+                observed_at, error, ..
+            } => {
+                if semantic_revision_ref.is_some()
+                    || error.scope_epoch != scope_epoch
+                    || error.source != delivered.source
+                    || !error.validate()
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: self.root.root_actor_run_key,
+                    actor_attribution: ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::SourceLifecycleControl,
+                    },
+                    source: scoped_control_envelope_source(
+                        &delivered.source,
+                        error.provenance.generation,
+                    ),
+                    native_time: None,
+                    observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority: ScopedEnvelopeEvidenceAuthority::EngineControl,
+                        quality: QualifiedValueQuality::Derived,
+                        effective_at: None,
+                        completeness: if error.retry.is_terminal() {
+                            ContractCompleteness::Unknown
+                        } else {
+                            ContractCompleteness::Partial
+                        },
+                    },
+                    event: ScopedObservationEvent::SourceObjectError { error },
                     native_evidence: ScopedNativeEvidence::EngineControl,
                 }
             }
@@ -5636,6 +6198,7 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
         ScopedProjectedObservation::UsageV2 { .. } => (true, 0),
         ScopedProjectedObservation::SourcePresence { .. }
         | ScopedProjectedObservation::SourceReset { .. }
+        | ScopedProjectedObservation::SourceObjectError { .. }
         | ScopedProjectedObservation::ObserverBootstrapComplete { .. }
         | ScopedProjectedObservation::ObserverResyncRequired { .. }
         | ScopedProjectedObservation::ObserverResyncStarted { .. }
@@ -6346,6 +6909,14 @@ pub struct ScopedObservationEpochState {
     append_objects: BTreeMap<String, ScopedKnownAppendObject>,
     admission: ScopedObservationAdmissionLane,
     projection: ScopedObservationProjectionSink,
+    object_errors: BTreeMap<String, ScopedSourceObjectErrorRuntime>,
+}
+
+#[derive(Debug, Clone)]
+struct ScopedSourceObjectErrorRuntime {
+    error: Arc<ScopedSourceObjectError>,
+    observed_at: i64,
+    control_offered: bool,
 }
 
 impl ScopedObservationEpochState {
@@ -6359,6 +6930,12 @@ impl ScopedObservationEpochState {
 
     pub fn admission_is_empty(&self) -> bool {
         self.admission.is_empty()
+    }
+
+    pub fn object_error(&self, relation_id: &str) -> Option<&ScopedSourceObjectError> {
+        self.object_errors
+            .get(relation_id)
+            .map(|state| state.error.as_ref())
     }
 
     pub fn append_object_and_admission_mut(
@@ -6593,6 +7170,49 @@ fn source_reset_event_id(
     hasher.update(&reset.old_generation.to_be_bytes());
     hasher.update(&reset.new_generation.to_be_bytes());
     hasher.update(&[append_transition_tag(reset.reason)]);
+    ScopedObservationEventId(*hasher.finalize().as_bytes())
+}
+
+fn source_object_error_event_id(error: &ScopedSourceObjectError) -> ScopedObservationEventId {
+    let mut hasher = source_control_event_hasher(&error.source, b"source.object-error");
+    hasher.update(&error.error_contract_version.to_be_bytes());
+    hash_event_component(&mut hasher, error.relation_id.as_bytes());
+    hasher.update(&error.scope_epoch.to_be_bytes());
+    hasher.update(&[error.failure_code.event_tag()]);
+    hasher.update(&error.provenance.generation.to_be_bytes());
+    match &error.provenance.last_successful_position {
+        Some(position) => {
+            hasher.update(&[1]);
+            let encoded = serde_json::to_vec(position)
+                .expect("validated common coverage positions always serialize");
+            hash_event_component(&mut hasher, &encoded);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    hasher.update(&[error.retry.event_tag()]);
+    match error.retry {
+        ScopedSourceObjectRetryState::RetryScheduled {
+            failed_attempts,
+            max_attempts,
+            retry_after_ms,
+        } => {
+            hasher.update(&failed_attempts.to_be_bytes());
+            hasher.update(&max_attempts.to_be_bytes());
+            hasher.update(&retry_after_ms.to_be_bytes());
+        }
+        ScopedSourceObjectRetryState::RetryExhausted {
+            failed_attempts,
+            max_attempts,
+        } => {
+            hasher.update(&failed_attempts.to_be_bytes());
+            hasher.update(&max_attempts.to_be_bytes());
+        }
+        ScopedSourceObjectRetryState::NotRetryable { failed_attempts } => {
+            hasher.update(&failed_attempts.to_be_bytes());
+        }
+    }
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
 
@@ -7290,6 +7910,8 @@ pub enum ScopedObservationSourceOwnerBindingError {
     InvalidBounds,
     #[error("scoped source owner requires the attachment's current valid epoch")]
     InvalidEpochState,
+    #[error("scoped source-owner retry policy is incompatible with retained scheduled work")]
+    RetryPolicyMismatch,
     #[error("scoped source owner could not recover the attachment's authorized scope program")]
     AuthorizedProgramUnavailable,
     #[error("scoped source owner cannot start after attachment close")]
@@ -7508,6 +8130,23 @@ impl ScopedObservationSourceOwnerRetryPolicy {
             .saturating_mul(1_u32 << exponent)
             .min(self.max_retry_delay)
     }
+
+    fn accepts_retained_retry(self, retry: ScopedSourceObjectRetryState) -> bool {
+        match retry {
+            ScopedSourceObjectRetryState::RetryScheduled {
+                max_attempts,
+                retry_after_ms,
+                ..
+            } => {
+                max_attempts == self.max_transient_attempts
+                    && retry_after_ms
+                        <= u64::try_from(self.max_retry_delay.as_millis())
+                            .expect("the bounded retry duration fits u64 milliseconds")
+            }
+            ScopedSourceObjectRetryState::RetryExhausted { .. }
+            | ScopedSourceObjectRetryState::NotRetryable { .. } => true,
+        }
+    }
 }
 
 impl Default for ScopedObservationSourceOwnerRetryPolicy {
@@ -7573,16 +8212,16 @@ pub enum ScopedObservationPassExecutionError {
     Poll(#[from] ScopedObservationPollError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedObservationRelationPollOutcome {
+    Ready,
+    RetryTransient,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ScopedObservationSourceOwnerRunError {
     #[error("scoped source-owner pass failed: {0}")]
     Pass(#[source] ScopedObservationPassExecutionError),
-    #[error("scoped source-owner transient retry limit was exhausted after {attempts} attempts")]
-    TransientRetryExhausted {
-        attempts: u32,
-        #[source]
-        last_error: Box<ScopedObservationPassExecutionError>,
-    },
 }
 
 #[derive(Debug)]
@@ -7629,6 +8268,7 @@ fn scoped_source_owner_error_is_delivery_backpressure(
     )
 }
 
+#[cfg(test)]
 fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecutionError) -> bool {
     matches!(
         error,
@@ -7642,6 +8282,53 @@ fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecution
                     )
             )
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedObjectFailureClassification {
+    Retryable(ScopedSourceObjectFailureCode),
+    Terminal(ScopedSourceObjectFailureCode),
+}
+
+fn scoped_object_failure_classification(
+    error: &ScopedObservationPassExecutionError,
+) -> Option<ScopedObjectFailureClassification> {
+    use ScopedObjectFailureClassification::{Retryable, Terminal};
+    use ScopedSourceObjectFailureCode::{
+        DecodeRecordPermanent, DecodeRetryTransient, DecodeStreamFatal, SourceDatabase,
+        SourceInvalidConfiguration, SourceInvalidCursor, SourceIo, SourceLimitExceeded,
+        SourcePathEscape, SourceUnstable,
+    };
+
+    match error {
+        ScopedObservationPassExecutionError::DecodeRetryTransient
+        | ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Decode(
+            ScopedDecodeFailureClass::Transient,
+        )) => Some(Retryable(DecodeRetryTransient)),
+        ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Source(
+            source_failure,
+        )) => Some(match source_failure {
+            ScopedSourceFailureClass::Unstable => Retryable(SourceUnstable),
+            ScopedSourceFailureClass::Database => Retryable(SourceDatabase),
+            ScopedSourceFailureClass::Io => Retryable(SourceIo),
+            ScopedSourceFailureClass::InvalidConfiguration => Terminal(SourceInvalidConfiguration),
+            ScopedSourceFailureClass::InvalidCursor => Terminal(SourceInvalidCursor),
+            ScopedSourceFailureClass::PathEscape => Terminal(SourcePathEscape),
+            ScopedSourceFailureClass::LimitExceeded => Terminal(SourceLimitExceeded),
+        }),
+        ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Decode(
+            ScopedDecodeFailureClass::RecordPermanent,
+        )) => Some(Terminal(DecodeRecordPermanent)),
+        ScopedObservationPassExecutionError::Access(ScopedObservationAccessError::Decode(
+            ScopedDecodeFailureClass::StreamFatal,
+        )) => Some(Terminal(DecodeStreamFatal)),
+        ScopedObservationPassExecutionError::InvalidRelationSet
+        | ScopedObservationPassExecutionError::InvalidEpochState
+        | ScopedObservationPassExecutionError::Access(_)
+        | ScopedObservationPassExecutionError::Admission(_)
+        | ScopedObservationPassExecutionError::Offer(_)
+        | ScopedObservationPassExecutionError::Poll(_) => None,
+    }
 }
 
 fn scoped_source_owner_error_is_cancelled(error: &ScopedObservationPassExecutionError) -> bool {
@@ -8238,6 +8925,63 @@ impl ScopedObservationAccessHost {
             .map_err(Into::into)
     }
 
+    fn offer_consumer_object_error(
+        &self,
+        drain: &mut ScopedObservationConsumerDrain,
+        object: &ScopedKnownAppendObject,
+        error: Arc<ScopedSourceObjectError>,
+        observed_at: i64,
+    ) -> Result<ScopedObservationOfferReceipt, ScopedObservationConsumerOfferError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedObservationConsumerOfferError::ForeignDrain);
+        }
+        if drain.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.lifecycle.is_closing()
+        {
+            return Err(ScopedObservationConsumerOfferError::Closed);
+        }
+        if !error.validate()
+            || !source_belongs_to_root(&error.source, &self.root_identity)
+            || error.scope_epoch != drain.delivery_lane().state().scope_epoch
+            || object.source != error.source
+            || object.relation_id.as_deref() != Some(error.relation_id.as_ref())
+            || !self.known_objects.contains_key(error.relation_id.as_ref())
+        {
+            return Err(ScopedObservationConsumerOfferError::Offer(
+                ScopedProjectionDeliveryError::Projection(
+                    ScopedProjectionError::ProvenanceMismatch,
+                ),
+            ));
+        }
+        let _operation = match self
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+        {
+            Ok(operation) => operation,
+            Err(ScopedObservationOperationStartError::Closing) => {
+                return Err(ScopedObservationConsumerOfferError::Closed);
+            }
+            Err(ScopedObservationOperationStartError::CapacityExhausted) => {
+                return Err(ScopedObservationConsumerOfferError::OperationCapacityExhausted);
+            }
+        };
+        let event_id = source_object_error_event_id(&error);
+        drain
+            .delivery_lane_mut()
+            .offer_projected(vec![ScopedProjectedObservation::SourceObjectError {
+                source: error.source.clone(),
+                observed_at,
+                event_id,
+                error,
+            }])
+            .map_err(|failure| {
+                ScopedObservationConsumerOfferError::Offer(ScopedProjectionDeliveryError::Delivery(
+                    failure.error,
+                ))
+            })
+    }
+
     /// Admit one logical poll request. Every request receives its own ticket,
     /// while all tickets admitted before the next pass reservation share that
     /// pass and offered watermark.
@@ -8330,11 +9074,15 @@ impl ScopedObservationAccessHost {
         let report = pass.report();
         let pass_id = pass.pass_id();
         if self.known_objects.keys().any(|relation_id| {
-            !report
+            let attempted = report
                 .relations()
                 .iter()
-                .any(|relation| relation.relation_id == *relation_id && relation.attempts > 0)
-                || !admission.relation_was_offered_in_pass(relation_id, pass_id)
+                .any(|relation| relation.relation_id == *relation_id && relation.attempts > 0);
+            match admission.relation_pass_evidence(relation_id, pass_id) {
+                Some(ScopedCoveragePassEvidence::AccessAttempt) => !attempted,
+                Some(ScopedCoveragePassEvidence::RetainedObjectError) => attempted,
+                None => true,
+            }
         }) {
             return Err(ScopedObservationPollError::IncompleteScopePass);
         }
@@ -8373,6 +9121,7 @@ impl ScopedObservationAccessHost {
                 .append_objects
                 .keys()
                 .any(|relation_id| !self.known_objects.contains_key(relation_id))
+            || !scoped_object_errors_match_epoch(active)
         {
             return Err(ScopedObservationPassExecutionError::InvalidEpochState);
         }
@@ -8403,6 +9152,7 @@ impl ScopedObservationAccessHost {
         active: &ScopedObservationEpochState,
         drain: &ScopedObservationConsumerDrain,
         bindings: &[ScopedObservationAppendPassBinding],
+        policy: ScopedObservationSourceOwnerRetryPolicy,
     ) -> Result<(), ScopedObservationSourceOwnerBindingError> {
         if !self.owns_consumer_drain(drain)
             || !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
@@ -8425,8 +9175,16 @@ impl ScopedObservationAccessHost {
                 .append_objects
                 .keys()
                 .any(|relation_id| !self.known_objects.contains_key(relation_id))
+            || !scoped_object_errors_match_epoch(active)
         {
             return Err(ScopedObservationSourceOwnerBindingError::InvalidEpochState);
+        }
+        if active
+            .object_errors
+            .values()
+            .any(|state| !policy.accepts_retained_retry(state.error.retry))
+        {
+            return Err(ScopedObservationSourceOwnerBindingError::RetryPolicyMismatch);
         }
         if bindings.len() != active.append_objects.len() {
             return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
@@ -8516,7 +9274,7 @@ impl ScopedObservationAccessHost {
         lease: &ScopedObservationPollLease,
         active: &mut ScopedObservationEpochState,
         request: &ScopedObservationAppendPassRequest<'_>,
-    ) -> Result<(), ScopedObservationPassExecutionError> {
+    ) -> Result<ScopedObservationRelationPollOutcome, ScopedObservationPassExecutionError> {
         let relation_id = request.relation_id;
         let observation = {
             let object = active
@@ -8555,6 +9313,11 @@ impl ScopedObservationAccessHost {
                 }
             }
         };
+        let outcome = if matches!(&observation.read, AppendRead::RetryTransient) {
+            ScopedObservationRelationPollOutcome::RetryTransient
+        } else {
+            ScopedObservationRelationPollOutcome::Ready
+        };
 
         let admission_result = {
             let object = active
@@ -8573,7 +9336,7 @@ impl ScopedObservationAccessHost {
                 failure.error,
             ));
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// Execute one complete live exact-scope append pass for a reserved poll.
@@ -8895,6 +9658,7 @@ impl ScopedObservationAccessHost {
             append_objects,
             admission,
             projection,
+            object_errors: BTreeMap::new(),
         })
     }
 
@@ -9176,6 +9940,7 @@ impl ScopedObservationAccessHost {
         let retired_admission = std::mem::replace(&mut active.admission, replacement_admission);
         drop(retired_admission);
         active.scope_epoch = barrier.scope_epoch;
+        active.object_errors.clear();
         stage.activated = true;
         Ok(barrier)
     }
@@ -10331,6 +11096,83 @@ impl ScopedKnownAppendObject {
         }
     }
 
+    fn prepare_object_error_coverage(
+        &self,
+        error: &ScopedSourceObjectError,
+    ) -> Result<ScopedOfferedDecodeCoverage, ()> {
+        if !error.validate()
+            || error.source != self.source
+            || self.relation_id.as_deref() != Some(error.relation_id.as_ref())
+        {
+            return Err(());
+        }
+        let position = self
+            .checkpoint
+            .as_ref()
+            .map(scoped_append_coverage_position)
+            .transpose()?;
+        if error.provenance.generation
+            != self
+                .checkpoint
+                .as_ref()
+                .map_or(1, |checkpoint| checkpoint.generation)
+            || error.provenance.last_successful_position != position
+        {
+            return Err(());
+        }
+        let completeness = if error.retry.is_terminal() || position.is_none() {
+            CoverageSetCompleteness::Unavailable
+        } else {
+            CoverageSetCompleteness::Partial
+        };
+        let status = if completeness == CoverageSetCompleteness::Partial {
+            CoverageStatus::Partial
+        } else {
+            CoverageStatus::Unavailable {
+                reason: error.failure_code.coverage_code().to_string(),
+            }
+        };
+        let point = scoped_decode_coverage_point(
+            &self.source,
+            error.provenance.generation,
+            position,
+            status,
+        )?;
+        Ok(ScopedOfferedDecodeCoverage {
+            source: self.source.clone(),
+            point: Some(point),
+            explicit_absence_or_deletion: None,
+            explicit_errors: vec![CoverageError {
+                stream_key: Some(self.source.stream_key),
+                object_key: Some(self.source.object_key),
+                code: error.failure_code.coverage_code().to_string(),
+            }],
+            completeness,
+        })
+    }
+
+    fn object_error_provenance(
+        &self,
+    ) -> Result<ScopedSourceObjectErrorProvenance, ScopedObservationPassExecutionError> {
+        let last_successful_position = self
+            .checkpoint
+            .as_ref()
+            .map(scoped_append_coverage_position)
+            .transpose()
+            .map_err(|()| {
+                ScopedObservationPassExecutionError::Admission(
+                    ScopedAdmissionError::InvalidCoverage,
+                )
+            })?;
+        Ok(ScopedSourceObjectErrorProvenance {
+            generation: self
+                .checkpoint
+                .as_ref()
+                .map_or(1, |checkpoint| checkpoint.generation),
+            last_successful_position,
+        })
+    }
+
     fn commit_admission(&mut self) {
         let pending = self
             .pending
@@ -10737,6 +11579,20 @@ fn validate_scoped_relation_coverage(
         return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
     }
     Ok(())
+}
+
+fn scoped_object_errors_match_epoch(active: &ScopedObservationEpochState) -> bool {
+    active.object_errors.iter().all(|(relation_id, state)| {
+        active
+            .append_objects
+            .get(relation_id)
+            .is_some_and(|object| {
+                state.error.validate()
+                    && state.error.relation_id.as_ref() == relation_id
+                    && state.error.scope_epoch == active.scope_epoch
+                    && state.error.source == object.source
+            })
+    })
 }
 
 fn validate_bootstrap_source_state(
@@ -12830,6 +13686,66 @@ mod projection_tests {
         assert_eq!(policy.retry_delay(1), Duration::from_millis(20));
         assert_eq!(policy.retry_delay(2), Duration::from_millis(25));
 
+        let valid_error = ScopedSourceObjectError {
+            error_contract_version: SCOPED_SOURCE_OBJECT_ERROR_CONTRACT_VERSION,
+            relation_id: Arc::from("root-object"),
+            source: source_identity(),
+            scope_epoch: 1,
+            failure_code: ScopedSourceObjectFailureCode::DecodeRetryTransient,
+            provenance: ScopedSourceObjectErrorProvenance {
+                generation: 1,
+                last_successful_position: None,
+            },
+            retry: ScopedSourceObjectRetryState::RetryScheduled {
+                failed_attempts: 1,
+                max_attempts: 4,
+                retry_after_ms: 10,
+            },
+        };
+        assert!(valid_error.validate());
+        assert!(policy.accepts_retained_retry(valid_error.retry));
+
+        let mut invalid_relation = valid_error.clone();
+        invalid_relation.relation_id = Arc::from("Root Object");
+        assert!(!invalid_relation.validate());
+
+        let mut mismatched_class = valid_error.clone();
+        mismatched_class.failure_code = ScopedSourceObjectFailureCode::DecodeStreamFatal;
+        assert!(!mismatched_class.validate());
+
+        let mut wrong_position_kind = valid_error.clone();
+        wrong_position_kind.provenance.last_successful_position = Some(
+            CoveragePosition::derive(
+                CoveragePositionKind::DocumentRevision,
+                b"revision-1",
+                Some(1),
+            )
+            .unwrap(),
+        );
+        assert!(!wrong_position_kind.validate());
+
+        let mut missing_position_order = valid_error.clone();
+        missing_position_order.provenance.last_successful_position = Some(
+            CoveragePosition::derive(CoveragePositionKind::AppendCursor, b"offset-1", None)
+                .unwrap(),
+        );
+        assert!(!missing_position_order.validate());
+
+        let incompatible_attempt_ceiling = ScopedObservationSourceOwnerRetryPolicy::new(
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+            3,
+        )
+        .unwrap();
+        assert!(!incompatible_attempt_ceiling.accepts_retained_retry(valid_error.retry));
+        let incompatible_delay_ceiling = ScopedObservationSourceOwnerRetryPolicy::new(
+            Duration::from_millis(5),
+            Duration::from_millis(5),
+            4,
+        )
+        .unwrap();
+        assert!(!incompatible_delay_ceiling.accepts_retained_retry(valid_error.retry));
+
         for delivery_error in [
             ScopedDeliveryError::SemanticQueueFull,
             ScopedDeliveryError::RetainedNativeQueueFull,
@@ -12878,6 +13794,29 @@ mod projection_tests {
             assert!(!scoped_source_owner_error_is_delivery_backpressure(
                 &transient
             ));
+            assert!(matches!(
+                scoped_object_failure_classification(&transient),
+                Some(ScopedObjectFailureClassification::Retryable(_))
+            ));
+        }
+        assert_eq!(
+            scoped_object_failure_classification(&ScopedObservationPassExecutionError::Access(
+                ScopedObservationAccessError::Decode(ScopedDecodeFailureClass::StreamFatal),
+            ),),
+            Some(ScopedObjectFailureClassification::Terminal(
+                ScopedSourceObjectFailureCode::DecodeStreamFatal,
+            ))
+        );
+        for attachment_failure in [
+            ScopedDecodeFailureClass::AdapterFatal,
+            ScopedDecodeFailureClass::InvalidContract,
+        ] {
+            assert_eq!(
+                scoped_object_failure_classification(&ScopedObservationPassExecutionError::Access(
+                    ScopedObservationAccessError::Decode(attachment_failure),
+                ),),
+                None
+            );
         }
         let cancelled =
             ScopedObservationPassExecutionError::Offer(ScopedObservationConsumerOfferError::Closed);

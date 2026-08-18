@@ -18,7 +18,7 @@ mod sqlite_snapshot;
 #[cfg(test)]
 mod conformance;
 
-pub(crate) use access::MAX_IDENTITY_VALUE_BYTES;
+pub(crate) use access::{validate_relation_id, MAX_IDENTITY_VALUE_BYTES};
 pub use access::{
     AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
     AccessOperation, AccessOutcome, AccessPhase, AccessReservation, AccessReservationRequest,

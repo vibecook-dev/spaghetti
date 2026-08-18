@@ -186,7 +186,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::adapter::{
-        verify_support_release_bundle, AdapterManifest, AdapterObjectContext,
+        verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, CoverageAbsenceKind, CoverageDomain, CoveragePositionKind,
         CoverageSetCompleteness, CoverageStatus, DecodeContext, DecodeDisposition, DecoderId,
         DiscoveryContext, ExternalEntityRef, Fact, FactBatch, FactSemanticContext,
@@ -220,7 +220,7 @@ mod tests {
         ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
         ScopedQueuedObservationFrame, ScopedReplacementMode, ScopedReplacementRepresentation,
         ScopedReplacementStageError, ScopedResyncReason, ScopedRootIdentityRequest,
-        ScopedSourceFailureClass,
+        ScopedSourceFailureClass, ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -336,7 +336,13 @@ mod tests {
         }
     }
 
-    fn promoted_fixture_catalog() -> (
+    const SINGLE_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
+    const TWO_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
+    fn promoted_fixture_catalog_with_scope(
+        scope_document: &[u8],
+    ) -> (
         Arc<SupportCatalog>,
         AdapterSupportBinding,
         crate::adapter::ScopeProgramManifest,
@@ -352,11 +358,7 @@ mod tests {
                 "support/source.json",
                 br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
             ),
-            (
-                "scope_program",
-                "support/scope.json",
-                br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#.as_slice(),
-            ),
+            ("scope_program", "support/scope.json", scope_document),
             (
                 "evidence",
                 "support/evidence.json",
@@ -408,6 +410,14 @@ mod tests {
         )
     }
 
+    fn promoted_fixture_catalog() -> (
+        Arc<SupportCatalog>,
+        AdapterSupportBinding,
+        crate::adapter::ScopeProgramManifest,
+    ) {
+        promoted_fixture_catalog_with_scope(SINGLE_OBJECT_SCOPE_DOCUMENT)
+    }
+
     fn supported_fixture_registry() -> AdapterRegistry {
         let (catalog, binding, scope_programs) = promoted_fixture_catalog();
         AdapterRegistryBuilder::new()
@@ -418,6 +428,19 @@ mod tests {
 
     fn stateful_supported_fixture_registry() -> AdapterRegistry {
         let (catalog, binding, scope_programs) = promoted_fixture_catalog();
+        AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_stateful_decode(),
+            )
+            .build_supported(catalog)
+            .unwrap()
+    }
+
+    fn stateful_two_object_fixture_registry() -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(TWO_OBJECT_SCOPE_DOCUMENT);
         AdapterRegistryBuilder::new()
             .register(
                 EmptyAdapter::new("fixture")
@@ -491,6 +514,19 @@ mod tests {
         }
     }
 
+    fn two_object_scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
+        let mut request = scoped_access_request(root.clone());
+        request.known_objects.push(ScopedKnownObjectGrant {
+            relation_id: "sibling-object".to_string(),
+            scope_root: false,
+            access_root: "root".to_string(),
+            locator_id: "sibling-object".to_string(),
+            root,
+            relative_path: "sibling.jsonl".into(),
+        });
+        request
+    }
+
     fn decode_scoped(
         host: &ScopedObservationAccessHost,
         object: &mut ScopedKnownAppendObject,
@@ -519,6 +555,33 @@ mod tests {
                 semantic_context: fixture_semantic_context(),
                 coverage_domains,
                 retention,
+                max_facts_per_record: 16,
+                max_diagnostics_per_record: 16,
+            },
+        )
+        .unwrap()
+    }
+
+    fn scoped_append_object_for_native_object(native_object_key: &[u8]) -> ScopedKnownAppendObject {
+        ScopedKnownAppendObject::new(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            ScopedAppendDecoderConfig {
+                decoder: DecoderId::new("fixture-decoder").unwrap(),
+                object_context: AdapterObjectContext::empty(),
+                semantic_context: FactSemanticContext::new(
+                    &AdapterId::new("fixture").unwrap(),
+                    1,
+                    b"fixture-source-instance",
+                    b"fixture-transcript",
+                    native_object_key,
+                    1,
+                )
+                .unwrap(),
+                coverage_domains: vec![CoverageDomain::FactFamily {
+                    family: "runtime.usage-v2".to_string(),
+                    version: 1,
+                }],
+                retention: RawRetentionPolicy::None,
                 max_facts_per_record: 16,
                 max_diagnostics_per_record: 16,
             },
@@ -556,6 +619,53 @@ mod tests {
             max_coverage_objects: 1,
         })
         .unwrap()
+    }
+
+    fn admission_lane_for_objects(max_coverage_objects: usize) -> ScopedObservationAdmissionLane {
+        ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 16,
+            max_retained_native_bytes: 0,
+            max_control_items: 16,
+            max_coverage_objects,
+        })
+        .unwrap()
+    }
+
+    fn reconcile_missing_relation_poll(
+        host: &ScopedObservationAccessHost,
+        lease: &ScopedObservationPollLease,
+        relation_id: &str,
+        object: &mut ScopedKnownAppendObject,
+        admission: &mut ScopedObservationAdmissionLane,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+        origin: &RecordOrigin,
+    ) {
+        let observation = object
+            .reconcile(
+                lease.access_pass(),
+                ScopedAppendReconcileRequest {
+                    relation_id,
+                    identity_inputs,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        assert!(!observation.object_present);
+        let ScopedAppendDecodeOutcome::Ready(decoded) = decode_scoped(host, object, &observation)
+        else {
+            panic!("stable missing source must produce a complete poll observation");
+        };
+        if let Err(failure) = admission.admit(object, &observation, decoded) {
+            panic!(
+                "missing-source relation admission failed: {}",
+                failure.error
+            );
+        }
     }
 
     fn decode_and_admit_ignored(
@@ -674,6 +784,13 @@ mod tests {
         ) -> Result<DecodeDisposition, AdapterError> {
             if !self.decode_statefully {
                 return Ok(DecodeDisposition::IgnoredKnown);
+            }
+            if record.payload == b"stream-fatal" {
+                return Err(AdapterError::new(
+                    AdapterErrorClass::StreamFatal,
+                    "fixture_stream_fatal",
+                    "fixture stream-fatal decode",
+                ));
             }
             if record.payload == b"retry" {
                 return Ok(DecodeDisposition::RetryTransient);
@@ -2112,6 +2229,314 @@ mod tests {
             .is_present());
         assert!(close.wait_async().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn scoped_source_owner_isolates_object_retry_exhaustion_from_healthy_siblings() {
+        let registry = stateful_two_object_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("object-isolated-retry-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            two_object_scoped_access_request(root.clone()),
+        )
+        .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 16,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 16,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let mut objects = vec![
+            scoped_append_object_for_native_object(b"session.jsonl"),
+            scoped_append_object_for_native_object(b"sibling.jsonl"),
+        ];
+        let root_source = objects[0].source_identity().clone();
+        let sibling_source = objects[1].source_identity().clone();
+        let mut admission = admission_lane_for_objects(2);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 16,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"object-isolated-session",
+        }];
+        let root_origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let sibling_origin = RecordOrigin {
+            object_id: 31,
+            ..root_origin.clone()
+        };
+
+        let bootstrap_ticket = handle.host().request_poll().unwrap();
+        let bootstrap_lease = handle.host().begin_poll().unwrap().unwrap();
+        reconcile_missing_relation_poll(
+            handle.host(),
+            &bootstrap_lease,
+            "root-object",
+            &mut objects[0],
+            &mut admission,
+            &identity,
+            &root_origin,
+        );
+        reconcile_missing_relation_poll(
+            handle.host(),
+            &bootstrap_lease,
+            "sibling-object",
+            &mut objects[1],
+            &mut admission,
+            &identity,
+            &sibling_origin,
+        );
+        let bootstrap_watermark = handle.with_attachment(|host, drain| {
+            host.complete_bootstrap_poll(bootstrap_lease, &admission, &projection, drain)
+                .unwrap()
+        });
+        assert!(matches!(
+            bootstrap_ticket.wait_async().await,
+            ScopedObservationPollResolution::Ready(watermark)
+                if Arc::ptr_eq(&watermark, &bootstrap_watermark)
+        ));
+        for object in &mut objects {
+            object.complete_bootstrap().unwrap();
+        }
+        let barrier = handle.with_attachment(|host, drain| {
+            host.offer_consumer_bootstrap_complete(&objects, &admission, &projection, drain, 50)
+                .unwrap()
+        });
+        let bootstrap = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &bootstrap.envelope.event,
+            ScopedObservationEvent::ObserverBootstrapComplete { barrier: delivered }
+                if Arc::ptr_eq(delivered, &barrier)
+        ));
+        runtime
+            .acknowledge_applied(bootstrap.application_receipt())
+            .unwrap();
+
+        let active = handle
+            .with_attachment(|host, drain| {
+                host.bind_consumer_bootstrap_epoch_state(objects, admission, projection, drain)
+            })
+            .unwrap();
+        let bindings = vec![
+            ScopedObservationAppendPassBinding::new(
+                "root-object",
+                vec![ScopedObservationOwnedIdentityInput::new(
+                    "native-session-id",
+                    b"object-isolated-session".to_vec(),
+                )
+                .unwrap()],
+                None,
+                1,
+                64,
+                root_origin,
+                false,
+            )
+            .unwrap(),
+            ScopedObservationAppendPassBinding::new(
+                "sibling-object",
+                vec![ScopedObservationOwnedIdentityInput::new(
+                    "native-session-id",
+                    b"object-isolated-session".to_vec(),
+                )
+                .unwrap()],
+                None,
+                1,
+                64,
+                sibling_origin,
+                false,
+            )
+            .unwrap(),
+        ];
+        let owner = handle
+            .bind_epoch_source_owner(
+                active,
+                bindings,
+                ScopedObservationSourceOwnerRetryPolicy::new(
+                    std::time::Duration::from_millis(2),
+                    std::time::Duration::from_millis(2),
+                    2,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let pass_count = Arc::new(AtomicUsize::new(0));
+        let source_pass_count = Arc::clone(&pass_count);
+        let source_task = tokio::spawn(owner.run_until_stopped_with_clock(move || {
+            100 + source_pass_count.fetch_add(1, Ordering::SeqCst) as i64
+        }));
+
+        std::fs::write(root.join("session.jsonl"), b"retry\n").unwrap();
+        std::fs::write(root.join("sibling.jsonl"), b"healthy\n").unwrap();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(first, ScopedObservationPollResolution::Ready(_)));
+
+        let mut retry_states = Vec::new();
+        let mut sibling_created = false;
+        while retry_states.len() < 2 || !sibling_created {
+            let yielded =
+                tokio::time::timeout(std::time::Duration::from_secs(2), runtime.next_event())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            match &yielded.envelope.event {
+                ScopedObservationEvent::SourceObjectError { error } => {
+                    assert_eq!(error.relation_id.as_ref(), "root-object");
+                    assert_eq!(error.provenance.generation, 1);
+                    assert!(error.provenance.last_successful_position.is_none());
+                    retry_states.push(error.retry);
+                    let redacted = format!("{error:?}");
+                    assert!(!redacted.contains(root.to_string_lossy().as_ref()));
+                    assert!(!redacted.contains("object-isolated-session"));
+                }
+                ScopedObservationEvent::SourcePresence {
+                    change: ScopedAppendPresenceChange::Created { generation: 1 },
+                } if yielded.envelope.source.object_key == sibling_source.object_key => {
+                    sibling_created = true;
+                }
+                _ => {}
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+        }
+        assert!(matches!(
+            retry_states.as_slice(),
+            [
+                ScopedSourceObjectRetryState::RetryScheduled {
+                    failed_attempts: 1,
+                    max_attempts: 2,
+                    retry_after_ms: 2,
+                },
+                ScopedSourceObjectRetryState::RetryExhausted {
+                    failed_attempts: 2,
+                    max_attempts: 2,
+                },
+            ]
+        ));
+        assert!(!source_task.is_finished());
+
+        let passes_after_exhaustion = pass_count.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert_eq!(pass_count.load(Ordering::SeqCst), passes_after_exhaustion);
+
+        OpenOptions::new()
+            .append(true)
+            .open(root.join("sibling.jsonl"))
+            .unwrap()
+            .write_all(b"more\n")
+            .unwrap();
+        let sibling_progress =
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+                .await
+                .unwrap()
+                .unwrap();
+        let ScopedObservationPollResolution::Ready(watermark) = sibling_progress else {
+            panic!("healthy sibling poll must complete through terminal object state");
+        };
+        assert!(watermark.explicit_object_errors.iter().any(|error| {
+            error.object_key == Some(root_source.object_key)
+                && error.code == "decode_retry_transient"
+        }));
+
+        OpenOptions::new()
+            .append(true)
+            .open(root.join("sibling.jsonl"))
+            .unwrap()
+            .write_all(b"stream-fatal\n")
+            .unwrap();
+        let terminal_sibling =
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(
+            terminal_sibling,
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        let terminal =
+            tokio::time::timeout(std::time::Duration::from_secs(2), runtime.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        let ScopedObservationEvent::SourceObjectError { error } = &terminal.envelope.event else {
+            panic!("stream-fatal decode must become an object-local terminal control");
+        };
+        assert_eq!(error.relation_id.as_ref(), "sibling-object");
+        assert_eq!(error.source, sibling_source);
+        assert!(matches!(
+            error.retry,
+            ScopedSourceObjectRetryState::NotRetryable { failed_attempts: 1 }
+        ));
+        assert_eq!(
+            error
+                .provenance
+                .last_successful_position
+                .as_ref()
+                .and_then(|position| position.monotonic_order),
+            Some(13)
+        );
+        runtime
+            .acknowledge_applied(terminal.application_receipt())
+            .unwrap();
+        assert!(!source_task.is_finished());
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), source_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped.exit(),
+            ScopedObservationSourceOwnerRunExit::Cancelled
+        ));
+        let (active, _) = stopped.into_parts();
+        assert!(matches!(
+            active.object_error("root-object").map(|error| error.retry),
+            Some(ScopedSourceObjectRetryState::RetryExhausted {
+                failed_attempts: 2,
+                max_attempts: 2,
+            })
+        ));
+        assert!(matches!(
+            active
+                .object_error("sibling-object")
+                .map(|error| error.retry),
+            Some(ScopedSourceObjectRetryState::NotRetryable { failed_attempts: 1 })
+        ));
+        assert_eq!(
+            active
+                .append_object("sibling-object")
+                .unwrap()
+                .checkpoint()
+                .unwrap()
+                .committed_offset,
+            13
+        );
+        assert!(active
+            .append_object("root-object")
+            .unwrap()
+            .checkpoint()
+            .is_none());
+        assert!(close.wait_async().await.complete);
     }
 
     #[tokio::test]
