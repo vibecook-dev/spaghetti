@@ -2650,6 +2650,54 @@ impl ScopedObservationAsyncHandle {
         }
     }
 
+    /// Execute a reserved exact-scope live pass while keeping native access
+    /// and decode outside the consumer-drain mutex. Only bounded validation,
+    /// offer, and watermark publication enter the attachment lock. The caller
+    /// remains the sole owner of `active` for the duration of the pass.
+    pub fn execute_epoch_poll_pass(
+        &self,
+        lease: ScopedObservationPollLease,
+        active: &mut ScopedObservationEpochState,
+        requests: &[ScopedObservationAppendPassRequest<'_>],
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPassExecutionError> {
+        {
+            let drain = self.shared.lock_drain();
+            self.shared
+                .host
+                .validate_epoch_poll_execution(&lease, active, &drain, requests)?;
+        }
+        {
+            let mut drain = self.shared.lock_drain();
+            self.shared
+                .host
+                .offer_epoch_poll_pending(active, &mut drain)?;
+        }
+
+        let requests_by_relation = requests
+            .iter()
+            .map(|request| (request.relation_id, request))
+            .collect::<BTreeMap<_, _>>();
+        let relation_ids = active.append_objects.keys().cloned().collect::<Vec<_>>();
+        for relation_id in relation_ids {
+            let request = requests_by_relation
+                .get(relation_id.as_str())
+                .expect("the exact relation set was prevalidated");
+            self.shared
+                .host
+                .reconcile_epoch_poll_relation(&lease, active, request)?;
+            let mut drain = self.shared.lock_drain();
+            self.shared
+                .host
+                .offer_epoch_poll_pending(active, &mut drain)?;
+        }
+
+        let drain = self.shared.lock_drain();
+        self.shared
+            .host
+            .complete_epoch_poll(lease, active, &drain)
+            .map_err(Into::into)
+    }
+
     pub fn prepare_watcher_install(
         &self,
         hint_capacity: usize,
@@ -7680,6 +7728,71 @@ impl ScopedObservationAccessHost {
         }
     }
 
+    fn reconcile_epoch_poll_relation(
+        &self,
+        lease: &ScopedObservationPollLease,
+        active: &mut ScopedObservationEpochState,
+        request: &ScopedObservationAppendPassRequest<'_>,
+    ) -> Result<(), ScopedObservationPassExecutionError> {
+        let relation_id = request.relation_id;
+        let observation = {
+            let object = active
+                .append_objects
+                .get_mut(relation_id)
+                .expect("the exact relation set was prevalidated");
+            object.reconcile(
+                lease.access_pass(),
+                ScopedAppendReconcileRequest {
+                    relation_id,
+                    identity_inputs: request.identity_inputs,
+                    access_phase: AccessPhase::Revalidation,
+                    parent_token: request.parent_token,
+                    depth: request.depth,
+                    max_bytes: request.max_bytes,
+                    origin: request.origin,
+                    force_contract_replay: request.force_contract_replay,
+                },
+            )?
+        };
+
+        let decoded = {
+            let object = active
+                .append_objects
+                .get_mut(relation_id)
+                .expect("the exact relation set was prevalidated");
+            match self.decode_append(object, &observation) {
+                Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
+                Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
+                    object.discard(&observation)?;
+                    return Err(ScopedObservationPassExecutionError::DecodeRetryTransient);
+                }
+                Err(error) => {
+                    object.discard(&observation)?;
+                    return Err(error.into());
+                }
+            }
+        };
+
+        let admission_result = {
+            let object = active
+                .append_objects
+                .get_mut(relation_id)
+                .expect("the exact relation set was prevalidated");
+            active.admission.admit(object, &observation, decoded)
+        };
+        if let Err(failure) = admission_result {
+            active
+                .append_objects
+                .get_mut(relation_id)
+                .expect("the exact relation set was prevalidated")
+                .discard(&observation)?;
+            return Err(ScopedObservationPassExecutionError::Admission(
+                failure.error,
+            ));
+        }
+        Ok(())
+    }
+
     /// Execute one complete live exact-scope append pass for a reserved poll.
     ///
     /// Requests are prevalidated as an exact set and then visited in canonical
@@ -7689,7 +7802,8 @@ impl ScopedObservationAccessHost {
     /// committed by admission remains paired with its queued frame; a retry
     /// flushes that frame before taking fresh bounded reads. Poll completion is
     /// the final operation and therefore cannot acknowledge coverage from an
-    /// older pass.
+    /// older pass. Async attachment owners must use the handle-level method so
+    /// native access never runs while their consumer-drain mutex is held.
     pub fn execute_epoch_poll_pass(
         &self,
         lease: ScopedObservationPollLease,
@@ -7713,61 +7827,7 @@ impl ScopedObservationAccessHost {
             let request = requests_by_relation
                 .get(relation_id.as_str())
                 .expect("the exact relation set was prevalidated");
-            let observation = {
-                let object = active
-                    .append_objects
-                    .get_mut(&relation_id)
-                    .expect("the canonical active relation remains present");
-                object.reconcile(
-                    lease.access_pass(),
-                    ScopedAppendReconcileRequest {
-                        relation_id: request.relation_id,
-                        identity_inputs: request.identity_inputs,
-                        access_phase: AccessPhase::Revalidation,
-                        parent_token: request.parent_token,
-                        depth: request.depth,
-                        max_bytes: request.max_bytes,
-                        origin: request.origin,
-                        force_contract_replay: request.force_contract_replay,
-                    },
-                )?
-            };
-
-            let decoded = {
-                let object = active
-                    .append_objects
-                    .get_mut(&relation_id)
-                    .expect("the canonical active relation remains present");
-                match self.decode_append(object, &observation) {
-                    Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
-                    Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
-                        object.discard(&observation)?;
-                        return Err(ScopedObservationPassExecutionError::DecodeRetryTransient);
-                    }
-                    Err(error) => {
-                        object.discard(&observation)?;
-                        return Err(error.into());
-                    }
-                }
-            };
-
-            let admission_result = {
-                let object = active
-                    .append_objects
-                    .get_mut(&relation_id)
-                    .expect("the canonical active relation remains present");
-                active.admission.admit(object, &observation, decoded)
-            };
-            if let Err(failure) = admission_result {
-                active
-                    .append_objects
-                    .get_mut(&relation_id)
-                    .expect("the canonical active relation remains present")
-                    .discard(&observation)?;
-                return Err(ScopedObservationPassExecutionError::Admission(
-                    failure.error,
-                ));
-            }
+            self.reconcile_epoch_poll_relation(&lease, active, request)?;
             self.offer_epoch_poll_pending(active, drain)?;
         }
 

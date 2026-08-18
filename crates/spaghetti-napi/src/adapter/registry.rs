@@ -1812,11 +1812,11 @@ mod tests {
     async fn scoped_async_runtime_delivers_and_applies_bootstrap_concurrently_with_ready() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
-        let host = ScopedObservationAccessHost::authorize(
-            &registry,
-            scoped_access_request(temp.path().join("async-runtime-bootstrap-root")),
-        )
-        .unwrap();
+        let root = temp.path().join("async-runtime-bootstrap-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
         let mut runtime = ScopedObservationAsyncRuntime::open(
             host,
             ScopedObservationDeliveryLimits {
@@ -1927,6 +1927,57 @@ mod tests {
             Some(barrier.barrier_sequence)
         );
         assert_eq!(applied.pending_sequence, None);
+
+        let mut active = handle
+            .with_attachment(|host, drain| {
+                host.bind_consumer_bootstrap_epoch_state(vec![object], admission, projection, drain)
+            })
+            .unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        let pass_request = [ScopedObservationAppendPassRequest {
+            relation_id: "root-object",
+            identity_inputs: &identity,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 64,
+            origin: &origin,
+            force_contract_replay: false,
+        }];
+        let poll_handle = handle.clone();
+        let source_handle = handle.clone();
+        let (poll, source_watermark, created) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(
+                    poll_handle.poll(),
+                    async {
+                        let lease = source_handle
+                            .next_poll_pass()
+                            .await
+                            .unwrap()
+                            .expect("the requested live pass remains runnable");
+                        source_handle.execute_epoch_poll_pass(lease, &mut active, &pass_request)
+                    },
+                    runtime.next_event(),
+                )
+            })
+            .await
+            .unwrap();
+        let source_watermark = source_watermark.unwrap();
+        assert!(matches!(
+            poll,
+            Ok(ScopedObservationPollResolution::Ready(watermark))
+                if Arc::ptr_eq(&watermark, &source_watermark)
+        ));
+        let created = created.unwrap().unwrap();
+        assert!(matches!(
+            created.envelope.event,
+            ScopedObservationEvent::SourcePresence {
+                change: ScopedAppendPresenceChange::Created { generation: 1 }
+            }
+        ));
+        runtime
+            .acknowledge_applied(created.application_receipt())
+            .unwrap();
 
         assert!(runtime.close().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
