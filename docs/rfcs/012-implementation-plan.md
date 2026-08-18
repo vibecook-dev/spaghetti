@@ -1623,8 +1623,13 @@ Current landing status (2026-08-18):
   only after the replacement epoch is valid. The integrated conformance path
   proves a parked epoch-1 owner performs no later access, epoch 1 cannot
   rebind, epoch 2 replaces source/coverage/reducer state, and its newly bound
-  owner services a fresh epoch-2 poll. Automatic watcher-to-replacement replay
-  orchestration and portable poll behavior during that handoff remain open;
+  owner services a fresh epoch-2 poll. The structured handoff now also drives
+  the exact current append bindings through a complete canonical replacement
+  pass while it continues supervising the retained watcher. It waits for
+  control capacity without draining application events, drains every bounded
+  source batch, publishes and atomically swaps the complete epoch, clears the
+  one-shot contract-replay flag, and re-pairs the same watcher with the fresh
+  source owner. Portable poll behavior during that handoff remains open;
 - bounded delivery now has a separate retained producer-capacity generation.
   Dequeue, explicit epoch supersession, terminal failure, and drain close wake
   a parked owner without a check-then-sleep race. Semantic, retained-native,
@@ -1688,9 +1693,13 @@ Current landing status (2026-08-18):
   replacement, re-pairs it with the preserved source authority, services both
   handoff-time and fresh epoch-2 poll demand, and proves permanent backend
   failure stops the re-paired source, releases the backend exactly once, and
-  leaves the ordered terminal control drainable before close. Automatic
-  replacement replay/rebind orchestration, remaining portable-host wiring,
-  and policy calibration remain open;
+  leaves the ordered terminal control drainable before close. The retained
+  handoff's automatic append replay/rebind path is fail-closed: transient
+  access/decode, re-overflow, incomplete coverage, admission, projection, or
+  delivery failure cannot swap partial state and instead terminalizes the
+  observer through the ordered failure control. Remaining portable-host
+  wiring, dynamic/non-append replacement composition, and policy calibration
+  remain open;
 - one pass is active at a time, a later pass receives fresh bounds, close is
   idempotent, and the frozen access report excludes paths, identity values, and
   content;
@@ -1857,9 +1866,9 @@ known-object relation/root summary, dynamic/discovered scope membership beyond
 the attachment's current exact known-object grants and family coverage beyond
 usage-v2,
 complete multi-family replacement manifests, whole-scope discovery and source
-state beyond the current exact append-object set, automatic watcher/source-
-owner replacement replay and rebind orchestration, remaining
-portable-host wiring and policy calibration, plus re-overflow orchestration,
+state beyond the current exact append-object set, remaining portable-host
+wiring and policy calibration, dynamic/non-append replacement composition,
+plus higher-level re-overflow retry orchestration,
 artifact mediation and the public close-method transport,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
@@ -1902,7 +1911,7 @@ Gate compares clean-bootstrap and resync replacement digests per RFC 012C family
 at the same RFC 012A coverage vector, including disappeared entities, explicit
 unavailable coverage, and unchanged event IDs.
 
-Current landing status (2026-08-17): D3 is `In progress`. Native-derived
+Current landing status (2026-08-18): D3 is `In progress`. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have
@@ -2024,9 +2033,24 @@ whole-scope replacement can bind the preserved authority to a fresh owner and
 service an epoch-local poll. A structured, non-detached supervisor now retains
 the native watcher across that handoff, permits callbacks to queue demand while
 the invalid epoch has no reader, re-pairs after replacement, and co-stops both
-owners on cancellation or terminal watcher/source failure. Automatic
-replacement replay and rebind orchestration remains later D3 composition
-rather than an implicit background task.
+owners on cancellation or terminal watcher/source failure. The next bounded
+D3 slice (`101cb90`) closes automatic replay/rebind for that exact append-only
+handoff without inventing a detached background task. The handoff supervises
+the retained native watcher while it waits for delivered resync authority,
+opens an empty epoch, visits exact relation bindings in canonical order,
+replays every bounded batch to complete source coverage, publishes the staged
+snapshot and completion barrier through existing capacity ownership, and only
+then rebinds and re-pairs the new source owner. A one-shot contract replay is
+applied only to the first batch and is cleared after replacement, preventing a
+large object or subsequent live poll from restarting forever at offset zero.
+The integrated test uses a five-record multi-batch replay, proves the rebound
+owner retains generation one at the complete cursor, services handoff-time
+poll demand, and later co-stops with the same watcher. Oversized/incomplete
+source state fails before swap, exposes no path or native identity in Debug,
+and emits one terminal failure rather than a false completion. Dynamic
+discovery, non-append source participants, recoverable per-object replacement
+policy, the portable host/SDK transport, and calibrated watcher/replay policy
+remain open.
 
 ### D4. SDK and Chopsticks migration
 
