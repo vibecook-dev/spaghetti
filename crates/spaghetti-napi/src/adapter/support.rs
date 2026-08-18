@@ -242,6 +242,29 @@ pub enum SupportReleaseStatus {
     Retired,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportCapabilityTopology {
+    Catalog,
+    Durable,
+    Scoped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupportCapabilityLevel {
+    Supported,
+    Degraded,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SupportCapabilityDeclaration {
+    pub capability_id: String,
+    pub topology: SupportCapabilityTopology,
+    pub level: SupportCapabilityLevel,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactVersionRange {
     pub minimum: String,
@@ -388,13 +411,52 @@ fn validate_identifier_list(
 pub struct SupportReleaseDescriptor {
     pub support_release_id: String,
     pub status: SupportReleaseStatus,
+    pub capabilities: Vec<SupportCapabilityDeclaration>,
     pub artifact_compatibility: ArtifactCompatibilityDeclaration,
 }
 
 impl SupportReleaseDescriptor {
     pub fn validate(&self) -> Result<(), SupportContractError> {
         validate_identifier("support release id", &self.support_release_id)?;
+        if self.capabilities.is_empty() {
+            return Err(SupportContractError::invalid(
+                "support release capabilities must not be empty",
+            ));
+        }
+        let mut capability_ids = BTreeSet::new();
+        for capability in &self.capabilities {
+            validate_identifier("support capability id", &capability.capability_id)?;
+            if !capability_ids.insert(&capability.capability_id) {
+                return Err(SupportContractError::invalid(format!(
+                    "duplicate support capability id {:?}",
+                    capability.capability_id
+                )));
+            }
+        }
         self.artifact_compatibility.validate()
+    }
+
+    fn declared_operation_permissions(&self) -> OperationPermissions {
+        let topology_is_fully_supported = |topology| {
+            let mut declared = false;
+            for capability in &self.capabilities {
+                if capability.topology != topology {
+                    continue;
+                }
+                declared = true;
+                if capability.level != SupportCapabilityLevel::Supported {
+                    return false;
+                }
+            }
+            declared
+        };
+        OperationPermissions {
+            version_probe: true,
+            catalog: topology_is_fully_supported(SupportCapabilityTopology::Catalog),
+            durable: topology_is_fully_supported(SupportCapabilityTopology::Durable),
+            scoped_observation: topology_is_fully_supported(SupportCapabilityTopology::Scoped),
+            bounded_drift: true,
+        }
     }
 }
 
@@ -444,6 +506,15 @@ struct SupportVersionsWire {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportCapabilityWire {
+    capability_id: String,
+    topology: SupportCapabilityTopology,
+    level: SupportCapabilityLevel,
+    notes: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 struct SupportReleaseWire {
     schema_version: u32,
     support_release_id: String,
@@ -452,6 +523,7 @@ struct SupportReleaseWire {
     artifact_compatibility: ArtifactCompatibilityDeclaration,
     references: SupportReferenceSetWire,
     versions: SupportVersionsWire,
+    capabilities: Vec<SupportCapabilityWire>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -556,9 +628,35 @@ pub fn verify_support_release_bundle(
             "support release decoder contract version must be greater than zero",
         ));
     }
+    let capabilities = release
+        .capabilities
+        .into_iter()
+        .map(|capability| {
+            let SupportCapabilityWire {
+                capability_id,
+                topology,
+                level,
+                notes,
+            } = capability;
+            if !matches!(
+                notes,
+                serde_json::Value::Null | serde_json::Value::String(_)
+            ) {
+                return Err(SupportContractError::invalid(
+                    "support capability notes must be a string or null",
+                ));
+            }
+            Ok(SupportCapabilityDeclaration {
+                capability_id,
+                topology,
+                level,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let descriptor = SupportReleaseDescriptor {
         support_release_id: release.support_release_id,
         status: release.status,
+        capabilities,
         artifact_compatibility: release.artifact_compatibility,
     };
     descriptor.validate()?;
@@ -784,14 +882,6 @@ pub struct OperationPermissions {
 }
 
 impl OperationPermissions {
-    const SUPPORTED: Self = Self {
-        version_probe: true,
-        catalog: true,
-        durable: true,
-        scoped_observation: true,
-        bounded_drift: true,
-    };
-
     const RECOGNIZED: Self = Self {
         version_probe: true,
         catalog: false,
@@ -1025,7 +1115,7 @@ pub fn classify_runtime_support(
                 CompatibilityClass::RecognizedUnverified
                 | CompatibilityClass::UnknownOrIncompatible => unreachable!(),
             },
-            permissions: OperationPermissions::SUPPORTED,
+            permissions: release.declared_operation_permissions(),
         });
     }
 
@@ -1038,7 +1128,10 @@ pub fn classify_runtime_support(
     let forward_catalog = marker_compatible
         .iter()
         .copied()
-        .filter(|release| release.artifact_compatibility.forward_catalog_only)
+        .filter(|release| {
+            release.artifact_compatibility.forward_catalog_only
+                && release.declared_operation_permissions().catalog
+        })
         .collect::<Vec<_>>();
     if forward_catalog.len() > 1 {
         return Ok(incompatible_decision(
@@ -1772,6 +1865,38 @@ mod tests {
         assert!(forward
             .authorize(SupportOperation::CatalogDiscovery)
             .is_ok());
+
+        let restricted = fixture
+            .runtime_cases
+            .iter()
+            .find(|case| case.name == "exact-capability-restricted")
+            .unwrap();
+        let restricted_binding = fixture_binding("capability-restricted-support-v1");
+        let restricted_scope = fixture_scope_manifest(
+            "capability-restricted-agent",
+            SupportReleaseStatus::Promoted,
+        );
+        let restricted_registration = AdapterSupportRegistration::new(
+            "capability-restricted-agent",
+            &restricted_binding,
+            &restricted_scope,
+        );
+        for operation in [
+            SupportOperation::CatalogDiscovery,
+            SupportOperation::DurableHistoryRuntime,
+            SupportOperation::ScopedTypedObservation,
+        ] {
+            let error = catalog
+                .authorize_typed_access(
+                    restricted_registration,
+                    &restricted.probe,
+                    operation,
+                    &fixture.contract_request,
+                    &fixture.contract_offer,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("forbidden"));
+        }
     }
 
     #[test]
@@ -1827,7 +1952,27 @@ mod tests {
                 "forward_catalog_only": false
             },
             "references": references,
-            "versions": {"adapter_package": "1.0.0", "decoder_contract": 1}
+            "versions": {"adapter_package": "1.0.0", "decoder_contract": 1},
+            "capabilities": [
+                {
+                    "capability_id": "fixture-catalog",
+                    "topology": "catalog",
+                    "level": "supported",
+                    "notes": null
+                },
+                {
+                    "capability_id": "fixture-history",
+                    "topology": "durable",
+                    "level": "supported",
+                    "notes": "fixture capability"
+                },
+                {
+                    "capability_id": "fixture-observation",
+                    "topology": "scoped",
+                    "level": "degraded",
+                    "notes": null
+                }
+            ]
         }))
         .unwrap();
         let documents = paths
@@ -1838,6 +1983,17 @@ mod tests {
         let verified = verify_support_release_bundle(&release, &documents).unwrap();
         assert_eq!(verified.adapter_id(), "fixture-agent");
         assert_eq!(verified.descriptor().status, SupportReleaseStatus::Promoted);
+        assert_eq!(verified.descriptor().capabilities.len(), 3);
+        assert_eq!(
+            verified.descriptor().declared_operation_permissions(),
+            OperationPermissions {
+                version_probe: true,
+                catalog: true,
+                durable: true,
+                scoped_observation: false,
+                bounded_drift: true,
+            }
+        );
         assert_eq!(
             verified.adapter_binding().adapter_package_version(),
             "1.0.0"
@@ -1849,6 +2005,27 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("digest"));
+
+        let mut missing_capabilities: Value = serde_json::from_slice(&release).unwrap();
+        missing_capabilities
+            .as_object_mut()
+            .unwrap()
+            .remove("capabilities");
+        let missing_capabilities = serde_json::to_vec(&missing_capabilities).unwrap();
+        assert!(
+            verify_support_release_bundle(&missing_capabilities, &documents)
+                .unwrap_err()
+                .to_string()
+                .contains("capabilities")
+        );
+
+        let mut invalid_notes: Value = serde_json::from_slice(&release).unwrap();
+        invalid_notes["capabilities"][0]["notes"] = serde_json::json!(false);
+        let invalid_notes = serde_json::to_vec(&invalid_notes).unwrap();
+        assert!(verify_support_release_bundle(&invalid_notes, &documents)
+            .unwrap_err()
+            .to_string()
+            .contains("notes"));
     }
 
     #[test]
@@ -1863,7 +2040,7 @@ mod tests {
         duplicated.push(duplicated[1].clone());
         assert!(classify_runtime_support(&exact.probe, &duplicated).is_err());
 
-        let mut overlapping = fixture.releases;
+        let mut overlapping = fixture.releases.clone();
         let mut second = overlapping[1].clone();
         second.support_release_id = "fixture-support-v2".to_string();
         overlapping.push(second);
@@ -1873,6 +2050,49 @@ mod tests {
             CompatibilityReason::AmbiguousPromotedRelease
         );
         assert!(!decision.permissions.durable);
+
+        let mut duplicated_capability = fixture.releases[1].clone();
+        duplicated_capability
+            .capabilities
+            .push(duplicated_capability.capabilities[0].clone());
+        assert!(
+            classify_runtime_support(&exact.probe, &[duplicated_capability])
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate support capability")
+        );
+
+        let mut oversized_capability = fixture.releases[1].clone();
+        oversized_capability.capabilities[0].capability_id = "é".repeat(65);
+        assert!(
+            classify_runtime_support(&exact.probe, &[oversized_capability])
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds 128 bytes")
+        );
+
+        let mut absent_capabilities = fixture.releases[1].clone();
+        absent_capabilities.capabilities.clear();
+        assert!(
+            classify_runtime_support(&exact.probe, &[absent_capabilities])
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+
+        let restricted = fixture
+            .runtime_cases
+            .iter()
+            .find(|case| case.name == "exact-capability-restricted")
+            .unwrap();
+        let mut absent_topologies = fixture.releases[2].clone();
+        absent_topologies
+            .capabilities
+            .retain(|capability| capability.capability_id == "restricted-history");
+        let decision = classify_runtime_support(&restricted.probe, &[absent_topologies]).unwrap();
+        assert!(decision.permissions.durable);
+        assert!(!decision.permissions.catalog);
+        assert!(!decision.permissions.scoped_observation);
     }
 
     #[test]

@@ -978,6 +978,16 @@ The installed native artifact is classified before semantic decoding:
 | Bounded drift evidence   | Per retention policy    | Hash/count/field-family diagnostics; no durable raw payload | Version/root diagnostic only  |
 | Compatibility output     | supported class/release | unverified class, observed version, and reason              | incompatible class and reason |
 
+A broad catalog, durable, or scoped operation authorization is supported as
+declared only when the selected digest-bound release declares at least one
+capability in that topology and every declared capability in that topology is
+`supported`. A `degraded` or `unsupported` capability, or an absent topology,
+fails closed because the broad authorization token cannot represent a safe
+capability subset. The same catalog-capability rule applies to the explicitly
+declared forward-compatible catalog path. Bounded version probing and bounded
+drift evidence remain governed by the compatibility-class and retention rules
+in the table rather than being upgraded by a capability declaration.
+
 A support release may declare a forward-compatible catalog decoder only when
 the ADS identifies stable version markers, strict bounds, and fixtures proving
 that the catalog identity surface is tolerant. Runtime flags cannot upgrade an

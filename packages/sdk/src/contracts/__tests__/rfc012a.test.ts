@@ -293,6 +293,44 @@ test('Rust, Python, and TypeScript support classification agree', () => {
   }
 });
 
+test('support capability declarations fail closed before portable classification', () => {
+  const releases = structuredClone(supportFixture.releases) as Array<{
+    capabilities: Array<{ capability_id: string; topology: string; level: string }>;
+  }>;
+  releases[1]!.capabilities.push(structuredClone(releases[1]!.capabilities[0]!));
+  assert.throws(
+    () => classifyRuntimeSupport(supportFixture.runtime_cases[0]!.probe, releases),
+    ContractValidationError,
+  );
+
+  const oversized = structuredClone(supportFixture.releases) as Array<{
+    capabilities: Array<{ capability_id: string }>;
+  }>;
+  oversized[1]!.capabilities[0]!.capability_id = 'é'.repeat(65);
+  assert.throws(
+    () => classifyRuntimeSupport(supportFixture.runtime_cases[0]!.probe, oversized),
+    ContractValidationError,
+  );
+
+  const absent = structuredClone(supportFixture.releases) as Array<{ capabilities: unknown[] }>;
+  absent[1]!.capabilities = [];
+  assert.throws(() => classifyRuntimeSupport(supportFixture.runtime_cases[0]!.probe, absent), ContractValidationError);
+
+  const absentTopologies = structuredClone(supportFixture.releases) as Array<{
+    capabilities: Array<{ capability_id: string }>;
+  }>;
+  absentTopologies[2]!.capabilities = absentTopologies[2]!.capabilities.filter(
+    (capability) => capability.capability_id === 'restricted-history',
+  );
+  const restrictedProbe = supportFixture.runtime_cases.find(
+    (runtimeCase) => runtimeCase.name === 'exact-capability-restricted',
+  )!.probe;
+  const decision = classifyRuntimeSupport(restrictedProbe, [absentTopologies[2]]);
+  assert.equal(decision.permissions.durable, true);
+  assert.equal(decision.permissions.catalog, false);
+  assert.equal(decision.permissions.scoped_observation, false);
+});
+
 test('Rust, Python, and TypeScript contract negotiation agree', () => {
   assert.deepEqual(
     selectContractVersions(supportFixture.contract_request, supportFixture.contract_offer),

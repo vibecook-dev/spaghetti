@@ -4,6 +4,23 @@
     {
       "support_release_id": "candidate-only-support-v1",
       "status": "candidate",
+      "capabilities": [
+        {
+          "capability_id": "candidate-catalog",
+          "topology": "catalog",
+          "level": "supported"
+        },
+        {
+          "capability_id": "candidate-history",
+          "topology": "durable",
+          "level": "supported"
+        },
+        {
+          "capability_id": "candidate-observation",
+          "topology": "scoped",
+          "level": "supported"
+        }
+      ],
       "artifact_compatibility": {
         "family": "candidate-agent",
         "platforms": ["darwin"],
@@ -16,6 +33,23 @@
     {
       "support_release_id": "fixture-support-v1",
       "status": "promoted",
+      "capabilities": [
+        {
+          "capability_id": "fixture-catalog",
+          "topology": "catalog",
+          "level": "supported"
+        },
+        {
+          "capability_id": "fixture-history",
+          "topology": "durable",
+          "level": "supported"
+        },
+        {
+          "capability_id": "fixture-observation",
+          "topology": "scoped",
+          "level": "supported"
+        }
+      ],
       "artifact_compatibility": {
         "family": "fixture-agent",
         "platforms": ["darwin"],
@@ -29,6 +63,46 @@
           }
         ],
         "required_markers": ["native.marker"],
+        "forward_catalog_only": true
+      }
+    },
+    {
+      "support_release_id": "capability-restricted-support-v1",
+      "status": "promoted",
+      "capabilities": [
+        {
+          "capability_id": "restricted-catalog",
+          "topology": "catalog",
+          "level": "unsupported"
+        },
+        {
+          "capability_id": "restricted-history",
+          "topology": "durable",
+          "level": "supported"
+        },
+        {
+          "capability_id": "restricted-usage",
+          "topology": "durable",
+          "level": "degraded"
+        },
+        {
+          "capability_id": "restricted-observation",
+          "topology": "scoped",
+          "level": "degraded"
+        }
+      ],
+      "artifact_compatibility": {
+        "family": "capability-restricted-agent",
+        "platforms": [
+          "darwin"
+        ],
+        "exact_versions": [
+          "4.0.0"
+        ],
+        "ranges": [],
+        "required_markers": [
+          "restricted.marker"
+        ],
         "forward_catalog_only": true
       }
     }
@@ -120,6 +194,56 @@
         "permissions": {
           "version_probe": true,
           "catalog": true,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": true
+        }
+      }
+    },
+    {
+      "name": "exact-capability-restricted",
+      "probe": {
+        "family": "capability-restricted-agent",
+        "platform": "darwin",
+        "version": "4.0.0",
+        "markers": [
+          "restricted.marker"
+        ],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "ExactSupported",
+        "support_release_id": "capability-restricted-support-v1",
+        "reason": "exact_promoted_version",
+        "permissions": {
+          "version_probe": true,
+          "catalog": false,
+          "durable": false,
+          "scoped_observation": false,
+          "bounded_drift": true
+        }
+      }
+    },
+    {
+      "name": "unsupported-forward-catalog",
+      "probe": {
+        "family": "capability-restricted-agent",
+        "platform": "darwin",
+        "version": "9.0.0",
+        "markers": [
+          "restricted.marker"
+        ],
+        "contradictory_markers": false
+      },
+      "expected": {
+        "support_selection_contract_version": 1,
+        "compatibility_class": "RecognizedUnverified",
+        "support_release_id": null,
+        "reason": "no_matching_promoted_release",
+        "permissions": {
+          "version_probe": true,
+          "catalog": false,
           "durable": false,
           "scoped_observation": false,
           "bounded_drift": true

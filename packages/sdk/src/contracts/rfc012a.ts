@@ -14,6 +14,14 @@ export const CONTRACT_VERSION_SELECTION_VERSION = 1 as const;
 const MAX_U32 = 0xffff_ffff;
 
 export type SupportReleaseStatus = 'candidate' | 'promoted' | 'retired';
+export type SupportCapabilityTopology = 'catalog' | 'durable' | 'scoped';
+export type SupportCapabilityLevel = 'supported' | 'degraded' | 'unsupported';
+
+export interface SupportCapabilityDeclaration {
+  capability_id: string;
+  topology: SupportCapabilityTopology;
+  level: SupportCapabilityLevel;
+}
 
 export interface ArtifactVersionRange {
   minimum: string;
@@ -34,6 +42,7 @@ export interface ArtifactCompatibilityDeclaration {
 export interface SupportReleaseDescriptor {
   support_release_id: string;
   status: SupportReleaseStatus;
+  capabilities: SupportCapabilityDeclaration[];
   artifact_compatibility: ArtifactCompatibilityDeclaration;
 }
 
@@ -366,6 +375,34 @@ function parseSupportRelease(value: unknown): SupportReleaseDescriptor {
   if (typeof compatibility.forward_catalog_only !== 'boolean') {
     throw new ContractValidationError('forward_catalog_only must be boolean');
   }
+  if (!Array.isArray(input.capabilities) || input.capabilities.length === 0) {
+    throw new ContractValidationError('support release capabilities must be a non-empty array');
+  }
+  const capabilities = input.capabilities.map((value, index): SupportCapabilityDeclaration => {
+    const capability = record(value, `support capability ${index}`);
+    assertKnownFields(capability, ['capability_id', 'topology', 'level', 'notes'], `support capability ${index}`);
+    const capabilityId = nonEmptyString(capability.capability_id, `support capability ${index} id`);
+    if (new TextEncoder().encode(capabilityId).length > 128) {
+      throw new ContractValidationError(`support capability ${index} id exceeds 128 bytes`);
+    }
+    if (!['catalog', 'durable', 'scoped'].includes(capability.topology as string)) {
+      throw new ContractValidationError(`support capability ${index} has an unsupported topology`);
+    }
+    if (!['supported', 'degraded', 'unsupported'].includes(capability.level as string)) {
+      throw new ContractValidationError(`support capability ${index} has an unsupported level`);
+    }
+    if (capability.notes !== undefined && capability.notes !== null && typeof capability.notes !== 'string') {
+      throw new ContractValidationError(`support capability ${index} notes must be a string or null`);
+    }
+    return {
+      capability_id: capabilityId,
+      topology: capability.topology as SupportCapabilityTopology,
+      level: capability.level as SupportCapabilityLevel,
+    };
+  });
+  if (new Set(capabilities.map((capability) => capability.capability_id)).size !== capabilities.length) {
+    throw new ContractValidationError('duplicate support capability id');
+  }
   const exactVersions = canonicalStringList(compatibility.exact_versions, 'exact artifact versions', false);
   if (exactVersions.some((version) => version.length > 128)) {
     throw new ContractValidationError('exact artifact version exceeds 128 bytes');
@@ -373,6 +410,7 @@ function parseSupportRelease(value: unknown): SupportReleaseDescriptor {
   return {
     support_release_id: nonEmptyString(input.support_release_id, 'support release id'),
     status: input.status as SupportReleaseStatus,
+    capabilities,
     artifact_compatibility: {
       family: nonEmptyString(compatibility.family, 'artifact family'),
       platforms: canonicalStringList(compatibility.platforms, 'artifact platforms', true),
@@ -410,14 +448,6 @@ function parseNativeArtifactProbe(value: unknown): NativeArtifactProbe {
   };
 }
 
-const supportedPermissions: OperationPermissions = {
-  version_probe: true,
-  catalog: true,
-  durable: true,
-  scoped_observation: true,
-  bounded_drift: true,
-};
-
 const recognizedPermissions: OperationPermissions = {
   version_probe: true,
   catalog: false,
@@ -425,6 +455,20 @@ const recognizedPermissions: OperationPermissions = {
   scoped_observation: false,
   bounded_drift: true,
 };
+
+function declaredOperationPermissions(release: SupportReleaseDescriptor): OperationPermissions {
+  const topologyIsFullySupported = (topology: SupportCapabilityTopology): boolean => {
+    const matching = release.capabilities.filter((capability) => capability.topology === topology);
+    return matching.length > 0 && matching.every((capability) => capability.level === 'supported');
+  };
+  return {
+    version_probe: true,
+    catalog: topologyIsFullySupported('catalog'),
+    durable: topologyIsFullySupported('durable'),
+    scoped_observation: topologyIsFullySupported('scoped'),
+    bounded_drift: true,
+  };
+}
 
 const incompatiblePermissions: OperationPermissions = {
   version_probe: true,
@@ -523,7 +567,7 @@ export function classifyRuntimeSupport(probeInput: unknown, releasesInput: unkno
       compatibilityClass,
       release.support_release_id,
       compatibilityClass === 'ExactSupported' ? 'exact_promoted_version' : 'fixture_backed_range',
-      supportedPermissions,
+      declaredOperationPermissions(release),
     );
   }
   if (promotedOnPlatform.length > 0 && markerCompatible.length === 0) {
@@ -534,7 +578,9 @@ export function classifyRuntimeSupport(probeInput: unknown, releasesInput: unkno
       incompatiblePermissions,
     );
   }
-  const forwardCatalog = markerCompatible.filter((release) => release.artifact_compatibility.forward_catalog_only);
+  const forwardCatalog = markerCompatible.filter(
+    (release) => release.artifact_compatibility.forward_catalog_only && declaredOperationPermissions(release).catalog,
+  );
   if (forwardCatalog.length > 1) {
     return compatibilityDecision('UnknownOrIncompatible', null, 'ambiguous_promoted_release', incompatiblePermissions);
   }

@@ -405,15 +405,17 @@ reuses the store-agnostic decode boundary, but no catalog, durable, or public
 scoped-observer host owns the full strict lifecycle; the access-report IPC
 retrieval shape and trusted native-probe/grant request are not yet frozen;
 adapter registrations must move from the explicit legacy path to the strict
-promoted catalog after the first support release is promoted. A promotion-
-safety audit additionally found that Rust package verification currently drops
-the support release's declared capability levels before classification assigns
-operation permissions; an exact/range promoted match can therefore receive a
-blanket permission set that is broader than its declared capabilities. No
-current candidate is selectable, but capability-to-operation binding is an
-explicit pre-promotion blocker. The remaining scope primitives and public
-N-API/IPC boundary still require executable conformance rather than portable
-classification alone.
+promoted catalog after the first support release is promoted. The promotion-
+safety capability gap is now closed across Rust, Python, and portable
+TypeScript: verified release descriptors retain the digest-bound capability
+topology and level declarations; exact/range classification permits a broad
+catalog, durable, or scoped operation only when that topology is nonempty and
+all of its declarations are `supported`; degraded, unsupported, absent,
+duplicate, and malformed declarations fail closed; and forward-catalog access
+requires supported catalog capability evidence. A shared fixture proves that
+a promoted but capability-restricted release cannot mint broader typed access.
+The remaining scope primitives and public N-API/IPC boundary still require
+executable conformance rather than portable classification alone.
 
 ### A3. Current-agent candidates
 
@@ -688,9 +690,9 @@ so the candidate evidence distinguishes a 64 KiB logical record, one bounded
 64 KiB framing read-ahead, a 4 KiB checkpoint anchor, and the conservative
 132 KiB physical ceiling. Current support remains `Candidate`, catalog remains
 unsupported, and the planned composition remains unbound; checkpoint restore
-still caps 100,000 entries below the planned 250,000, nested-parent UUID
-enforcement is undeclared, and the head ceiling is fixture evidence rather
-than ratified policy.
+and scan bounds are now aligned by the later closure below, while nested-parent
+UUID enforcement remains undeclared and the head ceiling remains fixture
+evidence rather than ratified policy.
 
 The fifth B2 slice (`ee331b7`) closes only the factual Claude decoder-axis
 drift: parent/subagent candidate declarations and the planned transcript-head
@@ -700,7 +702,22 @@ binding, and conformance tests carry the recomputed source-declaration digest,
 and a stale declaration document fails verification. No topology, admission,
 overlap, bound, capability, or status changed: the release remains Candidate,
 catalog authorization still rejects, and runtime composition/promotion remain
-blocked on the open B2 evidence plus A2's capability-to-operation binding.
+blocked on the open B2 evidence. A2's capability-to-operation binding is now
+fail-closed before any release can be promoted.
+
+The sixth B2 slice (`d36b589`) closes the common directory-checkpoint restart
+mismatch without promoting a source. Checkpoint decoding now requires the
+active `DirectorySnapshotConfig`, rejects entry counts above its exact
+`max_entries`, validates canonical binary path-key framing, and rejects members
+deeper than its current `max_depth` before traversal. Coordinator resume uses
+the selected stream configuration and leaves the durable checkpoint unchanged
+when a declaration narrows. Executable coverage proves that a valid
+100,001-entry checkpoint fails at 100,000 and restores at the Claude candidate's
+250,000 bound; this is serialization/restart evidence, not a ratified global
+performance limit. The Claude fixture drops only that resolved blocker.
+Nested-parent UUID policy, Grok updates-only admission, promoted runtime
+composition, source-access/coverage integration, and catalog publication remain
+open.
 
 ### B3. Durable pack, readiness, and pagination
 

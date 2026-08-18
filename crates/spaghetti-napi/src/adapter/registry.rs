@@ -399,7 +399,27 @@ mod tests {
                 "forward_catalog_only": false
             },
             "references": references,
-            "versions": {"adapter_package": "1.0.0", "decoder_contract": 1}
+            "versions": {"adapter_package": "1.0.0", "decoder_contract": 1},
+            "capabilities": [
+                {
+                    "capability_id": "fixture-catalog",
+                    "topology": "catalog",
+                    "level": "supported",
+                    "notes": null
+                },
+                {
+                    "capability_id": "fixture-history",
+                    "topology": "durable",
+                    "level": "supported",
+                    "notes": null
+                },
+                {
+                    "capability_id": "fixture-observation",
+                    "topology": "scoped",
+                    "level": "supported",
+                    "notes": null
+                }
+            ]
         }))
         .unwrap();
         let bundle_documents = documents
@@ -1005,7 +1025,7 @@ mod tests {
         assert!(report.verify_digest());
         assert_eq!(
             report.digest().to_string(),
-            "sha256:3d061fe88fd820c3bebf534b13276ee0b4258f957da006dfa0628ddd97924e52"
+            "sha256:5d494f25dab64f909e09c3547d90d8cd2459b2172dd5e7fdee0112d85298d6bb"
         );
         assert_ne!(report.digest(), empty_digest);
         let encoded = serde_json::to_string(&report).unwrap();

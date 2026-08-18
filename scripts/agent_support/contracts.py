@@ -92,11 +92,13 @@ def _result(
     support_release_id: str | None,
     reason: CompatibilityReason,
     *,
-    catalog_override: bool = False,
+    permissions_override: Mapping[str, bool] | None = None,
 ) -> CompatibilityResult:
-    permissions = dict(_PERMISSIONS[compatibility_class])
-    if catalog_override:
-        permissions["catalog"] = True
+    permissions = dict(
+        _PERMISSIONS[compatibility_class]
+        if permissions_override is None
+        else permissions_override
+    )
     return CompatibilityResult(
         SUPPORT_SELECTION_CONTRACT_VERSION,
         compatibility_class,
@@ -104,6 +106,48 @@ def _result(
         reason,
         permissions,
     )
+
+
+def _declared_operation_permissions(release: Mapping[str, Any]) -> dict[str, bool]:
+    capabilities = release.get("capabilities")
+    if not isinstance(capabilities, list) or not capabilities:
+        raise SupportContractError("support release capabilities must be a non-empty list")
+
+    seen: set[str] = set()
+    levels: dict[str, list[str]] = {"catalog": [], "durable": [], "scoped": []}
+    for index, capability in enumerate(capabilities):
+        if not isinstance(capability, Mapping):
+            raise SupportContractError(f"support capability {index} must be an object")
+        capability_id = capability.get("capability_id")
+        if (
+            not isinstance(capability_id, str)
+            or not capability_id
+            or capability_id.strip() != capability_id
+            or len(capability_id.encode("utf-8")) > 128
+        ):
+            raise SupportContractError(f"support capability {index} has an invalid id")
+        if capability_id in seen:
+            raise SupportContractError(f"duplicate support capability id {capability_id!r}")
+        seen.add(capability_id)
+        topology = capability.get("topology")
+        if not isinstance(topology, str) or topology not in levels:
+            raise SupportContractError(f"support capability {capability_id!r} has an unsupported topology")
+        level = capability.get("level")
+        if not isinstance(level, str) or level not in {"supported", "degraded", "unsupported"}:
+            raise SupportContractError(f"support capability {capability_id!r} has an unsupported level")
+        levels[topology].append(level)
+
+    def fully_supported(topology: str) -> bool:
+        declared = levels[topology]
+        return bool(declared) and all(level == "supported" for level in declared)
+
+    return {
+        "version_probe": True,
+        "catalog": fully_supported("catalog"),
+        "durable": fully_supported("durable"),
+        "scoped_observation": fully_supported("scoped"),
+        "bounded_drift": True,
+    }
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -137,6 +181,10 @@ def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]])
     release_ids = [str(entry["support_release_id"]) for entry in release_list]
     if len(release_ids) != len(set(release_ids)):
         raise SupportContractError("duplicate support release id")
+    declared_permissions = {
+        release_id: _declared_operation_permissions(entry)
+        for release_id, entry in zip(release_ids, release_list, strict=True)
+    }
     numeric_range_errors = validate_numeric_ranges(release_list)
     if numeric_range_errors:
         raise SupportContractError(numeric_range_errors[0])
@@ -214,7 +262,13 @@ def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]])
             if selected is CompatibilityClass.EXACT_SUPPORTED
             else CompatibilityReason.FIXTURE_BACKED_RANGE
         )
-        return _result(selected, str(entry["support_release_id"]), reason)
+        release_id = str(entry["support_release_id"])
+        return _result(
+            selected,
+            release_id,
+            reason,
+            permissions_override=declared_permissions[release_id],
+        )
 
     if promoted_on_platform and not marker_compatible:
         return _result(
@@ -227,6 +281,7 @@ def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]])
         entry
         for entry in marker_compatible
         if entry["artifact_compatibility"]["forward_catalog_only"]
+        and declared_permissions[str(entry["support_release_id"])]["catalog"]
     ]
     if len(forward_catalog) > 1:
         return _result(
@@ -239,7 +294,7 @@ def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]])
             CompatibilityClass.RECOGNIZED_UNVERIFIED,
             str(forward_catalog[0]["support_release_id"]),
             CompatibilityReason.PROMOTED_FORWARD_CATALOG_ONLY,
-            catalog_override=True,
+            permissions_override={**_PERMISSIONS[CompatibilityClass.RECOGNIZED_UNVERIFIED], "catalog": True},
         )
     return _result(
         CompatibilityClass.RECOGNIZED_UNVERIFIED,

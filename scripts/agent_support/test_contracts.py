@@ -9,8 +9,10 @@ from scripts.agent_support.contracts import (
     AccessBoundExceeded,
     AccessBudget,
     CompatibilityClass,
+    CompatibilityReason,
     ContractSelectionError,
     RuntimeProbe,
+    SupportContractError,
     classify_runtime,
     scope_access_report_digest,
     select_contract_versions,
@@ -29,6 +31,23 @@ def promoted_release() -> dict[str, object]:
     return {
         "support_release_id": "fixture-support-v1",
         "status": "promoted",
+        "capabilities": [
+            {
+                "capability_id": "fixture-catalog",
+                "topology": "catalog",
+                "level": "supported",
+            },
+            {
+                "capability_id": "fixture-history",
+                "topology": "durable",
+                "level": "supported",
+            },
+            {
+                "capability_id": "fixture-observation",
+                "topology": "scoped",
+                "level": "supported",
+            },
+        ],
         "artifact_compatibility": {
             "family": "fixture-agent",
             "platforms": ["darwin"],
@@ -209,6 +228,68 @@ class CompatibilityTests(unittest.TestCase):
         )
         self.assertFalse(candidate_result.permissions["catalog"])
         self.assertIsNone(candidate_result.support_release_id)
+
+    def test_promoted_permissions_are_bounded_by_declared_capability_levels(self) -> None:
+        promoted = promoted_release()
+        promoted["capabilities"] = [
+            {
+                "capability_id": "catalog",
+                "topology": "catalog",
+                "level": "unsupported",
+            },
+            {
+                "capability_id": "history",
+                "topology": "durable",
+                "level": "supported",
+            },
+            {
+                "capability_id": "usage",
+                "topology": "durable",
+                "level": "degraded",
+            },
+        ]
+        exact = classify_runtime(
+            RuntimeProbe("fixture-agent", "darwin", "1.2.3", frozenset({"native.marker"})),
+            [promoted],
+        )
+        self.assertEqual(exact.compatibility_class, CompatibilityClass.EXACT_SUPPORTED)
+        self.assertFalse(exact.permissions["catalog"])
+        self.assertFalse(exact.permissions["durable"])
+        self.assertFalse(exact.permissions["scoped_observation"])
+
+        promoted["artifact_compatibility"]["forward_catalog_only"] = True
+        forward = classify_runtime(
+            RuntimeProbe("fixture-agent", "darwin", "9.0.0", frozenset({"native.marker"})),
+            [promoted],
+        )
+        self.assertEqual(forward.reason, CompatibilityReason.NO_MATCHING_PROMOTED_RELEASE)
+        self.assertIsNone(forward.support_release_id)
+        self.assertFalse(forward.permissions["catalog"])
+
+    def test_malformed_capability_declarations_fail_closed(self) -> None:
+        release = promoted_release()
+        release["capabilities"].append(copy.deepcopy(release["capabilities"][0]))
+        with self.assertRaisesRegex(SupportContractError, "duplicate support capability"):
+            classify_runtime(
+                RuntimeProbe("fixture-agent", "darwin", "1.2.3", frozenset({"native.marker"})),
+                [release],
+            )
+
+        oversized = promoted_release()
+        oversized["capabilities"][0]["capability_id"] = "é" * 65
+        with self.assertRaisesRegex(SupportContractError, "invalid id"):
+            classify_runtime(
+                RuntimeProbe("fixture-agent", "darwin", "1.2.3", frozenset({"native.marker"})),
+                [oversized],
+            )
+
+        malformed = promoted_release()
+        malformed["capabilities"][0]["topology"] = []
+        with self.assertRaisesRegex(SupportContractError, "unsupported topology"):
+            classify_runtime(
+                RuntimeProbe("fixture-agent", "darwin", "1.2.3", frozenset({"native.marker"})),
+                [malformed],
+            )
 
 
 class ContractSelectionTests(unittest.TestCase):
