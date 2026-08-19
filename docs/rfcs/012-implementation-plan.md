@@ -2164,6 +2164,14 @@ Current landing status (2026-08-19):
   artifact policy can be consulted. This does not add an internal unknown-event
   producer, accept caller-created carrier values, read a source, or expose a
   native/public transport; and
+- the consumer-binding slice (`b9d8824`) shares that immutable optional
+  selection from the attachment into its sole bounded event drain, preserving
+  exact selected and explicit-absent modes without copying retained payload
+  state. A real dequeued known event now exposes the complete portable outer-
+  union value directly while retaining its narrower specialist envelope and
+  application receipt. The runtime still produces only known branches; the
+  sidecar cannot manufacture an unknown event, widen source authority, or act
+  as transport ownership; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
