@@ -1,364 +1,665 @@
-# RFC 012 parallel-work handoff
+# RFC 012 parallel execution runbook
 
 - **Status:** Ready to assign
-- **Written:** 2026-08-16
-- **Audience:** A second implementation agent working concurrently with the RFC
-  012D scoped-observation lane
+- **Written:** 2026-08-19
+- **Current product-code base:** `67a1ae9`
+- **Assignment base:** the primary-integrator commit containing this runbook;
+  use the exact SHA announced as `RUNBOOK READY — BASE <sha>`
+- **Audience:** repository owner, primary integrator, and parallel implementation
+  agents
 - **Primary references:** [implementation plan](./012-implementation-plan.md),
   [RFC 012A](./012a-agent-adaptation-and-engine-boundaries.md),
-  [RFC 012C](./012c-runtime-semantics-and-usage-v2.md), and the
-  [RFC 011 delta ledger](../../scripts/architecture/rfc012-rfc011-delta.json)
-
-## 1. Recommended assignment
-
-Assign **P1: portable runtime value-contract fixtures** first. It is a bounded
-slice of implementation-plan workstream C1. It advances the portable contract
-and catches Rust/TypeScript drift, but it does not block or overlap the current
-RFC 012D kernel/control-lane work.
-
-If P1 is accepted and committed early, the same agent may continue with **P2:
-RFC 011 delta evidence audit**. P2 is deliberately read-only with respect to
-the executable ledger: it reports evidence and gaps for later owner review but
-does not promote any release gate.
-
-Do not assign the parallel agent observer envelopes, epochs, overflow/resync,
-replacement snapshots, queueing, or barrier semantics. Those contracts are on
-the active critical path and are changing together.
-
-## 2. Concurrency and repository rules
-
-At the time this packet was written, the last shared implementation commit was
-`433d98b` (`feat: observe scoped source lifecycle`). The primary agent may have
-advanced `HEAD` or left unrelated working-tree edits by the time this packet is
-started.
-
-Before editing, the parallel agent must:
-
-1. Read this document completely.
-2. Run `git status --short` and `git rev-parse HEAD`; include both in the
-   handback report.
-3. Determine whether it is in the same working tree as the primary agent.
-4. If the tree is shared, **do not** switch branches, rebase, stash, clean, or
-   restore files. Existing modifications are somebody else's work.
-5. If it has an isolated worktree, branch from the latest shared commit named
-   by the user and report that base. Do not independently merge or rebase while
-   the task is active.
-
-The following paths are owned by the primary agent and are forbidden in both
-packets:
-
-- `crates/spaghetti-napi/src/scoped_observation.rs`
-- `crates/spaghetti-napi/src/adapter/registry.rs`
-- `docs/rfcs/012-implementation-plan.md`
-- `docs/rfcs/012d-session-scoped-observation.md`
-- `scripts/architecture/rfc012-rfc011-delta.json`
-- everything under `draft/`
-
-Do not use `git add -A`, `git add .`, or a broad formatter. Stage only the
-explicitly owned files for one packet, inspect `git diff --cached`, and make a
-separate commit per packet. Never stage a pre-existing modification or
-untracked file.
-
-If completing a packet appears to require a forbidden file, a schema or
-database migration, a native decoder change, or a new observation wire
-decision, stop and return the issue as a proposed follow-up. Do not cross the
-ownership boundary.
-
-## 3. P1 — Portable runtime value-contract fixtures
-
-### 3.1 Objective
-
-Create one deterministic, sanitized RFC 012C v1 fixture that Rust produces and
-validates and the portable TypeScript SDK independently parses and validates.
-Cover only these already-landed value families:
-
-- `runtime.actor-run` through `ActorRunRevisionFact`;
-- `runtime.actor-affiliation` through
-  `ActorAffiliationRevisionFact`; and
-- `runtime.usage-v2` through `UsageRevisionV2Fact`.
-
-The fixture is a portability and validation slice, not the complete C1 exit
-gate. In particular, it must not define observer envelopes, lifecycle control
-events, scope epochs, complete replacement snapshots, reducer ownership, or
-durable query pages.
-
-### 3.2 File ownership
-
-P1 may create or edit only these files:
-
-- new
-  `crates/spaghetti-napi/fixtures/contracts/rfc012c-runtime-v1.json`;
-- new
-  `crates/spaghetti-napi/src/adapter/runtime_contract_fixture.rs`;
-- `crates/spaghetti-napi/src/adapter/mod.rs`, solely to add
-  `#[cfg(test)] mod runtime_contract_fixture;`;
-- new `packages/sdk/src/contracts/rfc012c.ts`;
-- new `packages/sdk/src/contracts/__tests__/rfc012c.test.ts`;
-- `packages/sdk/src/index.ts`, solely to export the new RFC 012C contract
-  module; and
-- optionally `crates/spaghetti-napi/fixtures/README.md`, solely to add one
-  short entry for the new generated contract fixture.
-
-No other file is in scope. If a filename already exists when the packet starts,
-stop and report the collision before modifying it.
-
-### 3.3 Contract boundary
-
-The fixture must have a top-level `fixture_contract_version: 1` and identify
-each covered family and family version explicitly. Its examples must include:
-
-- one root actor and one child actor with valid parent linkage;
-- the same child actor simultaneously affiliated with a team and a workflow,
-  proving that affiliation dimensions are orthogonal;
-- at least one `removed` affiliation revision;
-- one usage revision with a native message ID as the response identity;
-- one source-record fallback response with no native message ID;
-- exact-zero usage, a known non-zero value, and an
-  `unknown`/`missing` bucket;
-- model and effort values with their authority, quality, completeness, and
-  provenance;
-- an A -> B -> A sequence for one response, with distinct semantic revision
-  identity for A and B and the same semantic revision identity for both A
-  occurrences; and
-- the canonical semantic revision metadata needed to show that opaque
-  references, not database IDs or paths, cross the boundary.
-
-All names and payload text must be synthetic. The fixture must contain no home
-directory, absolute path, prompt, transcript text, real native identifier, or
-captured user data.
-
-Use existing RFC 012A portable primitives from
-`packages/sdk/src/contracts/rfc012a.ts`, including
-`parseOpaqueContractReference`, `parseSemanticRevisionRef`, and
-`parseQualifiedValue`. Do not add a second opaque-reference format or decode an
-opaque reference.
-
-Use the Rust implementations as the semantic source of truth. The Rust test
-must construct the canonical keys and usage semantic revision keys through the
-existing constructors/methods and compare them with the committed fixture.
-Opaque references and expected digests must not be invented manually.
-
-For this packet, token values may use the existing JSON number representation
-only when they are non-negative JavaScript-safe integers. The TypeScript parser
-must reject unsafe integers instead of rounding them. If full `u64` transport
-is required, return that as a contract-design follow-up; do not silently choose
-decimal strings, bigint tags, or a new N-API representation in this packet.
-
-### 3.4 TypeScript API
-
-`rfc012c.ts` should expose typed v1 wire values and focused parsers for the
-three families. Keep the API value-oriented. A suitable shape is:
-
-```ts
-export const RUNTIME_SEMANTIC_CONTRACT_VERSION = 1 as const;
-
-export function parseActorRunRevision(value: unknown): ActorRunRevision;
-export function parseActorAffiliationRevision(value: unknown): ActorAffiliationRevision;
-export function parseUsageRevisionV2(value: unknown): UsageRevisionV2;
-export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixture;
-```
-
-Names may follow established repository conventions, but do not expose a
-session observer or event-stream API from this packet.
-
-Parsing must return newly validated values rather than relying on a TypeScript
-cast. It must reject at least:
-
-- an unknown contract major/version;
-- malformed or wrong-version opaque references;
-- a root actor with a parent;
-- a child actor without a parent or an actor parented to itself;
-- an unsupported actor role, affiliation dimension, or affiliation state;
-- empty optional native IDs when present;
-- a native-message response whose `response_key` does not equal
-  `native_message_id`;
-- a fallback response that claims `native_message_id`;
-- a response key that is empty, malformed/non-canonical padded standard
-  base64, or encoded as the legacy byte-array form;
-- an empty request ID;
-- a negative, fractional, non-number, or unsafe token count;
-- a usage authority outside `native_response | adapter_derived`;
-- empty provenance `native_field` or a zero/non-integer normalization contract
-  version;
-- an `unknown` qualified value with data or without an unknown reason; and
-- an unknown value claiming complete coverage, or a known qualified value
-  without data or with an unknown reason.
-
-Do not reject unknown object members merely because this v1 parser does not
-interpret them; forward-compatible raw retention is owned elsewhere. Do reject
-invalid values for fields that this contract understands.
-
-### 3.5 Rust fixture test
-
-The new Rust file is a test-only sibling module. It must:
-
-1. deterministically construct the expected actor, affiliation, usage, and
-   semantic-reference values with existing public or crate-private APIs;
-2. deserialize the committed JSON fixture into an explicit local fixture wire
-   struct;
-3. validate the payloads through the existing fact/batch contract rather than
-   serde shape alone;
-4. compare the deserialized fixture with the Rust-constructed expected value;
-5. serialize and deserialize again and assert semantic equality;
-6. recompute every committed usage semantic revision key and compare it with
-   the fixed expected reference/digest; and
-7. explicitly prove the A -> B -> A revision-identity behavior.
-
-Do not make `validate()` methods public merely to support the test. Keep the
-test inside the sibling module or validate by passing values through the
-existing `FactBatch` boundary.
-
-### 3.6 P1 exit gate
-
-P1 is complete only when all of the following are true:
-
-- Rust and TypeScript consume the exact same committed fixture.
-- Rust derives every opaque key and expected usage semantic revision identity.
-- TypeScript independently validates every accepted field; the test is not a
-  fixture cast or snapshot-only assertion.
-- The positive fixture covers every bullet in section 3.3.
-- Focused negative tests cover every rejection class in section 3.4.
-- No native path, database/runtime ID, or agent-specific actor kind enters the
-  portable values.
-- No observer envelope, queue, epoch, barrier, or replacement protocol is
-  introduced.
-- No existing decoder, database, schema, query, observer, or reducer behavior
-  changes.
-- Only P1-owned paths are staged and committed.
-- These commands pass from the repository root:
-
-```bash
-cargo test -p spaghetti-napi runtime_contract_fixture
-cargo fmt --all -- --check
-pnpm --filter @vibecook/spaghetti-sdk test
-pnpm --filter @vibecook/spaghetti-sdk typecheck
-pnpm validate
-git diff --check
-```
-
-If `pnpm validate` fails solely because of a known pre-existing concurrent edit,
-the agent must still run and report every focused command, identify the exact
-unrelated failure, and leave the packet unclaimed as complete until the primary
-agent can reproduce it on the combined tree.
-
-## 4. P2 — RFC 011 delta evidence audit
-
-### 4.1 Objective
-
-Audit every evidence item still marked `planned` in
-`scripts/architecture/rfc012-rfc011-delta.json`. Produce an evidence map that
-lets the owning agent decide which items can be promoted, which need stronger
-tests, and which remain unimplemented.
-
-This is an audit, not authorization to change the executable ledger or program
-status. A test that happens to resemble a claim is not enough: the audit must
-show that the test exercises the exact retained, strengthened, amended,
-refined, or superseded behavior.
-
-### 4.2 File ownership
-
-P2 may create exactly one file:
-
-- `docs/rfcs/012-rfc011-delta-evidence-audit-2026-08-16.md`
-
-It may not edit code, tests, RFCs, the implementation plan, or the JSON ledger.
-
-### 4.3 Required audit format
-
-The audit must list every `planned` evidence entry present at the recorded base
-commit exactly once. For each entry, record:
-
-At the authored base there are 12 planned evidence entries. Recompute and
-record the count at task start rather than assuming it stayed at 12.
-
-| Field             | Requirement                                             |
-| ----------------- | ------------------------------------------------------- |
-| Ledger ID         | Exact `X0-*` ID and disposition                         |
-| Planned claim     | Exact claim summarized without changing its meaning     |
-| Classification    | `implemented-and-executable`, `partial`, or `not-found` |
-| Evidence          | Repository path plus exact test/check/symbol name       |
-| Reproduction      | Smallest exact command that exercises the evidence      |
-| Semantic gap      | What the evidence does not prove                        |
-| Recommended owner | A/B/C/D/X workstream and concrete next action           |
-
-Claims based only on prose, type presence, or a passing broad test suite must
-be classified `partial` unless an executable assertion enforces the target
-behavior. If multiple tests collectively establish one claim, spell out each
-part of the composition.
-
-End the document with:
-
-- a count reconciliation: planned entries audited = implemented-and-executable
-  - partial + not-found;
-- a proposed ledger patch list, written as recommendations only;
-- the exact commands run and their outcomes; and
-- any claim whose disposition or owner appears internally inconsistent.
-
-### 4.4 P2 exit gate
-
-P2 is complete only when:
-
-- every planned evidence entry at the recorded base appears exactly once;
-- every `implemented-and-executable` classification cites a focused executable
-  assertion, not only an implementation file;
-- every `partial` classification names the missing assertion;
-- every `not-found` classification lists the searches performed;
-- the ledger and all implementation status remain unchanged;
-- only the single P2-owned document is staged and committed; and
-- these commands pass:
-
-```bash
-python3 scripts/architecture/check_rfc012_delta.py
-pnpm validate
-git diff --check
-```
-
-P2 must not run `check_rfc012_delta.py --require-complete` as an expected-pass
-gate: planned items intentionally make release mode fail until their owners
-accept executable evidence.
-
-## 5. Handback contract
-
-For each packet, return one concise report with:
+  [RFC 012B](./012b-catalog-readiness-and-progressive-startup.md),
+  [RFC 012C](./012c-runtime-semantics-and-usage-v2.md), and
+  [RFC 012D](./012d-session-scoped-observation.md)
+
+This runbook supersedes the 2026-08-16 single-agent handoff formerly stored at
+this path. It defines the parallel order for the still-open A1-A3, B1-B3, and
+C1-C3 work, the primary integrator's own work, review and merge checkpoints,
+and an external-SSD worktree layout.
+
+## 1. Current program position
+
+The `In progress` labels describe exit gates, not workstreams starting from
+zero:
+
+- **A1-A3:** the base model, support verifier, typed authorization, and three
+  Candidate packages exist. Remaining work includes promotion-minimum family
+  parity, the strict access request/report lifecycle, artifact pins, complete
+  candidate evidence, real compositions, and promotion review. No current
+  adapter release is promoted.
+- **B1-B3:** B1 is open only at its public exposure gate. B3 already includes
+  initial publication, retained pages, identity resolution, refresh
+  successors, logical retirement, and independently-safe refresh failure.
+  B2 still lacks a real promoted adapter composition and production source
+  access/coverage producer. B3 still lacks the remaining readiness variants
+  and caller-authorized public policy transport.
+- **C1-C3:** usage-v2, source-scoped selection, rollback, coverage, and durable
+  migration are substantially implemented. C3's immediate remaining exit gate
+  is collection and review of the representative external compatibility
+  report. C1/C2 still have promotion-minimum portable and scoped/durable family
+  parity work.
+
+The critical dependency is:
 
 ```text
-Packet: P1 or P2
-Base commit: <sha>
-Result commit: <sha>
-Changed files: <exact list>
-Focused commands: <command and pass/fail result>
-Full validation: <command and pass/fail result>
-Exit gate: PASS or NOT MET
-Unresolved design questions: <none or bounded list>
-Pre-existing/concurrent files left untouched: <exact list from git status>
+C3 evidence -------------------+
+A1/C1 contract parity ---------+--> A3 candidate completion --> promotion
+A2 authority lifecycle --------+              |
+                                               +--> B2 real composition
+B3 private durability ----------------------------> B1/B3 public exposure
+C2 runtime parity --------------------------------> promotion and D runtime
 ```
 
-Do not update the central implementation plan, promote X0 evidence, merge the
-commit, or begin another workstream. The primary agent will review the commit,
-rerun the relevant tests on the combined tree, and make any status/ledger
-change after semantic acceptance.
+Promotion and public exposure are intentionally not parallelized with their
+prerequisites.
 
-## 6. Primary-agent review gate
+## 2. Concurrency model
 
-When the packet returns, the primary agent will not accept it from a green test
-summary alone. Review will verify:
+There are four useful active slots. Use them as follows:
 
-1. commit and file-scope isolation;
-2. no accidental inclusion of concurrent work or `draft/`;
-3. Rust-derived opaque identities and A -> B -> A usage semantics;
-4. independent TypeScript parsing and all required negative cases;
-5. no premature observer/replacement wire commitment;
-6. sanitizer safety and absence of real captured data;
-7. focused and repository-wide validation on the combined tree; and
-8. whether any implementation-plan or X0 status change is actually justified.
+1. Agent C3: compatibility-window report.
+2. Agent A1/C1: portable/N-API semantic parity.
+3. Agent A2: strict access request/report boundary.
+4. Primary integrator (`/root`): checkpoint review, independent validation,
+   merge ownership, and a read-only Wave 2 Claude promotion-gate audit.
 
-## 7. Copy/paste kickoff prompt
+Do **not** spawn Agent B3 at time zero. Spawn it when Agent C3 has produced a
+reviewed commit and that slot is free. This keeps the primary integrator active
+and avoids five simultaneous owners.
+
+Agents work in separate Git worktrees and branches. The primary repository at
+`/Users/jamesyong/Projects/project100/p008/spaghetti` remains the integration
+tree. Only the primary integrator may update
+`docs/rfcs/012-implementation-plan.md`, stage in the integration tree, merge or
+cherry-pick lane commits, or prepare a promotion commit.
+
+## 3. External SSD layout
+
+At the time this runbook was written:
+
+- the internal data volume had about 16 GiB available;
+- `/Volumes/SamsungRed` was mounted as APFS with about 931 GiB available; and
+- the repository had previously accumulated a very large Cargo target tree.
+
+The portable SSD should hold worktrees and build artifacts. The main `.git`
+object database remains in the primary repository, but that database is small;
+the checked-out files, lane-local `node_modules`, and configured Cargo target
+tree live on the SSD.
+
+### 3.1 One-time setup by the repository owner
+
+Run these commands in a normal Terminal session while the SSD is mounted and
+after the primary integrator announces `RUNBOOK READY — BASE <sha>`. An agent
+sandbox may require explicit permission before it can write under `/Volumes`,
+so owner-created worktrees are the least surprising setup. Each agent session
+must then be launched with its SSD worktree as an authorized workspace root;
+changing directory inside a session whose sandbox authorizes only the internal
+repository may still leave the SSD read-only.
+
+```bash
+cd /Users/jamesyong/Projects/project100/p008/spaghetti
+
+RFC012_SSD_ROOT=/Volumes/SamsungRed/spaghetti-rfc012
+mkdir -p "$RFC012_SSD_ROOT/worktrees" \
+  "$RFC012_SSD_ROOT/build/cargo-target" \
+  "$RFC012_SSD_ROOT/build/pnpm-store"
+
+git worktree add -b work/c3-compatibility-report \
+  "$RFC012_SSD_ROOT/worktrees/c3" <RUNBOOK_BASE>
+git worktree add -b work/a1-c1-napi-parity \
+  "$RFC012_SSD_ROOT/worktrees/a1-c1" <RUNBOOK_BASE>
+git worktree add -b work/a2-access-boundary \
+  "$RFC012_SSD_ROOT/worktrees/a2" <RUNBOOK_BASE>
+```
+
+Launch each agent with its worktree as its working directory. Do not copy the
+untracked root `draft/` directory to the SSD worktrees.
+
+When Agent C3 is merged and its slot is free, the primary integrator will
+announce a new base commit. Then create the B3 worktree from that base:
+
+```bash
+cd /Users/jamesyong/Projects/project100/p008/spaghetti
+RFC012_SSD_ROOT=/Volumes/SamsungRed/spaghetti-rfc012
+
+git worktree add -b work/b3-readiness-next \
+  "$RFC012_SSD_ROOT/worktrees/b3" <INTEGRATOR_PROVIDED_BASE>
+```
+
+Wave 2 worktrees must likewise be created from the exact base announced after
+Wave 1 integration, not from `67a1ae9`.
+
+### 3.2 Build-artifact rules
+
+Each agent should set the shared Cargo target location for every Rust command:
+
+```bash
+export CARGO_TARGET_DIR=/Volumes/SamsungRed/spaghetti-rfc012/build/cargo-target
+```
+
+Cargo may serialize conflicting build operations against this shared target;
+that is acceptable and saves substantial disk space. Agents should perform
+analysis and editing concurrently but avoid launching multiple full Rust
+matrices at once. Focused tests belong to lane agents; the primary integrator
+runs the combined full matrix.
+
+If a worktree needs dependencies installed, keep its `node_modules` on the SSD
+and use the SSD-backed pnpm store:
+
+```bash
+pnpm install --frozen-lockfile \
+  --store-dir /Volumes/SamsungRed/spaghetti-rfc012/build/pnpm-store
+```
+
+Operational rules:
+
+- Confirm `/Volumes/SamsungRed` is mounted before starting or resuming an
+  agent.
+- Do not unplug or unmount the SSD while an agent, Cargo, pnpm, or Git command
+  is active.
+- No lane agent may run `cargo clean`; the Cargo target is shared.
+- No lane agent may run `git worktree prune`, remove another worktree, switch
+  the integration branch, stash integration-tree files, or use destructive Git
+  recovery commands.
+- Monitor both volumes periodically:
+
+```bash
+df -h /System/Volumes/Data /Volumes/SamsungRed
+du -sh /Volumes/SamsungRed/spaghetti-rfc012/build/cargo-target
+```
+
+- If the SSD disappears, stop. Do not prune the missing worktrees. Remount it
+  first and confirm `git worktree list` is coherent.
+
+## 4. Review protocol
+
+The primary integrator reviews continuously. Agents do not disappear until a
+large final diff is ready.
+
+### Checkpoint 1: scope freeze, before edits
+
+The agent reports:
+
+- base commit, branch, and worktree path;
+- deviations found in RFC, plan, code, fixtures, or schemas;
+- the smallest honest objective;
+- exact intended paths;
+- invariants, negative tests, and validation commands;
+- dependencies and any policy decision the task would otherwise invent.
+
+The primary integrator checks RFC fit, dependency direction, ownership, file
+overlap, false authority, and whether the slice can be made smaller. The agent
+must wait for `GO <lane> <frozen paths>` before editing.
+
+### Checkpoint 2: coherent focused checkpoint
+
+After the tree compiles and focused tests pass, the agent reports the exact
+paths, semantic behavior, tests/pass counts, and current `git status --short`.
+Everything remains unstaged.
+
+The primary integrator reviews authority construction, canonical identities,
+replay and reorder invariance, bounded preflight, privacy, restart behavior,
+wire parity, and failure precedence. The integrator may require additional
+negative tests before allowing the full matrix.
+
+### Checkpoint 3: final unstaged diff
+
+The agent reports:
+
+- exact diff paths and statistics;
+- every claim proved and every gate deliberately left open;
+- all focused/static validation results;
+- known unrelated failures;
+- an exact proposed commit message and plan-status paragraph.
+
+The primary integrator performs a line-by-line semantic diff review and reruns
+selected focused tests independently. The agent must not stage while this
+review is active.
+
+### Checkpoint 4: rebase/integration review
+
+Before a later lane lands, it is rebased or replayed onto the exact base
+provided by the integrator. The integrator rechecks fixture and package
+digests, generated output, schema mirrors, and assumptions changed by earlier
+lanes. Agents do not independently choose a new base.
+
+### Checkpoint 5: staging and commit
+
+Only after explicit `STAGE <lane>` approval does the agent stage its exact
+owned paths. It reports `git diff --cached --name-status` and
+`git diff --cached --check`. The integrator confirms the cache before the agent
+commits with the approved message.
+
+### Checkpoint 6: post-commit integration
+
+The agent reports its commit hash and clean status. The primary integrator
+merges/cherry-picks it, reruns the affected focused tests, and later runs the
+combined matrix. Only then may the implementation-plan status be updated.
+
+If agents cannot message `/root` directly, the repository owner should paste
+each checkpoint into the primary thread. Ask for review immediately when a
+checkpoint is ready; do not wait for the other lanes.
+
+## 5. Timeline and spawn schedule
+
+Durations below are planning ranges, not release promises. Evidence access,
+review findings, or newly discovered policy choices can extend them.
+
+### T+0: setup and spawn now
+
+Estimated owner setup: 20-40 minutes.
+
+Create the three SSD worktrees and spawn exactly:
+
+1. Agent C3 with the prompt in section 7.1.
+2. Agent A1/C1 with the prompt in section 7.2.
+3. Agent A2 with the prompt in section 7.3.
+
+The primary integrator remains active in the integration tree.
+
+Expected first checkpoint: the first working session, usually 30-90 minutes
+per agent. When any scope-freeze message arrives, immediately ask the primary
+integrator to review that lane. Approved agents continue without waiting for
+the other scope reviews.
+
+### Primary integrator work during Wave 1
+
+The primary integrator will not start a conflicting implementation lane.
+Instead it will:
+
+1. review and approve/reject every scope freeze;
+2. maintain a live path-ownership and merge queue;
+3. perform a read-only Claude Wave 2 promotion-gate audit across A2, A3, B2,
+   C2, and the current Candidate package;
+4. identify the exact promotion-minimum family and evidence matrix;
+5. independently test focused checkpoints;
+6. merge reviewed commits in dependency order; and
+7. own all plan-status updates and final combined validation.
+
+This review/integration work is the fourth active slot.
+
+### Wave 1a: first three lanes
+
+Approximate lane budgets:
+
+- C3 report: one-half to one agent-day if representative data is accessible;
+  otherwise it should return a precise blocker quickly.
+- A1/C1 parity: one to two agent-days.
+- A2 authority boundary: one to two agent-days.
+
+When Agent C3 reaches its final unstaged checkpoint, ask the primary integrator
+to review it immediately. After review, staging approval, commit, merge, and a
+focused integration check, the integrator will announce:
 
 ```text
-Work only on P1 in docs/rfcs/012-parallel-work-handoff.md. Read the full
-handoff before editing, obey its shared-worktree and file-ownership rules, and
-stop at the P1 handback contract. Do not touch the implementation plan, RFC
-012D, scoped_observation.rs, the executable X0 ledger, or draft/. Commit only
-P1-owned files and return the exact exit-gate report. If P1 is already present
-or requires a forbidden contract decision, stop and report the collision.
+C3 MERGED — B3 MAY START — BASE <sha>
 ```
+
+Only then create the B3 worktree and spawn Agent B3 with section 7.4. Agent B3
+will overlap the still-running A1/C1 and A2 lanes.
+
+If C3 is blocked only because representative external data is unavailable, do
+not leave its slot idle. The integrator may authorize B3 to start from a stated
+base while C3 remains a named promotion blocker.
+
+### Wave 1b: B3 and integration
+
+Approximate B3 budget: one to two agent-days, but a read-only blocker report is
+the correct output if the next transition requires policy that does not exist.
+
+As A1/C1, A2, and B3 finish, ask the primary integrator to review each final
+unstaged diff immediately. Do not wait for all three before beginning reviews.
+The merge queue is normally:
+
+1. C3 evidence and any candidate digest repin;
+2. A1/C1 parity;
+3. A2 lifecycle;
+4. B3 private durability.
+
+After the last Wave 1 merge, everyone waits while the primary integrator runs
+the combined matrix and updates the plan. Do not spawn Wave 2 until the primary
+integrator emits:
+
+```text
+WAVE 1 INTEGRATION GREEN — BASE <sha>
+```
+
+Estimated integration window: one-half to one agent-day, depending on schema,
+SDK, and support-package changes.
+
+### Wave 2: Claude promotion vertical
+
+Create three fresh SSD worktrees from the exact Wave 1 base and spawn:
+
+1. Agent C2: promotion-minimum runtime/scoped parity, section 8.1.
+2. Agent A3: Claude artifact and evidence completion, section 8.2.
+3. Agent B2: real Claude composition/access/coverage preparation, section 8.3.
+
+The primary integrator again occupies the fourth slot, reviews checkpoints,
+and maintains the exact promotion gate. Expected Wave 2 work is two to four
+agent-days plus integration, depending on artifact access and evidence gaps.
+
+Merge order is:
+
+1. C2 parity;
+2. A3 artifact/evidence;
+3. B2 runtime composition and coverage;
+4. full combined validation and evidence review;
+5. a separate, primary-integrator-owned promotion decision; and
+6. a separate runtime-selection change, if promotion succeeds.
+
+No Wave 2 implementation agent may promote a release. Do not spawn Wave 3
+until the primary integrator emits either:
+
+```text
+CLAUDE PROMOTION GATE PASSED — BASE <sha>
+```
+
+or a blocker report that explicitly replans the next wave.
+
+### Wave 3 and later
+
+After the Claude gate passes, the next parallel lanes are:
+
+- Codex A3/B2 evidence and composition;
+- Grok A3/B2 evidence and composition;
+- Claude D1-D3 real promoted scoped-observer integration; and
+- primary-integrator-owned B1/B3 caller-authorized public policy/exposure
+  integration.
+
+After those merge and validate:
+
+1. B1/B3 public N-API/SDK catalog exposure;
+2. D4 public observer migration;
+3. B4 host/UX and C4 downstream migration;
+4. B5/D5 performance calibration;
+5. A4 fourth-adapter proof; and
+6. X integration gates.
+
+## 6. Universal agent rules
+
+Every agent must:
+
+1. Read this file and the relevant RFC/implementation-plan sections fully.
+2. Start read-only and wait at Checkpoint 1.
+3. Preserve Candidate/unsupported status unless the primary integrator owns an
+   explicit later promotion operation.
+4. Treat access, completeness, identity, compatibility, and safety as typed
+   evidence, never caller booleans or repeated digest strings.
+5. Preflight collection and encoded-byte bounds before retaining or sorting
+   attacker-sized input.
+6. Keep native paths, IDs, prompts, content, and secrets out of fixtures,
+   Debug, logs, reports, and portable DTOs.
+7. Use `rg` for searches and `apply_patch` for hand edits.
+8. Never use `git add -A`, `git add .`, broad cleanup, destructive Git
+   commands, or another lane's worktree.
+9. Keep changes unstaged until the explicit staging checkpoint.
+10. Run `git diff --check` before every handoff.
+11. Report exact pass counts rather than saying only “tests pass.”
+12. Leave `docs/rfcs/012-implementation-plan.md`, architecture ledger status,
+    promotion status, and `draft/` to the primary integrator.
+
+## 7. Immediate agent prompts
+
+These prompts are intended to be copied verbatim when the worktrees are ready.
+
+### 7.1 Agent C3 — compatibility closeout
+
+```text
+You own the RFC 012C C3 compatibility-window closeout.
+
+Worktree: /Volumes/SamsungRed/spaghetti-rfc012/worktrees/c3
+Branch: work/c3-compatibility-report
+Base: <RUNBOOK_BASE announced by /root>
+
+Read docs/rfcs/012-parallel-work-handoff.md completely before acting. Set
+CARGO_TARGET_DIR=/Volumes/SamsungRed/spaghetti-rfc012/build/cargo-target for
+Rust commands. Do not run cargo clean and do not touch draft/.
+
+Begin read-only. Before editing, send /root:
+1. the exact remaining C3 gate;
+2. the representative input/window you can actually access;
+3. exact intended paths;
+4. privacy model and report fields;
+5. validation commands; and
+6. every candidate-package digest that would change.
+Wait for GO before editing.
+
+Task:
+- Run the existing bounded compatibility sampler over a genuinely
+  representative external window.
+- Produce only deterministic aggregate/privacy-reduced evidence.
+- Classify equal, legacy-higher, usage-v2-higher, and incomparable buckets
+  without treating expected semantic differences as failures.
+- Bind the report to exact artifact/declaration/release/contract and sampler
+  evidence.
+- Update candidate evidence bindings only when justified.
+- Determine whether this closes C3 or exposes another gate.
+
+Do not fabricate a report when data is unavailable. Do not commit paths,
+native IDs, content, secrets, or raw timestamps. Do not promote a release or
+edit docs/rfcs/012-implementation-plan.md. Separate report generation from
+support-package digest repinning where practical. Remain unstaged until /root
+grants STAGE.
+
+Report scope freeze, focused report/privacy checks, final unstaged diff, exact
+cached paths, report digest, pass counts, remaining gates, and git status at
+the checkpoints defined by the runbook.
+```
+
+### 7.2 Agent A1/C1 — portable and N-API parity
+
+```text
+You own one bounded RFC 012A A1 / RFC 012C C1 contract-parity closure.
+
+Worktree: /Volumes/SamsungRed/spaghetti-rfc012/worktrees/a1-c1
+Branch: work/a1-c1-napi-parity
+Base: <RUNBOOK_BASE announced by /root>
+
+Read docs/rfcs/012-parallel-work-handoff.md and the A1/C1 plan sections fully.
+Set CARGO_TARGET_DIR=/Volumes/SamsungRed/spaghetti-rfc012/build/cargo-target.
+Do not run cargo clean or touch draft/.
+
+Start read-only. Confirm whether the smallest promotion-critical gap is N-API
+parity for the already-landed canonical coverage, actor-run,
+actor-affiliation, and usage-v2 values. If a narrower prerequisite exists,
+report it. Send /root the frozen objective, exact paths, fixture matrix,
+negative tests, dependency conflicts, and validation before editing. Wait for
+GO.
+
+Intended task:
+- Freeze Rust-produced semantic fixtures for existing types only.
+- Consume equivalent values through N-API and portable TypeScript.
+- Prove durable/scoped forms preserve the same SemanticRevisionRef and
+  canonical identities.
+- Reject unknown nested fields, invalid nulls, unsafe integers, zero
+  generations, incompatible majors, noncanonical references, oversized
+  values, and malformed qualified evidence.
+- Prove no native locator/path or database handle crosses the boundary.
+- Add the narrow architecture coverage required for the boundary.
+
+Do not add a semantic family, change storage/query selection, touch support
+classification, catalog files, RFC 012D delivery, or vendor packages. Shared
+barrel/export files belong to the integrator unless a minimal compilation edit
+is approved first. Do not claim A1/C1 complete beyond the executable slice.
+Remain unstaged until STAGE approval.
+
+Report exact identities/revisions compared, wire negatives, privacy and size
+bounds, architecture results, focused Rust/SDK pass counts, remaining gates,
+and git status at every runbook checkpoint.
+```
+
+### 7.3 Agent A2 — strict access lifecycle
+
+```text
+You own the next bounded RFC 012A A2 authority/lifecycle slice.
+
+Worktree: /Volumes/SamsungRed/spaghetti-rfc012/worktrees/a2
+Branch: work/a2-access-boundary
+Base: <RUNBOOK_BASE announced by /root>
+
+Read docs/rfcs/012-parallel-work-handoff.md and the A2 plan section fully. Set
+CARGO_TARGET_DIR=/Volumes/SamsungRed/spaghetti-rfc012/build/cargo-target. Do
+not run cargo clean or touch draft/.
+
+First perform a read-only audit and freeze the smallest contract-only closure
+for access-report retrieval and the trusted native-probe/grant request. Send
+/root the exact paths, authority flow, invariants, negatives, portable surface,
+and validation matrix. Wait for GO before editing.
+
+Requirements:
+- Issue request/report authority only from the existing verified private
+  authorization.
+- Bind exact adapter, release ID/digest, declaration digest, scope program,
+  capability topology, operation, selection, and access-policy inputs.
+- Deny Candidate or unsupported access before negotiation or native access.
+- Keep authority-bearing Rust types private, non-Serde, nonconstructible, and
+  redacted in Debug.
+- Keep portable request/report values strict, bounded, path-free, and unable
+  to grant authority by themselves.
+- Reject wrong operation/program, capability restriction, stale or foreign
+  digest, selection drift, and replay.
+- Perform no native read and issue no public host permission.
+
+Own common support/authorization code and support contract/tooling only. Do
+not modify concrete vendor packages, catalog durability, or RFC 012C semantic
+families. Shared exports require prior approval. Do not promote. Remain
+unstaged until STAGE approval.
+
+At each checkpoint report who can construct every authority type, what is
+checked before native access, bounds/privacy, public gates left open, exact
+paths, tests/pass counts, and git status.
+```
+
+### 7.4 Agent B3 — next private readiness transition
+
+Use only after the integrator announces the new B3 base.
+
+```text
+You own the next policy-neutral RFC 012B B3 durable-readiness slice after the
+integrator-provided base.
+
+Worktree: /Volumes/SamsungRed/spaghetti-rfc012/worktrees/b3
+Branch: work/b3-readiness-next
+Base: <INTEGRATOR_PROVIDED_BASE>
+
+Read docs/rfcs/012-parallel-work-handoff.md and current B1/B3 plan status
+fully. Set CARGO_TARGET_DIR=/Volumes/SamsungRed/spaghetti-rfc012/build/cargo-target.
+Do not run cargo clean or touch draft/.
+
+Start read-only. Compare independently-safe discarded refresh, retry lineage,
+Degraded/Partial, no-snapshot Error, and public policy transport. Recommend
+only the smallest state whose authority already exists. A discarded active
+refresh that preserves an authenticated predecessor is a hypothesis, not an
+authorization: prove or reject it. Send /root the frozen design, exact paths,
+state transition, evidence authority, corruption/crash matrix, and exclusions.
+Wait for GO.
+
+Any implementation must bind exact restart-authenticated plan, selection,
+snapshot, publication/content digests, epoch, attempt, refresh-start commit,
+and state-commit CAS. It must not accept caller-selected safety. Persist one
+atomic source-neutral zero-fact transition with append-only evidence and a
+privacy-safe outbox; reconstruct independently of prunable notification rows;
+preserve pages, resolution, retirement, and SnapshotExpired behavior; and
+prove crash rollback, lost-ack replay, stale/foreign rejection, and
+Rust/TypeScript schema parity.
+
+If the transition requires a new policy or producer, stop with a frozen
+blocker rather than inventing authority. No public catalog method, LOCAL view,
+physical compaction, richer query, source read, promotion, or plan-status edit
+is allowed. Remain unstaged until STAGE approval.
+```
+
+## 8. Wave 2 prompts
+
+Replace `<WAVE_1_BASE>` only with the commit announced by the primary
+integrator. Create fresh worktrees on the SSD.
+
+### 8.1 Agent C2 — promotion-minimum runtime parity
+
+```text
+Base your work on <WAVE_1_BASE> in a fresh SSD worktree. Read the parallel
+runbook and C1-C3 plan status. Identify and close the smallest remaining RFC
+012C C2 runtime-family or observer-envelope mapping required for the Claude
+promotion surface. Prove durable/scoped entity identity, semantic revision,
+correction, complete/partial replacement, retraction, actor, affiliation, and
+coverage parity. Do not change query selection or promote support. Begin
+read-only, send /root exact paths/invariants/tests, and wait for GO. Remain
+unstaged through final semantic review and follow every runbook checkpoint.
+```
+
+### 8.2 Agent A3 — Claude artifact and evidence
+
+```text
+Base your work on <WAVE_1_BASE> in a fresh SSD worktree. Read the parallel
+runbook and A3 plan status. Finish the candidate-only Claude evidence package:
+exact artifact pin, deterministic sanitized transitions, complete claimed RFC
+012D relation coverage, required RFC 012C semantic fixtures,
+identity/compositionality/cross-topology checks, bounded performance evidence,
+and human sanitizer-review inputs. Keep the release Candidate and every
+unsupported capability unsupported. Do not implement runtime composition or
+promote. Begin read-only and report every document and compiled-binding digest
+that would change before editing. Follow all review/staging checkpoints.
+```
+
+### 8.3 Agent B2 — real Claude composition preparation
+
+```text
+Base your work on <WAVE_1_BASE> in a fresh SSD worktree and consume only the
+reviewed Claude declarations supplied by the integrator. Implement the actual
+common/runtime and Claude catalog composition plus source-access/coverage
+producer behind Candidate denial. It may execute in conformance with synthetic
+authorization but must remain impossible to authorize for the built-in
+Candidate. Bind complete membership authority, exact access
+policy/declaration/selection, component completion, source coverage, and final
+identity parity. Add no persistence, public API, policy expansion, or
+promotion. Start read-only, freeze exact paths with /root, remain unstaged, and
+follow every runbook checkpoint.
+```
+
+## 9. Merge and validation ownership
+
+Lane agents run only their focused matrix plus inexpensive static checks. The
+primary integrator runs the relevant combined checks after each merge and the
+full matrix at wave boundaries.
+
+The full integration matrix is selected according to touched surfaces and
+normally includes:
+
+- focused Rust tests for every changed module;
+- `cargo test -p spaghetti-napi --lib`;
+- `cargo clippy -p spaghetti-napi --lib --tests -- -D warnings`;
+- `cargo fmt --all -- --check`;
+- portable SDK tests, workspace typecheck, SDK build/package, and Prettier;
+- support-package validation and support contract tests;
+- RFC 011 architecture and RFC 012 delta ratchets;
+- fresh-schema, restart, crash, corruption, and Rust/TypeScript DDL parity for
+  schema changes;
+- small and medium ingest-diff for schema or durable-query changes;
+- fixture privacy and deterministic digest checks; and
+- `git diff --check` plus exact staged-path review.
+
+Live native census drift is never silently ignored. If it is unrelated to the
+lane, the agent and integrator record the exact deviation separately; if the
+lane claims representative native evidence, that drift must be resolved or the
+claim remains blocked.
+
+## 10. Stop conditions
+
+An agent stops and reports rather than improvising when it encounters:
+
+- missing representative evidence or inaccessible native input;
+- a required policy choice about identity, admission, disclosure, retry,
+  degradation, retention, or promotion;
+- a need to edit another lane's owned path;
+- an authorization that would be constructed from caller booleans or repeated
+  digests rather than verified evidence;
+- a need to expose a public API before its caller/transport authority exists;
+- a schema change outside an approved schema lane;
+- privacy-sensitive output that cannot be reduced safely; or
+- a failing shared baseline unrelated to the lane that prevents honest final
+  validation.
+
+The primary integrator resolves the dependency, revises the frozen scope, or
+records the task as blocked. Agents do not broaden scope on their own.
