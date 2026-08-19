@@ -1354,7 +1354,7 @@ source/decoder registry used by the durable host. It must:
 - expose RFC 012A source/family coverage from poll and barriers; and
 - instrument every access for no-global-scan conformance.
 
-Current landing status (2026-08-18):
+Current landing status (2026-08-19):
 
 - the crate-private composition root performs strict support/contract/program
   selection before validating exact grants and exposes no spoofable N-API
@@ -2140,6 +2140,21 @@ Current landing status (2026-08-18):
   the additive event-union contract: `unknown_wire_event` negotiation and
   bounded preservation, native/N-API delivery, iterator ownership, and
   portable attachment authority remain absent; and
+- the typed-unknown event-union slice (`765dda4`) now adds a separate v1
+  sidecar negotiation bound to the exact already-negotiated observation
+  selection. Selection requires type-tag, encoded-value, and envelope-
+  provenance preservation, takes the smaller requested/offered byte ceiling,
+  and caps it at 64 KiB. The non-Serde Rust carrier and strict TypeScript mirror
+  preserve an uninterpreted canonical type tag, bounded JSON value, and exact
+  source/sequence/epoch/generation/phase provenance without allowing an
+  unknown tag to shadow any current known event. Depth, node, object-key,
+  JavaScript-safe-integer, Unicode, and exact encoded-byte checks are
+  executable, including bounded output-array allocation before cloning. A
+  complete portable outer union routes known branches through their existing
+  specialist parsers and admits `unknown_wire_event` only with the exact
+  caller-held sidecar selection and authorized source context. The runtime
+  still has no internal unknown-event variant and does not retain the sidecar,
+  emit unknown events, or expose native/N-API iterator transport; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2150,8 +2165,8 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2, coverage-complete durable query exposure, selected
 and portable actor/affiliation replacement integrity, event variants outside
 the current usage, actor, source-lifecycle, artifact-availability, continuity,
-and completion specialist families, the bounded typed-unknown event carrier
-and complete portable union, the public N-API/SDK iterator transport for the
+and completion specialist families, runtime production and attachment of
+negotiated typed-unknown events, the public N-API/SDK iterator transport for the
 current contextual watermark and event contracts over the internal async
 lifecycle runtime,
 portable dynamic/discovered scope coverage beyond the current exact
@@ -2168,10 +2183,10 @@ public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but their contextual wire cannot become a
 public watermark and consumer-ready helper until dynamic scope membership/
 coverage, runtime-bound public close invocation, the native transport owner,
-and the remaining negotiated lifecycle surface are defined. The usage-v2 sink and
-delivery lane remain crate-private until the complete envelope/event/lifecycle
-DTOs, bounded unknown-variant preservation, and runtime-bound negotiated
-portable transport exist.
+and the remaining negotiated lifecycle surface are defined. The usage-v2 sink
+and delivery lane remain crate-private until the remaining lifecycle surface,
+unknown-sidecar attachment/emission, and runtime-bound negotiated portable
+transport exist.
 
 ### D2. Claude scope composition
 
