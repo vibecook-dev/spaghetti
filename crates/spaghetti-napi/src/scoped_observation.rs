@@ -78,6 +78,7 @@ pub type ScopedArtifactAvailabilitySnapshot =
     artifact_availability::ScopedArtifactAvailabilitySnapshot;
 pub type ScopedCompletionEnvelopeConsumerContext =
     completion_wire::ScopedCompletionEnvelopeConsumerContext;
+pub type ScopedObservationCompletedPoll = watermark_wire::ScopedObservationCompletedPoll;
 pub type ScopedObservationWatermarkConsumerContext =
     watermark_wire::ScopedObservationWatermarkConsumerContext;
 
@@ -3494,6 +3495,18 @@ impl ScopedObservationAsyncHandle {
     ) -> Result<ScopedObservationPollResolution, ScopedObservationPollError> {
         let ticket = self.shared.host.request_poll()?;
         Ok(ticket.wait_async().await)
+    }
+
+    /// Request one logical exact-scope poll and bind its completed watermark
+    /// to the owning attachment's strict contextual wire. This is the only
+    /// future portable handoff path: it re-resolves the exact ticket after the
+    /// await and never projects request generation into semantic state.
+    pub async fn poll_contextual(
+        &self,
+    ) -> Result<ScopedObservationContextualPollResolution, ScopedObservationPollError> {
+        let ticket = self.shared.host.request_poll()?;
+        let _ = ticket.wait_async().await;
+        self.shared.host.contextual_poll_resolution(&ticket)
     }
 
     /// Await and reserve the next coalesced exact-scope pass requested by a
@@ -12144,6 +12157,17 @@ pub enum ScopedObservationPollResolution {
     Cancelled,
 }
 
+/// Exact ticket resolution prepared for a future portable poll boundary.
+/// This enum and its completed value are deliberately non-Serde and remain in
+/// the crate-private observer substrate until a public attachment owner exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedObservationContextualPollResolution {
+    Pending,
+    Ready(Arc<ScopedObservationCompletedPoll>),
+    Failed(Arc<ScopedObserverFailure>),
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopedObservationReadyResolution {
     Pending,
@@ -13263,7 +13287,7 @@ impl ScopedObservationAccessHost {
     /// Bind one completed poll watermark to this exact attachment before any
     /// future portable projection. Equal roots from another simultaneous
     /// attachment are not interchangeable.
-    pub fn watermark_consumer_context(
+    fn watermark_consumer_context(
         &self,
         watermark: &ScopedObservationWatermarkCore,
     ) -> Result<ScopedObservationWatermarkConsumerContext, ScopedCoverageAssemblyError> {
@@ -13748,6 +13772,41 @@ impl ScopedObservationAccessHost {
         ticket: &ScopedObservationPollTicket,
     ) -> Result<ScopedObservationPollResolution, ScopedObservationPollError> {
         self.state.poll.resolution(ticket)
+    }
+
+    /// Re-resolve one exact attachment-owned ticket and, only when complete,
+    /// bind its retained watermark to this host's process-local authority and
+    /// verified capability/support context. A foreign ticket is rejected
+    /// before any contextual value can be minted.
+    pub fn contextual_poll_resolution(
+        &self,
+        ticket: &ScopedObservationPollTicket,
+    ) -> Result<ScopedObservationContextualPollResolution, ScopedObservationPollError> {
+        match self.state.poll.resolution(ticket)? {
+            ScopedObservationPollResolution::Pending => {
+                Ok(ScopedObservationContextualPollResolution::Pending)
+            }
+            ScopedObservationPollResolution::Ready(watermark) => {
+                let context = self.watermark_consumer_context(watermark.as_ref())?;
+                let completed = watermark_wire::ScopedObservationCompletedPoll::from_resolved(
+                    watermark, context,
+                )
+                .map_err(|_| {
+                    ScopedObservationPollError::Coverage(
+                        ScopedCoverageAssemblyError::InvalidContract,
+                    )
+                })?;
+                Ok(ScopedObservationContextualPollResolution::Ready(Arc::new(
+                    completed,
+                )))
+            }
+            ScopedObservationPollResolution::Failed(failure) => {
+                Ok(ScopedObservationContextualPollResolution::Failed(failure))
+            }
+            ScopedObservationPollResolution::Cancelled => {
+                Ok(ScopedObservationContextualPollResolution::Cancelled)
+            }
+        }
     }
 
     pub fn poll_state(&self) -> ScopedObservationPollState {

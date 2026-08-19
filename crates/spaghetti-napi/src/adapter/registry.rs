@@ -213,8 +213,9 @@ pub(crate) mod tests {
         ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
         ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncRuntime,
         ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
-        ScopedObservationConsumerOfferError, ScopedObservationContinuity,
-        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationConsumerOfferError, ScopedObservationContextualPollResolution,
+        ScopedObservationContinuity, ScopedObservationDeliveryLane,
+        ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -1942,10 +1943,39 @@ pub(crate) mod tests {
                 if Arc::ptr_eq(&waited, &first_watermark)
         ));
         poll_thread.join().unwrap();
+        let ScopedObservationContextualPollResolution::Ready(first_contextual) =
+            host.contextual_poll_resolution(&first).unwrap()
+        else {
+            panic!("the first completed ticket must bind its contextual watermark");
+        };
+        let ScopedObservationContextualPollResolution::Ready(second_contextual) =
+            host.contextual_poll_resolution(&second).unwrap()
+        else {
+            panic!("the coalesced ticket must bind its contextual watermark");
+        };
+        assert!(Arc::ptr_eq(
+            first_contextual.watermark(),
+            second_contextual.watermark()
+        ));
+        let first_wire = first_contextual.watermark_wire_value().unwrap();
+        assert_eq!(
+            first_wire,
+            second_contextual.watermark_wire_value().unwrap()
+        );
+        assert!(!first_wire.to_string().contains("request_generation"));
+        assert!(!first_contextual
+            .context_wire_value()
+            .unwrap()
+            .to_string()
+            .contains("request_generation"));
         assert_eq!(
             host.poll_resolution(&third).unwrap(),
             ScopedObservationPollResolution::Pending
         );
+        assert!(matches!(
+            host.contextual_poll_resolution(&third).unwrap(),
+            ScopedObservationContextualPollResolution::Pending
+        ));
 
         let follow_up = host.begin_poll().unwrap().unwrap();
         assert_eq!(follow_up.target_generation(), 3);
@@ -1973,6 +2003,19 @@ pub(crate) mod tests {
             host.poll_resolution(&third).unwrap(),
             ScopedObservationPollResolution::Ready(_)
         ));
+        let ScopedObservationContextualPollResolution::Ready(third_contextual) =
+            host.contextual_poll_resolution(&third).unwrap()
+        else {
+            panic!("the follow-up ticket must bind its own contextual watermark");
+        };
+        assert!(!Arc::ptr_eq(
+            first_contextual.watermark(),
+            third_contextual.watermark()
+        ));
+        assert_eq!(
+            first_contextual.watermark_wire_value().unwrap(),
+            third_contextual.watermark_wire_value().unwrap()
+        );
 
         // A raw access attempt cannot satisfy poll completion using coverage
         // left by an older pass; decode/admission/offered promotion must carry
@@ -2126,6 +2169,10 @@ pub(crate) mod tests {
             second.poll_resolution(&ticket),
             Err(ScopedObservationPollError::ForeignTicket)
         ));
+        assert!(matches!(
+            second.contextual_poll_resolution(&ticket),
+            Err(ScopedObservationPollError::ForeignTicket)
+        ));
         let lease = first.begin_poll().unwrap().unwrap();
         assert_eq!(first.poll_state().in_flight_through_generation, Some(1));
         first.close();
@@ -2141,6 +2188,10 @@ pub(crate) mod tests {
             first.poll_resolution(&ticket).unwrap(),
             ScopedObservationPollResolution::Cancelled
         );
+        assert!(matches!(
+            first.contextual_poll_resolution(&ticket).unwrap(),
+            ScopedObservationContextualPollResolution::Cancelled
+        ));
         assert!(matches!(
             first.request_poll(),
             Err(ScopedObservationPollError::Closed)
@@ -2590,6 +2641,14 @@ pub(crate) mod tests {
                 if Arc::ptr_eq(&failed, &failure)
         ));
         assert!(matches!(
+            handle
+                .host()
+                .contextual_poll_resolution(&pending_poll)
+                .unwrap(),
+            ScopedObservationContextualPollResolution::Failed(failed)
+                if Arc::ptr_eq(&failed, &failure)
+        ));
+        assert!(matches!(
             pending_ready.wait_async().await,
             ScopedObservationReadyResolution::Failed(failed)
                 if Arc::ptr_eq(&failed, &failure)
@@ -2841,13 +2900,14 @@ pub(crate) mod tests {
         // Leave its created-source control queued to force bounded pressure on
         // the immediately following deletion pass.
         std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
-        let created_poll = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
-            .await
-            .unwrap()
-            .unwrap();
+        let created_poll =
+            tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll_contextual())
+                .await
+                .unwrap()
+                .unwrap();
         assert!(matches!(
             created_poll,
-            ScopedObservationPollResolution::Ready(_)
+            ScopedObservationContextualPollResolution::Ready(_)
         ));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);
 

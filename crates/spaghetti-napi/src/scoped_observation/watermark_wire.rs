@@ -304,6 +304,62 @@ pub(crate) struct ScopedObservationWatermarkWire {
     queue_state: WatermarkQueueStateWire,
 }
 
+/// One request-local poll completion after the owning attachment has rebound
+/// the retained core watermark to its exact non-Serde consumer context. The
+/// poll request generation remains solely in the ticket/runtime and never
+/// enters this semantic result or either portable value.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ScopedObservationCompletedPoll {
+    watermark: Arc<ScopedObservationWatermarkCore>,
+    context: ScopedObservationWatermarkConsumerContext,
+    wire: ScopedObservationWatermarkWire,
+}
+
+impl std::fmt::Debug for ScopedObservationCompletedPoll {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationCompletedPoll")
+            .field("scope_epoch", &self.watermark.scope_epoch)
+            .field(
+                "offered_through_sequence",
+                &self.watermark.offered_through_sequence,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScopedObservationCompletedPoll {
+    pub(super) fn from_resolved(
+        watermark: Arc<ScopedObservationWatermarkCore>,
+        context: ScopedObservationWatermarkConsumerContext,
+    ) -> Result<Self, ScopedObservationWatermarkContractError> {
+        let wire =
+            ScopedObservationWatermarkWire::from_scoped_for_context(watermark.as_ref(), &context)?;
+        Ok(Self {
+            watermark,
+            context,
+            wire,
+        })
+    }
+
+    pub(crate) fn watermark(&self) -> &Arc<ScopedObservationWatermarkCore> {
+        &self.watermark
+    }
+
+    pub(crate) fn watermark_wire_value(
+        &self,
+    ) -> Result<JsonValue, ScopedObservationWatermarkContractError> {
+        serde_json::to_value(&self.wire).map_err(ScopedObservationWatermarkContractError::nested)
+    }
+
+    pub(crate) fn context_wire_value(
+        &self,
+    ) -> Result<JsonValue, ScopedObservationWatermarkContractError> {
+        serde_json::to_value(self.context.wire())
+            .map_err(ScopedObservationWatermarkContractError::nested)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScopedObservationWatermarkInput {

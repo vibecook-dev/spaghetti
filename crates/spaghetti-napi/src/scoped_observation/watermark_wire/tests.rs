@@ -457,3 +457,44 @@ fn strict_shape_bounds_and_privacy_fail_closed() {
     assert!(!debug.contains("v1:"));
     assert!(!debug.contains("sha256:"));
 }
+
+#[test]
+fn completed_poll_retains_exact_context_without_flow_control_identity() {
+    let fixture = fixture_watermark(ScopedObservationContinuity::Valid);
+    let watermark = Arc::new(fixture.core.clone());
+    let completed = super::ScopedObservationCompletedPoll::from_resolved(
+        Arc::clone(&watermark),
+        fixture.context.clone(),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(completed.watermark(), &watermark));
+    assert_eq!(
+        completed.watermark_wire_value().unwrap(),
+        serde_json::to_value(&fixture.wire).unwrap()
+    );
+    assert_eq!(
+        completed.context_wire_value().unwrap(),
+        serde_json::to_value(fixture.context.wire()).unwrap()
+    );
+
+    let encoded = format!(
+        "{}{}",
+        completed.watermark_wire_value().unwrap(),
+        completed.context_wire_value().unwrap()
+    );
+    assert!(!encoded.contains("request_generation"));
+    let debug = format!("{completed:?}");
+    assert!(debug.contains("scope_epoch: 2"));
+    assert!(debug.contains("offered_through_sequence: 5"));
+    assert!(!debug.contains("fixture-support"));
+    assert!(!debug.contains("session-observation"));
+    assert!(!debug.contains("v1:"));
+    assert!(!debug.contains("sha256:"));
+
+    let foreign = fixture_watermark(ScopedObservationContinuity::Valid);
+    assert!(super::ScopedObservationCompletedPoll::from_resolved(
+        Arc::clone(&watermark),
+        foreign.context,
+    )
+    .is_err());
+}
