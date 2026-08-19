@@ -2130,6 +2130,16 @@ Current landing status (2026-08-18):
   portable event union: no bounded `unknown_wire_event` carrier, typed-unknown
   negotiation, TypeScript union, N-API iterator, native source access, or
   portable attachment authority is added; and
+- the portable known-envelope slice (`1bda3ee`) now freezes a strict outer v1
+  discriminator and dispatches those same six implemented families through
+  their existing contextual TypeScript parsers. The Rust wrapper remains
+  non-Serde and attachment-bound, exposing only an owned authority-free value;
+  the shared privacy-reduced fixture binds the canonical family spelling and
+  one source-lifecycle example. Unknown outer fields, family/context/event
+  drift, and unrecognized family discriminators fail closed. This is still not
+  the additive event-union contract: `unknown_wire_event` negotiation and
+  bounded preservation, native/N-API delivery, iterator ownership, and
+  portable attachment authority remain absent; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
