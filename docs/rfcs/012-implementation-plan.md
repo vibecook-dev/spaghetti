@@ -2536,6 +2536,25 @@ built-in Claude is still Candidate/incomplete. Source-driver errors, artifact
 completion-barrier state, task-artifact declaration, support promotion, and
 N-API/SDK observer transport remain open.
 
+The next bounded D3 prerequisite (`a8175c2`) freezes completed native artifact
+observations into attachment-owned, path-free availability revisions without
+claiming ordered observer transport. Only a confined capture that successfully
+constructs the strict artifact result may update the bounded reducer; a
+dropped capture, contract failure, or attachment-close race cannot publish
+state. The latest observation for one canonical artifact/kind pair binds the
+exact current metadata selection, authorized relation, access-object token,
+generation, opaque provenance, and stable size or missing/over-limit/unstable
+state. Expected-generation checks and metadata/hash/inline disclosure choices
+cannot perturb the underlying native availability revision, while a native
+revision change does. Canonical snapshots filter observations whose metadata
+evidence was corrected, retracted, or made conflicting instead of relabeling
+them as missing, and Debug retains only bounded counts and redacted digests.
+These revisions deliberately remain outside watermarks and bootstrap/resync
+barriers until an ordered artifact-availability event binds them to the
+observer sequence. Ambiguous source-driver failures are still internal rather
+than guessed into portable unavailable reasons. Task-artifact declaration,
+support promotion, and N-API/SDK observer transport also remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
