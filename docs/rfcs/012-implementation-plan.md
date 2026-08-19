@@ -2570,6 +2570,23 @@ an N-API/SDK observer surface. Dynamic artifact discovery, task-artifact
 declaration, complete promoted scope evidence, and support promotion also
 remain open.
 
+The next bounded D3 prerequisite (`2d1ead4`) freezes a contextual portable
+projection of the barrier-bound artifact-availability snapshot without
+claiming an ordered event. Each canonical artifact/kind entry now retains its
+explicit available, missing, over-limit, or unstable state beside the opaque
+native-derived revision. The serialize-only Rust wire and independent
+TypeScript parser enforce the 4,096-entry ceiling, portable integer and
+identifier bounds, exact byte-order canonicalization, strict nested shapes,
+and one caller-held contract-selection/root/entry/digest context. The frozen
+fixture is produced by the real reducer rather than injected revisions and
+contains neither relations, access-object tokens, locators, content, nor native
+identifiers. This snapshot cannot assign an observer sequence, authorize a
+source read, or establish a bootstrap/resync barrier by itself. A real ordered
+artifact-availability event still requires an attachment-owned event/source
+occurrence reservation; the complete barrier wire, dynamic artifact
+discovery, task-artifact declaration, support promotion, and observer facade
+remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
