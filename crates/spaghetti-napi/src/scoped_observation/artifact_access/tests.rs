@@ -22,8 +22,9 @@ use crate::scoped_observation::{
     scoped_record_evidence, ScopedArtifactContentPolicy, ScopedArtifactRelationGrant,
     ScopedDecodedAppendItem, ScopedObservationAccessHost, ScopedObservationAdmissionLane,
     ScopedObservationDeliveryLimits, ScopedObservationEpochState, ScopedObservationEvent,
-    ScopedObservationProjectionLimits, ScopedObservationQueueLimits, ScopedProjectionError,
-    ScopedQueuedObservationFrame, ScopedRootIdentityRequest, ScopedSourceObjectIdentity,
+    ScopedObservationKnownEventFamily, ScopedObservationProjectionLimits,
+    ScopedObservationQueueLimits, ScopedProjectionError, ScopedQueuedObservationFrame,
+    ScopedRootIdentityRequest, ScopedSourceObjectIdentity,
 };
 
 const ARTIFACT_SCOPE_DOCUMENT: &[u8] = br#"{
@@ -866,6 +867,15 @@ fn ordered_availability_portable_fixture_is_produced_by_the_confined_pipeline() 
         ScopedArtifactAvailabilityEnvelopeWire::from_scoped_for_context(&yielded.envelope, context)
             .unwrap();
     let wire_value = serde_json::to_value(&wire).unwrap();
+    assert_eq!(
+        yielded.known_envelope().family(),
+        ScopedObservationKnownEventFamily::ArtifactAvailability
+    );
+    assert_eq!(yielded.known_envelope().wire_value(), &wire_value);
+    assert_eq!(
+        yielded.known_envelope().context_value(),
+        &serde_json::to_value(context.wire()).unwrap()
+    );
     let parsed = ScopedArtifactAvailabilityEnvelopeWire::from_wire_value_for_context(
         wire_value.clone(),
         context,

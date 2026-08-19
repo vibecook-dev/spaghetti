@@ -61,6 +61,7 @@ mod capability_snapshot_wire;
 mod close_wire;
 mod completion_wire;
 mod continuity_wire;
+mod event_wire;
 mod replacement_manifest_wire;
 mod scope_coverage_wire;
 mod source_wire;
@@ -80,6 +81,8 @@ pub type ScopedCompletionEnvelopeConsumerContext =
     completion_wire::ScopedCompletionEnvelopeConsumerContext;
 pub type ScopedContinuityEnvelopeConsumerContext =
     continuity_wire::ScopedContinuityEnvelopeConsumerContext;
+pub type ScopedObservationKnownEnvelope = event_wire::ScopedObservationKnownEnvelope;
+pub type ScopedObservationKnownEventFamily = event_wire::ScopedObservationKnownEventFamily;
 pub type ScopedObservationCompletedPoll = watermark_wire::ScopedObservationCompletedPoll;
 pub type ScopedObservationWatermarkConsumerContext =
     watermark_wire::ScopedObservationWatermarkConsumerContext;
@@ -2818,6 +2821,7 @@ impl Drop for ScopedObservationStartupReconcilePass {
 pub struct ScopedObservationYieldedEnvelope {
     pub envelope: ScopedObservationEnvelope,
     application_receipt: ScopedObservationApplicationReceipt,
+    known_envelope: ScopedObservationKnownEnvelope,
     artifact_availability_context: Option<ScopedArtifactAvailabilityEnvelopeConsumerContext>,
     completion_context: Option<ScopedCompletionEnvelopeConsumerContext>,
     continuity_context: Option<ScopedContinuityEnvelopeConsumerContext>,
@@ -2826,6 +2830,13 @@ pub struct ScopedObservationYieldedEnvelope {
 impl ScopedObservationYieldedEnvelope {
     pub fn application_receipt(&self) -> &ScopedObservationApplicationReceipt {
         &self.application_receipt
+    }
+
+    /// Attachment-bound strict wire projection for every currently known event
+    /// family. This is deliberately not the complete RFC 012D union until a
+    /// negotiated bounded `unknown_wire_event` carrier also exists.
+    pub fn known_envelope(&self) -> &ScopedObservationKnownEnvelope {
+        &self.known_envelope
     }
 
     /// Exact caller-held authority for consuming an ordered artifact-
@@ -3028,7 +3039,7 @@ impl ScopedObservationConsumerDrain {
             .map_err(ScopedObservationDrainError::Envelope)?;
         let envelope = self
             .mapper
-            .map(preview)
+            .map(preview.clone())
             .map_err(ScopedObservationDrainError::Envelope)?;
         let completion_context = ScopedCompletionEnvelopeConsumerContext::from_scoped_envelope(
             &envelope,
@@ -3050,6 +3061,19 @@ impl ScopedObservationConsumerDrain {
         debug_assert!(continuity_context
             .as_ref()
             .is_none_or(|context| { context.belongs_to_attachment(&self.attachment_authority) }));
+        let known_envelope = ScopedObservationKnownEnvelope::from_predequeue(
+            &envelope,
+            &self.mapper.root,
+            Arc::clone(&self.attachment_authority),
+            &preview,
+            event_wire::ScopedSpecializedEnvelopeContexts {
+                artifact_availability: artifact_availability_context.as_ref(),
+                completion: completion_context.as_ref(),
+                continuity: continuity_context.as_ref(),
+            },
+        )
+        .map_err(ScopedObservationDrainError::Envelope)?;
+        debug_assert!(known_envelope.belongs_to_attachment(&self.attachment_authority));
         let delivered = self
             .delivery
             .dequeue_next()
@@ -3092,6 +3116,7 @@ impl ScopedObservationConsumerDrain {
         Ok(Some(ScopedObservationYieldedEnvelope {
             envelope,
             application_receipt: receipt,
+            known_envelope,
             artifact_availability_context,
             completion_context,
             continuity_context,
@@ -18360,8 +18385,21 @@ mod projection_tests {
         max_semantic_events: usize,
         max_source_control_items: usize,
     ) -> ScopedObservationConsumerDrain {
+        consumer_drain_for_selection(
+            root,
+            observation_contract_selection(),
+            max_semantic_events,
+            max_source_control_items,
+        )
+    }
+
+    fn consumer_drain_for_selection(
+        root: ScopedObservationRootIdentity,
+        selection: ObservationContractSelection,
+        max_semantic_events: usize,
+        max_source_control_items: usize,
+    ) -> ScopedObservationConsumerDrain {
         let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
-        let selection = observation_contract_selection();
         let mut drain = ScopedObservationConsumerDrain::new(
             ScopedObservationEnvelopeMapper::new(root, selection.clone()),
             capability_context_for_selection(&selection),
@@ -18379,6 +18417,215 @@ mod projection_tests {
             .unwrap();
         drain.lifecycle_registered = true;
         drain
+    }
+
+    #[test]
+    fn scoped_known_envelope_routes_common_families_with_exact_attachment_context() {
+        let root = root_identity();
+        let selection = multi_family_observation_contract_selection();
+        let record = record_with_observed_at(3, 0, 10, 44);
+        let mut projection = multi_family_sink(8);
+        let projected = projection
+            .project(&decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Live,
+                &record,
+                contextual_usage_batch(
+                    &record,
+                    Some(("response-1", 10)),
+                    true,
+                    &[ActorAffiliationDimension::Team],
+                ),
+            ))
+            .unwrap();
+        assert_eq!(projected.len(), 3);
+        let mut drain = consumer_drain_for_selection(root.clone(), selection.clone(), 3, 1);
+        drain.delivery_lane_mut().offer(projected).unwrap();
+        let foreign = next_scoped_attachment_authority().unwrap();
+        let source = source_identity();
+
+        for (family, kind) in [
+            (ScopedObservationKnownEventFamily::Actor, "actor_run"),
+            (
+                ScopedObservationKnownEventFamily::Actor,
+                "actor_affiliation",
+            ),
+            (ScopedObservationKnownEventFamily::Usage, "usage_v2"),
+        ] {
+            let yielded = drain.next().unwrap().unwrap();
+            let known = yielded.known_envelope();
+            assert_eq!(known.family(), family);
+            assert_eq!(known.wire_value()["event"]["kind"], kind);
+            assert_eq!(
+                known.context_value()["contract_selection"],
+                serde_json::to_value(&selection).unwrap()
+            );
+            assert_eq!(
+                known.context_value()["root"]["session_key"],
+                serde_json::to_value(root.session_key).unwrap()
+            );
+            assert_eq!(
+                known.context_value()["authorized_sources"][0]["instance_key"],
+                serde_json::to_value(source.source_instance_key).unwrap()
+            );
+            assert!(known.belongs_to_attachment(&drain.attachment_authority));
+            assert!(!known.belongs_to_attachment(&foreign));
+            let debug = format!("{known:?}");
+            assert!(debug.contains("wire: \"<redacted>\""));
+            assert!(debug.contains("context: \"<redacted>\""));
+            assert!(!debug.contains("native-session"));
+            let receipt = yielded.application_receipt().clone();
+            drain.acknowledge_applied(&receipt).unwrap();
+        }
+
+        let created = ScopedAppendPresenceChange::Created { generation: 3 };
+        drain
+            .delivery_lane_mut()
+            .offer(vec![ScopedProjectedObservation::SourcePresence {
+                object_token: OBJECT_TOKEN,
+                source: source.clone(),
+                lane_ordinal: 2,
+                observed_at: 45,
+                phase: ScopedAppendDeliveryPhase::Live,
+                event_id: source_presence_event_id(&source, created),
+                change: created,
+            }])
+            .unwrap();
+        let yielded = drain.next().unwrap().unwrap();
+        let known = yielded.known_envelope();
+        assert_eq!(known.family(), ScopedObservationKnownEventFamily::Source);
+        assert_eq!(known.wire_value()["event"]["kind"], "source_created");
+        assert_eq!(
+            known.context_value()["authorized_sources"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn scoped_known_envelope_rejects_unselected_enrichment_before_dequeue() {
+        let root = root_identity();
+        let record = record_with_observed_at(3, 0, 10, 44);
+        let mut projection = multi_family_sink(8);
+        let projected = projection
+            .project(&decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Live,
+                &record,
+                contextual_usage_batch(
+                    &record,
+                    Some(("response-1", 10)),
+                    true,
+                    &[ActorAffiliationDimension::Team],
+                ),
+            ))
+            .unwrap();
+        let enriched_usage = projected
+            .into_iter()
+            .find(|event| matches!(event, ScopedProjectedObservation::UsageV2 { .. }))
+            .unwrap();
+        let mut drain = consumer_drain(root, 1, 1);
+        drain
+            .delivery_lane_mut()
+            .offer(vec![enriched_usage])
+            .unwrap();
+        let queued = drain.delivery_lane().state();
+
+        assert!(matches!(
+            drain.next(),
+            Err(ScopedObservationDrainError::Envelope(
+                ScopedEnvelopeError::DeliveryMismatch
+            ))
+        ));
+        assert_eq!(drain.delivery_lane().state(), queued);
+        assert_eq!(drain.state().delivered_through_sequence, 0);
+        assert_eq!(drain.state().pending_sequence, None);
+    }
+
+    #[test]
+    fn scoped_known_envelope_requires_exactly_its_specialist_context() {
+        let root = root_identity();
+        let mut continuity_drain = consumer_drain(root.clone(), 1, 1);
+        continuity_drain
+            .delivery_lane_mut()
+            .fail_observer(
+                &root,
+                ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+                17,
+            )
+            .unwrap();
+        let continuity_preview = continuity_drain.delivery.preview_next().unwrap();
+        let continuity_envelope = continuity_drain
+            .mapper
+            .map(continuity_preview.clone())
+            .unwrap();
+        let continuity_context = ScopedContinuityEnvelopeConsumerContext::from_delivered(
+            &continuity_envelope,
+            &root,
+            Arc::clone(&continuity_drain.attachment_authority),
+            &continuity_drain.delivery,
+        )
+        .unwrap()
+        .unwrap();
+        let queued = continuity_drain.delivery.state();
+
+        assert!(matches!(
+            ScopedObservationKnownEnvelope::from_predequeue(
+                &continuity_envelope,
+                &root,
+                Arc::clone(&continuity_drain.attachment_authority),
+                &continuity_preview,
+                event_wire::ScopedSpecializedEnvelopeContexts {
+                    artifact_availability: None,
+                    completion: None,
+                    continuity: None,
+                },
+            ),
+            Err(ScopedEnvelopeError::DeliveryMismatch)
+        ));
+        assert_eq!(continuity_drain.delivery.state(), queued);
+
+        let source = source_identity();
+        let created = ScopedAppendPresenceChange::Created { generation: 1 };
+        let mut source_drain = consumer_drain(root.clone(), 1, 1);
+        source_drain
+            .delivery_lane_mut()
+            .offer(vec![ScopedProjectedObservation::SourcePresence {
+                object_token: OBJECT_TOKEN,
+                source: source.clone(),
+                lane_ordinal: 1,
+                observed_at: 18,
+                phase: ScopedAppendDeliveryPhase::Live,
+                event_id: source_presence_event_id(&source, created),
+                change: created,
+            }])
+            .unwrap();
+        let source_preview = source_drain.delivery.preview_next().unwrap();
+        let source_envelope = source_drain.mapper.map(source_preview.clone()).unwrap();
+        let source_queued = source_drain.delivery.state();
+        assert!(matches!(
+            ScopedObservationKnownEnvelope::from_predequeue(
+                &source_envelope,
+                &root,
+                Arc::clone(&source_drain.attachment_authority),
+                &source_preview,
+                event_wire::ScopedSpecializedEnvelopeContexts {
+                    artifact_availability: None,
+                    completion: None,
+                    continuity: Some(&continuity_context),
+                },
+            ),
+            Err(ScopedEnvelopeError::DeliveryMismatch)
+        ));
+        assert_eq!(source_drain.delivery.state(), source_queued);
+
+        let yielded = continuity_drain.next().unwrap().unwrap();
+        assert_eq!(
+            yielded.known_envelope().family(),
+            ScopedObservationKnownEventFamily::Continuity
+        );
     }
 
     #[test]
@@ -20121,6 +20368,14 @@ mod projection_tests {
             ScopedObservationEvent::ObserverBootstrapComplete { barrier }
                 if Arc::ptr_eq(barrier, &engine_barrier)
         ));
+        assert_eq!(
+            complete.known_envelope().family(),
+            ScopedObservationKnownEventFamily::Completion
+        );
+        assert_eq!(
+            complete.known_envelope().context_value(),
+            &serde_json::to_value(complete.completion_context().unwrap().wire()).unwrap()
+        );
         let complete_receipt = complete.application_receipt().clone();
         assert!(drain.consumer_bootstrap_barrier().is_none());
         // A retry of the previous acknowledgement is harmless and cannot skip
@@ -20376,6 +20631,14 @@ mod projection_tests {
                 .as_str()
                 .is_some()
         );
+        assert_eq!(
+            invalidation.known_envelope().family(),
+            ScopedObservationKnownEventFamily::Continuity
+        );
+        assert_eq!(
+            invalidation.known_envelope().context_value(),
+            &invalidation_context.wire_value().unwrap()
+        );
         assert!(invalidation.artifact_availability_context().is_none());
         assert!(invalidation.completion_context().is_none());
         let state = drain
@@ -20415,6 +20678,14 @@ mod projection_tests {
                 .as_ref()
                 .map(|prior| prior.control_sequence),
             Some(required.control_sequence)
+        );
+        assert_eq!(
+            started_delivery.known_envelope().family(),
+            ScopedObservationKnownEventFamily::Continuity
+        );
+        assert_eq!(
+            started_delivery.known_envelope().context_value(),
+            &started_context.wire_value().unwrap()
         );
         drain
             .acknowledge_applied(started_delivery.application_receipt())
@@ -20471,6 +20742,14 @@ mod projection_tests {
         assert!(drain.consumer_resync_barrier().is_none());
         assert!(completed.continuity_context().is_none());
         assert!(completed.completion_context().is_some());
+        assert_eq!(
+            completed.known_envelope().family(),
+            ScopedObservationKnownEventFamily::Completion
+        );
+        assert_eq!(
+            completed.known_envelope().context_value(),
+            &serde_json::to_value(completed.completion_context().unwrap().wire()).unwrap()
+        );
         let state = drain
             .acknowledge_applied(completed.application_receipt())
             .unwrap();
