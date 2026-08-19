@@ -2587,6 +2587,22 @@ occurrence reservation; the complete barrier wire, dynamic artifact
 discovery, task-artifact declaration, support promotion, and observer facade
 remain open.
 
+The next bounded D3 prerequisite (`18971a8`) binds an executable
+evidence-derived artifact relation to one exact digest-bound scoped source
+stream before an ordered event can exist. The Claude file-history stream now
+declares scoped topology, and the relation repeats its exact
+`ReplaceDocument` stream ID and 1 MiB object ceiling. Python and Rust bundle
+verification reject unknown, wrong-root, non-scoped, unimplemented,
+wrong-primitive/boundary/lifecycle, or digest-drifted packages. A selected
+reservation enforces that per-object ceiling and derives the same
+platform-neutral framed stream/object coverage coordinate used by durable
+source discovery under the verified source-declaration digest. The proof
+remains private and redacted and is consumed with the confined capture. It
+still does not assign observer ordering or atomically pair queue admission
+with availability-reducer mutation. Initial-missing/unstable source-generation
+law, the ordered availability event and wire, task-artifact declaration,
+promotion, and N-API/SDK observer transport remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
