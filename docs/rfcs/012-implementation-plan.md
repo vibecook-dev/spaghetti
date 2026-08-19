@@ -2101,6 +2101,21 @@ Current landing status (2026-08-18):
   poll substrate remains internal for source-owner orchestration. This adds no
   unified event union, unknown-event preservation, N-API/SDK observer method,
   public iterator owner, or source-access authority; and
+- the contextual continuity-control slice (`b88c902`) now mints one non-Serde,
+  attachment-bound consumer context from the real ordered delivery lane before
+  dequeue for `observer.resync_required`, `observer.resync_started`, and
+  `observer.failed`. Required and started controls bind the exact completed
+  baseline plus delivered invalidation lineage; terminal failure retains the
+  completed bootstrap/replacement baseline when one exists, while a failure
+  before the first completed bootstrap serializes an explicit `null` instead
+  of fabricating snapshot authority. Rust and portable TypeScript enforce the
+  same phase/baseline law, exact selection/root/control source, epoch,
+  contiguous watermark, and strict nested control shapes. Context construction
+  failure leaves the queued control untouched, attachment identity remains
+  process-local and redacted, and completion barriers continue through their
+  separate contextual contract. This adds no unified event union,
+  typed-unknown preservation, public iterator/N-API method, native source
+  access, or portable attachment authority; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
