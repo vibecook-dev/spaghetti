@@ -2603,6 +2603,28 @@ with availability-reducer mutation. Initial-missing/unstable source-generation
 law, the ordered availability event and wire, task-artifact declaration,
 promotion, and N-API/SDK observer transport remain open.
 
+The next bounded D3 prerequisite (`89e2ead`) closes the attachment-local
+ordering half of artifact availability without changing the frozen v1
+snapshot wire. A generation-bound confined capture now retains the exact
+verified source-declaration digest and common framed source coordinate, derives
+an availability occurrence with a positive source generation, and prepares the
+reducer change without mutation. The occurrence enters the attachment's one
+semantic sequence before an infallible reducer commit; queue backpressure,
+foreign or wrong-epoch drains, source-binding drift, attachment close, and
+contract failure advance neither availability state nor observer sequence, and
+the same bounded capture remains retryable with its original observation time.
+Exact availability replay emits no duplicate sequence. Initial missing and
+initial unstable observations use source generation 1 without manufacturing a
+presence transition, so the first later present observation remains generation
+1 in agreement with common `ReplaceDocument` coverage. The mapped internal
+envelope is path-free, carries no locator, source record, cursor, native bytes,
+or semantic fact revision, and its deterministic event ID binds the source
+declaration, source coordinate/generation, root session, artifact key/kind,
+and availability revision while excluding delivery time, phase, and sequence.
+This remains a crate-private, non-serialized event seam: the portable ordered
+artifact event wire, task-artifact discovery, complete promoted support,
+N-API/SDK observer transport, and D4 migration remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
