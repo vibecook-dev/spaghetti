@@ -2555,6 +2555,21 @@ observer sequence. Ambiguous source-driver failures are still internal rather
 than guessed into portable unavailable reasons. Task-artifact declaration,
 support promotion, and N-API/SDK observer transport also remain open.
 
+The next bounded D3 prerequisite (`dae66ba`) binds that current canonical
+artifact-availability snapshot into both bootstrap and resync completion
+identity. Watermark capture freezes only observations whose metadata evidence
+is still current, each barrier retains the exact validated snapshot, bootstrap
+epoch binding rejects any post-barrier availability drift, and both coverage
+and replacement completion digests change when an availability revision
+changes. The completion aggregate advances to contract v2 while the existing
+actor and usage replacement-family digest contract remains v1, avoiding an
+unrelated semantic-family revision. The snapshot is still crate-private and
+non-serializable: this slice does not invent an ordinary ordered
+artifact-availability event, a portable source-generation/error mapping, or
+an N-API/SDK observer surface. Dynamic artifact discovery, task-artifact
+declaration, complete promoted scope evidence, and support promotion also
+remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
