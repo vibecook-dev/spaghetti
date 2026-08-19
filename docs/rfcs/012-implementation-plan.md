@@ -2116,6 +2116,20 @@ Current landing status (2026-08-18):
   separate contextual contract. This adds no unified event union,
   typed-unknown preservation, public iterator/N-API method, native source
   access, or portable attachment authority; and
+- the known-envelope dispatch slice (`612e680`) now projects every currently
+  implemented ordered event through its existing strict usage, actor, source,
+  artifact-availability, completion, or continuity contract before dequeue.
+  The non-Serde, non-cloneable wrapper retains the exact process-local
+  attachment authority, redacts both wire and context values from diagnostics,
+  and binds common-family values to the selected contracts, resolved root, and
+  exact delivered source. Families with specialist consumer authority require
+  exactly that context; missing, stray, unselected-enrichment, or mapped-
+  delivery drift fails while the offered event remains queued. Exhaustive Rust
+  dispatch makes a newly added internal event variant a compile-time decision.
+  This is deliberately a known-event multiplexer rather than the complete
+  portable event union: no bounded `unknown_wire_event` carrier, typed-unknown
+  negotiation, TypeScript union, N-API iterator, native source access, or
+  portable attachment authority is added; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2124,10 +2138,12 @@ D1 remains `In progress`: multi-object discovery/cursor orchestration,
 declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2, coverage-complete durable query exposure, selected
-and portable actor/affiliation replacement integrity, and envelope variants
-outside the current usage, source-lifecycle, continuity, and completion
-families, the public N-API/SDK iterator transport for the current contextual
-watermark and event contracts over the internal async lifecycle runtime,
+and portable actor/affiliation replacement integrity, event variants outside
+the current usage, actor, source-lifecycle, artifact-availability, continuity,
+and completion specialist families, the bounded typed-unknown event carrier
+and complete portable union, the public N-API/SDK iterator transport for the
+current contextual watermark and event contracts over the internal async
+lifecycle runtime,
 portable dynamic/discovered scope coverage beyond the current exact
 known-object relation/root summary, dynamic/discovered scope membership beyond
 the attachment's current exact known-object grants and family coverage beyond
