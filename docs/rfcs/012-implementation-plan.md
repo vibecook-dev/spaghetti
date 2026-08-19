@@ -2155,6 +2155,15 @@ Current landing status (2026-08-19):
   caller-held sidecar selection and authorized source context. The runtime
   still has no internal unknown-event variant and does not retain the sidecar,
   emit unknown events, or expose native/N-API iterator transport; and
+- the attachment-binding slice (`89a0d3b`) now accepts that optional sidecar
+  request/offer as one trusted Rust-host input, negotiates it immediately after
+  the base observation contract and before artifact policy, support selection,
+  grant validation, or source authority, and retains the exact result on the
+  non-cloneable attachment host. Explicit absence preserves known-only
+  operation; incompatible preservation fails before an invalid adapter or
+  artifact policy can be consulted. This does not add an internal unknown-event
+  producer, accept caller-created carrier values, read a source, or expose a
+  native/public transport; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2165,7 +2174,7 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2, coverage-complete durable query exposure, selected
 and portable actor/affiliation replacement integrity, event variants outside
 the current usage, actor, source-lifecycle, artifact-availability, continuity,
-and completion specialist families, runtime production and attachment of
+and completion specialist families, trusted runtime production and emission of
 negotiated typed-unknown events, the public N-API/SDK iterator transport for the
 current contextual watermark and event contracts over the internal async
 lifecycle runtime,
@@ -2185,7 +2194,7 @@ public watermark and consumer-ready helper until dynamic scope membership/
 coverage, runtime-bound public close invocation, the native transport owner,
 and the remaining negotiated lifecycle surface are defined. The usage-v2 sink
 and delivery lane remain crate-private until the remaining lifecycle surface,
-unknown-sidecar attachment/emission, and runtime-bound negotiated portable
+unknown-event production/emission, and runtime-bound negotiated portable
 transport exist.
 
 ### D2. Claude scope composition
