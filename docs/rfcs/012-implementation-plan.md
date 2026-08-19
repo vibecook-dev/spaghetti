@@ -2047,6 +2047,26 @@ Current landing status (2026-08-18):
   canonical artifact fact adoption, evidence-to-key binding, and the native
   read mediator must land together before the policy ceiling can authorize an
   actual read; and
+- the contextual completion-envelope slice (`dc0fc41`) now freezes ordered
+  `observer.bootstrap_complete` and `observer.resync_complete` delivery without
+  exposing an observer transport. The non-Serde Rust consumer context is minted
+  from the authorized attachment immediately before dequeue and binds the exact
+  selection, resolved root, observer-control source, sequence, epoch, phase,
+  observed time, queue boundary, barrier lineage, replacement manifest,
+  capability/support-release evidence, RFC 012A source and scope coverage,
+  canonical explicit errors, and artifact-availability snapshot. Context
+  construction failure leaves the offered barrier queued. Rust reconstructs
+  both typed barriers and recomputes their BLAKE3 snapshot and event identities;
+  portable TypeScript consumes only the Rust-issued context and independently
+  enforces the strict nested shapes, bounds, and opaque-identity equality. The
+  barrier admission path was tightened with the wire slice: every negotiated
+  fact family now requires matching coverage/completeness even when empty, and
+  every coverage set must name the resolved root and the capability report's
+  one selected support release, so an invalid barrier cannot be accepted and
+  later wedge the consumer. A privacy-reduced Rust fixture covers both clean
+  bootstrap and resync at equal state. This adds no N-API method, portable
+  observer owner, unknown-event preservation, native source access, or task/
+  artifact discovery authority; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2056,8 +2076,9 @@ declared relation-backed decoder dependency access, built-in
 canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2, coverage-complete durable query exposure, selected
 and portable actor/affiliation replacement integrity, and envelope variants
-beyond the current usage/source-lifecycle families, the public N-API/SDK
-iterator transport over the internal async lifecycle runtime,
+outside the current usage, source-lifecycle, continuity, and completion
+families, the public N-API/SDK iterator transport over the internal async
+lifecycle runtime,
 portable dynamic/discovered scope coverage beyond the current exact
 known-object relation/root summary, dynamic/discovered scope membership beyond
 the attachment's current exact known-object grants and family coverage beyond
@@ -2070,9 +2091,9 @@ transports,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
 boundaries are now transactional, but they cannot become a public watermark and
-consumer-ready helper until dynamic scope-membership and portable barrier
-coverage, resync completion, runtime-bound public close invocation, and the
-remaining negotiated lifecycle surface are defined. The usage-v2 sink and
+consumer-ready helper until dynamic scope membership/coverage, runtime-bound
+public close invocation, the native transport owner, and the remaining
+negotiated lifecycle surface are defined. The usage-v2 sink and
 delivery lane remain crate-private until the complete envelope/event/lifecycle
 DTOs, bounded unknown-variant preservation, and runtime-bound negotiated
 portable transport exist.
