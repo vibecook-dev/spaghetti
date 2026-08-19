@@ -84,7 +84,7 @@
           "relation_id": "file-artifacts-from-evidence",
           "primitive": "ArtifactLocatorFromEvidence",
           "access_root": "home",
-          "locator": "file-history-artifact-locator",
+          "locator": "file-history/{native-session-id}/{backup-name}",
           "identity_inputs": ["native-session-id", "backup-name", "artifact-version"],
           "bounds": { "max_fan_out": 1024, "max_depth": 3, "max_objects": 2048, "max_bytes": 2147483648, "max_rows": 0 },
           "unavailable_behavior": "skip_optional",
@@ -96,7 +96,7 @@
   ],
   "blockers": [
     "Prove every RFC 012D Claude relation against sanitized lifecycle fixtures.",
-    "Replace conceptual task/file artifact locators with executable common-engine declaration parameters.",
+    "Replace the conceptual task artifact locator with executable common-engine declaration parameters.",
     "Add future descendant and team inbox membership relations with measured bounds.",
     "Wire the declarations to the common scoped observer and its access telemetry."
   ],

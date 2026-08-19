@@ -155,7 +155,7 @@ impl ClaudeCodeAdapter {
                         22,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
                         "sha256:5ec0d94f65d06aa72444d951ee65f6aff7e920e57d82188114eff7b26238ea40",
-                        "sha256:689c86b9770544f826da37e72d1c4a1a37153fad4091372b954bba90ca2d5f7c",
+                        "sha256:39768ea2fdb54dd9e7d0379088fd0972ac31b34d88c5bbc42c2e55f4ed37ce1a",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -4834,12 +4834,19 @@ impl From<SourceDriverError> for AdapterError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{FactEnvelope, FactRevisionId, FactSemanticContext, SourceInstance};
+    use crate::adapter::{
+        FactEnvelope, FactRevisionId, FactSemanticContext, ScopeProgramStatus, Sha256Digest,
+        SourceInstance,
+    };
     use crate::source::{
-        AppendDelimitedFile, AppendItem, AppendRead, RecordOrigin, SourceMediaType,
+        validate_evidence_locator_template, AccessOperation, AccessPhase, AppendDelimitedFile,
+        AppendItem, AppendRead, RecordOrigin, ScopeAccessPlan, ScopeAccessRequest,
+        ScopeIdentityInput, SourceMediaType,
     };
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
@@ -5541,6 +5548,121 @@ mod tests {
             assert!(adapter
                 .bootstrap_object(&instance(root.path()), &object(stream, invalid))
                 .is_err());
+        }
+    }
+
+    #[test]
+    fn candidate_file_artifact_locator_matches_sanitized_runtime_objects() {
+        let adapter = ClaudeCodeAdapter::new();
+        let manifest = adapter.manifest();
+        let support = manifest.support_binding.as_ref().unwrap();
+        assert_eq!(
+            support.scope_program_digest(),
+            Sha256Digest::of(SCOPE_PROGRAM_DOCUMENT)
+        );
+        let scope = manifest.scope_programs.as_ref().unwrap();
+        assert_eq!(scope.status, ScopeProgramStatus::Incomplete);
+        let program = scope
+            .program("observe-root-session-and-descendants")
+            .unwrap();
+        let relation = program
+            .relations
+            .iter()
+            .find(|relation| relation.relation_id == "file-artifacts-from-evidence")
+            .unwrap();
+        assert_eq!(
+            relation.locator,
+            "file-history/{native-session-id}/{backup-name}"
+        );
+        assert_eq!(
+            relation.identity_inputs,
+            ["native-session-id", "backup-name", "artifact-version"]
+        );
+        validate_evidence_locator_template(relation).unwrap();
+        let task_relation = program
+            .relations
+            .iter()
+            .find(|relation| relation.relation_id == "task-artifacts-from-evidence")
+            .unwrap();
+        assert!(validate_evidence_locator_template(task_relation).is_err());
+
+        let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/small/.claude");
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![fixture_root.clone()],
+                observed_at: 1,
+            })
+            .unwrap()
+            .pop()
+            .unwrap();
+        let instance = SourceInstance { id: 7, spec };
+        let artifact_stream = adapter
+            .streams(&instance)
+            .unwrap()
+            .into_iter()
+            .find(|stream| stream.id.as_str() == ARTIFACT_CONTENT_STREAM)
+            .unwrap();
+        assert_eq!(artifact_stream.selector.root_name, "home");
+        assert_eq!(artifact_stream.selector.include, ["file-history/*/*@v*"]);
+        assert_eq!(artifact_stream.decoder.as_str(), ARTIFACT_CONTENT_DECODER);
+
+        let plan = ScopeAccessPlan::for_program(scope, program.program_id.as_str()).unwrap();
+        for native_session_id in [
+            "40f26ec0-7084-ef15-b183-2d832ca4ecd6",
+            "f0b5e9e0-9d2e-784c-47fe-707d93b458ab",
+        ] {
+            let identity = [
+                ScopeIdentityInput {
+                    name: "native-session-id",
+                    value: native_session_id.as_bytes(),
+                },
+                ScopeIdentityInput {
+                    name: "backup-name",
+                    value: b"abc123@v1",
+                },
+                ScopeIdentityInput {
+                    name: "artifact-version",
+                    value: b"1",
+                },
+            ];
+            let rendered = plan
+                .reserve(ScopeAccessRequest {
+                    relation_id: relation.relation_id.as_str(),
+                    operation: AccessOperation::ObjectRead,
+                    phase: AccessPhase::Revalidation,
+                    parent_token: None,
+                    identity_inputs: &identity,
+                    depth: 3,
+                    max_bytes: 24,
+                    max_rows: 0,
+                })
+                .unwrap()
+                .render_evidence_locator(&identity)
+                .unwrap();
+            let expected = PathBuf::from(format!("file-history/{native_session_id}/abc123@v1"));
+            assert_eq!(rendered, expected);
+            assert_eq!(
+                std::fs::metadata(fixture_root.join(&rendered))
+                    .unwrap()
+                    .len(),
+                24
+            );
+
+            let context = adapter
+                .bootstrap_object(
+                    &instance,
+                    &object(ARTIFACT_CONTENT_STREAM, rendered.to_str().unwrap()),
+                )
+                .unwrap();
+            assert_eq!(
+                ClaudeArtifactContentContext::decode(&context).unwrap(),
+                ClaudeArtifactContentContext {
+                    native_session_id: native_session_id.to_string(),
+                    native_artifact_id: "abc123@v1".to_string(),
+                    native_file_hash: "abc123".to_string(),
+                    version: 1,
+                }
+            );
         }
     }
 
