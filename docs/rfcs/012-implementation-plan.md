@@ -2435,6 +2435,25 @@ kind-to-locator mapping, reserve `ArtifactLocatorFromEvidence`, construct a
 locator, read native bytes, produce a production availability result, enter a
 completion barrier, promote support, or expose public transport.
 
+The next bounded D3 prerequisite (`a681aa7`) binds that current artifact
+request to one exact promoted relation without performing native I/O. Trusted
+attachment input maps each selected artifact kind to a unique
+`ArtifactLocatorFromEvidence` declaration and supplies the exact absolute
+host-approved roots used by its selected known-object and artifact relations;
+known-object locators must use the same named root. The current evidence proof
+privately supplies the agreed backup identity and version, while the exact,
+complete native root-session claim supplies the session parameter. Callers
+cannot substitute any of the three declared identity inputs. One common
+access-pass reservation binds the attachment, active epoch, relation, root,
+declaration locator identifier, request ceiling, and opaque object token; it
+borrows both the validated epoch and pass and is conservatively abandoned if
+dropped. Debug and access telemetry retain no native root, session, backup, or
+tracked path. This slice deliberately does not interpret the declaration's
+locator identifier, render a relative path, open a native object, complete the
+reservation, produce artifact availability, enter a barrier, promote Claude's
+incomplete Candidate scope program, or expose N-API/SDK transport. Executable
+Claude locator parameters and a common confined read mediator remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
