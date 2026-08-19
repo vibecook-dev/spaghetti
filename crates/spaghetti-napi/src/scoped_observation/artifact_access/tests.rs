@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use serde_json::Value;
 use tempfile::TempDir;
 
 use crate::adapter::{
@@ -291,6 +292,34 @@ fn write_artifact(temp: &TempDir, suffix: &str, content: &[u8]) -> std::path::Pa
     path
 }
 
+fn observed_artifact(
+    host: &ScopedObservationAccessHost,
+    active: &ScopedObservationEpochState,
+    pass: &ScopedObservationAccessPass,
+    artifact_key: CanonicalEntityKey,
+    expected_generation: Option<u64>,
+    max_bytes: u64,
+    content_policy: ScopedArtifactContentPolicy,
+) -> Value {
+    let command = artifact_command(
+        host,
+        active,
+        artifact_key,
+        expected_generation,
+        max_bytes,
+        content_policy,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(active, &command)
+        .unwrap();
+    let capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    serde_json::to_value(capture.into_observed().unwrap()).unwrap()
+}
+
 #[test]
 fn exact_evidence_relation_reservation_is_bound_redacted_and_conservative() {
     let temp = TempDir::new().unwrap();
@@ -456,6 +485,176 @@ fn confined_capture_applies_disclosure_policy_and_retains_generation_binding() {
 }
 
 #[test]
+fn portable_capture_uses_attachment_local_replace_generation_without_retargeting() {
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "generation", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    let path = write_artifact(&temp, "generation", b"first revision\n");
+    let pass = host.begin_pass().unwrap();
+
+    let first = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        None,
+        128,
+        ScopedArtifactContentPolicy::Inline,
+    );
+    assert_eq!(first["outcome"]["kind"], "available");
+    assert_eq!(first["outcome"]["generation"], 1);
+    assert_eq!(first["outcome"]["size_bytes"], 15);
+    let first_provenance = first["outcome"]["provenance_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    drop(pass);
+    let pass = host.begin_pass().unwrap();
+
+    let repeated = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(1),
+        128,
+        ScopedArtifactContentPolicy::HashOnly,
+    );
+    assert_eq!(repeated["outcome"]["kind"], "available");
+    assert_eq!(repeated["outcome"]["generation"], 1);
+    assert_eq!(repeated["outcome"]["provenance_ref"], first_provenance);
+    assert!(repeated["outcome"]["content_base64"].is_null());
+
+    std::fs::write(&path, b"second revision\n").unwrap();
+    let revised = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(1),
+        128,
+        ScopedArtifactContentPolicy::HashOnly,
+    );
+    assert_eq!(revised["outcome"]["kind"], "available");
+    assert_eq!(revised["outcome"]["generation"], 1);
+    assert_ne!(revised["outcome"]["provenance_ref"], first_provenance);
+
+    std::fs::remove_file(&path).unwrap();
+    let deleted = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(1),
+        128,
+        ScopedArtifactContentPolicy::Inline,
+    );
+    assert_eq!(deleted["outcome"]["kind"], "unavailable");
+    assert_eq!(deleted["outcome"]["reason"], "changed_generation");
+    assert_eq!(deleted["outcome"]["observed_generation"], 2);
+    assert!(deleted["outcome"]["observed_bytes"].is_null());
+    assert!(deleted["outcome"].get("content_base64").is_none());
+    let deleted_provenance = deleted["outcome"]["provenance_ref"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let still_missing = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(2),
+        128,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    assert_eq!(still_missing["outcome"]["reason"], "missing");
+    assert_eq!(still_missing["outcome"]["observed_generation"], 2);
+    assert_eq!(
+        still_missing["outcome"]["provenance_ref"],
+        deleted_provenance
+    );
+
+    write_artifact(&temp, "generation", b"recreated\n");
+    let recreated = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(2),
+        128,
+        ScopedArtifactContentPolicy::Inline,
+    );
+    assert_eq!(recreated["outcome"]["reason"], "changed_generation");
+    assert_eq!(recreated["outcome"]["observed_generation"], 3);
+    assert!(recreated["outcome"].get("content_base64").is_none());
+
+    let current = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(3),
+        128,
+        ScopedArtifactContentPolicy::Inline,
+    );
+    assert_eq!(current["outcome"]["kind"], "available");
+    assert_eq!(current["outcome"]["generation"], 3);
+    assert_eq!(current["outcome"]["size_bytes"], 10);
+
+    let encoded = serde_json::to_string(&[
+        first,
+        repeated,
+        revised,
+        deleted,
+        still_missing,
+        recreated,
+        current,
+    ])
+    .unwrap();
+    assert!(!encoded.contains(temp.path().to_string_lossy().as_ref()));
+    assert!(!encoded.contains("backup-17@v7"));
+}
+
+#[test]
+fn generation_ledger_is_bounded_and_overflow_fails_without_mutation() {
+    let mut ledger = ScopedArtifactGenerationLedger::new();
+    for ordinal in 0..MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS {
+        let mut bytes = [0; 32];
+        bytes[..8].copy_from_slice(&(ordinal as u64).to_be_bytes());
+        let token = AccessObjectToken::from_bytes(bytes);
+        ledger.preflight(token).unwrap();
+        assert_eq!(ledger.observe(token, true).unwrap(), Some(1));
+    }
+    let full_token = AccessObjectToken::from_bytes([0xff; 32]);
+    assert!(matches!(
+        ledger.preflight(full_token),
+        Err(ScopedArtifactRelationAccessError::GenerationCapacityExhausted)
+    ));
+    assert!(!ledger.objects.contains_key(&full_token));
+
+    let overflow_token = AccessObjectToken::from_bytes([0; 32]);
+    ledger.objects.insert(
+        overflow_token,
+        ScopedArtifactGenerationEntry {
+            generation: u64::MAX,
+            present: true,
+        },
+    );
+    assert!(matches!(
+        ledger.observe(overflow_token, false),
+        Err(ScopedArtifactRelationAccessError::GenerationExhausted)
+    ));
+    assert_eq!(
+        ledger.objects.get(&overflow_token),
+        Some(&ScopedArtifactGenerationEntry {
+            generation: u64::MAX,
+            present: true,
+        })
+    );
+}
+
+#[test]
 fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosure() {
     let temp = TempDir::new().unwrap();
     let host = artifact_host(&temp, "bounds", true);
@@ -479,10 +678,13 @@ fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosur
         .read_confined()
         .unwrap();
     assert!(matches!(
-        capture.state,
-        ScopedArtifactConfinedCaptureState::Missing
+        &capture.state,
+        ScopedArtifactConfinedCaptureState::Missing { .. }
     ));
-    drop(capture);
+    let missing = serde_json::to_value(capture.into_observed().unwrap()).unwrap();
+    assert_eq!(missing["outcome"]["reason"], "missing");
+    assert!(missing["outcome"]["observed_generation"].is_null());
+    assert!(missing["outcome"]["provenance_ref"].is_null());
 
     let path = write_artifact(&temp, "bounds", b"123456789");
     let command = artifact_command(
@@ -502,10 +704,30 @@ fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosur
         .read_confined()
         .unwrap();
     assert!(matches!(
-        capture.state,
-        ScopedArtifactConfinedCaptureState::Oversized { observed_bytes: 9 }
+        &capture.state,
+        ScopedArtifactConfinedCaptureState::Oversized {
+            observed_bytes: 9,
+            ..
+        }
     ));
-    drop(capture);
+    let oversized = serde_json::to_value(capture.into_observed().unwrap()).unwrap();
+    assert_eq!(oversized["outcome"]["reason"], "over_limit");
+    assert_eq!(oversized["outcome"]["observed_generation"], 1);
+    assert_eq!(oversized["outcome"]["observed_bytes"], 9);
+    assert!(oversized["outcome"]["provenance_ref"].is_string());
+
+    let changed = observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(2),
+        8,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    assert_eq!(changed["outcome"]["reason"], "changed_generation");
+    assert_eq!(changed["outcome"]["observed_generation"], 1);
+    assert!(changed["outcome"]["observed_bytes"].is_null());
 
     #[cfg(unix)]
     {
@@ -548,15 +770,16 @@ fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosur
         .unwrap()
         .clone();
     #[cfg(unix)]
-    assert_eq!(relation.attempts, 3);
+    assert_eq!(relation.attempts, 4);
     #[cfg(not(unix))]
-    assert_eq!(relation.attempts, 2);
+    assert_eq!(relation.attempts, 3);
     assert_eq!(relation.abandoned, 0);
     assert_eq!(relation.trace[0].outcome, AccessOutcome::Unavailable);
     assert_eq!(relation.trace[1].outcome, AccessOutcome::Oversized);
+    assert_eq!(relation.trace[2].outcome, AccessOutcome::Oversized);
     #[cfg(unix)]
     {
-        assert_eq!(relation.trace[2].outcome, AccessOutcome::Failed);
+        assert_eq!(relation.trace[3].outcome, AccessOutcome::Failed);
         assert_eq!(relation.bytes_read, 8);
     }
     #[cfg(not(unix))]
@@ -601,6 +824,44 @@ fn confined_capture_discards_a_read_if_the_attachment_closed_before_open() {
     assert_eq!(relation.bytes_read, 0);
     assert_eq!(relation.completed, 1);
     assert_eq!(relation.trace[0].outcome, AccessOutcome::Unavailable);
+}
+
+#[test]
+fn confined_capture_cannot_publish_after_attachment_close() {
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "close-after-read", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    write_artifact(&temp, "close-after-read", b"read then discard");
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        64,
+        ScopedArtifactContentPolicy::Inline,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let pass = host.begin_pass().unwrap();
+    let capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    host.close();
+    assert_eq!(
+        capture.into_observed().unwrap_err(),
+        ScopedArtifactContractError::Closed
+    );
+    let report = pass.report();
+    let relation = report
+        .relations()
+        .iter()
+        .find(|relation| relation.relation_id == "file-artifact")
+        .unwrap();
+    assert_eq!(relation.bytes_read, 17);
+    assert_eq!(relation.trace[0].outcome, AccessOutcome::Available);
 }
 
 #[test]

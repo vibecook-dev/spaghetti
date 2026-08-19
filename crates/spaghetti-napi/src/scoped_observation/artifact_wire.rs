@@ -2,11 +2,12 @@
 //!
 //! This module freezes the portable request/result shape without granting any
 //! native locator or source-read authority. A request can be minted only from
-//! an existing authorized attachment and contains no path. A future common
-//! mediator must still consume an exact `ArtifactLocatorFromEvidence`
-//! reservation before it may construct an outcome. Portable consumption is
-//! bound to the caller-held in-process command; neither the context wire nor a
-//! response can authorize access by itself.
+//! an existing authorized attachment and contains no path. The common mediator
+//! must consume an exact `ArtifactLocatorFromEvidence` reservation and bind a
+//! confined capture to attachment-local source generation before it may
+//! construct an outcome. Portable consumption is bound to the caller-held
+//! in-process command; neither the context wire nor a response can authorize
+//! access by itself.
 
 use std::fmt;
 use std::sync::Arc;
@@ -19,6 +20,7 @@ use serde_json::Value as JsonValue;
 use crate::adapter::{CanonicalEntityKey, Sha256Digest};
 use crate::observation_contract::ObservationContractSelection;
 
+use super::artifact_access::ScopedArtifactOutcomeAuthority;
 use super::artifact_evidence::ScopedArtifactEvidenceSelection;
 use super::{
     ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy, ScopedObservationAccessHost,
@@ -179,6 +181,24 @@ impl ScopedValidatedArtifactReadCommand<'_> {
 
     pub(super) fn expected_generation(&self) -> Option<u64> {
         self.command.expected_generation
+    }
+
+    pub(super) fn evidence_revision(&self) -> [u8; DIGEST_BYTES] {
+        *self
+            .command
+            .artifact_evidence
+            .as_ref()
+            .expect("a validated evidence-bound artifact command retains its evidence")
+            .revision()
+            .as_bytes()
+    }
+
+    pub(super) fn observed(
+        &self,
+        _authority: ScopedArtifactOutcomeAuthority,
+        outcome: ScopedArtifactReadOutcome,
+    ) -> Result<ScopedObservedArtifactWire, ScopedArtifactContractError> {
+        ScopedObservedArtifactWire::from_outcome(self.command, outcome)
     }
 }
 

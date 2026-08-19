@@ -4,9 +4,9 @@
 //! reserve one exact promoted `ArtifactLocatorFromEvidence` relation and
 //! render its declaration template from already-bound identity evidence. A
 //! consumed reservation may then use the common no-follow stable-file driver
-//! to produce a bounded private capture. The capture deliberately does not
-//! claim portable artifact availability because the exact native source-object
-//! generation still requires an independent authority.
+//! to produce a bounded private capture. An attachment-owned generation ledger
+//! binds that capture to common ReplaceDocument-style presence lineage before
+//! the existing strict wire contract may serialize an outcome.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -23,7 +23,11 @@ use crate::source::{
     StableRead,
 };
 
-use super::artifact_wire::ScopedValidatedArtifactReadCommand;
+use super::artifact_evidence::MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS;
+use super::artifact_wire::{
+    ScopedArtifactContractError, ScopedArtifactReadOutcome, ScopedArtifactUnavailableReason,
+    ScopedObservedArtifactWire, ScopedValidatedArtifactReadCommand,
+};
 use super::{
     ScopedAccessRootGrant, ScopedArtifactContentPolicy, ScopedArtifactRelationGrant,
     ScopedKnownObjectGrant, ScopedObservationAccessError, ScopedObservationAccessPass,
@@ -43,6 +47,10 @@ pub(crate) enum ScopedArtifactRelationAccessError {
     Closed,
     #[error("scoped artifact confined read failed: {0:?}")]
     Source(ScopedSourceFailureClass),
+    #[error("scoped artifact generation ledger is full")]
+    GenerationCapacityExhausted,
+    #[error("scoped artifact source generation overflowed")]
+    GenerationExhausted,
     #[error(transparent)]
     Access(#[from] AccessBudgetError),
 }
@@ -68,27 +76,105 @@ pub(crate) struct ScopedArtifactRelationReservation<'command, 'pass> {
     _artifact_version: Arc<str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopedArtifactGenerationEntry {
+    generation: u64,
+    present: bool,
+}
+
+/// Attachment-local source generation lineage for evidence-derived artifact
+/// objects. This mirrors the common ReplaceDocument presence semantics: a
+/// content revision or native file-identity replacement is same-generation,
+/// while an observed delete or recreation advances the generation. The exact
+/// relation/session/backup/version object token prevents cross-object reuse.
+pub(super) struct ScopedArtifactGenerationLedger {
+    objects: BTreeMap<AccessObjectToken, ScopedArtifactGenerationEntry>,
+}
+
+impl ScopedArtifactGenerationLedger {
+    pub(super) fn new() -> Self {
+        Self {
+            objects: BTreeMap::new(),
+        }
+    }
+
+    fn preflight(
+        &self,
+        object_token: AccessObjectToken,
+    ) -> Result<(), ScopedArtifactRelationAccessError> {
+        if !self.objects.contains_key(&object_token)
+            && self.objects.len() >= MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS
+        {
+            return Err(ScopedArtifactRelationAccessError::GenerationCapacityExhausted);
+        }
+        Ok(())
+    }
+
+    fn observe(
+        &mut self,
+        object_token: AccessObjectToken,
+        present: bool,
+    ) -> Result<Option<u64>, ScopedArtifactRelationAccessError> {
+        let Some(previous) = self.objects.get(&object_token).copied() else {
+            if !present {
+                return Ok(None);
+            }
+            self.objects.insert(
+                object_token,
+                ScopedArtifactGenerationEntry {
+                    generation: 1,
+                    present: true,
+                },
+            );
+            return Ok(Some(1));
+        };
+        let generation = if previous.present == present {
+            previous.generation
+        } else {
+            previous
+                .generation
+                .checked_add(1)
+                .ok_or(ScopedArtifactRelationAccessError::GenerationExhausted)?
+        };
+        self.objects.insert(
+            object_token,
+            ScopedArtifactGenerationEntry {
+                generation,
+                present,
+            },
+        );
+        Ok(Some(generation))
+    }
+}
+
 enum ScopedArtifactConfinedCaptureState {
-    Missing,
+    Missing {
+        observed_generation: Option<u64>,
+        provenance_ref: Option<[u8; 32]>,
+    },
     Oversized {
         observed_bytes: u64,
+        generation: u64,
+        provenance_ref: [u8; 32],
     },
     Unstable,
     Stable {
         _file_identity: FileIdentity,
         _modified_ns: i128,
         _revision: Revision,
+        generation: u64,
+        provenance_ref: [u8; 32],
         size_bytes: u64,
         content_hash: Option<Sha256Digest>,
         content: Option<Vec<u8>>,
     },
 }
 
-/// One bounded, stable native capture that deliberately stops before the
-/// portable artifact outcome. The borrowed validated command remains attached
-/// because its optional expected generation still requires an independent
-/// source-object generation authority. Native identity, revision, hash, and
-/// bytes are redacted from Debug and never serialized here.
+/// One bounded native capture with an attachment-local source generation. The
+/// borrowed validated command remains attached through generation comparison
+/// and portable outcome construction. Native identity, revision, hash, and
+/// bytes are redacted from Debug; disclosure into the wire remains governed by
+/// the exact validated content policy.
 pub(crate) struct ScopedArtifactConfinedCapture<'command, 'pass> {
     _validated: ScopedValidatedArtifactReadCommand<'command>,
     _pass: &'pass ScopedObservationAccessPass,
@@ -96,14 +182,38 @@ pub(crate) struct ScopedArtifactConfinedCapture<'command, 'pass> {
     state: ScopedArtifactConfinedCaptureState,
 }
 
+/// Unforgeable zero-sized witness that portable outcome construction consumed
+/// one generation-bound confined capture. Its tuple constructor is private to
+/// this module, so evidence validation alone cannot mint an observed result.
+pub(super) struct ScopedArtifactOutcomeAuthority(());
+
 impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (state, observed_bytes, has_content_hash, has_inline_content) = match &self.state {
-            ScopedArtifactConfinedCaptureState::Missing => ("missing", None, false, false),
-            ScopedArtifactConfinedCaptureState::Oversized { observed_bytes } => {
-                ("oversized", Some(*observed_bytes), false, false)
+        let (
+            state,
+            observed_bytes,
+            has_generation,
+            has_provenance,
+            has_content_hash,
+            has_inline_content,
+        ) = match &self.state {
+            ScopedArtifactConfinedCaptureState::Missing {
+                observed_generation,
+                provenance_ref,
+            } => (
+                "missing",
+                None,
+                observed_generation.is_some(),
+                provenance_ref.is_some(),
+                false,
+                false,
+            ),
+            ScopedArtifactConfinedCaptureState::Oversized { observed_bytes, .. } => {
+                ("oversized", Some(*observed_bytes), true, true, false, false)
             }
-            ScopedArtifactConfinedCaptureState::Unstable => ("unstable", None, false, false),
+            ScopedArtifactConfinedCaptureState::Unstable => {
+                ("unstable", None, false, false, false, false)
+            }
             ScopedArtifactConfinedCaptureState::Stable {
                 size_bytes,
                 content_hash,
@@ -112,6 +222,8 @@ impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
             } => (
                 "stable",
                 Some(*size_bytes),
+                true,
+                true,
                 content_hash.is_some(),
                 content.is_some(),
             ),
@@ -121,6 +233,8 @@ impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
             .field("object_token", &self.object_token)
             .field("state", &state)
             .field("observed_bytes", &observed_bytes)
+            .field("has_generation", &has_generation)
+            .field("has_provenance", &has_provenance)
             .field("has_content_hash", &has_content_hash)
             .field("has_inline_content", &has_inline_content)
             .field("native_path", &"<redacted>")
@@ -130,10 +244,105 @@ impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
     }
 }
 
+impl ScopedArtifactConfinedCapture<'_, '_> {
+    /// Convert a generation-bound private capture into the frozen portable
+    /// artifact shape. Generation mismatch is resolved before any retained
+    /// content can enter the wire; the exact validated command performs the
+    /// final request/content-policy checks.
+    pub(crate) fn into_observed(
+        self,
+    ) -> Result<ScopedObservedArtifactWire, ScopedArtifactContractError> {
+        if self
+            ._pass
+            .state
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ScopedArtifactContractError::Closed);
+        }
+        let expected_generation = self._validated.expected_generation();
+        let outcome = match self.state {
+            ScopedArtifactConfinedCaptureState::Missing {
+                observed_generation,
+                provenance_ref,
+            } => ScopedArtifactReadOutcome::Unavailable {
+                reason: if generation_changed(expected_generation, observed_generation) {
+                    ScopedArtifactUnavailableReason::ChangedGeneration
+                } else {
+                    ScopedArtifactUnavailableReason::Missing
+                },
+                observed_generation,
+                observed_bytes: None,
+                provenance_ref,
+            },
+            ScopedArtifactConfinedCaptureState::Oversized {
+                observed_bytes,
+                generation,
+                provenance_ref,
+            } => {
+                let changed = generation_changed(expected_generation, Some(generation));
+                ScopedArtifactReadOutcome::Unavailable {
+                    reason: if changed {
+                        ScopedArtifactUnavailableReason::ChangedGeneration
+                    } else {
+                        ScopedArtifactUnavailableReason::OverLimit
+                    },
+                    observed_generation: Some(generation),
+                    observed_bytes: (!changed).then_some(observed_bytes),
+                    provenance_ref: Some(provenance_ref),
+                }
+            }
+            ScopedArtifactConfinedCaptureState::Unstable => {
+                ScopedArtifactReadOutcome::Unavailable {
+                    reason: ScopedArtifactUnavailableReason::Unstable,
+                    observed_generation: None,
+                    observed_bytes: None,
+                    provenance_ref: None,
+                }
+            }
+            ScopedArtifactConfinedCaptureState::Stable {
+                generation,
+                provenance_ref,
+                ..
+            } if generation_changed(expected_generation, Some(generation)) => {
+                ScopedArtifactReadOutcome::Unavailable {
+                    reason: ScopedArtifactUnavailableReason::ChangedGeneration,
+                    observed_generation: Some(generation),
+                    observed_bytes: None,
+                    provenance_ref: Some(provenance_ref),
+                }
+            }
+            ScopedArtifactConfinedCaptureState::Stable {
+                generation,
+                provenance_ref,
+                size_bytes,
+                content_hash,
+                content,
+                ..
+            } => ScopedArtifactReadOutcome::Available {
+                generation,
+                provenance_ref,
+                size_bytes,
+                content_hash,
+                content,
+            },
+        };
+        self._validated
+            .observed(ScopedArtifactOutcomeAuthority(()), outcome)
+    }
+}
+
+fn generation_changed(expected: Option<u64>, observed: Option<u64>) -> bool {
+    expected
+        .zip(observed)
+        .is_some_and(|(expected, observed)| expected != observed)
+}
+
 impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
-    /// Consume this exact reservation with the common stable-file driver. This
-    /// produces a private capture only: source-object generation and portable
-    /// outcome construction remain separate authority boundaries.
+    /// Consume this exact reservation with the common stable-file driver and
+    /// the attachment's bounded source-generation ledger. Portable outcome
+    /// construction remains a separate consuming step so generation mismatch
+    /// can discard retained content before serialization.
     pub(crate) fn read_confined(
         self,
     ) -> Result<ScopedArtifactConfinedCapture<'command, 'pass>, ScopedArtifactRelationAccessError>
@@ -163,6 +372,15 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
                 ));
             }
         };
+        let mut generations = pass
+            .state
+            .artifact_generations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) = generations.preflight(object_token) {
+            reservation.complete(0, 0, AccessOutcome::Failed)?;
+            return Err(error);
+        }
         let read = match read_stable_file_confined(&root, &relative_path, max_bytes) {
             Ok(read) => read,
             Err(error) => {
@@ -177,15 +395,55 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
             return Err(ScopedArtifactRelationAccessError::Closed);
         }
         let content_policy = validated.content_policy();
+        let evidence_revision = validated.evidence_revision();
         let state = match read {
             StableRead::Missing => {
+                let observed_generation = match generations.observe(object_token, false) {
+                    Ok(generation) => generation,
+                    Err(error) => {
+                        reservation.complete(0, 0, AccessOutcome::Failed)?;
+                        return Err(error);
+                    }
+                };
+                let provenance_ref = observed_generation.map(|generation| {
+                    artifact_provenance_ref(
+                        object_token,
+                        generation,
+                        evidence_revision,
+                        ArtifactProvenanceObservation::Missing,
+                    )
+                });
                 reservation.complete(0, 0, AccessOutcome::Unavailable)?;
-                ScopedArtifactConfinedCaptureState::Missing
+                ScopedArtifactConfinedCaptureState::Missing {
+                    observed_generation,
+                    provenance_ref,
+                }
             }
             StableRead::Oversized(stamp) => {
+                let generation = match generations.observe(object_token, true) {
+                    Ok(Some(generation)) => generation,
+                    Ok(None) => unreachable!("present observations always establish generation"),
+                    Err(error) => {
+                        reservation.complete(0, 0, AccessOutcome::Failed)?;
+                        return Err(error);
+                    }
+                };
+                let provenance_ref = artifact_provenance_ref(
+                    object_token,
+                    generation,
+                    evidence_revision,
+                    ArtifactProvenanceObservation::FileStamp {
+                        identity: &stamp.identity,
+                        modified_ns: stamp.modified_ns,
+                        size_bytes: stamp.len,
+                        revision: None,
+                    },
+                );
                 reservation.complete(0, 0, AccessOutcome::Oversized)?;
                 ScopedArtifactConfinedCaptureState::Oversized {
                     observed_bytes: stamp.len,
+                    generation,
+                    provenance_ref,
                 }
             }
             StableRead::Unstable => {
@@ -198,6 +456,25 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
                 revision,
             } => {
                 let size_bytes = bytes.len() as u64;
+                let generation = match generations.observe(object_token, true) {
+                    Ok(Some(generation)) => generation,
+                    Ok(None) => unreachable!("present observations always establish generation"),
+                    Err(error) => {
+                        reservation.complete(size_bytes, 0, AccessOutcome::Failed)?;
+                        return Err(error);
+                    }
+                };
+                let provenance_ref = artifact_provenance_ref(
+                    object_token,
+                    generation,
+                    evidence_revision,
+                    ArtifactProvenanceObservation::FileStamp {
+                        identity: &stamp.identity,
+                        modified_ns: stamp.modified_ns,
+                        size_bytes,
+                        revision: Some(revision),
+                    },
+                );
                 let content_hash = matches!(
                     content_policy,
                     ScopedArtifactContentPolicy::HashOnly | ScopedArtifactContentPolicy::Inline
@@ -210,6 +487,8 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
                     _file_identity: stamp.identity,
                     _modified_ns: stamp.modified_ns,
                     _revision: revision,
+                    generation,
+                    provenance_ref,
                     size_bytes,
                     content_hash,
                     content,
@@ -223,6 +502,58 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
             state,
         })
     }
+}
+
+enum ArtifactProvenanceObservation<'a> {
+    Missing,
+    FileStamp {
+        identity: &'a FileIdentity,
+        modified_ns: i128,
+        size_bytes: u64,
+        revision: Option<Revision>,
+    },
+}
+
+fn artifact_provenance_ref(
+    object_token: AccessObjectToken,
+    generation: u64,
+    evidence_revision: [u8; 32],
+    observation: ArtifactProvenanceObservation<'_>,
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/artifact-provenance/v1\0");
+    hasher.update(object_token.as_bytes());
+    hasher.update(&generation.to_be_bytes());
+    hasher.update(&evidence_revision);
+    match observation {
+        ArtifactProvenanceObservation::Missing => {
+            hasher.update(&[1]);
+        }
+        ArtifactProvenanceObservation::FileStamp {
+            identity,
+            modified_ns,
+            size_bytes,
+            revision,
+        } => {
+            hasher.update(&[2]);
+            let mut identity_bytes = Vec::with_capacity(32);
+            identity.encode_into(&mut identity_bytes);
+            hasher.update(&(identity_bytes.len() as u64).to_be_bytes());
+            hasher.update(&identity_bytes);
+            hasher.update(&modified_ns.to_be_bytes());
+            hasher.update(&size_bytes.to_be_bytes());
+            match revision {
+                Some(revision) => {
+                    hasher.update(&[1]);
+                    hasher.update(revision.as_bytes());
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
+    };
+    *hasher.finalize().as_bytes()
 }
 
 impl fmt::Debug for ScopedArtifactRelationReservation<'_, '_> {

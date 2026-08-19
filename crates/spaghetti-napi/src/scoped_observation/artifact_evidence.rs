@@ -21,7 +21,7 @@ use super::{
 };
 
 pub(super) const SCOPED_ARTIFACT_EVIDENCE_CONTRACT_VERSION: u32 = 1;
-const MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS: usize = 4_096;
+pub(super) const MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS: usize = 4_096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum ScopedArtifactEvidenceDisposition {

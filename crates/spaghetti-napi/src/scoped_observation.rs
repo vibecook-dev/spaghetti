@@ -12893,6 +12893,7 @@ struct ScopedObservationAccessState {
     closed: AtomicBool,
     pass_active: AtomicBool,
     next_pass_id: AtomicU64,
+    artifact_generations: Mutex<artifact_access::ScopedArtifactGenerationLedger>,
     consumer_drain_opened: AtomicBool,
     watcher_orchestrator_opened: AtomicBool,
     poll: Arc<ScopedObservationPollRuntime>,
@@ -13059,6 +13060,9 @@ impl ScopedObservationAccessHost {
                 closed: AtomicBool::new(false),
                 pass_active: AtomicBool::new(false),
                 next_pass_id: AtomicU64::new(1),
+                artifact_generations: Mutex::new(
+                    artifact_access::ScopedArtifactGenerationLedger::new(),
+                ),
                 consumer_drain_opened: AtomicBool::new(false),
                 watcher_orchestrator_opened: AtomicBool::new(false),
                 poll: Arc::new(ScopedObservationPollRuntime::default()),
