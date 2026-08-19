@@ -2857,10 +2857,16 @@ impl ScopedObservationYieldedEnvelope {
     }
 
     /// Attachment-bound strict wire projection for every currently known event
-    /// family. This is deliberately not the complete RFC 012D union until a
-    /// negotiated bounded `unknown_wire_event` carrier also exists.
+    /// family. Specialist consumers may continue using this narrower view.
     pub fn known_envelope(&self) -> &ScopedObservationKnownEnvelope {
         &self.known_envelope
+    }
+
+    /// Complete portable RFC 012D outer-union value for this delivery. The
+    /// current runtime emits only known branches; an unknown branch additionally
+    /// requires the drain's exact negotiated sidecar and a trusted producer.
+    pub fn event_union_value(&self) -> serde_json::Value {
+        self.known_envelope.event_union_value()
     }
 
     /// Exact caller-held authority for consuming an ordered artifact-
@@ -2977,6 +2983,7 @@ pub struct ScopedObservationConsumerDrain {
     mapper: ScopedObservationEnvelopeMapper,
     completion_capability_context:
         Arc<capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext>,
+    unknown_wire_selection: Option<Arc<ObservationUnknownWireContractSelection>>,
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
     authority: Arc<ScopedObservationApplicationAuthority>,
@@ -3002,10 +3009,31 @@ impl ScopedObservationConsumerDrain {
         lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
         limits: ScopedObservationDeliveryLimits,
     ) -> Result<Self, ScopedDeliveryError> {
+        Self::new_with_unknown_wire(
+            mapper,
+            completion_capability_context,
+            None,
+            attachment_authority,
+            lifecycle,
+            limits,
+        )
+    }
+
+    fn new_with_unknown_wire(
+        mapper: ScopedObservationEnvelopeMapper,
+        completion_capability_context: Arc<
+            capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext,
+        >,
+        unknown_wire_selection: Option<Arc<ObservationUnknownWireContractSelection>>,
+        attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
+        limits: ScopedObservationDeliveryLimits,
+    ) -> Result<Self, ScopedDeliveryError> {
         let authority = Arc::new(ScopedObservationApplicationAuthority);
         Ok(Self {
             mapper,
             completion_capability_context,
+            unknown_wire_selection,
             attachment_authority,
             lifecycle,
             authority,
@@ -3020,6 +3048,14 @@ impl ScopedObservationConsumerDrain {
             lifecycle_registered: false,
             closed: false,
         })
+    }
+
+    /// Exact optional preservation sidecar retained by the sole attachment
+    /// consumer. It is negotiation context, not event or source authority.
+    pub(crate) fn unknown_wire_contract_selection(
+        &self,
+    ) -> Option<&ObservationUnknownWireContractSelection> {
+        self.unknown_wire_selection.as_deref()
     }
 
     /// Yield one mapped envelope. The next envelope remains unavailable until
@@ -13344,7 +13380,7 @@ pub struct ScopedObservationAccessHost {
     /// Exact optional sidecar selected before source authority. The
     /// non-cloneable attachment host retains it until a later trusted runtime
     /// producer can emit bounded unknown events.
-    unknown_wire_selection: Option<ObservationUnknownWireContractSelection>,
+    unknown_wire_selection: Option<Arc<ObservationUnknownWireContractSelection>>,
     observation_capabilities: ObservationCapabilities,
     completion_capability_context:
         Arc<capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext>,
@@ -13400,7 +13436,8 @@ impl ScopedObservationAccessHost {
                     &observation_contract,
                 )
             })
-            .transpose()?;
+            .transpose()?
+            .map(Arc::new);
         artifact_wire::validate_attachment_artifact_access_policy(
             request.artifact_access_policy,
         )
@@ -13529,7 +13566,7 @@ impl ScopedObservationAccessHost {
     pub(crate) fn unknown_wire_contract_selection(
         &self,
     ) -> Option<&ObservationUnknownWireContractSelection> {
-        self.unknown_wire_selection.as_ref()
+        self.unknown_wire_selection.as_deref()
     }
 
     /// Selection-bound RFC 012D per-family support report. Current source
@@ -13606,12 +13643,13 @@ impl ScopedObservationAccessHost {
         if self.state.closed.load(Ordering::Acquire) || self.lifecycle.is_closing() {
             return Err(ScopedObservationOpenDrainError::Closed);
         }
-        let mut drain = ScopedObservationConsumerDrain::new(
+        let mut drain = ScopedObservationConsumerDrain::new_with_unknown_wire(
             ScopedObservationEnvelopeMapper::new(
                 self.root_identity.clone(),
                 self.observation_contract.clone(),
             ),
             Arc::clone(&self.completion_capability_context),
+            self.unknown_wire_selection.as_ref().map(Arc::clone),
             Arc::clone(&self.attachment_authority),
             Arc::clone(&self.lifecycle),
             limits,
@@ -18515,7 +18553,7 @@ mod projection_tests {
             );
             assert_eq!(&transport["event"], known.wire_value());
             assert_eq!(&transport["context"], known.context_value());
-            let union = known.event_union_value();
+            let union = yielded.event_union_value();
             assert_eq!(
                 union["scoped_observation_event_union_contract_version"],
                 event_wire::SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION

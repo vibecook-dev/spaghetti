@@ -1861,11 +1861,27 @@ pub(crate) mod tests {
         let selected = host.unknown_wire_contract_selection().unwrap();
         assert_eq!(selected.max_preserved_bytes(), 4_096);
         assert_eq!(selected.observation_selection(), host.contract_selection());
+        let drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        assert_eq!(drain.unknown_wire_contract_selection(), Some(selected));
 
         let mut absent = scoped_access_request(temp.path().join("absent"));
         absent.unknown_wire_contract = None;
         let absent = ScopedObservationAccessHost::authorize(&registry, absent).unwrap();
         assert!(absent.unknown_wire_contract_selection().is_none());
+        let absent_drain = absent
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        assert!(absent_drain.unknown_wire_contract_selection().is_none());
 
         let mut incompatible = scoped_access_request(temp.path().join("incompatible"));
         incompatible.adapter_id = "not-registered".to_owned();
