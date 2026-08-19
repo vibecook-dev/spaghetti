@@ -2500,6 +2500,23 @@ the runtime `StreamSpec`. Candidate, scope, and capability statuses remain
 unchanged. A confined common read mediator, task-artifact declaration, complete
 scope evidence, and promotion remain open.
 
+The next bounded D3 prerequisite (`386e025`) consumes an exact promoted
+artifact-relation reservation through the common no-follow stable-file driver
+and produces a crate-private confined capture. Missing, oversized, unstable,
+and stable objects complete or conservatively fail the reserved access budget;
+stable reads account their exact physical bytes. The validated content policy
+is applied immediately: metadata-only retains neither bytes nor hash,
+hash-only retains only SHA-256, and inline retains both. Native root/path,
+identity, revision, hash, and content remain non-serializable and redacted
+from Debug, while the capture continues to borrow the validated command and
+access pass. It deliberately cannot construct the portable artifact outcome:
+that outcome's generation is the native source-object generation, not the
+metadata artifact version, and no durable generation authority is present at
+this seam. Built-in Claude remains Candidate/incomplete and therefore cannot
+execute the read. Generation mapping, portable availability publication,
+completion-barrier integration, task-artifact declaration, promotion, and
+public transport remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
