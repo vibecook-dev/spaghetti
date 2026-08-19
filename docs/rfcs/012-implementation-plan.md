@@ -2486,8 +2486,19 @@ SHA-256 is bound by both the support release and compiled adapter. The scope
 program remains `incomplete`, the support release remains Candidate, scoped
 observation remains unsupported, and the task-artifact locator remains
 conceptual. This adds no root join, native read, availability result, barrier,
-or public transport; the file-history source-declaration/runtime decoder-ID
-drift and a confined common read mediator remain separate promotion gates.
+or public transport; a confined common read mediator remains a separate
+promotion gate.
+
+The next bounded D3 prerequisite (`9c74998`) closes the file-history
+source-declaration/runtime decoder-ID drift without changing the compiled
+decoder or any durable checkpoint identity. The Candidate source declaration
+now names the existing `claude-file-history-blob` decoder for the exact
+`file-history-blobs` stream, and the source-document SHA-256 is repinned in the
+support release and compiled adapter. Executable conformance binds that digest
+and compares the declared root, selector, decoder, and 1 MiB object ceiling to
+the runtime `StreamSpec`. Candidate, scope, and capability statuses remain
+unchanged. A confined common read mediator, task-artifact declaration, complete
+scope evidence, and promotion remain open.
 
 ### D4. SDK and Chopsticks migration
 
