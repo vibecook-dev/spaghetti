@@ -2067,6 +2067,24 @@ Current landing status (2026-08-18):
   bootstrap and resync at equal state. This adds no N-API method, portable
   observer owner, unknown-event preservation, native source access, or task/
   artifact discovery authority; and
+- the contextual poll-watermark slice (`c28bdef`) now freezes one completed
+  poll's offered boundary without turning request generation or a native clock
+  into semantic progress. A process-local attachment authority is retained by
+  every captured watermark, and only the exact owning host can mint its non-
+  Serde consumer context. That context binds the negotiated selection and
+  support release, full resolved root, exactly one Decode set plus exactly one
+  set for every selected fact family, declared scope coverage, canonical
+  explicit errors, artifact-availability revision, epoch, offered sequence,
+  and queue state. Only `Bootstrap` and `Valid` continuity can cross the wire;
+  resync-required, resyncing, and failed states remain on the control lane.
+  The portable queue law requires the offered/delivered difference to equal
+  the retained semantic plus source-control item counts, while retained native
+  bytes remain accounting rather than sequence. Serialize-only Rust and strict
+  TypeScript parsers reject cross-attachment context, selection/root/support,
+  coverage, nested semantic-state, queue, bound, or unknown-field drift against
+  one privacy-reduced fixture. This adds no source-access authority, request-
+  generation field, unified event union, N-API method, iterator owner, native
+  payload/locator disclosure, or public observer transport; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2077,8 +2095,8 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2, coverage-complete durable query exposure, selected
 and portable actor/affiliation replacement integrity, and envelope variants
 outside the current usage, source-lifecycle, continuity, and completion
-families, the public N-API/SDK iterator transport over the internal async
-lifecycle runtime,
+families, the public N-API/SDK iterator transport for the current contextual
+watermark and event contracts over the internal async lifecycle runtime,
 portable dynamic/discovered scope coverage beyond the current exact
 known-object relation/root summary, dynamic/discovered scope membership beyond
 the attachment's current exact known-object grants and family coverage beyond
@@ -2090,10 +2108,10 @@ native artifact-access mediation and the public artifact/close-method
 transports,
 the trusted native version-probe/identity-input drivers, and the complete
 public request are not yet implemented. The internal offered and applied
-boundaries are now transactional, but they cannot become a public watermark and
-consumer-ready helper until dynamic scope membership/coverage, runtime-bound
-public close invocation, the native transport owner, and the remaining
-negotiated lifecycle surface are defined. The usage-v2 sink and
+boundaries are now transactional, but their contextual wire cannot become a
+public watermark and consumer-ready helper until dynamic scope membership/
+coverage, runtime-bound public close invocation, the native transport owner,
+and the remaining negotiated lifecycle surface are defined. The usage-v2 sink and
 delivery lane remain crate-private until the complete envelope/event/lifecycle
 DTOs, bounded unknown-variant preservation, and runtime-bound negotiated
 portable transport exist.
