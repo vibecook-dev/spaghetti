@@ -51,6 +51,7 @@ use crate::source::{
 };
 
 mod actor_wire;
+mod artifact_evidence;
 mod artifact_wire;
 mod capability_snapshot_wire;
 mod close_wire;
@@ -8674,6 +8675,8 @@ pub enum ScopedProjectionError {
     ActorRunCapacityFull,
     #[error("scoped actor-affiliation projection entity capacity is full")]
     ActorAffiliationCapacityFull,
+    #[error("scoped artifact evidence capacity is full")]
+    ArtifactEvidenceCapacityFull,
     #[error("scoped usage-v2 fact is missing its canonical semantic revision")]
     MissingSemanticRevision,
     #[error("scoped usage-v2 fact has an invalid canonical semantic revision")]
@@ -8686,6 +8689,8 @@ pub enum ScopedProjectionError {
     StaleRevision,
     #[error("scoped actor context contradicts its canonical entity or session")]
     InvalidActorContext,
+    #[error("scoped artifact metadata does not provide valid root-bound canonical evidence")]
+    InvalidArtifactEvidence,
     #[error("scoped source reset does not match retained reducer generation")]
     InvalidResetState,
     #[error("scoped source presence change contradicts retained reducer state")]
@@ -8838,6 +8843,7 @@ struct ScopedProjectionMutation {
     actor_retractions: Vec<CanonicalEntityKey>,
     affiliation_upserts: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
     affiliation_retractions: Vec<CanonicalEntityKey>,
+    artifact_evidence: artifact_evidence::ScopedArtifactEvidenceMutation,
 }
 
 #[derive(Clone, Copy)]
@@ -8867,23 +8873,41 @@ pub struct ScopedObservationProjectionSink {
     usage_v2: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
     actor_runs: BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
     actor_affiliations: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
+    artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer,
 }
 
 impl ScopedObservationProjectionSink {
     pub fn new(limits: ScopedObservationProjectionLimits) -> Result<Self, ScopedProjectionError> {
-        Self::new_with_families(limits, ScopedProjectionFamilies::usage_v2_only())
+        Self::new_with_families(limits, ScopedProjectionFamilies::usage_v2_only(), None)
     }
 
     fn new_for_contracts(
         limits: ScopedObservationProjectionLimits,
         contracts: &crate::adapter::ContractVersionSelection,
     ) -> Result<Self, ScopedProjectionError> {
-        Self::new_with_families(limits, ScopedProjectionFamilies::from_contracts(contracts)?)
+        Self::new_with_families(
+            limits,
+            ScopedProjectionFamilies::from_contracts(contracts)?,
+            None,
+        )
+    }
+
+    fn new_bound_for_contracts(
+        limits: ScopedObservationProjectionLimits,
+        contracts: &crate::adapter::ContractVersionSelection,
+        root_session: CanonicalEntityKey,
+    ) -> Result<Self, ScopedProjectionError> {
+        Self::new_with_families(
+            limits,
+            ScopedProjectionFamilies::from_contracts(contracts)?,
+            Some(root_session),
+        )
     }
 
     fn new_with_families(
         limits: ScopedObservationProjectionLimits,
         families: ScopedProjectionFamilies,
+        root_session: Option<CanonicalEntityKey>,
     ) -> Result<Self, ScopedProjectionError> {
         if limits.max_usage_v2_entities == 0 {
             return Err(ScopedProjectionError::InvalidLimits);
@@ -8895,6 +8919,7 @@ impl ScopedObservationProjectionSink {
             usage_v2: BTreeMap::new(),
             actor_runs: BTreeMap::new(),
             actor_affiliations: BTreeMap::new(),
+            artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer::new(root_session),
         })
     }
 
@@ -8902,8 +8927,9 @@ impl ScopedObservationProjectionSink {
         limits: ScopedObservationProjectionLimits,
         families: ScopedProjectionFamilies,
         scope_epoch: u64,
+        root_session: CanonicalEntityKey,
     ) -> Result<Self, ScopedProjectionError> {
-        let mut projection = Self::new_with_families(limits, families)?;
+        let mut projection = Self::new_with_families(limits, families, Some(root_session))?;
         projection.lifecycle = ScopedProjectionLifecycle::Replacement { scope_epoch };
         Ok(projection)
     }
@@ -8967,6 +8993,7 @@ impl ScopedObservationProjectionSink {
     }
 
     fn commit(&mut self, mutation: ScopedProjectionMutation) {
+        self.artifact_evidence.commit(mutation.artifact_evidence);
         for fact_id in mutation.usage_retractions {
             let removed = self.usage_v2.remove(&fact_id);
             debug_assert!(removed.is_some(), "prepared usage-v2 retraction must exist");
@@ -9004,6 +9031,8 @@ impl ScopedObservationProjectionSink {
     }
 
     fn rollback_replacement_object_prevalidated(&mut self, object_token: u64) {
+        self.artifact_evidence
+            .rollback_replacement_object(object_token);
         self.usage_v2
             .retain(|_, state| state.object_token != object_token);
         self.actor_runs
@@ -9014,6 +9043,12 @@ impl ScopedObservationProjectionSink {
 
     pub fn usage_v2_entity_count(&self) -> usize {
         self.usage_v2.len()
+    }
+
+    fn artifact_evidence_snapshot(
+        &self,
+    ) -> Result<artifact_evidence::ScopedArtifactEvidenceSnapshot, ScopedProjectionError> {
+        self.artifact_evidence.snapshot()
     }
 
     fn supports_coverage_domain(&self, domain: &CoverageDomain) -> bool {
@@ -9197,6 +9232,11 @@ impl ScopedObservationProjectionSink {
             ScopedRevisionedEntityRetractionCause::Reset(reset),
             ScopedProjectionError::InvalidResetState,
         )?;
+        let artifact_evidence = self.artifact_evidence.prepare_object_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
@@ -9220,6 +9260,7 @@ impl ScopedObservationProjectionSink {
                 usage_retractions: fact_ids,
                 actor_retractions: context_retractions.actors,
                 affiliation_retractions: context_retractions.affiliations,
+                artifact_evidence,
                 ..ScopedProjectionMutation::default()
             },
         })
@@ -9248,6 +9289,7 @@ impl ScopedObservationProjectionSink {
                         .actor_affiliations
                         .values()
                         .any(|state| state.object_token == object_token)
+                    || self.artifact_evidence.has_object(object_token)
                 {
                     return Err(ScopedProjectionError::InvalidPresenceState);
                 }
@@ -9285,6 +9327,18 @@ impl ScopedObservationProjectionSink {
                     ScopedProjectionError::InvalidPresenceState,
                 )?,
         };
+        let artifact_evidence = match change {
+            ScopedAppendPresenceChange::Created { .. } => {
+                artifact_evidence::ScopedArtifactEvidenceMutation::default()
+            }
+            ScopedAppendPresenceChange::Deleted { generation } => {
+                self.artifact_evidence.prepare_object_retractions(
+                    object_token,
+                    generation,
+                    ScopedProjectionError::InvalidPresenceState,
+                )?
+            }
+        };
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
@@ -9308,6 +9362,7 @@ impl ScopedObservationProjectionSink {
                 usage_retractions: fact_ids,
                 actor_retractions: context_retractions.actors,
                 affiliation_retractions: context_retractions.affiliations,
+                artifact_evidence,
                 ..ScopedProjectionMutation::default()
             },
         })
@@ -9575,6 +9630,16 @@ impl ScopedObservationProjectionSink {
                     }
                     mutation.affiliation_upserts.insert(key, state);
                 }
+                Fact::ArtifactMetadataSnapshot(fact) => {
+                    self.artifact_evidence.prepare_metadata(
+                        &mut mutation.artifact_evidence,
+                        object_token,
+                        source,
+                        evidence,
+                        envelope,
+                        fact,
+                    )?;
+                }
                 _ => {}
             }
         }
@@ -9828,14 +9893,15 @@ impl ScopedObservationReplacementStage {
         families: ScopedProjectionFamilies,
     ) -> Result<Self, ScopedReplacementStageError> {
         Ok(Self {
-            root,
-            scope_epoch,
             projection: ScopedObservationProjectionSink::new_replacement(
                 limits,
                 families,
                 scope_epoch,
+                root.session_key,
             )
             .map_err(ScopedReplacementStageError::Projection)?,
+            root,
+            scope_epoch,
             prepared: None,
             completed: None,
         })
@@ -12994,9 +13060,10 @@ impl ScopedObservationAccessHost {
         &self,
         limits: ScopedObservationProjectionLimits,
     ) -> Result<ScopedObservationProjectionSink, ScopedProjectionError> {
-        ScopedObservationProjectionSink::new_for_contracts(
+        ScopedObservationProjectionSink::new_bound_for_contracts(
             limits,
             &self.observation_contract.contract_versions,
+            self.root_identity.session_key,
         )
     }
 
