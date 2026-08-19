@@ -290,6 +290,14 @@ pub(crate) struct ObservationUnknownWireContractSelection {
 }
 
 impl ObservationUnknownWireContractSelection {
+    pub(crate) fn observation_selection(&self) -> &ObservationContractSelection {
+        &self.observation_selection
+    }
+
+    pub(crate) fn max_preserved_bytes(&self) -> u32 {
+        self.capability.max_preserved_bytes
+    }
+
     fn validate(&self) -> Result<(), ObservationUnknownWireContractError> {
         if self.observation_unknown_wire_negotiation_contract_version
             != OBSERVATION_UNKNOWN_WIRE_NEGOTIATION_CONTRACT_VERSION

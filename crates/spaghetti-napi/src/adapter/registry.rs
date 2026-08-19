@@ -194,6 +194,11 @@ pub(crate) mod tests {
         SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
         SupportBundleDocument,
     };
+    use crate::observation_contract::unknown_wire::{
+        ObservationUnknownWireCapability, ObservationUnknownWireCompatibilityAxis,
+        ObservationUnknownWireContractError, ObservationUnknownWireContractOffer,
+        ObservationUnknownWireContractRequest,
+    };
     use crate::observation_contract::{
         negotiate_observation_contract, ObservationCapabilities, ObservationCompatibilityAxis,
         ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
@@ -226,11 +231,12 @@ pub(crate) mod tests {
         ScopedObservationSourceOwnerBindingError, ScopedObservationSourceOwnerRetryPolicy,
         ScopedObservationSourceOwnerRunError, ScopedObservationSourceOwnerRunExit,
         ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
-        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
-        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
-        ScopedResyncReason, ScopedRootIdentityRequest, ScopedScopeRelationState,
-        ScopedSourceFailureClass, ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
+        ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
+        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
+        ScopedQueuedObservationFrame, ScopedReplacementMode, ScopedReplacementRepresentation,
+        ScopedReplacementStageError, ScopedResyncReason, ScopedRootIdentityRequest,
+        ScopedScopeRelationState, ScopedSourceFailureClass, ScopedSourceObjectFailureCode,
+        ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -555,6 +561,16 @@ pub(crate) mod tests {
                 vec![1],
             )
             .unwrap(),
+            unknown_wire_contract: Some(ScopedObservationUnknownWireNegotiation::new(
+                ObservationUnknownWireContractRequest::new(
+                    ObservationUnknownWireCapability::preserving(8_192).unwrap(),
+                )
+                .unwrap(),
+                ObservationUnknownWireContractOffer::new(
+                    ObservationUnknownWireCapability::preserving(4_096).unwrap(),
+                )
+                .unwrap(),
+            )),
             root_identity: ScopedRootIdentityRequest::new(
                 1,
                 b"fixture-source-instance".as_slice(),
@@ -1827,6 +1843,54 @@ pub(crate) mod tests {
             Err(ScopedObservationAccessError::ObservationContract(
                 ObservationNegotiationError::IncompatibleObservationContract {
                     axis: ObservationCompatibilityAxis::EventContractVersion,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn scoped_host_negotiates_and_retains_the_optional_unknown_wire_sidecar_pre_access() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("selected")),
+        )
+        .unwrap();
+        let selected = host.unknown_wire_contract_selection().unwrap();
+        assert_eq!(selected.max_preserved_bytes(), 4_096);
+        assert_eq!(selected.observation_selection(), host.contract_selection());
+
+        let mut absent = scoped_access_request(temp.path().join("absent"));
+        absent.unknown_wire_contract = None;
+        let absent = ScopedObservationAccessHost::authorize(&registry, absent).unwrap();
+        assert!(absent.unknown_wire_contract_selection().is_none());
+
+        let mut incompatible = scoped_access_request(temp.path().join("incompatible"));
+        incompatible.adapter_id = "not-registered".to_owned();
+        incompatible.artifact_access_policy =
+            ScopedArtifactAccessPolicy::bounded(0, ScopedArtifactContentPolicy::Inline);
+        let mut request = serde_json::to_value(
+            ObservationUnknownWireContractRequest::new(
+                ObservationUnknownWireCapability::preserving(8_192).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        request["capability"]["preserves_encoded_value"] = serde_json::json!(false);
+        incompatible.unknown_wire_contract = Some(ScopedObservationUnknownWireNegotiation::new(
+            serde_json::from_value(request).unwrap(),
+            ObservationUnknownWireContractOffer::new(
+                ObservationUnknownWireCapability::preserving(4_096).unwrap(),
+            )
+            .unwrap(),
+        ));
+        assert!(matches!(
+            ScopedObservationAccessHost::authorize(&registry, incompatible),
+            Err(ScopedObservationAccessError::UnknownWireContract(
+                ObservationUnknownWireContractError::Incompatible {
+                    axis: ObservationUnknownWireCompatibilityAxis::EncodedValuePreservation,
                 }
             ))
         ));

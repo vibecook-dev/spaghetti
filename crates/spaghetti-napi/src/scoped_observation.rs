@@ -35,6 +35,11 @@ use crate::coverage_runtime::{
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
 };
+use crate::observation_contract::unknown_wire::{
+    negotiate_observation_unknown_wire, ObservationUnknownWireContractError,
+    ObservationUnknownWireContractOffer, ObservationUnknownWireContractRequest,
+    ObservationUnknownWireContractSelection,
+};
 use crate::observation_contract::{
     negotiate_observation_contract, ObservationCapabilities, ObservationCapabilityContractError,
     ObservationContractOffer, ObservationContractRequest, ObservationContractSelection,
@@ -172,12 +177,31 @@ pub struct ScopedArtifactRelationGrant {
 /// are supplied by the trusted Rust composition root, never by a portable
 /// runtime consumer.
 #[derive(Debug, Clone)]
+pub(crate) struct ScopedObservationUnknownWireNegotiation {
+    request: ObservationUnknownWireContractRequest,
+    offer: ObservationUnknownWireContractOffer,
+}
+
+impl ScopedObservationUnknownWireNegotiation {
+    pub(crate) fn new(
+        request: ObservationUnknownWireContractRequest,
+        offer: ObservationUnknownWireContractOffer,
+    ) -> Self {
+        Self { request, offer }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ScopedObservationAccessRequest {
     pub adapter_id: String,
     pub artifact_probe: NativeArtifactProbe,
     pub artifact_access_policy: ScopedArtifactAccessPolicy,
     pub observation_contract_request: ObservationContractRequest,
     pub observation_contract_offer: ObservationContractOffer,
+    /// Optional additive-event preservation sidecar. Both sides travel as one
+    /// trusted host input so a half-negotiated capability cannot reach the
+    /// attachment boundary.
+    pub(crate) unknown_wire_contract: Option<ScopedObservationUnknownWireNegotiation>,
     pub root_identity: ScopedRootIdentityRequest,
     pub program_id: String,
     pub known_objects: Vec<ScopedKnownObjectGrant>,
@@ -12089,6 +12113,8 @@ pub enum ScopedObservationAccessError {
     #[error(transparent)]
     ObservationContract(#[from] ObservationNegotiationError),
     #[error(transparent)]
+    UnknownWireContract(#[from] ObservationUnknownWireContractError),
+    #[error(transparent)]
     ObservationCapabilities(#[from] ObservationCapabilityContractError),
     #[error("scoped observation authorization failed: {0}")]
     Authorization(String),
@@ -13315,6 +13341,10 @@ pub struct ScopedObservationAccessHost {
     adapter: Arc<dyn AgentAdapter>,
     compatibility: CompatibilityDecision,
     observation_contract: ObservationContractSelection,
+    /// Exact optional sidecar selected before source authority. The
+    /// non-cloneable attachment host retains it until a later trusted runtime
+    /// producer can emit bounded unknown events.
+    unknown_wire_selection: Option<ObservationUnknownWireContractSelection>,
     observation_capabilities: ObservationCapabilities,
     completion_capability_context:
         Arc<capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext>,
@@ -13360,6 +13390,17 @@ impl ScopedObservationAccessHost {
             &request.observation_contract_request,
             &request.observation_contract_offer,
         )?;
+        let unknown_wire_selection = request
+            .unknown_wire_contract
+            .as_ref()
+            .map(|sidecar| {
+                negotiate_observation_unknown_wire(
+                    &sidecar.request,
+                    &sidecar.offer,
+                    &observation_contract,
+                )
+            })
+            .transpose()?;
         artifact_wire::validate_attachment_artifact_access_policy(
             request.artifact_access_policy,
         )
@@ -13438,6 +13479,7 @@ impl ScopedObservationAccessHost {
             adapter,
             compatibility,
             observation_contract,
+            unknown_wire_selection,
             observation_capabilities,
             completion_capability_context,
             artifact_access_policy: request.artifact_access_policy,
@@ -13479,6 +13521,15 @@ impl ScopedObservationAccessHost {
     /// itself RFC 012D's per-family `capabilities()` DTO.
     pub fn contract_selection(&self) -> &ObservationContractSelection {
         &self.observation_contract
+    }
+
+    /// Optional bounded additive-event preservation contract selected before
+    /// any support or source-access authority. Retention alone does not create
+    /// an unknown-event producer or a portable observer transport.
+    pub(crate) fn unknown_wire_contract_selection(
+        &self,
+    ) -> Option<&ObservationUnknownWireContractSelection> {
+        self.unknown_wire_selection.as_ref()
     }
 
     /// Selection-bound RFC 012D per-family support report. Current source
