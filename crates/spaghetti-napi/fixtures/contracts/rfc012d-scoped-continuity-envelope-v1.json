@@ -49,7 +49,7 @@
         }
       },
       "state": {
-        "baseline_snapshot_digest": "v1:Jyq_7PBGRr2EhlM2DudZfEBiloWf2zzqGHXm8dh6BXA",
+        "baseline_snapshot_digest": null,
         "current_scope_epoch": 1,
         "last_contiguous_sequence": 0,
         "phase": "bootstrap",

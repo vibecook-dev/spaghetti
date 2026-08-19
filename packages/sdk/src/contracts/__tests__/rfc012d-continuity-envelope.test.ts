@@ -51,6 +51,9 @@ test('portable TypeScript independently parses every frozen Rust continuity cont
   for (const [phase, envelope] of Object.entries(fixture.observer_failed)) {
     assert.deepEqual(parseScopedContinuityEnvelope(envelope, fixture.contexts[`failed_${phase}`]), envelope);
   }
+  assert.equal(fixture.contexts.failed_bootstrap.state.baseline_snapshot_digest, null);
+  assert.notEqual(fixture.contexts.failed_live.state.baseline_snapshot_digest, null);
+  assert.notEqual(fixture.contexts.failed_correction.state.baseline_snapshot_digest, null);
   assert.equal(fixture.fixture_contract_version, 1);
   assert.deepEqual(fixture.expected.supported_variants, [
     'observer_resync_required',
@@ -93,6 +96,22 @@ test('selection, root, control source, and caller continuity state are exact', (
   const baseline = clone(fixture.contexts.required);
   baseline.state.baseline_snapshot_digest = fixture.resync_started.event_id;
   reject(envelope, baseline);
+
+  const missingBaseline = clone(fixture.contexts.required);
+  missingBaseline.state.baseline_snapshot_digest = null;
+  reject(envelope, missingBaseline);
+
+  const wrongContextPhase = clone(fixture.contexts.required);
+  wrongContextPhase.state.phase = 'correction';
+  reject(envelope, wrongContextPhase);
+
+  const inventedBootstrapBaseline = clone(fixture.contexts.failed_bootstrap);
+  inventedBootstrapBaseline.state.baseline_snapshot_digest = fixture.resync_started.event_id;
+  reject(fixture.observer_failed.bootstrap, inventedBootstrapBaseline);
+
+  const missingLiveBaseline = clone(fixture.contexts.failed_live);
+  missingLiveBaseline.state.baseline_snapshot_digest = null;
+  reject(fixture.observer_failed.live, missingLiveBaseline);
 
   const duplicate = clone(envelope);
   duplicate.observer_sequence = 5;

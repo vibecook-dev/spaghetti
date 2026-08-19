@@ -78,6 +78,8 @@ pub type ScopedArtifactAvailabilitySnapshot =
     artifact_availability::ScopedArtifactAvailabilitySnapshot;
 pub type ScopedCompletionEnvelopeConsumerContext =
     completion_wire::ScopedCompletionEnvelopeConsumerContext;
+pub type ScopedContinuityEnvelopeConsumerContext =
+    continuity_wire::ScopedContinuityEnvelopeConsumerContext;
 pub type ScopedObservationCompletedPoll = watermark_wire::ScopedObservationCompletedPoll;
 pub type ScopedObservationWatermarkConsumerContext =
     watermark_wire::ScopedObservationWatermarkConsumerContext;
@@ -2818,6 +2820,7 @@ pub struct ScopedObservationYieldedEnvelope {
     application_receipt: ScopedObservationApplicationReceipt,
     artifact_availability_context: Option<ScopedArtifactAvailabilityEnvelopeConsumerContext>,
     completion_context: Option<ScopedCompletionEnvelopeConsumerContext>,
+    continuity_context: Option<ScopedContinuityEnvelopeConsumerContext>,
 }
 
 impl ScopedObservationYieldedEnvelope {
@@ -2839,6 +2842,14 @@ impl ScopedObservationYieldedEnvelope {
     /// and retains the attachment's verified support/offer context privately.
     pub fn completion_context(&self) -> Option<&ScopedCompletionEnvelopeConsumerContext> {
         self.completion_context.as_ref()
+    }
+
+    /// Exact caller-held continuity state for an ordered resync-required,
+    /// resync-started, or observer-failed control. It is derived from the
+    /// attachment-owned delivery lane before dequeue and is absent for every
+    /// other event family.
+    pub fn continuity_context(&self) -> Option<&ScopedContinuityEnvelopeConsumerContext> {
+        self.continuity_context.as_ref()
     }
 }
 
@@ -3027,6 +3038,18 @@ impl ScopedObservationConsumerDrain {
         .map_err(|_| {
             ScopedObservationDrainError::Envelope(ScopedEnvelopeError::DeliveryMismatch)
         })?;
+        let continuity_context = ScopedContinuityEnvelopeConsumerContext::from_delivered(
+            &envelope,
+            &self.mapper.root,
+            Arc::clone(&self.attachment_authority),
+            &self.delivery,
+        )
+        .map_err(|_| {
+            ScopedObservationDrainError::Envelope(ScopedEnvelopeError::DeliveryMismatch)
+        })?;
+        debug_assert!(continuity_context
+            .as_ref()
+            .is_none_or(|context| { context.belongs_to_attachment(&self.attachment_authority) }));
         let delivered = self
             .delivery
             .dequeue_next()
@@ -3071,6 +3094,7 @@ impl ScopedObservationConsumerDrain {
             application_receipt: receipt,
             artifact_availability_context,
             completion_context,
+            continuity_context,
         }))
     }
 
@@ -20337,6 +20361,23 @@ mod projection_tests {
             ScopedObservationEvent::ObserverResyncRequired { control }
                 if Arc::ptr_eq(control, &required)
         ));
+        let invalidation_context = invalidation
+            .continuity_context()
+            .expect("resync-required delivery carries exact continuity state");
+        assert_eq!(invalidation_context.state().current_scope_epoch, 1);
+        assert_eq!(invalidation_context.state().last_contiguous_sequence, 1);
+        assert_eq!(
+            invalidation_context.state().baseline_snapshot_digest,
+            Some(bootstrap.replacement_snapshot_digest)
+        );
+        assert!(invalidation_context.state().prior_resync_required.is_none());
+        assert!(
+            invalidation_context.wire_value().unwrap()["state"]["baseline_snapshot_digest"]
+                .as_str()
+                .is_some()
+        );
+        assert!(invalidation.artifact_availability_context().is_none());
+        assert!(invalidation.completion_context().is_none());
         let state = drain
             .acknowledge_applied(invalidation.application_receipt())
             .unwrap();
@@ -20354,6 +20395,27 @@ mod projection_tests {
             ScopedObservationEvent::ObserverResyncStarted { control }
                 if Arc::ptr_eq(control, &started)
         ));
+        let started_context = started_delivery
+            .continuity_context()
+            .expect("resync-started delivery carries the retained invalidation");
+        assert_eq!(started_context.state().current_scope_epoch, 1);
+        assert_eq!(started_context.state().last_contiguous_sequence, 4);
+        assert_eq!(
+            started_context.state().baseline_snapshot_digest,
+            Some(bootstrap.replacement_snapshot_digest)
+        );
+        assert_eq!(
+            started_context.state().prior_resync_required.as_ref(),
+            Some(required.as_ref())
+        );
+        assert_eq!(
+            started_context
+                .state()
+                .prior_resync_required
+                .as_ref()
+                .map(|prior| prior.control_sequence),
+            Some(required.control_sequence)
+        );
         drain
             .acknowledge_applied(started_delivery.application_receipt())
             .unwrap();
@@ -20407,6 +20469,8 @@ mod projection_tests {
                 if Arc::ptr_eq(barrier, &resync_barrier)
         ));
         assert!(drain.consumer_resync_barrier().is_none());
+        assert!(completed.continuity_context().is_none());
+        assert!(completed.completion_context().is_some());
         let state = drain
             .acknowledge_applied(completed.application_receipt())
             .unwrap();
@@ -20417,6 +20481,108 @@ mod projection_tests {
             &drain.consumer_resync_barrier().unwrap(),
             &resync_barrier
         ));
+    }
+
+    #[test]
+    fn scoped_consumer_drain_bootstrap_failure_context_has_no_false_baseline() {
+        let root = root_identity();
+        let mut drain = consumer_drain(root.clone(), 1, 1);
+        let failure = drain
+            .delivery_lane_mut()
+            .fail_observer(
+                &root,
+                ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+                17,
+            )
+            .unwrap();
+        let yielded = drain.next().unwrap().unwrap();
+        assert!(matches!(
+            &yielded.envelope.event,
+            ScopedObservationEvent::ObserverFailed { failure: delivered }
+                if Arc::ptr_eq(delivered, &failure)
+        ));
+        let context = yielded
+            .continuity_context()
+            .expect("bootstrap observer failure carries exact continuity state");
+        assert_eq!(context.state().current_scope_epoch, 1);
+        assert_eq!(context.state().last_contiguous_sequence, 0);
+        assert_eq!(context.state().phase, ScopedAppendDeliveryPhase::Bootstrap);
+        assert_eq!(context.state().baseline_snapshot_digest, None);
+        assert!(context.state().prior_resync_required.is_none());
+        assert!(context.belongs_to_attachment(&drain.attachment_authority));
+        assert_eq!(
+            context.wire_value().unwrap()["state"]["baseline_snapshot_digest"],
+            serde_json::Value::Null
+        );
+        let debug = format!("{context:?}");
+        assert!(debug.contains("has_completed_baseline: false"));
+        assert!(!debug.contains("native-session"));
+        assert!(!debug.contains("v1:"));
+        assert!(yielded.artifact_availability_context().is_none());
+        assert!(yielded.completion_context().is_none());
+        drain
+            .acknowledge_applied(yielded.application_receipt())
+            .unwrap();
+
+        let mut live_drain = consumer_drain(root.clone(), 1, 1);
+        let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
+            root: root.clone(),
+            scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
+            offered_through_sequence: 0,
+            source_coverage: fixture_completion_coverage(&root, false),
+            observation_capabilities: observation_capabilities_for_selection(
+                &observation_contract_selection(),
+            ),
+            scope_coverage: fixture_scope_coverage(&root, false),
+            explicit_object_errors: Vec::new(),
+            artifact_availability: empty_artifact_availability(&root),
+            queue_state: live_drain.delivery_lane().state(),
+        };
+        let bootstrap = live_drain
+            .delivery_lane_mut()
+            .offer_bootstrap_barrier(
+                &root,
+                watermark,
+                fixture_manifest_for_selection(&observation_contract_selection()),
+                false,
+                18,
+            )
+            .unwrap();
+        let bootstrap_delivery = live_drain.next().unwrap().unwrap();
+        live_drain
+            .acknowledge_applied(bootstrap_delivery.application_receipt())
+            .unwrap();
+        assert!(!context.belongs_to_attachment(&live_drain.attachment_authority));
+        let live_failure = live_drain
+            .delivery_lane_mut()
+            .fail_observer(
+                &root,
+                ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+                19,
+            )
+            .unwrap();
+        let live_yielded = live_drain.next().unwrap().unwrap();
+        assert!(matches!(
+            &live_yielded.envelope.event,
+            ScopedObservationEvent::ObserverFailed { failure: delivered }
+                if Arc::ptr_eq(delivered, &live_failure)
+        ));
+        let live_context = live_yielded
+            .continuity_context()
+            .expect("live observer failure retains its completed baseline");
+        assert_eq!(live_context.state().phase, ScopedAppendDeliveryPhase::Live);
+        assert_eq!(
+            live_context.state().baseline_snapshot_digest,
+            Some(bootstrap.replacement_snapshot_digest)
+        );
+        assert!(live_context.belongs_to_attachment(&live_drain.attachment_authority));
+        assert!(!live_context.belongs_to_attachment(&drain.attachment_authority));
+        assert!(
+            live_context.wire_value().unwrap()["state"]["baseline_snapshot_digest"]
+                .as_str()
+                .is_some()
+        );
     }
 
     #[test]

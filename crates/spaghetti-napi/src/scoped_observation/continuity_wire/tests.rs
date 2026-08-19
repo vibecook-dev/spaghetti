@@ -141,14 +141,14 @@ fn context_for(
         FixtureControl::Required(_) => ScopedContinuityConsumerContext {
             current_scope_epoch: 1,
             last_contiguous_sequence: 1,
-            baseline_snapshot_digest: baseline(b"epoch-1-baseline"),
+            baseline_snapshot_digest: Some(baseline(b"epoch-1-baseline")),
             phase: ScopedAppendDeliveryPhase::Live,
             prior_resync_required: None,
         },
         FixtureControl::Started => ScopedContinuityConsumerContext {
             current_scope_epoch: 1,
             last_contiguous_sequence: 4,
-            baseline_snapshot_digest: baseline(b"epoch-1-baseline"),
+            baseline_snapshot_digest: Some(baseline(b"epoch-1-baseline")),
             phase: ScopedAppendDeliveryPhase::Live,
             prior_resync_required: Some(required_control(
                 root,
@@ -168,7 +168,8 @@ fn context_for(
             } else {
                 2
             },
-            baseline_snapshot_digest: baseline(b"epoch-1-baseline"),
+            baseline_snapshot_digest: (phase != ScopedAppendDeliveryPhase::Bootstrap)
+                .then(|| baseline(b"epoch-1-baseline")),
             phase,
             prior_resync_required: None,
         },
@@ -299,36 +300,13 @@ fn portable_context_value(
     root: &ScopedObservationRootIdentity,
     context: &ScopedContinuityConsumerContext,
 ) -> Value {
-    let control_source = observer_control_source(root).unwrap();
-    let prior = context.prior_resync_required.as_ref().map(|required| {
-        json!({
-            "kind": "observer_resync_required",
-            "invalid_scope_epoch": required.invalid_scope_epoch,
-            "control_sequence": required.control_sequence,
-            "last_contiguous_sequence": required.last_contiguous_sequence,
-            "baseline_snapshot_digest": encode_opaque(required.baseline_snapshot_digest.as_bytes()),
-            "reason": ResyncReasonWire::from(required.reason),
-            "discarded_semantic_events": required.discarded_semantic_events,
-            "discarded_source_controls": required.discarded_source_controls,
-            "discarded_retained_native_bytes": required.discarded_retained_native_bytes,
-        })
-    });
-    json!({
-        "contract_selection": selection,
-        "root": ContinuityRootWire::from_root(root),
-        "control_source": {
-            "instance_key": control_source.source_instance_key,
-            "stream_key": control_source.stream_key,
-            "object_key": control_source.object_key,
-        },
-        "state": {
-            "current_scope_epoch": context.current_scope_epoch,
-            "last_contiguous_sequence": context.last_contiguous_sequence,
-            "baseline_snapshot_digest": encode_opaque(context.baseline_snapshot_digest.as_bytes()),
-            "phase": ContinuityDeliveryPhaseWire::from(context.phase),
-            "prior_resync_required": prior,
-        },
-    })
+    let envelope_context = super::ScopedContinuityEnvelopeConsumerContext {
+        attachment_authority: next_scoped_attachment_authority().unwrap(),
+        contract_selection: selection.clone(),
+        root: root.clone(),
+        state: context.clone(),
+    };
+    serde_json::to_value(envelope_context.wire().unwrap()).unwrap()
 }
 
 fn fixture_value() -> Value {
@@ -451,7 +429,7 @@ fn invalidation_binds_epoch_watermark_baseline_and_reason_identity() {
     reject(base.clone(), &wrong_watermark);
 
     let mut wrong_baseline = context.clone();
-    wrong_baseline.baseline_snapshot_digest = baseline(b"other-baseline");
+    wrong_baseline.baseline_snapshot_digest = Some(baseline(b"other-baseline"));
     reject(base.clone(), &wrong_baseline);
 
     let mut forged_id = base.clone();
@@ -701,6 +679,77 @@ fn serializer_cannot_sanitize_mismatched_mapped_envelope_fields() {
         ),
         Err(ScopedContinuityEnvelopeContractError::UnsupportedEvent)
     );
+}
+
+#[test]
+fn baseline_authority_is_absent_only_before_the_first_completed_snapshot() {
+    let (bootstrap_failure, selection, root, bootstrap_context) =
+        mapped_envelope(FixtureControl::Failed {
+            phase: ScopedAppendDeliveryPhase::Bootstrap,
+            reason: ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+        });
+    assert_eq!(bootstrap_context.baseline_snapshot_digest, None);
+    assert!(ScopedContinuityEnvelopeWire::from_scoped_for_context(
+        &bootstrap_failure,
+        &selection,
+        &root,
+        &bootstrap_context,
+    )
+    .is_ok());
+    assert_eq!(
+        portable_context_value(&selection, &root, &bootstrap_context)["state"]
+            ["baseline_snapshot_digest"],
+        Value::Null
+    );
+    let mut invented_bootstrap_baseline = bootstrap_context.clone();
+    invented_bootstrap_baseline.baseline_snapshot_digest =
+        Some(baseline(b"invented-bootstrap-baseline"));
+    assert!(ScopedContinuityEnvelopeWire::from_scoped_for_context(
+        &bootstrap_failure,
+        &selection,
+        &root,
+        &invented_bootstrap_baseline,
+    )
+    .is_err());
+
+    let (live_failure, selection, root, mut live_context) =
+        mapped_envelope(FixtureControl::Failed {
+            phase: ScopedAppendDeliveryPhase::Live,
+            reason: ScopedObserverFailureReason::NativeWatcherRoutingFailed,
+        });
+    live_context.baseline_snapshot_digest = None;
+    assert!(ScopedContinuityEnvelopeWire::from_scoped_for_context(
+        &live_failure,
+        &selection,
+        &root,
+        &live_context,
+    )
+    .is_err());
+
+    let (required, selection, root, mut required_context) = mapped_envelope(
+        FixtureControl::Required(ScopedResyncReason::WatcherOverflow),
+    );
+    required_context.baseline_snapshot_digest = None;
+    assert!(ScopedContinuityEnvelopeWire::from_scoped_for_context(
+        &required,
+        &selection,
+        &root,
+        &required_context,
+    )
+    .is_err());
+
+    let mut wrong_phase = context_for(
+        &root,
+        FixtureControl::Required(ScopedResyncReason::WatcherOverflow),
+    );
+    wrong_phase.phase = ScopedAppendDeliveryPhase::Correction;
+    assert!(ScopedContinuityEnvelopeWire::from_scoped_for_context(
+        &required,
+        &selection,
+        &root,
+        &wrong_phase,
+    )
+    .is_err());
 }
 
 #[test]

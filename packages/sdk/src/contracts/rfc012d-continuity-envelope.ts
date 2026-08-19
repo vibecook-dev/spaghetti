@@ -85,7 +85,7 @@ export type ScopedContinuityControl =
 export interface ScopedContinuityConsumerState {
   current_scope_epoch: number;
   last_contiguous_sequence: number;
-  baseline_snapshot_digest: string;
+  baseline_snapshot_digest: string | null;
   phase: ScopedContinuityPhase;
   prior_resync_required: ScopedResyncRequiredControl | null;
 }
@@ -281,11 +281,20 @@ export function parseScopedContinuityEnvelopeContext(value: unknown): ScopedCont
     stateInput.last_contiguous_sequence,
     'caller last contiguous sequence',
   );
-  const baselineSnapshotDigest = decodeFixedOpaque(stateInput.baseline_snapshot_digest, 'caller baseline digest');
+  const baselineSnapshotDigest =
+    stateInput.baseline_snapshot_digest === null
+      ? null
+      : decodeFixedOpaque(stateInput.baseline_snapshot_digest, 'caller baseline digest');
   const prior = stateInput.prior_resync_required === null ? null : parseRequiredShape(stateInput.prior_resync_required);
+  const statePhase = phase(stateInput.phase, 'caller continuity phase');
+  if ((statePhase === 'bootstrap') !== (baselineSnapshotDigest === null)) {
+    throw new ContractValidationError('caller baseline presence does not match its delivery phase');
+  }
   if (
     prior !== null &&
-    (prior.invalid_scope_epoch !== currentScopeEpoch ||
+    (statePhase !== 'live' ||
+      baselineSnapshotDigest === null ||
+      prior.invalid_scope_epoch !== currentScopeEpoch ||
       prior.baseline_snapshot_digest !== baselineSnapshotDigest ||
       prior.control_sequence !== lastContiguousSequence)
   ) {
@@ -299,7 +308,7 @@ export function parseScopedContinuityEnvelopeContext(value: unknown): ScopedCont
       current_scope_epoch: currentScopeEpoch,
       last_contiguous_sequence: lastContiguousSequence,
       baseline_snapshot_digest: baselineSnapshotDigest,
-      phase: phase(stateInput.phase, 'caller continuity phase'),
+      phase: statePhase,
       prior_resync_required: prior,
     },
   };
@@ -569,6 +578,7 @@ function parseEvent(
       control.last_contiguous_sequence !== context.state.last_contiguous_sequence ||
       control.baseline_snapshot_digest !== context.state.baseline_snapshot_digest ||
       context.state.prior_resync_required !== null ||
+      context.state.phase !== 'live' ||
       envelopePhase !== 'live'
     ) {
       throw new ContractValidationError('resync-required control does not match caller-held continuity state');

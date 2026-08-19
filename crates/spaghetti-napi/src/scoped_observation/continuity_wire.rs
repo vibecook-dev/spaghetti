@@ -1,11 +1,13 @@
 //! Strict portable RFC 012D wire projection for continuity invalidation,
 //! replacement start, and terminal observer failure controls.
 //!
-//! Bootstrap and replacement-completion barriers remain a separate future
-//! slice because their coverage/manifests are not complete. This top-level
-//! value intentionally has no unbound `Deserialize` path: consumption requires
-//! caller-held negotiation, root, and lifecycle state. Rust derives the
-//! observer-control coordinate and recomputes every deterministic event ID.
+//! Bootstrap and replacement-completion barriers use their separate strict
+//! completion contract. This top-level value intentionally has no unbound
+//! `Deserialize` path: consumption requires caller-held negotiation, root, and
+//! lifecycle state. Rust derives the observer-control coordinate and
+//! recomputes every deterministic event ID.
+
+use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -21,11 +23,12 @@ use crate::observation_contract::ObservationContractSelection;
 
 use super::{
     observer_control_source, observer_failed_event_id, resync_required_event_id,
-    resync_started_event_id, ScopedActorAttribution, ScopedActorFallbackReason,
-    ScopedAppendDeliveryPhase, ScopedEnvelopeEvidenceAuthority, ScopedNativeEvidence,
-    ScopedObservationEnvelope, ScopedObservationEvent, ScopedObservationRootIdentity,
-    ScopedObserverFailureReason, ScopedReplacementMode, ScopedReplacementSnapshotDigest,
-    ScopedResyncReason, ScopedResyncRequired, ScopedResyncStarted,
+    resync_started_event_id, valid_replacement_baseline_snapshot_digest, ScopedActorAttribution,
+    ScopedActorFallbackReason, ScopedAppendDeliveryPhase, ScopedEnvelopeEvidenceAuthority,
+    ScopedNativeEvidence, ScopedObservationAttachmentAuthority, ScopedObservationContinuity,
+    ScopedObservationDeliveryLane, ScopedObservationEnvelope, ScopedObservationEvent,
+    ScopedObservationRootIdentity, ScopedObserverFailureReason, ScopedReplacementMode,
+    ScopedReplacementSnapshotDigest, ScopedResyncReason, ScopedResyncRequired, ScopedResyncStarted,
     SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION,
 };
 
@@ -54,13 +57,61 @@ impl ScopedContinuityEnvelopeContractError {
 /// State retained independently by the sole ordered consumer. A received
 /// control cannot establish its own current epoch, applied watermark, baseline
 /// snapshot, or delivered invalidation lineage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ScopedContinuityConsumerContext {
     pub current_scope_epoch: u64,
     pub last_contiguous_sequence: u64,
-    pub baseline_snapshot_digest: ScopedReplacementSnapshotDigest,
+    pub baseline_snapshot_digest: Option<ScopedReplacementSnapshotDigest>,
     pub phase: ScopedAppendDeliveryPhase,
     pub prior_resync_required: Option<ScopedResyncRequired>,
+}
+
+impl std::fmt::Debug for ScopedContinuityConsumerContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedContinuityConsumerContext")
+            .field("current_scope_epoch", &self.current_scope_epoch)
+            .field("last_contiguous_sequence", &self.last_contiguous_sequence)
+            .field(
+                "has_completed_baseline",
+                &self.baseline_snapshot_digest.is_some(),
+            )
+            .field("phase", &self.phase)
+            .field(
+                "has_prior_resync_required",
+                &self.prior_resync_required.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Exact process-local authority retained beside one yielded continuity
+/// control. The state is derived from the delivery lane before dequeue rather
+/// than from fields supplied by the received control.
+#[derive(Clone)]
+pub(crate) struct ScopedContinuityEnvelopeConsumerContext {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    contract_selection: ObservationContractSelection,
+    root: ScopedObservationRootIdentity,
+    state: ScopedContinuityConsumerContext,
+}
+
+impl std::fmt::Debug for ScopedContinuityEnvelopeConsumerContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedContinuityEnvelopeConsumerContext")
+            .field("current_scope_epoch", &self.state.current_scope_epoch)
+            .field(
+                "last_contiguous_sequence",
+                &self.state.last_contiguous_sequence,
+            )
+            .field(
+                "has_completed_baseline",
+                &self.state.baseline_snapshot_digest.is_some(),
+            )
+            .field("phase", &self.state.phase)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,6 +421,243 @@ enum ContinuityControlEventWire {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuityControlSourceBindingWire {
+    instance_key: CanonicalSourceInstanceKey,
+    stream_key: CoverageStreamKey,
+    object_key: CoverageObjectKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuityPriorResyncRequiredWire {
+    kind: &'static str,
+    invalid_scope_epoch: u64,
+    control_sequence: u64,
+    last_contiguous_sequence: u64,
+    baseline_snapshot_digest: String,
+    reason: ResyncReasonWire,
+    discarded_semantic_events: u64,
+    discarded_source_controls: u64,
+    discarded_retained_native_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ContinuityConsumerStateWire {
+    current_scope_epoch: u64,
+    last_contiguous_sequence: u64,
+    baseline_snapshot_digest: Option<String>,
+    phase: ContinuityDeliveryPhaseWire,
+    prior_resync_required: Option<ContinuityPriorResyncRequiredWire>,
+}
+
+/// Serialize-only caller context consumed by the existing strict portable
+/// continuity parser. The process-local attachment authority remains outside
+/// this value and cannot be reconstructed from JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ScopedContinuityEnvelopeContextWire {
+    contract_selection: ObservationContractSelection,
+    root: ContinuityRootWire,
+    control_source: ContinuityControlSourceBindingWire,
+    state: ContinuityConsumerStateWire,
+}
+
+impl ScopedContinuityEnvelopeConsumerContext {
+    pub(super) fn from_delivered(
+        envelope: &ScopedObservationEnvelope,
+        expected_root: &ScopedObservationRootIdentity,
+        attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<Option<Self>, ScopedContinuityEnvelopeContractError> {
+        let delivery_state = delivery.state();
+        let state = match &envelope.event {
+            ScopedObservationEvent::ObserverResyncRequired { control } => {
+                let retained = delivery.resync_required().ok_or_else(|| {
+                    ScopedContinuityEnvelopeContractError::invalid(
+                        "resync-required delivery is missing its retained control",
+                    )
+                })?;
+                let baseline =
+                    valid_replacement_baseline_snapshot_digest(delivery).ok_or_else(|| {
+                        ScopedContinuityEnvelopeContractError::invalid(
+                            "resync-required delivery has no completed baseline",
+                        )
+                    })?;
+                if !Arc::ptr_eq(control, &retained)
+                    || delivery_state.continuity != ScopedObservationContinuity::ResyncRequired
+                    || delivery_state.scope_epoch != control.invalid_scope_epoch
+                    || delivery_state.delivered_through_sequence != control.last_contiguous_sequence
+                    || baseline != control.baseline_snapshot_digest
+                {
+                    return Err(ScopedContinuityEnvelopeContractError::invalid(
+                        "resync-required delivery does not match retained lane state",
+                    ));
+                }
+                ScopedContinuityConsumerContext {
+                    current_scope_epoch: control.invalid_scope_epoch,
+                    last_contiguous_sequence: delivery_state.delivered_through_sequence,
+                    baseline_snapshot_digest: Some(baseline),
+                    phase: ScopedAppendDeliveryPhase::Live,
+                    prior_resync_required: None,
+                }
+            }
+            ScopedObservationEvent::ObserverResyncStarted { control } => {
+                let retained = delivery.resync_started().ok_or_else(|| {
+                    ScopedContinuityEnvelopeContractError::invalid(
+                        "resync-started delivery is missing its retained control",
+                    )
+                })?;
+                let required = delivery.resync_required().ok_or_else(|| {
+                    ScopedContinuityEnvelopeContractError::invalid(
+                        "resync-started delivery is missing its prior invalidation",
+                    )
+                })?;
+                if !Arc::ptr_eq(control, &retained)
+                    || delivery_state.continuity != ScopedObservationContinuity::Resyncing
+                    || delivery_state.scope_epoch != control.new_scope_epoch
+                    || delivery_state.delivered_through_sequence != required.control_sequence
+                    || required.invalid_scope_epoch != control.old_scope_epoch
+                    || required.control_sequence != control.required_control_sequence
+                    || required.baseline_snapshot_digest != control.baseline_snapshot_digest
+                    || required.reason != control.reason
+                {
+                    return Err(ScopedContinuityEnvelopeContractError::invalid(
+                        "resync-started delivery does not match retained lane state",
+                    ));
+                }
+                ScopedContinuityConsumerContext {
+                    current_scope_epoch: control.old_scope_epoch,
+                    last_contiguous_sequence: delivery_state.delivered_through_sequence,
+                    baseline_snapshot_digest: Some(required.baseline_snapshot_digest),
+                    phase: ScopedAppendDeliveryPhase::Live,
+                    prior_resync_required: Some((*required).clone()),
+                }
+            }
+            ScopedObservationEvent::ObserverFailed { failure } => {
+                let retained = delivery.observer_failure().ok_or_else(|| {
+                    ScopedContinuityEnvelopeContractError::invalid(
+                        "observer-failed delivery is missing its retained control",
+                    )
+                })?;
+                if !Arc::ptr_eq(failure, &retained)
+                    || delivery_state.continuity != ScopedObservationContinuity::Failed
+                    || delivery_state.scope_epoch != failure.failed_scope_epoch
+                    || delivery_state.delivered_through_sequence != failure.last_contiguous_sequence
+                {
+                    return Err(ScopedContinuityEnvelopeContractError::invalid(
+                        "observer-failed delivery does not match retained lane state",
+                    ));
+                }
+                ScopedContinuityConsumerContext {
+                    current_scope_epoch: failure.failed_scope_epoch,
+                    last_contiguous_sequence: delivery_state.delivered_through_sequence,
+                    baseline_snapshot_digest: valid_replacement_baseline_snapshot_digest(delivery),
+                    phase: failure.phase,
+                    prior_resync_required: None,
+                }
+            }
+            ScopedObservationEvent::SourcePresence { .. }
+            | ScopedObservationEvent::SourceReset { .. }
+            | ScopedObservationEvent::SourceObjectError { .. }
+            | ScopedObservationEvent::UsageV2 { .. }
+            | ScopedObservationEvent::ActorRun { .. }
+            | ScopedObservationEvent::ActorAffiliation { .. }
+            | ScopedObservationEvent::ArtifactAvailability { .. }
+            | ScopedObservationEvent::ObserverBootstrapComplete { .. }
+            | ScopedObservationEvent::ObserverResyncComplete { .. } => return Ok(None),
+        };
+        ScopedContinuityEnvelopeWire::from_scoped_for_context(
+            envelope,
+            &envelope.contract_selection,
+            expected_root,
+            &state,
+        )?;
+        let context = Self {
+            attachment_authority,
+            contract_selection: envelope.contract_selection.clone(),
+            root: expected_root.clone(),
+            state,
+        };
+        context.wire()?;
+        Ok(Some(context))
+    }
+
+    pub(crate) fn state(&self) -> &ScopedContinuityConsumerContext {
+        &self.state
+    }
+
+    pub(crate) fn wire(
+        &self,
+    ) -> Result<ScopedContinuityEnvelopeContextWire, ScopedContinuityEnvelopeContractError> {
+        require_positive_safe(self.state.current_scope_epoch, "caller current_scope_epoch")?;
+        require_safe_u64(
+            self.state.last_contiguous_sequence,
+            "caller last_contiguous_sequence",
+        )?;
+        validate_context_baseline(&self.state)?;
+        let prior_resync_required = self
+            .state
+            .prior_resync_required
+            .as_ref()
+            .map(|required| {
+                validate_prior_required(required, &self.root, &self.state)?;
+                Ok(ContinuityPriorResyncRequiredWire {
+                    kind: "observer_resync_required",
+                    invalid_scope_epoch: required.invalid_scope_epoch,
+                    control_sequence: required.control_sequence,
+                    last_contiguous_sequence: required.last_contiguous_sequence,
+                    baseline_snapshot_digest: encode_opaque(
+                        required.baseline_snapshot_digest.as_bytes(),
+                    ),
+                    reason: required.reason.into(),
+                    discarded_semantic_events: required.discarded_semantic_events,
+                    discarded_source_controls: required.discarded_source_controls,
+                    discarded_retained_native_bytes: required.discarded_retained_native_bytes,
+                })
+            })
+            .transpose()?;
+        let control_source = observer_control_source(&self.root).map_err(|()| {
+            ScopedContinuityEnvelopeContractError::invalid(
+                "observer control source identity cannot be derived",
+            )
+        })?;
+        Ok(ScopedContinuityEnvelopeContextWire {
+            contract_selection: self.contract_selection.clone(),
+            root: ContinuityRootWire::from_root(&self.root),
+            control_source: ContinuityControlSourceBindingWire {
+                instance_key: control_source.source_instance_key,
+                stream_key: control_source.stream_key,
+                object_key: control_source.object_key,
+            },
+            state: ContinuityConsumerStateWire {
+                current_scope_epoch: self.state.current_scope_epoch,
+                last_contiguous_sequence: self.state.last_contiguous_sequence,
+                baseline_snapshot_digest: self
+                    .state
+                    .baseline_snapshot_digest
+                    .map(|digest| encode_opaque(digest.as_bytes())),
+                phase: self.state.phase.into(),
+                prior_resync_required,
+            },
+        })
+    }
+
+    pub(crate) fn wire_value(&self) -> Result<JsonValue, ScopedContinuityEnvelopeContractError> {
+        serde_json::to_value(self.wire()?)
+            .map_err(|error| ScopedContinuityEnvelopeContractError::invalid(error.to_string()))
+    }
+
+    pub(super) fn belongs_to_attachment(
+        &self,
+        authority: &Arc<ScopedObservationAttachmentAuthority>,
+    ) -> bool {
+        Arc::ptr_eq(&self.attachment_authority, authority)
+    }
+}
+
 /// Specialized serialization-only projection of three observer controls.
 /// Received values must use `from_wire_value_for_context`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -665,6 +953,7 @@ impl ScopedContinuityEnvelopeWire {
             expected_state.last_contiguous_sequence,
             "caller last_contiguous_sequence",
         )?;
+        validate_context_baseline(expected_state)?;
         if let Some(prior) = expected_state.prior_resync_required.as_ref() {
             validate_prior_required(prior, expected_root, expected_state)?;
             if expected_state.last_contiguous_sequence != prior.control_sequence {
@@ -714,12 +1003,13 @@ impl ScopedContinuityEnvelopeWire {
                 )?;
                 let baseline = decode_digest(baseline_snapshot_digest, "baseline_snapshot_digest")?;
                 if self.phase != ContinuityDeliveryPhaseWire::Live
+                    || expected_state.phase != ScopedAppendDeliveryPhase::Live
                     || self.scope_epoch != *invalid_scope_epoch
                     || self.observer_sequence != *control_sequence
                     || *control_sequence <= *last_contiguous_sequence
                     || *invalid_scope_epoch != expected_state.current_scope_epoch
                     || *last_contiguous_sequence != expected_state.last_contiguous_sequence
-                    || baseline != expected_state.baseline_snapshot_digest
+                    || expected_state.baseline_snapshot_digest != Some(baseline)
                     || expected_state.prior_resync_required.is_some()
                 {
                     return Err(Self::invalid(
@@ -756,6 +1046,7 @@ impl ScopedContinuityEnvelopeWire {
                         )
                     })?;
                 if self.phase != ContinuityDeliveryPhaseWire::Correction
+                    || expected_state.phase != ScopedAppendDeliveryPhase::Live
                     || self.scope_epoch != *new_scope_epoch
                     || self.observer_sequence != *control_sequence
                     || old_scope_epoch.checked_add(1) != Some(*new_scope_epoch)
@@ -763,7 +1054,7 @@ impl ScopedContinuityEnvelopeWire {
                     || expected_state.last_contiguous_sequence != prior.control_sequence
                     || *required_control_sequence != prior.control_sequence
                     || *control_sequence <= *required_control_sequence
-                    || baseline != expected_state.baseline_snapshot_digest
+                    || expected_state.baseline_snapshot_digest != Some(baseline)
                     || baseline != prior.baseline_snapshot_digest
                     || ScopedResyncReason::from(*reason) != prior.reason
                     || *replacement != ReplacementModeWire::FullSnapshot
@@ -829,6 +1120,30 @@ impl ScopedContinuityEnvelopeWire {
     }
 }
 
+fn validate_context_baseline(
+    state: &ScopedContinuityConsumerContext,
+) -> Result<(), ScopedContinuityEnvelopeContractError> {
+    let valid = matches!(
+        (state.phase, state.baseline_snapshot_digest),
+        (ScopedAppendDeliveryPhase::Bootstrap, None)
+            | (
+                ScopedAppendDeliveryPhase::Live | ScopedAppendDeliveryPhase::Correction,
+                Some(_)
+            )
+    );
+    if !valid {
+        return Err(ScopedContinuityEnvelopeContractError::invalid(
+            "caller-held baseline presence does not match its delivery phase",
+        ));
+    }
+    if state.prior_resync_required.is_some() && state.phase != ScopedAppendDeliveryPhase::Live {
+        return Err(ScopedContinuityEnvelopeContractError::invalid(
+            "caller-held invalidation requires live baseline state",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_prior_required(
     prior: &ScopedResyncRequired,
     expected_root: &ScopedObservationRootIdentity,
@@ -855,7 +1170,7 @@ fn validate_prior_required(
     if prior.root != *expected_root
         || prior.invalid_scope_epoch != expected_state.current_scope_epoch
         || prior.control_sequence <= prior.last_contiguous_sequence
-        || prior.baseline_snapshot_digest != expected_state.baseline_snapshot_digest
+        || expected_state.baseline_snapshot_digest != Some(prior.baseline_snapshot_digest)
     {
         return Err(ScopedContinuityEnvelopeContractError::invalid(
             "caller-held resync invalidation is inconsistent",
