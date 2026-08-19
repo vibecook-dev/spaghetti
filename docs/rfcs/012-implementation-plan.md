@@ -2517,6 +2517,25 @@ execute the read. Generation mapping, portable availability publication,
 completion-barrier integration, task-artifact declaration, promotion, and
 public transport remain open.
 
+The next bounded D3 prerequisite (`38ce442`) supplies that missing generation
+authority inside the database-free attachment. A mutex-serialized, bounded
+ledger keyed by the exact relation/session/backup/version access-object token
+mirrors common `ReplaceDocument` presence lineage: content revision or native
+file-identity replacement remains in one generation, while an observed delete
+or recreation advances it. The ledger persists across access passes and shares
+the artifact-evidence reducer's 4,096-object safety ceiling. Each stable or
+known-missing observation derives a path-free opaque provenance reference from
+the current metadata-evidence revision, source generation, and exact native
+revision state. A stale caller-held expected generation produces
+`changed_generation` before content enters the portable wire; matching reads
+retain only the requested metadata/hash/inline disclosure, and attachment
+close is rechecked before serialization. An unforgeable consumed-capture
+witness prevents evidence validation alone from minting a result. This remains
+crate-private and executes only from a genuinely promoted scoped authorization;
+built-in Claude is still Candidate/incomplete. Source-driver errors, artifact
+completion-barrier state, task-artifact declaration, support promotion, and
+N-API/SDK observer transport remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
