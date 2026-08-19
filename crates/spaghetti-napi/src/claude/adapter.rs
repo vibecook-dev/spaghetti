@@ -154,7 +154,7 @@ impl ClaudeCodeAdapter {
                         env!("CARGO_PKG_VERSION"),
                         22,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
-                        "sha256:5ec0d94f65d06aa72444d951ee65f6aff7e920e57d82188114eff7b26238ea40",
+                        "sha256:e616770b3406202558e57f8af894975c9804374c8dedc3200b52d74a3aece77d",
                         "sha256:39768ea2fdb54dd9e7d0379088fd0972ac31b34d88c5bbc42c2e55f4ed37ce1a",
                     )
                     .expect("static Claude support binding is valid"),
@@ -5559,6 +5559,32 @@ mod tests {
         assert_eq!(
             support.scope_program_digest(),
             Sha256Digest::of(SCOPE_PROGRAM_DOCUMENT)
+        );
+        let source_declaration_document = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+        ));
+        assert_eq!(
+            support.source_declaration_digest(),
+            Sha256Digest::of(source_declaration_document)
+        );
+        let source_declaration: Value =
+            serde_json::from_slice(source_declaration_document).unwrap();
+        let declared_stream = source_declaration["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["stream_id"] == ARTIFACT_CONTENT_STREAM)
+            .unwrap();
+        assert_eq!(declared_stream["root_id"], "home");
+        assert_eq!(
+            declared_stream["relative_patterns"],
+            serde_json::json!(["file-history/*/*@v*"])
+        );
+        assert_eq!(declared_stream["decoder_id"], ARTIFACT_CONTENT_DECODER);
+        assert_eq!(
+            declared_stream["bounds"]["max_object_bytes"],
+            ARTIFACT_CONTENT_MAX_BYTES
         );
         let scope = manifest.scope_programs.as_ref().unwrap();
         assert_eq!(scope.status, ScopeProgramStatus::Incomplete);

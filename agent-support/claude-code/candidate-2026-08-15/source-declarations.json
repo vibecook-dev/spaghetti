@@ -166,7 +166,7 @@
       "primitive": "ReplaceDocument",
       "topologies": ["durable"],
       "implementation_state": "existing",
-      "decoder_id": "claude-artifact-content",
+      "decoder_id": "claude-file-history-blob",
       "authority": "canonical",
       "bounds": { "max_object_bytes": 1048576, "max_entries": 250000, "max_depth": 64 },
       "lifecycle": ["replace", "identity_change", "delete", "recreate"],
