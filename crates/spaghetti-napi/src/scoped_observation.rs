@@ -18456,6 +18456,13 @@ mod projection_tests {
             let known = yielded.known_envelope();
             assert_eq!(known.family(), family);
             assert_eq!(known.wire_value()["event"]["kind"], kind);
+            let transport = known.transport_value();
+            assert_eq!(
+                transport["scoped_known_envelope_contract_version"],
+                event_wire::SCOPED_OBSERVATION_KNOWN_ENVELOPE_CONTRACT_VERSION
+            );
+            assert_eq!(&transport["event"], known.wire_value());
+            assert_eq!(&transport["context"], known.context_value());
             assert_eq!(
                 known.context_value()["contract_selection"],
                 serde_json::to_value(&selection).unwrap()

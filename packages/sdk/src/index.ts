@@ -43,6 +43,7 @@ export * from './contracts/rfc012d-capability-snapshot.js';
 export * from './contracts/rfc012d-close.js';
 export * from './contracts/rfc012d-completion-envelope.js';
 export * from './contracts/rfc012d-continuity-envelope.js';
+export * from './contracts/rfc012d-known-envelope.js';
 export * from './contracts/rfc012d-replacement-manifest.js';
 export * from './contracts/rfc012d-scope-coverage.js';
 export * from './contracts/rfc012d-source-envelope.js';

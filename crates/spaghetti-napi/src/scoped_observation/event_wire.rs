@@ -35,6 +35,8 @@ use super::{
     ScopedObservationRootIdentity,
 };
 
+pub(crate) const SCOPED_OBSERVATION_KNOWN_ENVELOPE_CONTRACT_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopedObservationKnownEventFamily {
     Usage,
@@ -43,6 +45,19 @@ pub(crate) enum ScopedObservationKnownEventFamily {
     ArtifactAvailability,
     Completion,
     Continuity,
+}
+
+impl ScopedObservationKnownEventFamily {
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Usage => "usage",
+            Self::Actor => "actor",
+            Self::Source => "source",
+            Self::ArtifactAvailability => "artifact_availability",
+            Self::Completion => "completion",
+            Self::Continuity => "continuity",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -259,12 +274,38 @@ impl ScopedObservationKnownEnvelope {
         &self.context_value
     }
 
+    /// Strict outer dispatcher value for the currently known specialist
+    /// contracts. Returning an owned value keeps this process-local authority
+    /// non-Serde; a later native transport must still consume the yielded
+    /// envelope under its attachment lifecycle.
+    pub(crate) fn transport_value(&self) -> JsonValue {
+        known_wire_value(
+            self.family,
+            self.context_value.clone(),
+            self.wire_value.clone(),
+        )
+    }
+
     pub(super) fn belongs_to_attachment(
         &self,
         authority: &Arc<ScopedObservationAttachmentAuthority>,
     ) -> bool {
         Arc::ptr_eq(&self.attachment_authority, authority)
     }
+}
+
+fn known_wire_value(
+    family: ScopedObservationKnownEventFamily,
+    context: JsonValue,
+    event: JsonValue,
+) -> JsonValue {
+    serde_json::json!({
+        "scoped_known_envelope_contract_version":
+            SCOPED_OBSERVATION_KNOWN_ENVELOPE_CONTRACT_VERSION,
+        "family": family.wire_name(),
+        "context": context,
+        "event": event,
+    })
 }
 
 fn serialize_wire<T: Serialize>(wire: T) -> Result<JsonValue, ScopedEnvelopeError> {
@@ -310,3 +351,6 @@ fn validate_delivery(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
