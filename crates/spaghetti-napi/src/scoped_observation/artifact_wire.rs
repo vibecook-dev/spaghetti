@@ -172,6 +172,14 @@ impl ScopedValidatedArtifactReadCommand<'_> {
     pub(crate) fn context_wire(&self) -> ScopedArtifactReadContextWire {
         self.command.context_wire_internal()
     }
+
+    pub(super) fn content_policy(&self) -> ScopedArtifactContentPolicy {
+        self.command.content_policy
+    }
+
+    pub(super) fn expected_generation(&self) -> Option<u64> {
+        self.command.expected_generation
+    }
 }
 
 struct ScopedArtifactReadParameters {

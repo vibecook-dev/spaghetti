@@ -262,6 +262,35 @@ fn active_with_content_evidence(
     )
 }
 
+fn artifact_command(
+    host: &ScopedObservationAccessHost,
+    active: &ScopedObservationEpochState,
+    artifact_key: CanonicalEntityKey,
+    expected_generation: Option<u64>,
+    max_bytes: u64,
+    content_policy: ScopedArtifactContentPolicy,
+) -> super::super::artifact_wire::ScopedArtifactReadCommand {
+    host.prepare_portable_artifact_read_from_evidence(
+        active,
+        artifact_key,
+        "workflow_definition",
+        expected_generation,
+        max_bytes,
+        content_policy,
+    )
+    .unwrap()
+}
+
+fn write_artifact(temp: &TempDir, suffix: &str, content: &[u8]) -> std::path::PathBuf {
+    let path = temp
+        .path()
+        .join(format!("{suffix}-artifacts"))
+        .join("file-history/native-session/backup-17@v7");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
 #[test]
 fn exact_evidence_relation_reservation_is_bound_redacted_and_conservative() {
     let temp = TempDir::new().unwrap();
@@ -321,8 +350,8 @@ fn exact_evidence_relation_reservation_is_bound_redacted_and_conservative() {
         assert!(!debug.contains(secret));
     }
 
-    let relation = pass
-        .report()
+    let report = pass.report();
+    let relation = report
         .relations()
         .iter()
         .find(|relation| relation.relation_id == "file-artifact")
@@ -349,6 +378,229 @@ fn exact_evidence_relation_reservation_is_bound_redacted_and_conservative() {
     let trace = serde_json::to_string(&relation).unwrap();
     assert!(!trace.contains("native-session"));
     assert!(!trace.contains("backup-17@v7"));
+}
+
+#[test]
+fn confined_capture_applies_disclosure_policy_and_retains_generation_binding() {
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "capture", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    let content = b"echo bounded artifact\n";
+    let path = write_artifact(&temp, "capture", content);
+    let expected_hash = Sha256Digest::of(content);
+    let expected_hash_text = expected_hash.to_string();
+    let pass = host.begin_pass().unwrap();
+
+    for (policy, expects_hash, expects_content) in [
+        (ScopedArtifactContentPolicy::MetadataOnly, false, false),
+        (ScopedArtifactContentPolicy::HashOnly, true, false),
+        (ScopedArtifactContentPolicy::Inline, true, true),
+    ] {
+        let command = artifact_command(&host, &active, artifact_key, Some(91), 512, policy);
+        let validated = host
+            .validate_evidence_bound_artifact_command(&active, &command)
+            .unwrap();
+        let capture = pass
+            .reserve_artifact_relation_from_evidence(validated)
+            .unwrap()
+            .read_confined()
+            .unwrap();
+        assert_eq!(capture._validated.expected_generation(), Some(91));
+        let ScopedArtifactConfinedCaptureState::Stable {
+            size_bytes,
+            content_hash,
+            content: retained_content,
+            ..
+        } = &capture.state
+        else {
+            panic!("stable artifact unexpectedly changed state");
+        };
+        assert_eq!(*size_bytes, content.len() as u64);
+        assert_eq!(content_hash.is_some(), expects_hash);
+        if expects_hash {
+            assert_eq!(*content_hash, Some(expected_hash));
+        }
+        assert_eq!(retained_content.is_some(), expects_content);
+        if expects_content {
+            assert_eq!(retained_content.as_deref(), Some(content.as_slice()));
+        }
+        let debug = format!("{capture:?}");
+        assert!(debug.contains("state: \"stable\""));
+        assert!(debug.contains("native_path: \"<redacted>\""));
+        for secret in [
+            path.to_string_lossy().as_ref(),
+            "echo bounded artifact",
+            expected_hash_text.as_str(),
+            "backup-17@v7",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        drop(capture);
+    }
+
+    let report = pass.report();
+    let relation = report
+        .relations()
+        .iter()
+        .find(|relation| relation.relation_id == "file-artifact")
+        .unwrap()
+        .clone();
+    assert_eq!(relation.attempts, 3);
+    assert_eq!(relation.reservations_granted, 3);
+    assert_eq!(relation.completed, 3);
+    assert_eq!(relation.bytes_read, (content.len() * 3) as u64);
+    assert!(relation
+        .trace
+        .iter()
+        .all(|entry| entry.outcome == AccessOutcome::Available));
+}
+
+#[test]
+fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosure() {
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "bounds", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    let pass = host.begin_pass().unwrap();
+
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        8,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    assert!(matches!(
+        capture.state,
+        ScopedArtifactConfinedCaptureState::Missing
+    ));
+    drop(capture);
+
+    let path = write_artifact(&temp, "bounds", b"123456789");
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        8,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    assert!(matches!(
+        capture.state,
+        ScopedArtifactConfinedCaptureState::Oversized { observed_bytes: 9 }
+    ));
+    drop(capture);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let outside = temp.path().join("private-outside");
+        std::fs::write(&outside, b"private").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&outside, &path).unwrap();
+        let command = artifact_command(
+            &host,
+            &active,
+            artifact_key,
+            None,
+            8,
+            ScopedArtifactContentPolicy::MetadataOnly,
+        );
+        let validated = host
+            .validate_evidence_bound_artifact_command(&active, &command)
+            .unwrap();
+        let error = pass
+            .reserve_artifact_relation_from_evidence(validated)
+            .unwrap()
+            .read_confined()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ScopedArtifactRelationAccessError::Source(ScopedSourceFailureClass::PathEscape)
+        ));
+        let debug = format!("{error:?}");
+        assert!(!debug.contains(temp.path().to_string_lossy().as_ref()));
+        assert!(!debug.contains("backup-17@v7"));
+    }
+
+    let relation = pass
+        .report()
+        .relations()
+        .iter()
+        .find(|relation| relation.relation_id == "file-artifact")
+        .unwrap()
+        .clone();
+    #[cfg(unix)]
+    assert_eq!(relation.attempts, 3);
+    #[cfg(not(unix))]
+    assert_eq!(relation.attempts, 2);
+    assert_eq!(relation.abandoned, 0);
+    assert_eq!(relation.trace[0].outcome, AccessOutcome::Unavailable);
+    assert_eq!(relation.trace[1].outcome, AccessOutcome::Oversized);
+    #[cfg(unix)]
+    {
+        assert_eq!(relation.trace[2].outcome, AccessOutcome::Failed);
+        assert_eq!(relation.bytes_read, 8);
+    }
+    #[cfg(not(unix))]
+    assert_eq!(relation.bytes_read, 0);
+    let trace = serde_json::to_string(&relation).unwrap();
+    assert!(!trace.contains(temp.path().to_string_lossy().as_ref()));
+    assert!(!trace.contains("backup-17@v7"));
+}
+
+#[test]
+fn confined_capture_discards_a_read_if_the_attachment_closed_before_open() {
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "closed", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    write_artifact(&temp, "closed", b"not read");
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        64,
+        ScopedArtifactContentPolicy::Inline,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let pass = host.begin_pass().unwrap();
+    let proof = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap();
+    host.close();
+    assert!(matches!(
+        proof.read_confined(),
+        Err(ScopedArtifactRelationAccessError::Closed)
+    ));
+    let report = pass.report();
+    let relation = report
+        .relations()
+        .iter()
+        .find(|relation| relation.relation_id == "file-artifact")
+        .unwrap();
+    assert_eq!(relation.bytes_read, 0);
+    assert_eq!(relation.completed, 1);
+    assert_eq!(relation.trace[0].outcome, AccessOutcome::Unavailable);
 }
 
 #[test]

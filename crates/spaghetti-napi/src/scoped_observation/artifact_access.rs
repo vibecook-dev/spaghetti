@@ -1,27 +1,33 @@
-//! Non-I/O artifact relation authorization.
+//! Confined artifact relation authorization and capture.
 //!
 //! This seam consumes current admitted artifact metadata only far enough to
 //! reserve one exact promoted `ArtifactLocatorFromEvidence` relation and
-//! render its declaration template from already-bound identity evidence. It
-//! retains only a confined relative path; it does not join a native root, open
-//! an object, or claim artifact availability.
+//! render its declaration template from already-bound identity evidence. A
+//! consumed reservation may then use the common no-follow stable-file driver
+//! to produce a bounded private capture. The capture deliberately does not
+//! claim portable artifact availability because the exact native source-object
+//! generation still requires an independent authority.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::adapter::{ContractCompleteness, QualifiedValueQuality, ScopeRelationPrimitive};
+use crate::adapter::{
+    ContractCompleteness, QualifiedValueQuality, ScopeRelationPrimitive, Sha256Digest,
+};
 use crate::source::{
-    validate_evidence_locator_template, AccessBudgetError, AccessObjectToken, AccessOperation,
-    AccessPhase, AuthorizedScopeAccessPlan, ScopeAccessRequest, ScopeAccessReservation,
-    ScopeIdentityInput,
+    read_stable_file_confined, validate_evidence_locator_template, AccessBudgetError,
+    AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AuthorizedScopeAccessPlan,
+    FileIdentity, Revision, ScopeAccessRequest, ScopeAccessReservation, ScopeIdentityInput,
+    StableRead,
 };
 
 use super::artifact_wire::ScopedValidatedArtifactReadCommand;
 use super::{
-    ScopedAccessRootGrant, ScopedArtifactRelationGrant, ScopedKnownObjectGrant,
-    ScopedObservationAccessError, ScopedObservationAccessPass,
+    ScopedAccessRootGrant, ScopedArtifactContentPolicy, ScopedArtifactRelationGrant,
+    ScopedKnownObjectGrant, ScopedObservationAccessError, ScopedObservationAccessPass,
+    ScopedSourceFailureClass,
 };
 
 const ARTIFACT_IDENTITY_INPUTS: [&str; 3] =
@@ -33,6 +39,10 @@ pub(crate) enum ScopedArtifactRelationAccessError {
     InvalidBinding,
     #[error("artifact relation requires an exact complete native session identity")]
     NativeSessionUnavailable,
+    #[error("scoped artifact access closed before the confined read completed")]
+    Closed,
+    #[error("scoped artifact confined read failed: {0:?}")]
+    Source(ScopedSourceFailureClass),
     #[error(transparent)]
     Access(#[from] AccessBudgetError),
 }
@@ -56,6 +66,163 @@ pub(crate) struct ScopedArtifactRelationReservation<'command, 'pass> {
     _native_session_id: Arc<str>,
     _native_artifact_id: Arc<str>,
     _artifact_version: Arc<str>,
+}
+
+enum ScopedArtifactConfinedCaptureState {
+    Missing,
+    Oversized {
+        observed_bytes: u64,
+    },
+    Unstable,
+    Stable {
+        _file_identity: FileIdentity,
+        _modified_ns: i128,
+        _revision: Revision,
+        size_bytes: u64,
+        content_hash: Option<Sha256Digest>,
+        content: Option<Vec<u8>>,
+    },
+}
+
+/// One bounded, stable native capture that deliberately stops before the
+/// portable artifact outcome. The borrowed validated command remains attached
+/// because its optional expected generation still requires an independent
+/// source-object generation authority. Native identity, revision, hash, and
+/// bytes are redacted from Debug and never serialized here.
+pub(crate) struct ScopedArtifactConfinedCapture<'command, 'pass> {
+    _validated: ScopedValidatedArtifactReadCommand<'command>,
+    _pass: &'pass ScopedObservationAccessPass,
+    object_token: AccessObjectToken,
+    state: ScopedArtifactConfinedCaptureState,
+}
+
+impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (state, observed_bytes, has_content_hash, has_inline_content) = match &self.state {
+            ScopedArtifactConfinedCaptureState::Missing => ("missing", None, false, false),
+            ScopedArtifactConfinedCaptureState::Oversized { observed_bytes } => {
+                ("oversized", Some(*observed_bytes), false, false)
+            }
+            ScopedArtifactConfinedCaptureState::Unstable => ("unstable", None, false, false),
+            ScopedArtifactConfinedCaptureState::Stable {
+                size_bytes,
+                content_hash,
+                content,
+                ..
+            } => (
+                "stable",
+                Some(*size_bytes),
+                content_hash.is_some(),
+                content.is_some(),
+            ),
+        };
+        formatter
+            .debug_struct("ScopedArtifactConfinedCapture")
+            .field("object_token", &self.object_token)
+            .field("state", &state)
+            .field("observed_bytes", &observed_bytes)
+            .field("has_content_hash", &has_content_hash)
+            .field("has_inline_content", &has_inline_content)
+            .field("native_path", &"<redacted>")
+            .field("native_identity", &"<redacted>")
+            .field("native_revision", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
+    /// Consume this exact reservation with the common stable-file driver. This
+    /// produces a private capture only: source-object generation and portable
+    /// outcome construction remain separate authority boundaries.
+    pub(crate) fn read_confined(
+        self,
+    ) -> Result<ScopedArtifactConfinedCapture<'command, 'pass>, ScopedArtifactRelationAccessError>
+    {
+        let Self {
+            _validated: validated,
+            _pass: pass,
+            _reservation: reservation,
+            object_token,
+            max_bytes,
+            _root: root,
+            _relative_path: relative_path,
+            ..
+        } = self;
+        if pass.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+            reservation.complete(0, 0, AccessOutcome::Unavailable)?;
+            return Err(ScopedArtifactRelationAccessError::Closed);
+        }
+        let max_bytes = match usize::try_from(max_bytes) {
+            Ok(max_bytes) => max_bytes,
+            Err(_) => {
+                reservation.fail_conservative();
+                return Err(ScopedArtifactRelationAccessError::Access(
+                    AccessBudgetError::InvalidConfig(
+                        "artifact byte reservation exceeds this platform".to_string(),
+                    ),
+                ));
+            }
+        };
+        let read = match read_stable_file_confined(&root, &relative_path, max_bytes) {
+            Ok(read) => read,
+            Err(error) => {
+                reservation.fail_conservative();
+                return Err(ScopedArtifactRelationAccessError::Source(
+                    super::source_failure_class(&error),
+                ));
+            }
+        };
+        if pass.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+            reservation.fail_conservative();
+            return Err(ScopedArtifactRelationAccessError::Closed);
+        }
+        let content_policy = validated.content_policy();
+        let state = match read {
+            StableRead::Missing => {
+                reservation.complete(0, 0, AccessOutcome::Unavailable)?;
+                ScopedArtifactConfinedCaptureState::Missing
+            }
+            StableRead::Oversized(stamp) => {
+                reservation.complete(0, 0, AccessOutcome::Oversized)?;
+                ScopedArtifactConfinedCaptureState::Oversized {
+                    observed_bytes: stamp.len,
+                }
+            }
+            StableRead::Unstable => {
+                reservation.fail_conservative();
+                ScopedArtifactConfinedCaptureState::Unstable
+            }
+            StableRead::Stable {
+                stamp,
+                bytes,
+                revision,
+            } => {
+                let size_bytes = bytes.len() as u64;
+                let content_hash = matches!(
+                    content_policy,
+                    ScopedArtifactContentPolicy::HashOnly | ScopedArtifactContentPolicy::Inline
+                )
+                .then(|| Sha256Digest::of(&bytes));
+                let content =
+                    (content_policy == ScopedArtifactContentPolicy::Inline).then_some(bytes);
+                reservation.complete(size_bytes, 0, AccessOutcome::Available)?;
+                ScopedArtifactConfinedCaptureState::Stable {
+                    _file_identity: stamp.identity,
+                    _modified_ns: stamp.modified_ns,
+                    _revision: revision,
+                    size_bytes,
+                    content_hash,
+                    content,
+                }
+            }
+        };
+        Ok(ScopedArtifactConfinedCapture {
+            _validated: validated,
+            _pass: pass,
+            object_token,
+            state,
+        })
+    }
 }
 
 impl fmt::Debug for ScopedArtifactRelationReservation<'_, '_> {
