@@ -49,7 +49,8 @@ pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use scope::{
     ScopeContractError, ScopeProgramDeclaration, ScopeProgramManifest, ScopeProgramStatus,
     ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
-    ScopeUnavailableBehavior, SCOPE_PROGRAM_SCHEMA_VERSION,
+    ScopeRelationSourceBinding, ScopeRelationSourcePrimitive, ScopeUnavailableBehavior,
+    SCOPE_PROGRAM_SCHEMA_VERSION,
 };
 pub(crate) use semantic::CoverageMembershipRevisionBuilder;
 pub use semantic::{

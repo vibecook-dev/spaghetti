@@ -254,6 +254,7 @@ pub struct AuthorizedScopeAccessPlan {
     inner: ScopeAccessPlan,
     support_release_id: String,
     support_release_digest: [u8; 32],
+    source_declaration_digest: [u8; 32],
     scope_program_digest: [u8; 32],
     selection_contract_version: u32,
     observation_contract_version: u32,
@@ -276,6 +277,7 @@ impl AuthorizedScopeAccessPlan {
             inner,
             support_release_id: authorization.support_release_id().to_string(),
             support_release_digest: *authorization.support_release_digest().as_bytes(),
+            source_declaration_digest: *authorization.source_declaration_digest().as_bytes(),
             scope_program_digest: *authorization.scope_program_digest().as_bytes(),
             selection_contract_version: authorization.selection_contract_version(),
             observation_contract_version: authorization.observation_contract_version(),
@@ -296,6 +298,10 @@ impl AuthorizedScopeAccessPlan {
 
     pub fn support_release_id(&self) -> &str {
         &self.support_release_id
+    }
+
+    pub(crate) fn source_declaration_digest(&self) -> &[u8; 32] {
+        &self.source_declaration_digest
     }
 
     pub fn relation(&self, relation_id: &str) -> Option<&ScopeRelationDeclaration> {

@@ -12,7 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::scope::{ScopeProgramDeclaration, ScopeProgramManifest, ScopeProgramStatus};
+use super::scope::{
+    ScopeProgramDeclaration, ScopeProgramManifest, ScopeProgramStatus, ScopeRelationSourcePrimitive,
+};
 
 pub const SUPPORT_SELECTION_CONTRACT_VERSION: u32 = 1;
 pub const CONTRACT_VERSION_SELECTION_VERSION: u32 = 1;
@@ -535,6 +537,30 @@ struct SupportDocumentIdentityWire {
     support_release_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SupportSourceDeclarationWire {
+    #[serde(default)]
+    streams: Vec<SupportSourceStreamWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SupportSourceStreamWire {
+    stream_id: String,
+    root_id: String,
+    primitive: String,
+    topologies: Vec<String>,
+    implementation_state: String,
+    bounds: SupportSourceBoundsWire,
+    lifecycle: Vec<String>,
+    safe_decoder_state_boundary: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SupportSourceBoundsWire {
+    #[serde(default)]
+    max_object_bytes: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedSupportRelease {
     release_digest: Sha256Digest,
@@ -683,6 +709,7 @@ pub fn verify_support_release_bundle(
     let mut ads_id = None;
     let mut ads_references = Vec::new();
     let mut source_declaration_digest = None;
+    let mut source_declaration = None;
     let mut scope_program_digest = None;
     let mut scope_programs = None;
     for (kind, reference) in release.references.entries() {
@@ -747,7 +774,16 @@ pub fn verify_support_release_bundle(
         }
         match kind {
             "ads" => ads_digest = Some(actual_digest),
-            "source_declaration" => source_declaration_digest = Some(actual_digest),
+            "source_declaration" => {
+                let parsed = serde_json::from_slice::<SupportSourceDeclarationWire>(bytes)
+                    .map_err(|error| {
+                        SupportContractError::invalid(format!(
+                            "support bundle source declaration is invalid: {error}"
+                        ))
+                    })?;
+                source_declaration_digest = Some(actual_digest);
+                source_declaration = Some(parsed);
+            }
             "scope_program" => {
                 let parsed = ScopeProgramManifest::from_json(bytes).map_err(|error| {
                     SupportContractError::invalid(format!(
@@ -778,6 +814,10 @@ pub fn verify_support_release_bundle(
 
     let scope_programs =
         scope_programs.expect("support reference set always includes scope program");
+    validate_scope_source_bindings(
+        &scope_programs,
+        &source_declaration.expect("support reference set always includes source declaration"),
+    )?;
     let scope_status_matches = match descriptor.status {
         SupportReleaseStatus::Candidate => matches!(
             scope_programs.status,
@@ -812,6 +852,60 @@ pub fn verify_support_release_bundle(
         adapter_binding,
         scope_programs,
     })
+}
+
+fn validate_scope_source_bindings(
+    scope_programs: &ScopeProgramManifest,
+    source_declaration: &SupportSourceDeclarationWire,
+) -> Result<(), SupportContractError> {
+    let mut streams = BTreeMap::new();
+    for stream in &source_declaration.streams {
+        validate_identifier("support source stream id", &stream.stream_id)?;
+        if streams.insert(stream.stream_id.as_str(), stream).is_some() {
+            return Err(SupportContractError::invalid(format!(
+                "support source declaration repeats stream {:?}",
+                stream.stream_id
+            )));
+        }
+    }
+    for relation in scope_programs.relations() {
+        let Some(binding) = relation.source_binding.as_ref() else {
+            continue;
+        };
+        let stream = streams.get(binding.stream_id.as_str()).ok_or_else(|| {
+            SupportContractError::invalid(format!(
+                "scope relation {:?} binds unknown source stream {:?}",
+                relation.relation_id, binding.stream_id
+            ))
+        })?;
+        let lifecycle = stream
+            .lifecycle
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if stream.root_id != relation.access_root
+            || stream.primitive
+                != match binding.primitive {
+                    ScopeRelationSourcePrimitive::ReplaceDocument => "ReplaceDocument",
+                }
+            || stream.bounds.max_object_bytes != Some(binding.max_object_bytes)
+            || !stream
+                .topologies
+                .iter()
+                .any(|topology| topology == "scoped")
+            || stream.implementation_state != "existing"
+            || stream.safe_decoder_state_boundary != "object_generation_revision"
+            || !["replace", "delete", "recreate"]
+                .into_iter()
+                .all(|required| lifecycle.contains(required))
+        {
+            return Err(SupportContractError::invalid(format!(
+                "scope relation {:?} source binding does not match an existing scoped ReplaceDocument stream",
+                relation.relation_id
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_support_path(path: &str) -> Result<(), SupportContractError> {
@@ -1749,6 +1843,10 @@ impl AuthorizedScopeProgram<'_> {
         self.authorization.support_release_digest
     }
 
+    pub(crate) fn source_declaration_digest(&self) -> Sha256Digest {
+        self.authorization.source_declaration_digest
+    }
+
     pub fn scope_program_digest(&self) -> Sha256Digest {
         self.authorization.scope_program_digest
     }
@@ -1856,6 +1954,7 @@ mod tests {
                     },
                     statement_id: None,
                     parameter_names: None,
+                    source_binding: None,
                     unavailable_behavior: ScopeUnavailableBehavior::RecordUnavailable,
                     claim_refs: vec!["scope-evidence".to_string()],
                 }],
@@ -2224,6 +2323,76 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("notes"));
+    }
+
+    #[test]
+    fn support_scope_source_binding_is_checked_against_the_digest_bound_source_document() {
+        let scope = ScopeProgramManifest::from_json(br#"{
+          "schema_version": 1,
+          "declaration_id": "fixture-scope",
+          "adapter_id": "fixture",
+          "ads_id": "fixture-ads",
+          "status": "promoted",
+          "roots": ["root"],
+          "programs": [{
+            "program_id": "observe-session",
+            "root_entity_kind": "session",
+            "root_relation_id": "root-object",
+            "relations": [
+              {
+                "relation_id": "root-object",
+                "primitive": "KnownObject",
+                "access_root": "root",
+                "locator": "known-object",
+                "identity_inputs": ["native-session-id"],
+                "bounds": {"max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
+                "unavailable_behavior": "record_unavailable",
+                "claim_refs": ["scope-evidence"]
+              },
+              {
+                "relation_id": "artifact-object",
+                "primitive": "ArtifactLocatorFromEvidence",
+                "access_root": "root",
+                "locator": "artifacts/{native-session-id}",
+                "identity_inputs": ["native-session-id"],
+                "bounds": {"max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
+                "source_binding": {"stream_id": "artifact-stream", "primitive": "ReplaceDocument", "max_object_bytes": 1024},
+                "unavailable_behavior": "record_unavailable",
+                "claim_refs": ["scope-evidence"]
+              }
+            ],
+            "claim_refs": ["scope-evidence"]
+          }],
+          "blockers": [],
+          "claim_refs": ["scope-evidence"]
+        }"#)
+        .unwrap();
+        let mut source: SupportSourceDeclarationWire = serde_json::from_value(serde_json::json!({
+            "streams": [{
+                "stream_id": "artifact-stream",
+                "root_id": "root",
+                "primitive": "ReplaceDocument",
+                "topologies": ["durable", "scoped"],
+                "implementation_state": "existing",
+                "bounds": {"max_object_bytes": 1024},
+                "lifecycle": ["replace", "identity_change", "delete", "recreate"],
+                "safe_decoder_state_boundary": "object_generation_revision"
+            }]
+        }))
+        .unwrap();
+        validate_scope_source_bindings(&scope, &source).unwrap();
+
+        source.streams[0].bounds.max_object_bytes = Some(2048);
+        assert!(validate_scope_source_bindings(&scope, &source)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
+        source.streams[0].bounds.max_object_bytes = Some(1024);
+        source.streams[0].topologies = vec!["durable".to_string()];
+        assert!(validate_scope_source_bindings(&scope, &source)
+            .unwrap_err()
+            .to_string()
+            .contains("does not match"));
     }
 
     #[test]

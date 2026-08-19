@@ -14,13 +14,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::adapter::{
-    ContractCompleteness, QualifiedValueQuality, ScopeRelationPrimitive, Sha256Digest,
+    ContractCompleteness, CoverageObjectKey, CoverageStreamKey, QualifiedValueQuality,
+    ScopeRelationPrimitive, Sha256Digest,
 };
 use crate::source::{
-    read_stable_file_confined, validate_evidence_locator_template, AccessBudgetError,
-    AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AuthorizedScopeAccessPlan,
-    FileIdentity, Revision, ScopeAccessRequest, ScopeAccessReservation, ScopeIdentityInput,
-    StableRead,
+    confined_relative_path_key, read_stable_file_confined, validate_evidence_locator_template,
+    AccessBudgetError, AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase,
+    AuthorizedScopeAccessPlan, FileIdentity, Revision, ScopeAccessRequest, ScopeAccessReservation,
+    ScopeIdentityInput, StableRead,
 };
 
 use super::artifact_availability::{
@@ -34,7 +35,7 @@ use super::artifact_wire::{
 use super::{
     ScopedAccessRootGrant, ScopedArtifactContentPolicy, ScopedArtifactRelationGrant,
     ScopedKnownObjectGrant, ScopedObservationAccessError, ScopedObservationAccessPass,
-    ScopedSourceFailureClass,
+    ScopedSourceFailureClass, ScopedSourceObjectIdentity,
 };
 
 const ARTIFACT_IDENTITY_INPUTS: [&str; 3] =
@@ -72,11 +73,37 @@ pub(crate) struct ScopedArtifactRelationReservation<'command, 'pass> {
     artifact_kind: Arc<str>,
     object_token: AccessObjectToken,
     max_bytes: u64,
+    source_binding: ScopedArtifactSourceObjectBinding,
     _root: PathBuf,
     _relative_path: PathBuf,
     _native_session_id: Arc<str>,
     _native_artifact_id: Arc<str>,
     _artifact_version: Arc<str>,
+}
+
+/// Exact path-free source coordinate derived from the promoted scope
+/// relation's checked source binding and the confined rendered locator. It is
+/// retained privately for the future ordered availability offer; possession
+/// does not assign an observer sequence or authorize another read.
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedArtifactSourceObjectBinding {
+    source_declaration_digest: [u8; 32],
+    source: ScopedSourceObjectIdentity,
+    max_object_bytes: u64,
+}
+
+impl fmt::Debug for ScopedArtifactSourceObjectBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedArtifactSourceObjectBinding")
+            .field("adapter_id", &self.source.adapter_id)
+            .field("max_object_bytes", &self.max_object_bytes)
+            .field("source_declaration_digest", &"sha256:<redacted>")
+            .field("source_instance", &"<redacted>")
+            .field("stream", &"<redacted>")
+            .field("object", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +209,7 @@ pub(crate) struct ScopedArtifactConfinedCapture<'command, 'pass> {
     _validated: ScopedValidatedArtifactReadCommand<'command>,
     _pass: &'pass ScopedObservationAccessPass,
     object_token: AccessObjectToken,
+    source_binding: ScopedArtifactSourceObjectBinding,
     state: ScopedArtifactConfinedCaptureState,
 }
 
@@ -234,6 +262,7 @@ impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
         formatter
             .debug_struct("ScopedArtifactConfinedCapture")
             .field("object_token", &self.object_token)
+            .field("source_binding", &self.source_binding)
             .field("state", &state)
             .field("observed_bytes", &observed_bytes)
             .field("has_generation", &has_generation)
@@ -259,6 +288,7 @@ impl ScopedArtifactConfinedCapture<'_, '_> {
             _validated: validated,
             _pass: pass,
             object_token,
+            source_binding: _,
             state,
         } = self;
         if pass.state.closed.load(std::sync::atomic::Ordering::Acquire) {
@@ -427,6 +457,7 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
             _reservation: reservation,
             object_token,
             max_bytes,
+            source_binding,
             _root: root,
             _relative_path: relative_path,
             ..
@@ -573,6 +604,7 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
             _validated: validated,
             _pass: pass,
             object_token,
+            source_binding,
             state,
         })
     }
@@ -662,6 +694,7 @@ pub(super) fn validate_artifact_relation_grants(
             ))
         })?;
         if relation.primitive != ScopeRelationPrimitive::ArtifactLocatorFromEvidence
+            || relation.source_binding.is_none()
             || relation
                 .identity_inputs
                 .iter()
@@ -793,6 +826,15 @@ impl ScopedObservationAccessPass {
             .plan
             .relation(relation_id)
             .ok_or(ScopedArtifactRelationAccessError::InvalidBinding)?;
+        let declared_source = relation
+            .source_binding
+            .as_ref()
+            .ok_or(ScopedArtifactRelationAccessError::InvalidBinding)?;
+        if validated.command.max_bytes <= relation.bounds.max_bytes
+            && validated.command.max_bytes > declared_source.max_object_bytes
+        {
+            return Err(ScopedArtifactRelationAccessError::InvalidBinding);
+        }
         let root = self
             .access_roots
             .get(&relation.access_root)
@@ -857,6 +899,41 @@ impl ScopedObservationAccessPass {
                 return Err(ScopedArtifactRelationAccessError::Access(error));
             }
         };
+        let source_object_key = match confined_relative_path_key(&relative_path) {
+            Ok(value) => value,
+            Err(_) => {
+                reservation.fail_conservative();
+                return Err(ScopedArtifactRelationAccessError::InvalidBinding);
+            }
+        };
+        let stream_key = match CoverageStreamKey::derive(
+            self.root_identity.adapter_id.as_str(),
+            declared_source.stream_id.as_bytes(),
+        ) {
+            Ok(stream_key) => stream_key,
+            Err(_) => {
+                reservation.fail_conservative();
+                return Err(ScopedArtifactRelationAccessError::InvalidBinding);
+            }
+        };
+        let object_key =
+            match CoverageObjectKey::derive(&declared_source.stream_id, &source_object_key) {
+                Ok(object_key) => object_key,
+                Err(_) => {
+                    reservation.fail_conservative();
+                    return Err(ScopedArtifactRelationAccessError::InvalidBinding);
+                }
+            };
+        let source_binding = ScopedArtifactSourceObjectBinding {
+            source_declaration_digest: *self.plan.source_declaration_digest(),
+            source: ScopedSourceObjectIdentity {
+                adapter_id: self.root_identity.adapter_id.clone(),
+                source_instance_key: self.root_identity.source_instance_key,
+                stream_key,
+                object_key,
+            },
+            max_object_bytes: declared_source.max_object_bytes,
+        };
         let object_token = reservation.object_token();
         Ok(ScopedArtifactRelationReservation {
             relation_id: Arc::from(relation_id),
@@ -865,6 +942,7 @@ impl ScopedObservationAccessPass {
             artifact_kind: Arc::from(validated.command.artifact_kind.as_str()),
             object_token,
             max_bytes: validated.command.max_bytes,
+            source_binding,
             _root: root.root.clone(),
             _relative_path: relative_path,
             _native_session_id: Arc::from(native_session.native_id.as_str()),

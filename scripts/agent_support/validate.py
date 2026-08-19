@@ -353,6 +353,8 @@ def _validate_scope_contract(bundle: Bundle) -> list[str]:
     errors: list[str] = []
     ads = bundle.document("ads.json")
     scope = bundle.document("scope-programs.json")
+    source = bundle.document("source-declarations.json")
+    source_streams = {item["stream_id"]: item for item in source["streams"]}
     roots = {item["root_id"] for item in ads["source_instance"]["canonical_roots"]}
     if not set(scope["roots"]).issubset(roots):
         errors.append(f"{bundle.label}/scope-programs.json: declares an unknown access root")
@@ -389,6 +391,36 @@ def _validate_scope_contract(bundle: Bundle) -> list[str]:
                 errors.append(f"{prefix}: parameterized SQLite relation needs statement_id and parameters")
             if not is_sql and ("statement_id" in relation or "parameter_names" in relation):
                 errors.append(f"{prefix}: SQL declaration fields are forbidden for this primitive")
+            source_binding = relation.get("source_binding")
+            is_artifact = relation["primitive"] == "ArtifactLocatorFromEvidence"
+            if scope["status"] == "promoted" and is_artifact and source_binding is None:
+                errors.append(f"{prefix}: promoted artifact relation requires a source binding")
+            if not is_artifact and source_binding is not None:
+                errors.append(f"{prefix}: only an artifact relation may declare a source binding")
+            if source_binding is not None:
+                if source_binding["max_object_bytes"] > relation["bounds"]["max_bytes"]:
+                    errors.append(f"{prefix}: source object bound exceeds the relation byte budget")
+                stream = source_streams.get(source_binding["stream_id"])
+                if stream is None:
+                    errors.append(
+                        f"{prefix}: source binding names unknown stream {source_binding['stream_id']}"
+                    )
+                else:
+                    if stream["root_id"] != relation["access_root"]:
+                        errors.append(f"{prefix}: source binding root differs from relation root")
+                    if stream["primitive"] != source_binding["primitive"]:
+                        errors.append(f"{prefix}: source binding primitive differs from source declaration")
+                    if stream["bounds"].get("max_object_bytes") != source_binding["max_object_bytes"]:
+                        errors.append(f"{prefix}: source binding object bound differs from source declaration")
+                    if "scoped" not in stream["topologies"]:
+                        errors.append(f"{prefix}: source binding stream does not declare scoped topology")
+                    if stream["implementation_state"] != "existing":
+                        errors.append(f"{prefix}: source binding stream is not implemented")
+                    if stream["safe_decoder_state_boundary"] != "object_generation_revision":
+                        errors.append(f"{prefix}: source binding stream lacks generation/revision boundary")
+                    required_lifecycle = {"replace", "delete", "recreate"}
+                    if not required_lifecycle.issubset(stream["lifecycle"]):
+                        errors.append(f"{prefix}: source binding stream lacks replace/delete/recreate lifecycle")
         if root_relation_id is not None:
             root_relations = [
                 relation

@@ -54,6 +54,7 @@ const ARTIFACT_SCOPE_DOCUMENT: &[u8] = br#"{
         "locator": "file-history/{native-session-id}/{backup-name}",
         "identity_inputs": ["native-session-id", "backup-name", "artifact-version"],
         "bounds": {"max_fan_out": 4, "max_depth": 3, "max_objects": 4, "max_bytes": 4096, "max_rows": 0},
+        "source_binding": {"stream_id": "artifact-blobs", "primitive": "ReplaceDocument", "max_object_bytes": 1024},
         "unavailable_behavior": "skip_optional",
         "claim_refs": ["scope-evidence"]
       },
@@ -64,6 +65,7 @@ const ARTIFACT_SCOPE_DOCUMENT: &[u8] = br#"{
         "locator": "wrong-artifact-locator",
         "identity_inputs": ["native-session-id", "backup-name"],
         "bounds": {"max_fan_out": 1, "max_depth": 2, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
+        "source_binding": {"stream_id": "artifact-blobs", "primitive": "ReplaceDocument", "max_object_bytes": 1024},
         "unavailable_behavior": "skip_optional",
         "claim_refs": ["scope-evidence"]
       },
@@ -74,6 +76,7 @@ const ARTIFACT_SCOPE_DOCUMENT: &[u8] = br#"{
         "locator": "conceptual-artifact-locator",
         "identity_inputs": ["native-session-id", "backup-name", "artifact-version"],
         "bounds": {"max_fan_out": 1, "max_depth": 2, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
+        "source_binding": {"stream_id": "artifact-blobs", "primitive": "ReplaceDocument", "max_object_bytes": 1024},
         "unavailable_behavior": "skip_optional",
         "claim_refs": ["scope-evidence"]
       }
@@ -369,6 +372,30 @@ fn exact_evidence_relation_reservation_is_bound_redacted_and_conservative() {
     assert_eq!(proof._native_session_id.as_ref(), "native-session");
     assert_eq!(proof._native_artifact_id.as_ref(), "backup-17@v7");
     assert_eq!(proof._artifact_version.as_ref(), "7");
+    assert_eq!(
+        proof.source_binding.source_declaration_digest,
+        *pass.plan.source_declaration_digest()
+    );
+    assert_eq!(proof.source_binding.max_object_bytes, 1024);
+    assert_eq!(
+        proof.source_binding.source.source_instance_key,
+        active.root.source_instance_key
+    );
+    assert_eq!(
+        proof.source_binding.source.stream_key,
+        CoverageStreamKey::derive("fixture", b"artifact-blobs").unwrap()
+    );
+    assert_eq!(
+        proof.source_binding.source.object_key,
+        CoverageObjectKey::derive(
+            "artifact-blobs",
+            &confined_relative_path_key(std::path::Path::new(
+                "file-history/native-session/backup-17@v7"
+            ))
+            .unwrap()
+        )
+        .unwrap()
+    );
     let debug = format!("{proof:?}");
     for secret in [
         temp.path().to_string_lossy().as_ref(),
@@ -378,6 +405,22 @@ fn exact_evidence_relation_reservation_is_bound_redacted_and_conservative() {
     ] {
         assert!(!debug.contains(secret));
     }
+
+    let oversized_command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        1025,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    let oversized_validated = host
+        .validate_evidence_bound_artifact_command(&active, &oversized_command)
+        .unwrap();
+    assert!(matches!(
+        pass.reserve_artifact_relation_from_evidence(oversized_validated),
+        Err(ScopedArtifactRelationAccessError::InvalidBinding)
+    ));
 
     let report = pass.report();
     let relation = report

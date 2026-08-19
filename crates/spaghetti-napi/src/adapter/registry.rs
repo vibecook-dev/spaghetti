@@ -365,7 +365,7 @@ pub(crate) mod tests {
             (
                 "source_declaration",
                 "support/source.json",
-                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
+                br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice(),
             ),
             ("scope_program", "support/scope.json", scope_document),
             (
@@ -1337,7 +1337,7 @@ pub(crate) mod tests {
         assert!(report.verify_digest());
         assert_eq!(
             report.digest().to_string(),
-            "sha256:293d3c4e10e46afab60e64b51cd161c6a9fa48c482519039ccf986f8ced95c84"
+            "sha256:4fa5890dac3fbf65b3ebdb38d5e6cc82bef9e02e23cb6d3bb9aadf2792cf8105"
         );
         assert_ne!(report.digest(), empty_digest);
         let encoded = serde_json::to_string(&report).unwrap();

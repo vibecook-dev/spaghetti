@@ -164,7 +164,7 @@
       "root_id": "home",
       "relative_patterns": ["file-history/*/*@v*"],
       "primitive": "ReplaceDocument",
-      "topologies": ["durable"],
+      "topologies": ["durable", "scoped"],
       "implementation_state": "existing",
       "decoder_id": "claude-file-history-blob",
       "authority": "canonical",

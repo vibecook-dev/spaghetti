@@ -87,6 +87,7 @@
           "locator": "file-history/{native-session-id}/{backup-name}",
           "identity_inputs": ["native-session-id", "backup-name", "artifact-version"],
           "bounds": { "max_fan_out": 1024, "max_depth": 3, "max_objects": 2048, "max_bytes": 2147483648, "max_rows": 0 },
+          "source_binding": { "stream_id": "file-history-blobs", "primitive": "ReplaceDocument", "max_object_bytes": 1048576 },
           "unavailable_behavior": "skip_optional",
           "claim_refs": ["claude-scope-relations-open"]
         }

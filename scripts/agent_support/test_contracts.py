@@ -423,6 +423,8 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                             "canonical_roots": [{"root_id": "root"}],
                         }
                     }
+                if name == "source-declarations.json":
+                    return {"streams": []}
                 self.assert_scope_name(name)
                 return self.scope
 
@@ -466,6 +468,82 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         self.assertTrue(any("must use KnownObject" in error for error in errors))
         program["root_relation_id"] = "root-object"
         self.assertEqual(_validate_scope_contract(bundle), [])
+
+    def test_artifact_scope_source_binding_matches_a_scoped_source_stream(self) -> None:
+        class FixtureBundle:
+            label = "fixture"
+
+            def __init__(self) -> None:
+                self.scope: dict[str, Any] = {
+                    "status": "promoted",
+                    "roots": ["root"],
+                    "blockers": [],
+                    "programs": [
+                        {
+                            "program_id": "observe-session",
+                            "root_relation_id": "root-object",
+                            "relations": [
+                                {
+                                    "relation_id": "root-object",
+                                    "primitive": "KnownObject",
+                                    "access_root": "root",
+                                    "locator": "session.jsonl",
+                                },
+                                {
+                                    "relation_id": "artifact-object",
+                                    "primitive": "ArtifactLocatorFromEvidence",
+                                    "access_root": "root",
+                                    "locator": "artifacts/{artifact}",
+                                    "bounds": {"max_bytes": 4096},
+                                    "source_binding": {
+                                        "stream_id": "artifacts",
+                                        "primitive": "ReplaceDocument",
+                                        "max_object_bytes": 1024,
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                }
+                self.source: dict[str, Any] = {
+                    "streams": [
+                        {
+                            "stream_id": "artifacts",
+                            "root_id": "root",
+                            "primitive": "ReplaceDocument",
+                            "topologies": ["scoped"],
+                            "implementation_state": "existing",
+                            "bounds": {"max_object_bytes": 1024},
+                            "lifecycle": ["replace", "delete", "recreate"],
+                            "safe_decoder_state_boundary": "object_generation_revision",
+                        }
+                    ]
+                }
+
+            def document(self, name: str) -> dict[str, Any]:
+                if name == "ads.json":
+                    return {
+                        "source_instance": {"canonical_roots": [{"root_id": "root"}]}
+                    }
+                if name == "scope-programs.json":
+                    return self.scope
+                if name == "source-declarations.json":
+                    return self.source
+                raise AssertionError(name)
+
+        bundle = FixtureBundle()
+        self.assertEqual(_validate_scope_contract(bundle), [])
+
+        bundle.source["streams"][0]["topologies"] = ["durable"]
+        self.assertTrue(
+            any("scoped topology" in error for error in _validate_scope_contract(bundle))
+        )
+        bundle.source["streams"][0]["topologies"] = ["scoped"]
+        binding = bundle.scope["programs"][0]["relations"][1]["source_binding"]
+        binding["max_object_bytes"] = 2048
+        self.assertTrue(
+            any("object bound" in error for error in _validate_scope_contract(bundle))
+        )
 
     def test_strict_schema_rejects_unknown_property(self) -> None:
         schema = json.loads((SCHEMA_ROOT / "evidence-manifest.schema.json").read_text(encoding="utf-8"))

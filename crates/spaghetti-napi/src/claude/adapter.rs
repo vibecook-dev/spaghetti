@@ -154,8 +154,8 @@ impl ClaudeCodeAdapter {
                         env!("CARGO_PKG_VERSION"),
                         22,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
-                        "sha256:e616770b3406202558e57f8af894975c9804374c8dedc3200b52d74a3aece77d",
-                        "sha256:39768ea2fdb54dd9e7d0379088fd0972ac31b34d88c5bbc42c2e55f4ed37ce1a",
+                        "sha256:3d8a5f0d005f97ede696c95c30dfccdb9cbaeeed6f8b0359d8dbfed38445a974",
+                        "sha256:3b65475646b501a93695534ab968f4187a20bbec9a3d0d1228cd42670f447114",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -4840,8 +4840,8 @@ mod tests {
 
     use super::*;
     use crate::adapter::{
-        FactEnvelope, FactRevisionId, FactSemanticContext, ScopeProgramStatus, Sha256Digest,
-        SourceInstance,
+        FactEnvelope, FactRevisionId, FactSemanticContext, ScopeProgramStatus,
+        ScopeRelationSourcePrimitive, Sha256Digest, SourceInstance,
     };
     use crate::source::{
         validate_evidence_locator_template, AccessOperation, AccessPhase, AppendDelimitedFile,
@@ -5578,6 +5578,10 @@ mod tests {
             .unwrap();
         assert_eq!(declared_stream["root_id"], "home");
         assert_eq!(
+            declared_stream["topologies"],
+            serde_json::json!(["durable", "scoped"])
+        );
+        assert_eq!(
             declared_stream["relative_patterns"],
             serde_json::json!(["file-history/*/*@v*"])
         );
@@ -5603,6 +5607,16 @@ mod tests {
         assert_eq!(
             relation.identity_inputs,
             ["native-session-id", "backup-name", "artifact-version"]
+        );
+        let source_binding = relation.source_binding.as_ref().unwrap();
+        assert_eq!(source_binding.stream_id, ARTIFACT_CONTENT_STREAM);
+        assert_eq!(
+            source_binding.primitive,
+            ScopeRelationSourcePrimitive::ReplaceDocument
+        );
+        assert_eq!(
+            source_binding.max_object_bytes,
+            ARTIFACT_CONTENT_MAX_BYTES as u64
         );
         validate_evidence_locator_template(relation).unwrap();
         let task_relation = program

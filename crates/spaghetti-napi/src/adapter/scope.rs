@@ -57,6 +57,35 @@ pub enum ScopeUnavailableBehavior {
     FailScope,
 }
 
+/// Exact bounded source contract used by an evidence-derived artifact
+/// relation. V1 intentionally permits only the common ReplaceDocument shape:
+/// other primitives need their own generation and position law before they
+/// can back an ordered artifact-availability occurrence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScopeRelationSourcePrimitive {
+    ReplaceDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeRelationSourceBinding {
+    pub stream_id: String,
+    pub primitive: ScopeRelationSourcePrimitive,
+    pub max_object_bytes: u64,
+}
+
+impl ScopeRelationSourceBinding {
+    fn validate(&self, relation_bounds: ScopeRelationBounds) -> Result<(), ScopeContractError> {
+        validate_identifier("scope relation source stream id", &self.stream_id)?;
+        if self.max_object_bytes == 0 || self.max_object_bytes > relation_bounds.max_bytes {
+            return Err(invalid(
+                "scope relation source object bound must be positive and fit the relation byte budget",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeRelationBounds {
@@ -100,12 +129,22 @@ pub struct ScopeRelationDeclaration {
     pub statement_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameter_names: Option<Vec<String>>,
+    /// Exact declared source stream whose canonical object coordinate backs
+    /// this evidence-derived artifact read. Incomplete manifests may omit the
+    /// binding while a conceptual relation remains unresolved; promoted
+    /// manifests may not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_binding: Option<ScopeRelationSourceBinding>,
     pub unavailable_behavior: ScopeUnavailableBehavior,
     pub claim_refs: Vec<String>,
 }
 
 impl ScopeRelationDeclaration {
-    fn validate(&self, roots: &BTreeSet<&str>) -> Result<(), ScopeContractError> {
+    fn validate(
+        &self,
+        roots: &BTreeSet<&str>,
+        require_artifact_source_binding: bool,
+    ) -> Result<(), ScopeContractError> {
         validate_identifier("scope relation id", &self.relation_id)?;
         validate_identifier("scope relation access root", &self.access_root)?;
         if !roots.contains(self.access_root.as_str()) {
@@ -141,6 +180,25 @@ impl ScopeRelationDeclaration {
                 ));
             }
             _ => {}
+        }
+        match (self.primitive, self.source_binding.as_ref()) {
+            (ScopeRelationPrimitive::ArtifactLocatorFromEvidence, Some(binding)) => {
+                binding.validate(self.bounds)?;
+            }
+            (ScopeRelationPrimitive::ArtifactLocatorFromEvidence, None)
+                if require_artifact_source_binding =>
+            {
+                return Err(invalid(
+                    "promoted evidence-derived artifact relation requires a source binding",
+                ));
+            }
+            (ScopeRelationPrimitive::ArtifactLocatorFromEvidence, None) => {}
+            (_, Some(_)) => {
+                return Err(invalid(
+                    "only an evidence-derived artifact relation may declare a source binding",
+                ));
+            }
+            (_, None) => {}
         }
         Ok(())
     }
@@ -245,7 +303,7 @@ impl ScopeProgramManifest {
                 )));
             }
             for relation in &program.relations {
-                relation.validate(&roots)?;
+                relation.validate(&roots, self.status == ScopeProgramStatus::Promoted)?;
                 if !relation_ids.insert(relation.relation_id.as_str()) {
                     return Err(invalid(format!(
                         "duplicate scope relation id {}",
@@ -468,5 +526,45 @@ mod tests {
             manifest.programs[0].relations[0].locator = locator.to_string();
             assert!(manifest.validate().is_err(), "accepted {locator:?}");
         }
+    }
+
+    #[test]
+    fn promoted_artifact_relations_require_an_exact_bounded_source_binding() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+        ));
+        let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
+        manifest.status = ScopeProgramStatus::Promoted;
+        manifest.blockers.clear();
+        manifest.programs[0].root_relation_id = Some("root-history".to_string());
+        let relation = &mut manifest.programs[0].relations[1];
+        relation.primitive = ScopeRelationPrimitive::ArtifactLocatorFromEvidence;
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires a source binding"));
+
+        let relation = &mut manifest.programs[0].relations[1];
+        relation.source_binding = Some(ScopeRelationSourceBinding {
+            stream_id: "summary-documents".to_string(),
+            primitive: ScopeRelationSourcePrimitive::ReplaceDocument,
+            max_object_bytes: relation.bounds.max_bytes,
+        });
+        manifest.validate().unwrap();
+
+        manifest.programs[0].relations[1].source_binding = None;
+        manifest.programs[0].relations[1].primitive = ScopeRelationPrimitive::SiblingObject;
+        manifest.programs[0].relations[2].source_binding = Some(ScopeRelationSourceBinding {
+            stream_id: "events-documents".to_string(),
+            primitive: ScopeRelationSourcePrimitive::ReplaceDocument,
+            max_object_bytes: 1,
+        });
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("only an evidence-derived artifact relation"));
     }
 }
