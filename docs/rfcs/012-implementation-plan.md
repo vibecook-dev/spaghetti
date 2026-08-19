@@ -2625,6 +2625,26 @@ This remains a crate-private, non-serialized event seam: the portable ordered
 artifact event wire, task-artifact discovery, complete promoted support,
 N-API/SDK observer transport, and D4 migration remain open.
 
+The next bounded D3 prerequisite (`dabce41`) freezes that ordered artifact-
+availability event as a strict contextual Rust/TypeScript v1 envelope without
+changing the existing availability-snapshot bytes or revision law. The
+consumer drain now retains a redacted, non-Serde context minted while the
+private source occurrence is still present. It binds the exact negotiation,
+root, common source coordinate and generation, observer sequence and epoch,
+observation time and phase, Rust-issued event ID, and availability entry. Rust
+retains the verified source-declaration digest privately and recomputes the
+event identity; the serialized portable context omits that digest and instead
+requires the exact Rust-issued ID and reducer entry. Both parsers reuse the
+strict source-envelope boundary for root actor, affiliation, source, null, and
+engine-evidence validation, while requiring `CommonReducer` availability
+evidence and rejecting entry/source-generation drift. The frozen fixture comes
+from a real confined missing-object read through reducer preparation, ordered
+offer, drain mapping, and contextual serialization. Neither event nor context
+carries an artifact locator, source record, cursor, native bytes, semantic
+revision, or source-declaration digest. This adds a portable contract and SDK
+parser/export only: no N-API observer method, production transport, task-
+artifact discovery, support promotion, or D4 migration is claimed.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
