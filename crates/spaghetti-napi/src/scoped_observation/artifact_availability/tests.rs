@@ -113,6 +113,16 @@ fn snapshot_is_canonical_current_evidence_bound_and_path_free() {
     let mut wrong_count = forward_snapshot.clone();
     wrong_count.entry_count += 1;
     assert!(!wrong_count.validate_for_root(root));
+    let mut zero_revision = forward_snapshot.clone();
+    zero_revision.entries[0].revision = ScopedArtifactAvailabilityRevision([0; 32]);
+    assert!(!zero_revision.validate_for_root(root));
+    let mut invalid_state = forward_snapshot.clone();
+    invalid_state.entries[0].state = ScopedArtifactAvailabilityState::Available {
+        generation: 0,
+        provenance_ref: [3; 32],
+        size_bytes: 1,
+    };
+    assert!(!invalid_state.validate_for_root(root));
 
     let stale = BTreeSet::from([(first_key, [9; 32])]);
     let stale_snapshot = snapshot_with(&forward, root, &stale);

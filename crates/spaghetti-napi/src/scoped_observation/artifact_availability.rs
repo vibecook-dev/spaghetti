@@ -20,6 +20,7 @@ use super::artifact_evidence::{
 use super::{ScopedObservationProjectionSink, ScopedProjectionError};
 
 pub(super) const SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION: u32 = 1;
+const JS_SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScopedArtifactAvailabilityState {
@@ -96,6 +97,7 @@ pub struct ScopedArtifactAvailabilityEntry {
     artifact_key: CanonicalEntityKey,
     artifact_kind: Arc<str>,
     revision: ScopedArtifactAvailabilityRevision,
+    state: ScopedArtifactAvailabilityState,
 }
 
 impl ScopedArtifactAvailabilityEntry {
@@ -109,6 +111,10 @@ impl ScopedArtifactAvailabilityEntry {
 
     pub fn revision(&self) -> ScopedArtifactAvailabilityRevision {
         self.revision
+    }
+
+    pub(super) fn state(&self) -> ScopedArtifactAvailabilityState {
+        self.state
     }
 }
 
@@ -142,8 +148,14 @@ impl ScopedArtifactAvailabilitySnapshot {
                 (&window[0].artifact_key, window[0].artifact_kind.as_ref())
                     < (&window[1].artifact_key, window[1].artifact_kind.as_ref())
             })
+            && self.entries.iter().all(|entry| {
+                entry.revision.0.iter().any(|byte| *byte != 0)
+                    && validate_artifact_kind(&entry.artifact_kind)
+                    && validate_availability_state(entry.state)
+            })
             && self.semantic_digest
                 == derive_snapshot_digest(root_session, self.entry_count, &self.entries)
+            && self.semantic_digest.0.iter().any(|byte| *byte != 0)
     }
 
     #[cfg(test)]
@@ -165,15 +177,17 @@ impl ScopedArtifactAvailabilitySnapshot {
             CanonicalEntityKey,
             impl Into<Arc<str>>,
             ScopedArtifactAvailabilityRevision,
+            ScopedArtifactAvailabilityState,
         )>,
     ) -> Self {
         let mut entries = entries
             .into_iter()
             .map(
-                |(artifact_key, artifact_kind, revision)| ScopedArtifactAvailabilityEntry {
+                |(artifact_key, artifact_kind, revision, state)| ScopedArtifactAvailabilityEntry {
                     artifact_key,
                     artifact_kind: artifact_kind.into(),
                     revision,
+                    state,
                 },
             )
             .collect::<Vec<_>>();
@@ -242,7 +256,7 @@ impl ScopedArtifactAvailabilityReducer {
         })
     }
 
-    fn snapshot_with_current<F>(
+    pub(super) fn snapshot_with_current<F>(
         &self,
         root_session: CanonicalEntityKey,
         mut is_current: F,
@@ -265,6 +279,7 @@ impl ScopedArtifactAvailabilityReducer {
                 artifact_key: *artifact_key,
                 artifact_kind: Arc::clone(artifact_kind),
                 revision,
+                state: observation.state,
             });
         }
         let entry_count = u64::try_from(entries.len())
@@ -276,6 +291,54 @@ impl ScopedArtifactAvailabilityReducer {
             semantic_digest: derive_snapshot_digest(root_session, entry_count, &entries),
             entries,
         })
+    }
+}
+
+fn validate_artifact_kind(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+}
+
+fn validate_availability_state(state: ScopedArtifactAvailabilityState) -> bool {
+    match state {
+        ScopedArtifactAvailabilityState::Available {
+            generation,
+            provenance_ref,
+            size_bytes,
+        } => {
+            generation > 0
+                && generation <= JS_SAFE_INTEGER_MAX
+                && provenance_ref.iter().any(|byte| *byte != 0)
+                && size_bytes <= JS_SAFE_INTEGER_MAX
+        }
+        ScopedArtifactAvailabilityState::Missing {
+            observed_generation,
+            provenance_ref,
+        } => {
+            observed_generation.is_some() == provenance_ref.is_some()
+                && observed_generation
+                    .is_none_or(|generation| generation > 0 && generation <= JS_SAFE_INTEGER_MAX)
+                && provenance_ref.is_none_or(|reference| reference.iter().any(|byte| *byte != 0))
+        }
+        ScopedArtifactAvailabilityState::OverLimit {
+            generation,
+            provenance_ref,
+            observed_bytes,
+            request_max_bytes,
+        } => {
+            generation > 0
+                && generation <= JS_SAFE_INTEGER_MAX
+                && provenance_ref.iter().any(|byte| *byte != 0)
+                && request_max_bytes > 0
+                && request_max_bytes <= JS_SAFE_INTEGER_MAX
+                && observed_bytes <= JS_SAFE_INTEGER_MAX
+                && observed_bytes > request_max_bytes
+        }
+        ScopedArtifactAvailabilityState::Unstable => true,
     }
 }
 

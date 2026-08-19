@@ -1,0 +1,204 @@
+{
+  "empty": {
+    "context": {
+      "contract_selection": {
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {
+            "runtime.usage-v2": 1
+          },
+          "model_major": 1,
+          "observation_contract_version": 1,
+          "query_pack_version": null,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "envelope_contract_version": 1,
+        "event_contract_version": 1,
+        "lifecycle_contract_version": 1,
+        "observation_negotiation_contract_version": 1
+      },
+      "expected_entries": [],
+      "expected_entry_count": 0,
+      "expected_semantic_digest": "v1:MLGk7_Y1IqB1J70suG7cyV3SW6LS2g-oCfOJGv0qdag",
+      "root_session_key": "v1:ovsTQv7A7OhgQuCyKKlbiNmGOJ7QD1TOWuKKXAdYc4U"
+    },
+    "snapshot": {
+      "contract_selection": {
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {
+            "runtime.usage-v2": 1
+          },
+          "model_major": 1,
+          "observation_contract_version": 1,
+          "query_pack_version": null,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "envelope_contract_version": 1,
+        "event_contract_version": 1,
+        "lifecycle_contract_version": 1,
+        "observation_negotiation_contract_version": 1
+      },
+      "entries": [],
+      "entry_count": 0,
+      "root_session_key": "v1:ovsTQv7A7OhgQuCyKKlbiNmGOJ7QD1TOWuKKXAdYc4U",
+      "scoped_artifact_availability_contract_version": 1,
+      "semantic_digest": "v1:MLGk7_Y1IqB1J70suG7cyV3SW6LS2g-oCfOJGv0qdag"
+    }
+  },
+  "expected": {
+    "bootstrap_or_resync_barrier": false,
+    "native_content_disclosure": "none",
+    "native_locator_disclosure": "none",
+    "ordered_observer_event": false,
+    "portable_observer_transport": false,
+    "semantic_digest_algorithm": "blake3-256",
+    "source_access_authority": false,
+    "states": [
+      "available",
+      "missing",
+      "over_limit",
+      "unstable"
+    ]
+  },
+  "fixture_contract_version": 1,
+  "populated": {
+    "context": {
+      "contract_selection": {
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {
+            "runtime.usage-v2": 1
+          },
+          "model_major": 1,
+          "observation_contract_version": 1,
+          "query_pack_version": null,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "envelope_contract_version": 1,
+        "event_contract_version": 1,
+        "lifecycle_contract_version": 1,
+        "observation_negotiation_contract_version": 1
+      },
+      "expected_entries": [
+        {
+          "artifact_key": "v1:CJtvWQLASsRzs2F9A_ks6JnoNspQRT8MVTe9Uh_qF_g",
+          "artifact_kind": "team_configuration",
+          "revision": "v1:pwDjEzlvppZCAjPXys4DgyWAEULZk8PexL45Q3SO_pw",
+          "state": {
+            "kind": "unstable"
+          }
+        },
+        {
+          "artifact_key": "v1:CPFkuxRtC0Q_-J6m6E72ISr8LhW8mDptp08TcEPZubM",
+          "artifact_kind": "native_run_record",
+          "revision": "v1:Wyc3oRxN_56EyYzHB10jPZ2B-nRIcdbq4TIKmifP218",
+          "state": {
+            "generation": 5,
+            "kind": "over_limit",
+            "observed_bytes": 1025,
+            "provenance_ref": "v1:AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+            "request_max_bytes": 1024
+          }
+        },
+        {
+          "artifact_key": "v1:TpaLJPmSyycKzjJscDlxpvEcYdpvA_XFMI4ex2Yu_zI",
+          "artifact_kind": "workflow_definition",
+          "revision": "v1:kJcuAcSGemtiloeJ5gGAvhg9qnp7yQT9vrHAIBDRus4",
+          "state": {
+            "generation": 3,
+            "kind": "available",
+            "provenance_ref": "v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "size_bytes": 91
+          }
+        },
+        {
+          "artifact_key": "v1:eS1_TMfDd9EyQxaKO6ldBAdEBSR_VcFZE9FEp4MXOOw",
+          "artifact_kind": "workflow_journal",
+          "revision": "v1:LcTsxqHF8GOGcl069t83UzXQ08ne8d0xcJKL8Aq2p68",
+          "state": {
+            "kind": "missing",
+            "observed_generation": 4,
+            "provenance_ref": "v1:AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+          }
+        }
+      ],
+      "expected_entry_count": 4,
+      "expected_semantic_digest": "v1:d0FvMyjjrfAiDa-C4tsc76ValO9vRcdvk7fFDUGAnAs",
+      "root_session_key": "v1:ovsTQv7A7OhgQuCyKKlbiNmGOJ7QD1TOWuKKXAdYc4U"
+    },
+    "snapshot": {
+      "contract_selection": {
+        "contract_versions": {
+          "coverage_contract_version": 1,
+          "external_entity_reference_version": 1,
+          "fact_family_versions": {
+            "runtime.usage-v2": 1
+          },
+          "model_major": 1,
+          "observation_contract_version": 1,
+          "query_pack_version": null,
+          "selection_contract_version": 1,
+          "semantic_revision_reference_version": 1
+        },
+        "envelope_contract_version": 1,
+        "event_contract_version": 1,
+        "lifecycle_contract_version": 1,
+        "observation_negotiation_contract_version": 1
+      },
+      "entries": [
+        {
+          "artifact_key": "v1:CJtvWQLASsRzs2F9A_ks6JnoNspQRT8MVTe9Uh_qF_g",
+          "artifact_kind": "team_configuration",
+          "revision": "v1:pwDjEzlvppZCAjPXys4DgyWAEULZk8PexL45Q3SO_pw",
+          "state": {
+            "kind": "unstable"
+          }
+        },
+        {
+          "artifact_key": "v1:CPFkuxRtC0Q_-J6m6E72ISr8LhW8mDptp08TcEPZubM",
+          "artifact_kind": "native_run_record",
+          "revision": "v1:Wyc3oRxN_56EyYzHB10jPZ2B-nRIcdbq4TIKmifP218",
+          "state": {
+            "generation": 5,
+            "kind": "over_limit",
+            "observed_bytes": 1025,
+            "provenance_ref": "v1:AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM",
+            "request_max_bytes": 1024
+          }
+        },
+        {
+          "artifact_key": "v1:TpaLJPmSyycKzjJscDlxpvEcYdpvA_XFMI4ex2Yu_zI",
+          "artifact_kind": "workflow_definition",
+          "revision": "v1:kJcuAcSGemtiloeJ5gGAvhg9qnp7yQT9vrHAIBDRus4",
+          "state": {
+            "generation": 3,
+            "kind": "available",
+            "provenance_ref": "v1:AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+            "size_bytes": 91
+          }
+        },
+        {
+          "artifact_key": "v1:eS1_TMfDd9EyQxaKO6ldBAdEBSR_VcFZE9FEp4MXOOw",
+          "artifact_kind": "workflow_journal",
+          "revision": "v1:LcTsxqHF8GOGcl069t83UzXQ08ne8d0xcJKL8Aq2p68",
+          "state": {
+            "kind": "missing",
+            "observed_generation": 4,
+            "provenance_ref": "v1:AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI"
+          }
+        }
+      ],
+      "entry_count": 4,
+      "root_session_key": "v1:ovsTQv7A7OhgQuCyKKlbiNmGOJ7QD1TOWuKKXAdYc4U",
+      "scoped_artifact_availability_contract_version": 1,
+      "semantic_digest": "v1:d0FvMyjjrfAiDa-C4tsc76ValO9vRcdvk7fFDUGAnAs"
+    }
+  }
+}

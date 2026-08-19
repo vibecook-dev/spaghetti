@@ -53,6 +53,7 @@ use crate::source::{
 mod actor_wire;
 mod artifact_access;
 mod artifact_availability;
+mod artifact_availability_wire;
 mod artifact_evidence;
 mod artifact_wire;
 mod capability_snapshot_wire;
@@ -18492,6 +18493,7 @@ mod projection_tests {
                 artifact_key,
                 "workflow_definition",
                 ScopedArtifactAvailabilityRevision::fixture([7; 32]),
+                artifact_availability::ScopedArtifactAvailabilityState::Unstable,
             )],
         );
         let scope_coverage = fixture_scope_coverage(&root, true);
