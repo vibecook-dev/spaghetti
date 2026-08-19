@@ -2085,6 +2085,22 @@ Current landing status (2026-08-18):
   one privacy-reduced fixture. This adds no source-access authority, request-
   generation field, unified event union, N-API method, iterator owner, native
   payload/locator disclosure, or public observer transport; and
+- the contextual poll-completion slice (`5854c5f`) now carries that frozen
+  watermark through the real request-local poll runtime rather than leaving
+  wire construction as a detached contract test. After a ticket resolves, the
+  owning host re-resolves the exact ticket before minting one non-Serde,
+  attachment-bound completed-poll value containing the strict context and
+  watermark wire. Coalesced pre-reservation calls retain the same core and
+  exact portable values; a call admitted after reservation remains pending for
+  its follow-up pass, and an unchanged follow-up may serialize the same
+  semantic watermark without importing its distinct flow-control generation.
+  Foreign tickets fail before context minting, while cancellation and terminal
+  failure remain typed non-watermark results. The async handle exercises this
+  same contextual path, and its redacted result exposes no request generation,
+  support/program digest, native locator, payload, or clock. The prior raw-core
+  poll substrate remains internal for source-owner orchestration. This adds no
+  unified event union, unknown-event preservation, N-API/SDK observer method,
+  public iterator owner, or source-access authority; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
