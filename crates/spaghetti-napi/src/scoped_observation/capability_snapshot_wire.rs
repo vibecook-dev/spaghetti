@@ -222,7 +222,7 @@ impl ScopedCapabilitySnapshotWire {
     }
 }
 
-fn derive_capability_digest(
+pub(super) fn derive_capability_digest(
     capabilities: &ObservationCapabilities,
 ) -> Result<[u8; DIGEST_BYTES], ScopedCapabilitySnapshotContractError> {
     capabilities

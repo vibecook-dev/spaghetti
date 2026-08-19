@@ -7782,6 +7782,7 @@ pub(crate) mod tests {
         assert_eq!(barrier.family_manifest.len(), 1);
         assert_eq!(barrier.family_manifest[0].fact_family, "runtime.usage-v2");
         assert_eq!(barrier.family_manifest[0].entity_or_event_count, 0);
+        assert_eq!(&barrier.observation_capabilities, host.capabilities());
         assert!(barrier.explicit_object_errors.is_empty());
         assert_eq!(barrier.queue_state.offered_through_sequence, 1);
         assert_eq!(barrier.queue_state.queued_source_control_items, 1);
@@ -7964,6 +7965,10 @@ pub(crate) mod tests {
         assert_eq!(resync_barrier.source_coverage.len(), 2);
         assert_eq!(resync_barrier.scope_coverage, barrier.scope_coverage);
         assert_eq!(resync_barrier.family_manifest, barrier.family_manifest);
+        assert_eq!(
+            resync_barrier.observation_capabilities,
+            barrier.observation_capabilities
+        );
         assert_eq!(
             resync_barrier.replacement_snapshot_digest,
             barrier.replacement_snapshot_digest
