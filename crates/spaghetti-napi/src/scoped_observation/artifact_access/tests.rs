@@ -617,6 +617,77 @@ fn portable_capture_uses_attachment_local_replace_generation_without_retargeting
 }
 
 #[test]
+fn completed_capture_updates_current_availability_without_disclosure_policy_drift() {
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "availability", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    let path = write_artifact(&temp, "availability", b"first revision\n");
+    let initial = host.artifact_availability_snapshot(&active).unwrap();
+    assert_eq!(initial.entry_count(), 0);
+
+    let pass = host.begin_pass().unwrap();
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        128,
+        ScopedArtifactContentPolicy::Inline,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    assert_eq!(
+        host.artifact_availability_snapshot(&active)
+            .unwrap()
+            .entry_count(),
+        0,
+        "a native capture is not published before strict result construction"
+    );
+    capture.into_observed().unwrap();
+    let first = host.artifact_availability_snapshot(&active).unwrap();
+    assert_eq!(first.entry_count(), 1);
+
+    observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(1),
+        128,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    let policy_replay = host.artifact_availability_snapshot(&active).unwrap();
+    assert_eq!(policy_replay.semantic_digest(), first.semantic_digest());
+
+    std::fs::write(path, b"second revision\n").unwrap();
+    observed_artifact(
+        &host,
+        &active,
+        &pass,
+        artifact_key,
+        Some(1),
+        128,
+        ScopedArtifactContentPolicy::HashOnly,
+    );
+    let revised = host.artifact_availability_snapshot(&active).unwrap();
+    assert_ne!(revised.semantic_digest(), first.semantic_digest());
+    let debug = format!("{revised:?}");
+    for secret in [
+        temp.path().to_string_lossy().as_ref(),
+        "backup-17@v7",
+        "second revision",
+    ] {
+        assert!(!debug.contains(secret));
+    }
+}
+
+#[test]
 fn generation_ledger_is_bounded_and_overflow_fails_without_mutation() {
     let mut ledger = ScopedArtifactGenerationLedger::new();
     for ordinal in 0..MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS {

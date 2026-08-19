@@ -23,6 +23,9 @@ use crate::source::{
     StableRead,
 };
 
+use super::artifact_availability::{
+    ScopedArtifactAvailabilityObservation, ScopedArtifactAvailabilityState,
+};
 use super::artifact_evidence::MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS;
 use super::artifact_wire::{
     ScopedArtifactContractError, ScopedArtifactReadOutcome, ScopedArtifactUnavailableReason,
@@ -252,16 +255,19 @@ impl ScopedArtifactConfinedCapture<'_, '_> {
     pub(crate) fn into_observed(
         self,
     ) -> Result<ScopedObservedArtifactWire, ScopedArtifactContractError> {
-        if self
-            ._pass
-            .state
-            .closed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        let Self {
+            _validated: validated,
+            _pass: pass,
+            object_token,
+            state,
+        } = self;
+        if pass.state.closed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(ScopedArtifactContractError::Closed);
         }
-        let expected_generation = self._validated.expected_generation();
-        let outcome = match self.state {
+        let availability_observation =
+            artifact_availability_observation(&validated, object_token, &state);
+        let expected_generation = validated.expected_generation();
+        let outcome = match state {
             ScopedArtifactConfinedCaptureState::Missing {
                 observed_generation,
                 provenance_ref,
@@ -327,9 +333,77 @@ impl ScopedArtifactConfinedCapture<'_, '_> {
                 content,
             },
         };
-        self._validated
-            .observed(ScopedArtifactOutcomeAuthority(()), outcome)
+        let observed = validated.observed(ScopedArtifactOutcomeAuthority(()), outcome)?;
+        let mut availability = pass
+            .state
+            .artifact_availability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pass.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ScopedArtifactContractError::Closed);
+        }
+        availability
+            .observe(availability_observation)
+            .map_err(|()| ScopedArtifactContractError::Invalid {
+                message: "scoped artifact availability capacity is exhausted".to_string(),
+            })?;
+        Ok(observed)
     }
+}
+
+fn artifact_availability_observation(
+    validated: &ScopedValidatedArtifactReadCommand<'_>,
+    object_token: AccessObjectToken,
+    state: &ScopedArtifactConfinedCaptureState,
+) -> ScopedArtifactAvailabilityObservation {
+    let native_state = match state {
+        ScopedArtifactConfinedCaptureState::Missing {
+            observed_generation,
+            provenance_ref,
+        } => ScopedArtifactAvailabilityState::Missing {
+            observed_generation: *observed_generation,
+            provenance_ref: *provenance_ref,
+        },
+        ScopedArtifactConfinedCaptureState::Oversized {
+            observed_bytes,
+            generation,
+            provenance_ref,
+        } => ScopedArtifactAvailabilityState::OverLimit {
+            generation: *generation,
+            provenance_ref: *provenance_ref,
+            observed_bytes: *observed_bytes,
+            request_max_bytes: validated.command.max_bytes,
+        },
+        ScopedArtifactConfinedCaptureState::Unstable => ScopedArtifactAvailabilityState::Unstable,
+        ScopedArtifactConfinedCaptureState::Stable {
+            generation,
+            provenance_ref,
+            size_bytes,
+            ..
+        } => ScopedArtifactAvailabilityState::Available {
+            generation: *generation,
+            provenance_ref: *provenance_ref,
+            size_bytes: *size_bytes,
+        },
+    };
+    ScopedArtifactAvailabilityObservation::new(
+        validated
+            .command
+            .artifact_evidence
+            .as_ref()
+            .expect("a validated artifact capture retains exact metadata evidence")
+            .clone(),
+        Arc::from(validated.command.artifact_kind.as_str()),
+        Arc::clone(
+            validated
+                .command
+                .artifact_relation_id
+                .as_ref()
+                .expect("a validated artifact capture retains an exact relation"),
+        ),
+        object_token,
+        native_state,
+    )
 }
 
 fn generation_changed(expected: Option<u64>, observed: Option<u64>) -> bool {

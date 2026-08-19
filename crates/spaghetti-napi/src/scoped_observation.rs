@@ -52,6 +52,7 @@ use crate::source::{
 
 mod actor_wire;
 mod artifact_access;
+mod artifact_availability;
 mod artifact_evidence;
 mod artifact_wire;
 mod capability_snapshot_wire;
@@ -12894,6 +12895,7 @@ struct ScopedObservationAccessState {
     pass_active: AtomicBool,
     next_pass_id: AtomicU64,
     artifact_generations: Mutex<artifact_access::ScopedArtifactGenerationLedger>,
+    artifact_availability: Mutex<artifact_availability::ScopedArtifactAvailabilityReducer>,
     consumer_drain_opened: AtomicBool,
     watcher_orchestrator_opened: AtomicBool,
     poll: Arc<ScopedObservationPollRuntime>,
@@ -13063,6 +13065,9 @@ impl ScopedObservationAccessHost {
                 artifact_generations: Mutex::new(
                     artifact_access::ScopedArtifactGenerationLedger::new(),
                 ),
+                artifact_availability: Mutex::new(
+                    artifact_availability::ScopedArtifactAvailabilityReducer::new(),
+                ),
                 consumer_drain_opened: AtomicBool::new(false),
                 watcher_orchestrator_opened: AtomicBool::new(false),
                 poll: Arc::new(ScopedObservationPollRuntime::default()),
@@ -13098,6 +13103,29 @@ impl ScopedObservationAccessHost {
 
     pub fn root_identity(&self) -> &ScopedObservationRootIdentity {
         &self.root_identity
+    }
+
+    /// Freeze only completed artifact observations whose exact metadata
+    /// selection is still current in this active epoch. This state is kept
+    /// separate from the watermark until an ordered artifact-availability
+    /// event can bind it to the observer sequence.
+    fn artifact_availability_snapshot(
+        &self,
+        active: &ScopedObservationEpochState,
+    ) -> Result<artifact_availability::ScopedArtifactAvailabilitySnapshot, ScopedProjectionError>
+    {
+        if self.state.closed.load(Ordering::Acquire)
+            || !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+            || active.root != self.root_identity
+            || active.projection.lifecycle != ScopedProjectionLifecycle::Active
+        {
+            return Err(ScopedProjectionError::InvalidLifecycle);
+        }
+        self.state
+            .artifact_availability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot(self.root_identity.session_key, &active.projection)
     }
 
     /// Construct an empty reducer bound to this attachment's exact negotiated
@@ -14468,6 +14496,11 @@ impl ScopedObservationAccessHost {
     /// block on that acknowledgement.
     pub fn close(&self) -> ScopedObservationCloseBarrier {
         let barrier = self.lifecycle.begin_close();
+        let _artifact_availability = self
+            .state
+            .artifact_availability
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.state.closed.store(true, Ordering::Release);
         self.state.poll.close();
         self.state.ready.cancel();
