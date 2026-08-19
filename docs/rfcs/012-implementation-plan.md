@@ -2421,6 +2421,20 @@ identities while withholding native locator material. It does not reserve
 availability, enter the portable artifact DTO or completion barrier, promote
 support, or expose public transport.
 
+The next bounded D3 prerequisite (`865e4c7`) removes arbitrary-key production
+minting from the scoped artifact request seam. Only an exact active attachment
+epoch with current, non-conflicting `ContentExpected` metadata may derive a
+request; its opaque request identity privately binds the canonical artifact
+and evidence revision. A borrowed validation proof keeps that epoch immutable
+through request-context emission, so correction, reset, retraction, conflict,
+or cross-attachment replay fails closed. The metadata artifact version remains
+distinct from the optional caller-held native source-object generation check.
+The frozen v1 wire shape and fixture do not change, and unbound request/result
+construction is test-only. This still does not select an artifact relation or
+kind-to-locator mapping, reserve `ArtifactLocatorFromEvidence`, construct a
+locator, read native bytes, produce a production availability result, enter a
+completion barrier, promote support, or expose public transport.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
