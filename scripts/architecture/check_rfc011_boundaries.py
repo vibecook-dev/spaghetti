@@ -566,6 +566,29 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         for binding in required_completion_wire_bindings
     ):
         found.add(f"{relative}#missing-contextual-completion-envelope-contract")
+    watermark_wire = scoped_dir / "watermark_wire.rs"
+    watermark_wire_text = (
+        production_rust_text(watermark_wire)
+        if watermark_wire in production_scoped_paths
+        else ""
+    )
+    required_watermark_wire_bindings = (
+        "pub(crate) struct ScopedObservationWatermarkConsumerContext",
+        "pub(crate) struct ScopedObservationWatermarkWire",
+        "from_scoped_for_context(",
+        "from_wire_value_for_context(",
+        "Arc::ptr_eq(",
+        "source_coverage_matches_authority(",
+        "selected_family_coverage_is_complete(",
+        "canonical_explicit_errors(",
+        "WatermarkContinuityWire::Bootstrap",
+        "WatermarkContinuityWire::Valid",
+    )
+    if any(
+        binding not in watermark_wire_text
+        for binding in required_watermark_wire_bindings
+    ):
+        found.add(f"{relative}#missing-contextual-watermark-contract")
     scope_coverage_wire = scoped_dir / "scope_coverage_wire.rs"
     scope_coverage_wire_text = (
         production_rust_text(scope_coverage_wire)
@@ -628,6 +651,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "packages/sdk/src/contracts/rfc012d-completion-envelope.ts"
     )
     completion_portable = REPO_ROOT / completion_portable_relative
+    watermark_portable_relative = "packages/sdk/src/contracts/rfc012d-watermark.ts"
+    watermark_portable = REPO_ROOT / watermark_portable_relative
     close_portable_relative = "packages/sdk/src/contracts/rfc012d-close.ts"
     close_portable = REPO_ROOT / close_portable_relative
     artifact_portable_relative = "packages/sdk/src/contracts/rfc012d-artifact.ts"
@@ -653,6 +678,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         or not source_portable.exists()
         or not continuity_portable.exists()
         or not completion_portable.exists()
+        or not watermark_portable.exists()
         or not close_portable.exists()
         or not artifact_portable.exists()
         or not artifact_availability_portable.exists()
@@ -704,6 +730,19 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         ):
             found.add(
                 f"{completion_portable_relative}#missing-contextual-completion-envelope-contract"
+            )
+        watermark_portable_text = read(watermark_portable)
+        if (
+            "export interface ScopedObservationWatermarkContext"
+            not in watermark_portable_text
+            or "export interface ScopedObservationWatermark"
+            not in watermark_portable_text
+            or "export function parseScopedObservationWatermark("
+            not in watermark_portable_text
+            or "expectedContextInput: unknown" not in watermark_portable_text
+        ):
+            found.add(
+                f"{watermark_portable_relative}#missing-contextual-watermark-contract"
             )
         close_portable_text = read(close_portable)
         if (
@@ -768,6 +807,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             source_portable,
             continuity_portable,
             completion_portable,
+            watermark_portable,
             close_portable,
             artifact_portable,
             artifact_availability_portable,
@@ -815,6 +855,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         found.add(
             f"{repo_path(sdk_index)}#missing-rfc012d-completion-envelope-export"
         )
+    if "./contracts/rfc012d-watermark.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-watermark-export")
     if "./contracts/rfc012d-close.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-close-export")
     if "./contracts/rfc012d-artifact.js" not in RUNTIME_MODULE_RE.findall(

@@ -65,6 +65,7 @@ mod replacement_manifest_wire;
 mod scope_coverage_wire;
 mod source_wire;
 mod usage_wire;
+mod watermark_wire;
 
 pub type ScopedArtifactAvailabilityEntry = artifact_availability::ScopedArtifactAvailabilityEntry;
 pub type ScopedArtifactAvailabilityEnvelopeConsumerContext =
@@ -77,6 +78,8 @@ pub type ScopedArtifactAvailabilitySnapshot =
     artifact_availability::ScopedArtifactAvailabilitySnapshot;
 pub type ScopedCompletionEnvelopeConsumerContext =
     completion_wire::ScopedCompletionEnvelopeConsumerContext;
+pub type ScopedObservationWatermarkConsumerContext =
+    watermark_wire::ScopedObservationWatermarkConsumerContext;
 
 /// Maximum artifact disclosure one observer attachment may request. The
 /// ordering is intentional: metadata discloses less than a hash, and a hash
@@ -2303,6 +2306,7 @@ struct ScopedObservationApplicationAuthority;
 /// Unforgeable identity shared only by one authorized host and the consumer
 /// drain it constructs. Root identity alone is insufficient because two
 /// simultaneous attachments may intentionally observe the same native scope.
+#[derive(PartialEq, Eq)]
 struct ScopedObservationAttachmentAuthority {
     /// Process-local uniqueness input for opaque portable attachment
     /// correlation. Runtime authority continues to rely on `Arc` identity;
@@ -7845,11 +7849,15 @@ impl ScopedScopeCoverage {
 /// domains that are simultaneously object-declared, contract-selected, and
 /// reducer-supported, paired with exact declared-relation/root coverage,
 /// current evidence-bound artifact-availability revisions, and the immutable
-/// attachment capability report. This remains crate-private and deliberately
-/// does not masquerade as the complete RFC 012D watermark: dynamic discovery,
-/// portable barrier transport, and the observer facade remain open.
+/// attachment capability report. Its strict wire remains contextual and
+/// crate-private; dynamic discovery, the unified event union, public transport,
+/// and the observer facade remain open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedObservationWatermarkCore {
+    /// Process-local attachment authority. It is never serialized and keeps a
+    /// caller from contextualizing another attachment's otherwise identical
+    /// root/coverage watermark.
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     pub root: ScopedObservationRootIdentity,
     pub scope_epoch: u64,
     pub offered_through_sequence: u64,
@@ -13252,6 +13260,21 @@ pub struct ScopedObservationAccessHost {
 }
 
 impl ScopedObservationAccessHost {
+    /// Bind one completed poll watermark to this exact attachment before any
+    /// future portable projection. Equal roots from another simultaneous
+    /// attachment are not interchangeable.
+    pub fn watermark_consumer_context(
+        &self,
+        watermark: &ScopedObservationWatermarkCore,
+    ) -> Result<ScopedObservationWatermarkConsumerContext, ScopedCoverageAssemblyError> {
+        watermark_wire::ScopedObservationWatermarkConsumerContext::from_scoped_watermark(
+            watermark,
+            &self.attachment_authority,
+            Arc::clone(&self.completion_capability_context),
+        )
+        .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)
+    }
+
     pub fn authorize(
         registry: &AdapterRegistry,
         request: ScopedObservationAccessRequest,
@@ -14203,6 +14226,7 @@ impl ScopedObservationAccessHost {
             .snapshot(self.root_identity.session_key, projection)
             .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)?;
         Ok(ScopedObservationWatermarkCore {
+            attachment_authority: Arc::clone(&self.attachment_authority),
             root: self.root_identity.clone(),
             scope_epoch: queue_state.scope_epoch,
             offered_through_sequence: queue_state.offered_through_sequence,
@@ -19102,6 +19126,7 @@ mod projection_tests {
         let mut delivery = delivery_lane(1, 1);
         let before = delivery.state();
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
@@ -19121,6 +19146,7 @@ mod projection_tests {
 
         let exact_manifest = fixture_manifest_for_selection(&selection);
         let exact_watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
@@ -19841,6 +19867,7 @@ mod projection_tests {
 
         let root = root_identity();
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
@@ -19918,6 +19945,7 @@ mod projection_tests {
             .offer(vec![bootstrap_presence.clone()])
             .unwrap();
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
@@ -20174,6 +20202,7 @@ mod projection_tests {
         let event_waiter = drain.event_waiter();
         assert_eq!(event_waiter.snapshot().offered_through_sequence, 0);
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
@@ -20272,6 +20301,7 @@ mod projection_tests {
         assert_eq!(drain.state().applied_scope_epoch, Some(2));
 
         let completion_watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: 2,
             offered_through_sequence: 5,
@@ -20346,6 +20376,7 @@ mod projection_tests {
         let mut delivery = delivery_lane(2, 2);
         delivery.offer(bootstrap).unwrap();
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
@@ -20579,6 +20610,7 @@ mod projection_tests {
         let mapper = envelope_mapper(root.clone());
         let mut delivery = delivery_lane(2, 2);
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
@@ -20712,6 +20744,7 @@ mod projection_tests {
 
         let mut replay = delivery_lane(1, 1);
         let replay_watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: 1,
             offered_through_sequence: 0,
@@ -21086,6 +21119,7 @@ mod projection_tests {
         );
 
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
@@ -21140,6 +21174,7 @@ mod projection_tests {
 
         let mut delivery = delivery_lane(1, 1);
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
@@ -21298,6 +21333,7 @@ mod projection_tests {
             ))
             .unwrap();
         let completion_watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: 2,
             offered_through_sequence: 4,
@@ -21382,6 +21418,7 @@ mod projection_tests {
         let active = multi_family_sink(8);
         let mut delivery = delivery_lane(3, 1);
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
@@ -21583,6 +21620,7 @@ mod projection_tests {
 
         let mut delivery = delivery_lane(1, 1);
         let watermark = ScopedObservationWatermarkCore {
+            attachment_authority: next_scoped_attachment_authority().unwrap(),
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,

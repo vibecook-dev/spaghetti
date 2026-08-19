@@ -276,6 +276,7 @@ fn fixture_pair() -> FixturePair {
     let artifact_availability = ScopedArtifactAvailabilitySnapshot::empty_fixture(root.session_key);
     let explicit_object_errors = canonical_explicit_errors(&source_coverage).unwrap();
     let watermark = ScopedObservationWatermarkCore {
+        attachment_authority: Arc::clone(&drain.attachment_authority),
         root: root.clone(),
         scope_epoch: 1,
         offered_through_sequence: 0,
@@ -320,6 +321,7 @@ fn fixture_pair() -> FixturePair {
         .unwrap();
 
     let correction_watermark = ScopedObservationWatermarkCore {
+        attachment_authority: Arc::clone(&drain.attachment_authority),
         root: root.clone(),
         scope_epoch: 2,
         offered_through_sequence: 3,

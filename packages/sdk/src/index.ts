@@ -30,9 +30,10 @@ export * from './contracts/rfc012c.js';
 // RFC 012D exact-version negotiation plus deliberately incomplete contextual
 // actor, usage, source-control, continuity, exact-known-object scope coverage,
 // contextual replacement-family, capability, artifact-availability, and
-// bootstrap/resync-completion snapshots, attachment-close, and bounded-artifact
-// wire slices. The complete event union, native artifact-access mediator, and
-// native observer transport remain gated on the full scoped contract.
+// bootstrap/resync-completion and completed-poll watermark snapshots,
+// attachment-close, and bounded-artifact wire slices. The complete event union,
+// native artifact-access mediator, and native observer transport remain gated
+// on the full scoped contract.
 export * from './contracts/rfc012d.js';
 export * from './contracts/rfc012d-actor-envelope.js';
 export * from './contracts/rfc012d-artifact.js';
@@ -46,6 +47,7 @@ export * from './contracts/rfc012d-replacement-manifest.js';
 export * from './contracts/rfc012d-scope-coverage.js';
 export * from './contracts/rfc012d-source-envelope.js';
 export * from './contracts/rfc012d-usage-envelope.js';
+export * from './contracts/rfc012d-watermark.js';
 
 // Transport-neutral async client and the sole-owner production service.
 export * from './client/index.js';
