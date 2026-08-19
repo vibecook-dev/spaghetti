@@ -2454,6 +2454,25 @@ reservation, produce artifact availability, enter a barrier, promote Claude's
 incomplete Candidate scope program, or expose N-API/SDK transport. Executable
 Claude locator parameters and a common confined read mediator remain open.
 
+The next bounded D3 prerequisite (`1e8cd7c`) makes that common reservation
+interpret only executable evidence-derived locator templates, still without
+performing native I/O. Host authorization now rejects a selected artifact
+relation unless its locator contains at least one unique placeholder named by
+the declaration's identity inputs. After reservation, the common guard
+re-derives the opaque object token from the exact already-bound session,
+backup, and version inputs before rendering them into a UTF-8, confined
+relative path capped at 4 KiB. Unknown, repeated, unmatched, or nested
+placeholders; input substitution; separators, traversal, control bytes,
+non-UTF-8 values, platform drive prefixes, and over-cap output all fail closed.
+The borrowed proof privately retains the native root and rendered relative
+path as separate values, while Debug and access telemetry remain path-free.
+This slice does not join the root and path, resolve symlinks, open or read an
+object, complete the access reservation, publish availability, enter a
+barrier, promote support, or expose N-API/SDK transport. Claude's current
+Candidate locator remains conceptual and therefore non-executable; declaring
+and proving its exact file-history template remains a separate conformance
+gate.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
