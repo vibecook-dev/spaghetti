@@ -18456,6 +18456,7 @@ mod projection_tests {
             let known = yielded.known_envelope();
             assert_eq!(known.family(), family);
             assert_eq!(known.wire_value()["event"]["kind"], kind);
+            assert!(crate::observation_contract::unknown_wire::is_known_event_type_tag(kind));
             let transport = known.transport_value();
             assert_eq!(
                 transport["scoped_known_envelope_contract_version"],
@@ -18463,6 +18464,13 @@ mod projection_tests {
             );
             assert_eq!(&transport["event"], known.wire_value());
             assert_eq!(&transport["context"], known.context_value());
+            let union = known.event_union_value();
+            assert_eq!(
+                union["scoped_observation_event_union_contract_version"],
+                event_wire::SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION
+            );
+            assert_eq!(&union["event"], known.wire_value());
+            assert_eq!(&union["context"], known.context_value());
             assert_eq!(
                 known.context_value()["contract_selection"],
                 serde_json::to_value(&selection).unwrap()

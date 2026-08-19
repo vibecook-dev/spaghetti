@@ -52,3 +52,25 @@ fn all_known_family_discriminators_are_closed_and_canonical() {
         ]
     );
 }
+
+#[test]
+fn known_events_project_into_the_complete_outer_union_without_claiming_unknown_emission() {
+    let source: JsonValue = serde_json::from_str(SOURCE_FIXTURE).unwrap();
+    let union = known_event_union_wire_value(
+        ScopedObservationKnownEventFamily::Source,
+        source["context"].clone(),
+        source["created"].clone(),
+    );
+    assert_eq!(
+        union["scoped_observation_event_union_contract_version"],
+        SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION
+    );
+    assert_eq!(union["family"], "source");
+    assert_eq!(union["context"], source["context"]);
+    assert_eq!(union["event"], source["created"]);
+    assert!(union
+        .as_object()
+        .unwrap()
+        .get("scoped_known_envelope_contract_version")
+        .is_none());
+}

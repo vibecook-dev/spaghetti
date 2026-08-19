@@ -21,6 +21,7 @@ use crate::adapter::{
 
 mod capabilities;
 pub(crate) use capabilities::{ObservationCapabilities, ObservationCapabilityContractError};
+pub(crate) mod unknown_wire;
 
 pub(crate) const OBSERVATION_NEGOTIATION_CONTRACT_VERSION: u32 = 1;
 pub(crate) const OBSERVATION_PROFILE_CONTRACT_VERSION: u32 = 1;

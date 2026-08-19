@@ -36,6 +36,7 @@ use super::{
 };
 
 pub(crate) const SCOPED_OBSERVATION_KNOWN_ENVELOPE_CONTRACT_VERSION: u32 = 1;
+pub(crate) const SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopedObservationKnownEventFamily {
@@ -286,6 +287,18 @@ impl ScopedObservationKnownEnvelope {
         )
     }
 
+    /// Complete outer-union shape for a currently known event. The same union
+    /// also admits `unknown_wire_event` only when its separate preservation
+    /// contract was negotiated; this runtime still has no internal unknown
+    /// event variant and therefore emits only these checked known branches.
+    pub(crate) fn event_union_value(&self) -> JsonValue {
+        known_event_union_wire_value(
+            self.family,
+            self.context_value.clone(),
+            self.wire_value.clone(),
+        )
+    }
+
     pub(super) fn belongs_to_attachment(
         &self,
         authority: &Arc<ScopedObservationAttachmentAuthority>,
@@ -302,6 +315,20 @@ fn known_wire_value(
     serde_json::json!({
         "scoped_known_envelope_contract_version":
             SCOPED_OBSERVATION_KNOWN_ENVELOPE_CONTRACT_VERSION,
+        "family": family.wire_name(),
+        "context": context,
+        "event": event,
+    })
+}
+
+fn known_event_union_wire_value(
+    family: ScopedObservationKnownEventFamily,
+    context: JsonValue,
+    event: JsonValue,
+) -> JsonValue {
+    serde_json::json!({
+        "scoped_observation_event_union_contract_version":
+            SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION,
         "family": family.wire_name(),
         "context": context,
         "event": event,
