@@ -327,6 +327,74 @@ fn evidence_revisions_change_without_rekeying_and_conflicts_do_not_fabricate_ava
 }
 
 #[test]
+fn content_selection_is_exact_current_and_never_upgrades_conflicting_evidence() {
+    let artifact = artifact_key(b"selected-artifact");
+    let first_record = record(11, 22, 33, 0, 10, 44);
+    let second_record = record(11, 22, 33, 10, 20, 45);
+    let third_record = record(11, 22, 33, 20, 30, 46);
+    let mut reducer = ScopedArtifactEvidenceReducer::new(Some(root_session()));
+    admit(
+        &mut reducer,
+        &first_record,
+        &batch_with_metadata(
+            &first_record,
+            "message-a",
+            artifact,
+            Some("selected-artifact@v1"),
+            ArtifactCapture::ContentExpected,
+            1,
+        ),
+    )
+    .unwrap();
+    let first = reducer
+        .select_content_expected(artifact)
+        .unwrap()
+        .expect("content-bearing metadata selects the artifact");
+    assert_eq!(first.root_session(), root_session());
+    assert_eq!(first.artifact_key(), artifact);
+    assert_eq!(first.version(), 1);
+    assert!(reducer.selection_is_current(&first).unwrap());
+    assert!(!format!("{first:?}").contains("selected-artifact@v1"));
+
+    admit(
+        &mut reducer,
+        &second_record,
+        &batch_with_metadata(
+            &second_record,
+            "message-a",
+            artifact,
+            Some("selected-artifact@v2"),
+            ArtifactCapture::ContentExpected,
+            2,
+        ),
+    )
+    .unwrap();
+    assert!(!reducer.selection_is_current(&first).unwrap());
+    let revised = reducer
+        .select_content_expected(artifact)
+        .unwrap()
+        .expect("the corrected evidence remains selectable");
+    assert_eq!(revised.version(), 2);
+    assert_ne!(first.revision(), revised.revision());
+
+    admit(
+        &mut reducer,
+        &third_record,
+        &batch_with_metadata(
+            &third_record,
+            "message-b",
+            artifact,
+            None,
+            ArtifactCapture::NotCaptured,
+            2,
+        ),
+    )
+    .unwrap();
+    assert!(reducer.select_content_expected(artifact).unwrap().is_none());
+    assert!(!reducer.selection_is_current(&revised).unwrap());
+}
+
+#[test]
 fn root_mismatch_and_source_lifecycle_fail_closed() {
     let artifact = artifact_key(b"backup-a@v1");
     let source_record = record(11, 22, 33, 0, 10, 44);

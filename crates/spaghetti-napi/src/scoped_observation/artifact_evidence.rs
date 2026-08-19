@@ -79,6 +79,63 @@ pub(super) struct ScopedArtifactEvidenceEntry {
     revision: ScopedArtifactEvidenceRevision,
 }
 
+/// One process-local proof that the current scoped reducer has complete,
+/// non-conflicting metadata naming a content-bearing artifact version.
+/// The native backup name deliberately remains in reducer-owned fact state;
+/// this proof cannot construct a locator or reserve source access.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct ScopedArtifactEvidenceSelection {
+    root_session: CanonicalEntityKey,
+    artifact_key: CanonicalEntityKey,
+    version: u64,
+    revision: ScopedArtifactEvidenceRevision,
+}
+
+impl ScopedArtifactEvidenceSelection {
+    pub(super) fn root_session(&self) -> CanonicalEntityKey {
+        self.root_session
+    }
+
+    pub(super) fn artifact_key(&self) -> CanonicalEntityKey {
+        self.artifact_key
+    }
+
+    pub(super) fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub(super) fn revision(&self) -> ScopedArtifactEvidenceRevision {
+        self.revision
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(
+        root_session: CanonicalEntityKey,
+        artifact_key: CanonicalEntityKey,
+        version: u64,
+        revision: [u8; 32],
+    ) -> Self {
+        Self {
+            root_session,
+            artifact_key,
+            version,
+            revision: ScopedArtifactEvidenceRevision(revision),
+        }
+    }
+}
+
+impl fmt::Debug for ScopedArtifactEvidenceSelection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedArtifactEvidenceSelection")
+            .field("root_session", &self.root_session)
+            .field("artifact_key", &self.artifact_key)
+            .field("version", &self.version)
+            .field("revision", &self.revision)
+            .finish()
+    }
+}
+
 impl fmt::Debug for ScopedArtifactEvidenceEntry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -326,6 +383,60 @@ impl ScopedArtifactEvidenceReducer {
             .retain(|_, state| state.object_token != object_token);
     }
 
+    /// Select one currently agreed content-bearing artifact. Missing,
+    /// explicitly not-captured, and conflicting evidence all return `None`;
+    /// none of those states may be upgraded into a portable read request.
+    pub(super) fn select_content_expected(
+        &self,
+        artifact_key: CanonicalEntityKey,
+    ) -> Result<Option<ScopedArtifactEvidenceSelection>, ScopedProjectionError> {
+        let root_session = self
+            .root_session
+            .ok_or(ScopedProjectionError::InvalidArtifactEvidence)?;
+        let mut assertions = Vec::new();
+        assertions
+            .try_reserve_exact(self.facts.len())
+            .map_err(|_| ScopedProjectionError::ArtifactEvidenceCapacityFull)?;
+        for state in self.facts.values() {
+            for assertion in &state.assertions {
+                if assertion.artifact_key == artifact_key {
+                    assertions.push((state, assertion));
+                }
+            }
+        }
+        if assertions.is_empty() {
+            return Ok(None);
+        }
+        let (disposition, _, revision) =
+            summarize_assertions(root_session, artifact_key, &assertions)?;
+        if disposition != ScopedArtifactEvidenceDisposition::ContentExpected {
+            return Ok(None);
+        }
+        let version = assertions
+            .first()
+            .ok_or(ScopedProjectionError::InvalidArtifactEvidence)?
+            .1
+            .version;
+        Ok(Some(ScopedArtifactEvidenceSelection {
+            root_session,
+            artifact_key,
+            version,
+            revision,
+        }))
+    }
+
+    pub(super) fn selection_is_current(
+        &self,
+        selection: &ScopedArtifactEvidenceSelection,
+    ) -> Result<bool, ScopedProjectionError> {
+        if self.root_session != Some(selection.root_session) {
+            return Ok(false);
+        }
+        Ok(self
+            .select_content_expected(selection.artifact_key)?
+            .is_some_and(|current| current == *selection))
+    }
+
     pub(super) fn snapshot(&self) -> Result<ScopedArtifactEvidenceSnapshot, ScopedProjectionError> {
         let root_session = self
             .root_session
@@ -351,33 +462,8 @@ impl ScopedArtifactEvidenceReducer {
             .try_reserve_exact(grouped.len())
             .map_err(|_| ScopedProjectionError::ArtifactEvidenceCapacityFull)?;
         for (artifact_key, assertions) in grouped {
-            let first = assertions
-                .first()
-                .ok_or(ScopedProjectionError::InvalidArtifactEvidence)?;
-            let agrees = assertions.iter().all(|(_, assertion)| {
-                assertion.capture == first.1.capture
-                    && assertion.version == first.1.version
-                    && assertion.native_artifact_id == first.1.native_artifact_id
-            });
-            let disposition = if !agrees {
-                ScopedArtifactEvidenceDisposition::Conflicting
-            } else {
-                match first.1.capture {
-                    ArtifactCapture::ContentExpected => {
-                        ScopedArtifactEvidenceDisposition::ContentExpected
-                    }
-                    ArtifactCapture::NotCaptured => ScopedArtifactEvidenceDisposition::NotCaptured,
-                }
-            };
-            let evidence_count = u64::try_from(assertions.len())
-                .map_err(|_| ScopedProjectionError::ArtifactEvidenceCapacityFull)?;
-            let revision = derive_entry_revision(
-                root_session,
-                artifact_key,
-                disposition,
-                first.1,
-                &assertions,
-            );
+            let (disposition, evidence_count, revision) =
+                summarize_assertions(root_session, artifact_key, &assertions)?;
             entries.push(ScopedArtifactEvidenceEntry {
                 artifact_key,
                 disposition,
@@ -406,6 +492,41 @@ impl ScopedArtifactEvidenceReducer {
             entries,
         })
     }
+}
+
+fn summarize_assertions(
+    root_session: CanonicalEntityKey,
+    artifact_key: CanonicalEntityKey,
+    assertions: &[(&ScopedArtifactEvidenceFactState, &ScopedArtifactAssertion)],
+) -> Result<
+    (
+        ScopedArtifactEvidenceDisposition,
+        u64,
+        ScopedArtifactEvidenceRevision,
+    ),
+    ScopedProjectionError,
+> {
+    let first = assertions
+        .first()
+        .ok_or(ScopedProjectionError::InvalidArtifactEvidence)?;
+    let agrees = assertions.iter().all(|(_, assertion)| {
+        assertion.capture == first.1.capture
+            && assertion.version == first.1.version
+            && assertion.native_artifact_id == first.1.native_artifact_id
+    });
+    let disposition = if !agrees {
+        ScopedArtifactEvidenceDisposition::Conflicting
+    } else {
+        match first.1.capture {
+            ArtifactCapture::ContentExpected => ScopedArtifactEvidenceDisposition::ContentExpected,
+            ArtifactCapture::NotCaptured => ScopedArtifactEvidenceDisposition::NotCaptured,
+        }
+    };
+    let evidence_count = u64::try_from(assertions.len())
+        .map_err(|_| ScopedProjectionError::ArtifactEvidenceCapacityFull)?;
+    let revision =
+        derive_entry_revision(root_session, artifact_key, disposition, first.1, assertions);
+    Ok((disposition, evidence_count, revision))
 }
 
 fn derive_entry_revision(

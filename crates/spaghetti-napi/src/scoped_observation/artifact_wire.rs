@@ -19,9 +19,11 @@ use serde_json::Value as JsonValue;
 use crate::adapter::{CanonicalEntityKey, Sha256Digest};
 use crate::observation_contract::ObservationContractSelection;
 
+use super::artifact_evidence::ScopedArtifactEvidenceSelection;
 use super::{
     ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy, ScopedObservationAccessHost,
-    ScopedObservationAttachmentAuthority, ScopedObservationRootIdentity,
+    ScopedObservationAttachmentAuthority, ScopedObservationEpochState,
+    ScopedObservationRootIdentity, ScopedProjectionLifecycle,
 };
 
 pub(crate) const SCOPED_ARTIFACT_CONTRACT_VERSION: u32 = 1;
@@ -44,6 +46,10 @@ pub(crate) enum ScopedArtifactContractError {
     Closed,
     #[error("scoped artifact request exceeds the attachment access policy")]
     PolicyDenied,
+    #[error("scoped artifact request has no current content-bearing metadata evidence")]
+    EvidenceUnavailable,
+    #[error("scoped artifact request metadata evidence is no longer current")]
+    StaleEvidence,
 }
 
 impl ScopedArtifactContractError {
@@ -144,12 +150,36 @@ pub(crate) struct ScopedArtifactReadCommand {
     expected_generation: Option<u64>,
     max_bytes: u64,
     content_policy: ScopedArtifactContentPolicy,
+    artifact_evidence: Option<ScopedArtifactEvidenceSelection>,
     attachment_ref: [u8; DIGEST_BYTES],
     request_id: [u8; DIGEST_BYTES],
 }
 
+/// Borrowed proof that the command still matches the exact active epoch and
+/// current artifact evidence. Holding this value keeps the epoch immutably
+/// borrowed, so its reducer cannot change between validation and outcome
+/// construction. It is still not native source-access authority.
+pub(crate) struct ScopedValidatedArtifactReadCommand<'a> {
+    command: &'a ScopedArtifactReadCommand,
+    _host: &'a ScopedObservationAccessHost,
+    _active: &'a ScopedObservationEpochState,
+}
+
+impl ScopedValidatedArtifactReadCommand<'_> {
+    pub(crate) fn context_wire(&self) -> ScopedArtifactReadContextWire {
+        self.command.context_wire_internal()
+    }
+}
+
 struct ScopedArtifactReadParameters {
     artifact_key: CanonicalEntityKey,
+    artifact_kind: String,
+    expected_generation: Option<u64>,
+    max_bytes: u64,
+    content_policy: ScopedArtifactContentPolicy,
+}
+
+struct ScopedEvidenceBoundArtifactReadParameters {
     artifact_kind: String,
     expected_generation: Option<u64>,
     max_bytes: u64,
@@ -164,6 +194,7 @@ impl fmt::Debug for ScopedArtifactReadCommand {
             .field("expected_generation", &self.expected_generation)
             .field("max_bytes", &self.max_bytes)
             .field("content_policy", &self.content_policy)
+            .field("evidence_bound", &self.artifact_evidence.is_some())
             .field("attachment_ref", &encode_opaque(&self.attachment_ref))
             .field("request_id", &encode_opaque(&self.request_id))
             .finish_non_exhaustive()
@@ -177,6 +208,55 @@ impl ScopedArtifactReadCommand {
         contract_selection: ObservationContractSelection,
         root: ScopedObservationRootIdentity,
         parameters: ScopedArtifactReadParameters,
+    ) -> Result<Self, ScopedArtifactContractError> {
+        Self::new_internal(
+            attachment_authority,
+            artifact_access_policy,
+            contract_selection,
+            root,
+            parameters,
+            None,
+        )
+    }
+
+    fn new_from_evidence(
+        attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        artifact_access_policy: ScopedArtifactAccessPolicy,
+        contract_selection: ObservationContractSelection,
+        root: ScopedObservationRootIdentity,
+        artifact_evidence: ScopedArtifactEvidenceSelection,
+        parameters: ScopedEvidenceBoundArtifactReadParameters,
+    ) -> Result<Self, ScopedArtifactContractError> {
+        let ScopedEvidenceBoundArtifactReadParameters {
+            artifact_kind,
+            expected_generation,
+            max_bytes,
+            content_policy,
+        } = parameters;
+        let parameters = ScopedArtifactReadParameters {
+            artifact_key: artifact_evidence.artifact_key(),
+            artifact_kind,
+            expected_generation,
+            max_bytes,
+            content_policy,
+        };
+        Self::new_internal(
+            attachment_authority,
+            artifact_access_policy,
+            contract_selection,
+            root,
+            parameters,
+            Some(artifact_evidence),
+        )
+    }
+
+    fn new_internal(
+        attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        artifact_access_policy: ScopedArtifactAccessPolicy,
+        contract_selection: ObservationContractSelection,
+        root: ScopedObservationRootIdentity,
+        parameters: ScopedArtifactReadParameters,
+        artifact_evidence: Option<ScopedArtifactEvidenceSelection>,
     ) -> Result<Self, ScopedArtifactContractError> {
         let ScopedArtifactReadParameters {
             artifact_key,
@@ -216,6 +296,11 @@ impl ScopedArtifactReadCommand {
                 "attachment correlation token must be positive",
             ));
         }
+        if artifact_evidence.as_ref().is_some_and(|evidence| {
+            evidence.root_session() != root.session_key || evidence.artifact_key() != artifact_key
+        }) {
+            return Err(ScopedArtifactContractError::EvidenceUnavailable);
+        }
         let root_wire = ScopedArtifactRootWire::from_root(&root);
         let attachment_ref =
             derive_attachment_ref(attachment_authority.token, &contract_selection, &root_wire)?;
@@ -226,6 +311,9 @@ impl ScopedArtifactReadCommand {
             expected_generation,
             max_bytes,
             content_policy,
+            artifact_evidence
+                .as_ref()
+                .map(|evidence| evidence.revision()),
         );
         Ok(Self {
             attachment_authority,
@@ -237,6 +325,7 @@ impl ScopedArtifactReadCommand {
             expected_generation,
             max_bytes,
             content_policy,
+            artifact_evidence,
             attachment_ref,
             request_id,
         })
@@ -249,10 +338,16 @@ impl ScopedArtifactReadCommand {
             && self.root == host.root_identity
     }
 
-    pub(crate) fn context_wire(&self) -> ScopedArtifactReadContextWire {
+    fn context_wire_internal(&self) -> ScopedArtifactReadContextWire {
         ScopedArtifactReadContextWire::from_command(self)
     }
 
+    #[cfg(test)]
+    pub(crate) fn context_wire(&self) -> ScopedArtifactReadContextWire {
+        self.context_wire_internal()
+    }
+
+    #[cfg(test)]
     pub(crate) fn observed(
         &self,
         outcome: ScopedArtifactReadOutcome,
@@ -260,6 +355,7 @@ impl ScopedArtifactReadCommand {
         ScopedObservedArtifactWire::from_outcome(self, outcome)
     }
 
+    #[cfg(test)]
     pub(crate) fn parse_observed(
         &self,
         value: JsonValue,
@@ -269,9 +365,98 @@ impl ScopedArtifactReadCommand {
 }
 
 impl ScopedObservationAccessHost {
+    /// Prepare a path-free request only from the exact current canonical
+    /// metadata evidence retained by this attachment's active projection.
+    /// This still performs no relation reservation, locator construction, or
+    /// native access.
+    pub(crate) fn prepare_portable_artifact_read_from_evidence(
+        &self,
+        active: &ScopedObservationEpochState,
+        artifact_key: CanonicalEntityKey,
+        artifact_kind: impl Into<String>,
+        expected_generation: Option<u64>,
+        max_bytes: u64,
+        content_policy: ScopedArtifactContentPolicy,
+    ) -> Result<ScopedArtifactReadCommand, ScopedArtifactContractError> {
+        if self.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ScopedArtifactContractError::Closed);
+        }
+        if !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+            || active.root != self.root_identity
+            || active.projection.lifecycle != ScopedProjectionLifecycle::Active
+        {
+            return Err(ScopedArtifactContractError::ForeignCommand);
+        }
+        let artifact_evidence = active
+            .projection
+            .artifact_evidence
+            .select_content_expected(artifact_key)
+            .map_err(|_| ScopedArtifactContractError::EvidenceUnavailable)?
+            .ok_or(ScopedArtifactContractError::EvidenceUnavailable)?;
+        if artifact_evidence.root_session() != self.root_identity.session_key {
+            return Err(ScopedArtifactContractError::ForeignCommand);
+        }
+        ScopedArtifactReadCommand::new_from_evidence(
+            Arc::clone(&self.attachment_authority),
+            self.artifact_access_policy,
+            self.observation_contract.clone(),
+            self.root_identity.clone(),
+            artifact_evidence,
+            ScopedEvidenceBoundArtifactReadParameters {
+                artifact_kind: artifact_kind.into(),
+                expected_generation,
+                max_bytes,
+                content_policy,
+            },
+        )
+    }
+
+    /// Revalidate the exact evidence revision immediately before a future
+    /// mediator consumes this command. A reset, retraction, correction, or
+    /// conflicting observation makes the command stale.
+    pub(crate) fn validate_evidence_bound_artifact_command<'a>(
+        &'a self,
+        active: &'a ScopedObservationEpochState,
+        command: &'a ScopedArtifactReadCommand,
+    ) -> Result<ScopedValidatedArtifactReadCommand<'a>, ScopedArtifactContractError> {
+        if self.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ScopedArtifactContractError::Closed);
+        }
+        if !command.matches_host(self)
+            || !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+            || active.root != self.root_identity
+        {
+            return Err(ScopedArtifactContractError::ForeignCommand);
+        }
+        let evidence = command
+            .artifact_evidence
+            .as_ref()
+            .ok_or(ScopedArtifactContractError::EvidenceUnavailable)?;
+        if active.projection.lifecycle != ScopedProjectionLifecycle::Active
+            || evidence.root_session() != self.root_identity.session_key
+        {
+            return Err(ScopedArtifactContractError::ForeignCommand);
+        }
+        if active
+            .projection
+            .artifact_evidence
+            .selection_is_current(evidence)
+            .map_err(|_| ScopedArtifactContractError::StaleEvidence)?
+        {
+            Ok(ScopedValidatedArtifactReadCommand {
+                command,
+                _host: self,
+                _active: active,
+            })
+        } else {
+            Err(ScopedArtifactContractError::StaleEvidence)
+        }
+    }
+
     /// Prepare a path-free portable artifact request bound to this attachment.
     /// This performs no native access and is not a substitute for the future
     /// evidence-derived locator authorization.
+    #[cfg(test)]
     pub(crate) fn prepare_portable_artifact_read(
         &self,
         artifact_key: CanonicalEntityKey,
@@ -298,6 +483,7 @@ impl ScopedObservationAccessHost {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn validate_portable_artifact_command(
         &self,
         command: &ScopedArtifactReadCommand,
@@ -511,7 +697,7 @@ impl ScopedObservedArtifactWire {
         };
         let value = Self {
             scoped_artifact_contract_version: SCOPED_ARTIFACT_CONTRACT_VERSION,
-            request: command.context_wire(),
+            request: command.context_wire_internal(),
             locator_disclosure: ScopedArtifactLocatorDisclosureWire::Withheld,
             outcome,
         };
@@ -543,7 +729,7 @@ impl ScopedObservedArtifactWire {
     ) -> Result<(), ScopedArtifactContractError> {
         if self.scoped_artifact_contract_version != SCOPED_ARTIFACT_CONTRACT_VERSION
             || self.locator_disclosure != ScopedArtifactLocatorDisclosureWire::Withheld
-            || self.request != expected.context_wire()
+            || self.request != expected.context_wire_internal()
         {
             return Err(ScopedArtifactContractError::ForeignCommand);
         }
@@ -741,7 +927,7 @@ fn parse_context_for_command(
     };
     decode_opaque_exact(&context.attachment_ref, "artifact attachment reference")?;
     decode_opaque_exact(&context.request_id, "artifact request id")?;
-    if context != expected.context_wire() {
+    if context != expected.context_wire_internal() {
         return Err(ScopedArtifactContractError::ForeignCommand);
     }
     Ok(context)
@@ -832,9 +1018,17 @@ fn derive_request_id(
     expected_generation: Option<u64>,
     max_bytes: u64,
     content_policy: ScopedArtifactContentPolicy,
+    artifact_evidence_revision: Option<super::artifact_evidence::ScopedArtifactEvidenceRevision>,
 ) -> [u8; DIGEST_BYTES] {
     let mut hasher = blake3::Hasher::new();
-    hash_part(&mut hasher, b"spaghetti.rfc012d.artifact-request.v1");
+    hash_part(
+        &mut hasher,
+        if artifact_evidence_revision.is_some() {
+            b"spaghetti.rfc012d.artifact-evidence-request.v1"
+        } else {
+            b"spaghetti.rfc012d.artifact-request.v1"
+        },
+    );
     hash_part(&mut hasher, attachment_ref);
     hash_part(&mut hasher, artifact_key.as_bytes());
     hash_part(&mut hasher, artifact_kind.as_bytes());
@@ -854,6 +1048,9 @@ fn derive_request_id(
             ScopedArtifactContentPolicy::Inline => 3,
         }],
     );
+    if let Some(revision) = artifact_evidence_revision {
+        hash_part(&mut hasher, revision.as_bytes());
+    }
     *hasher.finalize().as_bytes()
 }
 

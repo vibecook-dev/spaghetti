@@ -149,6 +149,15 @@ fn command_with_access_policy(
     )
 }
 
+fn evidence_selection(version: u64, revision: u8) -> ScopedArtifactEvidenceSelection {
+    ScopedArtifactEvidenceSelection::fixture(
+        root_identity().session_key,
+        artifact_key(),
+        version,
+        [revision; 32],
+    )
+}
+
 fn inline_observed(command: &ScopedArtifactReadCommand) -> ScopedObservedArtifactWire {
     let content = b"echo bounded artifact\n".to_vec();
     command
@@ -160,6 +169,77 @@ fn inline_observed(command: &ScopedArtifactReadCommand) -> ScopedObservedArtifac
             content: Some(content),
         })
         .unwrap()
+}
+
+#[test]
+fn evidence_bound_command_preserves_read_generation_and_private_request_identity() {
+    let first = ScopedArtifactReadCommand::new_from_evidence(
+        Arc::new(ScopedObservationAttachmentAuthority { token: 81 }),
+        ScopedArtifactAccessPolicy::bounded(4096, ScopedArtifactContentPolicy::Inline),
+        contract_selection(),
+        root_identity(),
+        evidence_selection(7, 1),
+        ScopedEvidenceBoundArtifactReadParameters {
+            artifact_kind: "workflow_definition".to_owned(),
+            expected_generation: Some(91),
+            max_bytes: 4096,
+            content_policy: ScopedArtifactContentPolicy::Inline,
+        },
+    )
+    .unwrap();
+    let revised = ScopedArtifactReadCommand::new_from_evidence(
+        Arc::clone(&first.attachment_authority),
+        first.artifact_access_policy,
+        first.contract_selection.clone(),
+        first.root.clone(),
+        evidence_selection(7, 2),
+        ScopedEvidenceBoundArtifactReadParameters {
+            artifact_kind: "workflow_definition".to_owned(),
+            expected_generation: Some(91),
+            max_bytes: 4096,
+            content_policy: ScopedArtifactContentPolicy::Inline,
+        },
+    )
+    .unwrap();
+    assert_eq!(first.expected_generation, Some(91));
+    assert!(first.artifact_evidence.is_some());
+    assert_ne!(first.request_id, revised.request_id);
+    let debug = format!("{first:?}");
+    assert!(debug.contains("evidence_bound: true"));
+    assert!(!debug.contains("v1:<redacted>"));
+
+    let foreign_root = CanonicalEntityKey::derive(
+        "fixture",
+        &root_identity().source_instance_key,
+        "session",
+        b"foreign-session",
+    )
+    .unwrap();
+    let foreign =
+        ScopedArtifactEvidenceSelection::fixture(foreign_root, artifact_key(), 7, [3; 32]);
+    assert_eq!(
+        ScopedArtifactReadCommand::new_from_evidence(
+            Arc::new(ScopedObservationAttachmentAuthority { token: 82 }),
+            ScopedArtifactAccessPolicy::bounded(4096, ScopedArtifactContentPolicy::Inline),
+            contract_selection(),
+            root_identity(),
+            foreign,
+            ScopedEvidenceBoundArtifactReadParameters {
+                artifact_kind: "workflow_definition".to_owned(),
+                expected_generation: Some(91),
+                max_bytes: 4096,
+                content_policy: ScopedArtifactContentPolicy::Inline,
+            },
+        )
+        .expect_err("foreign-root evidence must not mint a request"),
+        ScopedArtifactContractError::EvidenceUnavailable
+    );
+
+    assert!(
+        command(83, ScopedArtifactContentPolicy::Inline, Some(7), 4096)
+            .artifact_evidence
+            .is_none()
+    );
 }
 
 fn fixture_value() -> Value {
