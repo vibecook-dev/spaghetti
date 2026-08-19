@@ -227,6 +227,54 @@ pub(super) fn apply_artifact_facts(
     Ok(changes)
 }
 
+/// Remove the assertion-side owner of one canonical artifact fact before its
+/// `fact_records` owner is replaced by an exact semantic replay.
+///
+/// High-volume bootstrap deliberately disables SQLite foreign-key enforcement
+/// until finalization, so deleting only the parent fact cannot rely on
+/// `ON DELETE CASCADE`. Keep this explicit cleanup equivalent to that cascade;
+/// the replayed fact is projected again later in the same transaction.
+pub(super) fn retract_replayed_artifact_fact(
+    transaction: &Transaction<'_>,
+    fact_id: &[u8],
+) -> Result<(), EngineError> {
+    execute_cached(
+        transaction,
+        r#"
+            DELETE FROM canonical_artifacts
+            WHERE decisive_metadata_fact_id = ?1
+               OR decisive_content_fact_id = ?1
+            "#,
+        [fact_id],
+    )
+    .map_err(|error| sqlite_error("retract replayed canonical artifact", error))?;
+    execute_cached(
+        transaction,
+        "DELETE FROM artifact_metadata_assertions WHERE fact_id = ?1",
+        [fact_id],
+    )
+    .map_err(|error| sqlite_error("retract replayed artifact metadata entries", error))?;
+    execute_cached(
+        transaction,
+        "DELETE FROM artifact_snapshot_assertions WHERE fact_id = ?1",
+        [fact_id],
+    )
+    .map_err(|error| sqlite_error("retract replayed artifact metadata snapshot", error))?;
+    execute_cached(
+        transaction,
+        "DELETE FROM artifact_content_assertions WHERE fact_id = ?1",
+        [fact_id],
+    )
+    .map_err(|error| sqlite_error("retract replayed artifact content", error))?;
+    execute_cached(
+        transaction,
+        "DELETE FROM fact_dependency_reads WHERE fact_id = ?1",
+        [fact_id],
+    )
+    .map_err(|error| sqlite_error("retract replayed artifact dependencies", error))?;
+    Ok(())
+}
+
 /// Materialize final artifact state once after a reader-inaccessible cold
 /// bootstrap. Assertion rows are the durable source of truth; rebuilding here
 /// avoids repeatedly reading and rewriting a growing assertion history for

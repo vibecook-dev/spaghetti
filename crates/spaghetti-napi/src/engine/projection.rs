@@ -21,7 +21,7 @@ use crate::adapter::{
     UsageValueAuthority, ValueQuality,
 };
 
-use super::artifact_projection::apply_artifact_facts;
+use super::artifact_projection::{apply_artifact_facts, retract_replayed_artifact_fact};
 use super::commit::{
     apply_observation_commit_with_projection, apply_observation_commit_with_projection_and_hook,
     apply_observation_commit_with_projection_in_transaction, ChangeEntry, CommitDetail, CommitHook,
@@ -1739,6 +1739,7 @@ fn persist_semantic_artifact_fact_rows(
         replay_fact_ids.push(fact_id);
     }
     for fact_id in replay_fact_ids {
+        retract_replayed_artifact_fact(transaction, &fact_id)?;
         transaction
             .execute("DELETE FROM fact_records WHERE fact_id = ?1", [fact_id])
             .map_err(|error| sqlite_error("replace canonical artifact replay owner", error))?;
@@ -11113,6 +11114,19 @@ mod tests {
             push_canonical_artifact_pair(&mut first, &first_record);
         commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
 
+        // Cold bootstrap relaxes foreign keys until its final audit. Exact
+        // semantic replay must therefore perform the assertion cleanup that
+        // SQLite cascades would normally provide.
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+
         let replay_record = direct_record(1, 1, 2, 30, b"canonical-artifact-replay");
         let mut replay =
             FactBatch::new_with_semantic_context(2, 1, semantic_context(b"fixture-transcript"))
@@ -11150,6 +11164,18 @@ mod tests {
         assert_eq!(count(&connection, "artifact_snapshot_assertions"), 1);
         assert_eq!(count(&connection, "artifact_metadata_assertions"), 1);
         assert_eq!(count(&connection, "artifact_content_assertions"), 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                },)
+                .unwrap(),
+            0,
+            "bootstrap-relaxed replay must not strand assertion owners",
+        );
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .unwrap();
         for (kind, initial_id, replay_id) in [
             (
                 "artifact_metadata_snapshot",
