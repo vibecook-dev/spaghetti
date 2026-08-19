@@ -118,6 +118,10 @@ impl ScopedCapabilitySnapshotConsumerContext {
             expected_semantic_digest: encode_opaque(&self.expected_semantic_digest),
         }
     }
+
+    pub(crate) fn support_release_id(&self) -> &str {
+        &self.support_release_id
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

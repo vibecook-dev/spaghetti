@@ -330,6 +330,33 @@ impl ObservationCapabilities {
         }
         Ok(())
     }
+
+    /// Returns the one promoted support release shared by every negotiated
+    /// family after validating the full capability report.
+    pub(crate) fn selected_support_release_id(
+        &self,
+    ) -> Result<&str, ObservationCapabilityContractError> {
+        self.validate()?;
+        self.fact_families
+            .iter()
+            .find_map(|capability| {
+                capability.selected_version.and_then(|_| {
+                    let ObservationCapabilityEvidence::PromotedSupportRelease {
+                        support_release_id,
+                        ..
+                    } = &capability.evidence
+                    else {
+                        return None;
+                    };
+                    Some(support_release_id.as_str())
+                })
+            })
+            .ok_or_else(|| {
+                ObservationCapabilityContractError::invalid(
+                    "observation capabilities require a selected support release",
+                )
+            })
+    }
 }
 
 fn validate_selection_is_offered(

@@ -543,6 +543,29 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         for binding in required_continuity_wire_bindings
     ):
         found.add(f"{relative}#missing-contextual-continuity-envelope-contract")
+    completion_wire = scoped_dir / "completion_wire.rs"
+    completion_wire_text = (
+        production_rust_text(completion_wire)
+        if completion_wire in production_scoped_paths
+        else ""
+    )
+    required_completion_wire_bindings = (
+        "pub(crate) struct ScopedCompletionEnvelopeConsumerContext",
+        "pub(crate) struct ScopedCompletionEnvelopeWire",
+        "from_scoped_envelope(",
+        "from_wire_value_for_context(",
+        "Arc<ScopedCapabilitySnapshotConsumerContext>",
+        "source_coverage_matches_authority(",
+        "bootstrap_barrier_snapshot_is_valid(barrier)",
+        "resync_barrier_snapshot_is_valid(barrier)",
+        "validate_common_via_source_contract(",
+        "ScopedCompletionEnvelopeContractError::UnsupportedEvent",
+    )
+    if any(
+        binding not in completion_wire_text
+        for binding in required_completion_wire_bindings
+    ):
+        found.add(f"{relative}#missing-contextual-completion-envelope-contract")
     scope_coverage_wire = scoped_dir / "scope_coverage_wire.rs"
     scope_coverage_wire_text = (
         production_rust_text(scope_coverage_wire)
@@ -601,6 +624,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "packages/sdk/src/contracts/rfc012d-continuity-envelope.ts"
     )
     continuity_portable = REPO_ROOT / continuity_portable_relative
+    completion_portable_relative = (
+        "packages/sdk/src/contracts/rfc012d-completion-envelope.ts"
+    )
+    completion_portable = REPO_ROOT / completion_portable_relative
     close_portable_relative = "packages/sdk/src/contracts/rfc012d-close.ts"
     close_portable = REPO_ROOT / close_portable_relative
     artifact_portable_relative = "packages/sdk/src/contracts/rfc012d-artifact.ts"
@@ -625,6 +652,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         or not usage_portable.exists()
         or not source_portable.exists()
         or not continuity_portable.exists()
+        or not completion_portable.exists()
         or not close_portable.exists()
         or not artifact_portable.exists()
         or not artifact_availability_portable.exists()
@@ -663,6 +691,19 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         ):
             found.add(
                 f"{continuity_portable_relative}#missing-contextual-continuity-envelope-contract"
+            )
+        completion_portable_text = read(completion_portable)
+        if (
+            "export interface ScopedCompletionEnvelopeContext"
+            not in completion_portable_text
+            or "export interface ScopedCompletionEnvelope"
+            not in completion_portable_text
+            or "export function parseScopedCompletionEnvelope("
+            not in completion_portable_text
+            or "expectedContextInput: unknown" not in completion_portable_text
+        ):
+            found.add(
+                f"{completion_portable_relative}#missing-contextual-completion-envelope-contract"
             )
         close_portable_text = read(close_portable)
         if (
@@ -726,6 +767,7 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             usage_portable,
             source_portable,
             continuity_portable,
+            completion_portable,
             close_portable,
             artifact_portable,
             artifact_availability_portable,
@@ -766,6 +808,12 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     ):
         found.add(
             f"{repo_path(sdk_index)}#missing-rfc012d-continuity-envelope-export"
+        )
+    if "./contracts/rfc012d-completion-envelope.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(
+            f"{repo_path(sdk_index)}#missing-rfc012d-completion-envelope-export"
         )
     if "./contracts/rfc012d-close.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-close-export")

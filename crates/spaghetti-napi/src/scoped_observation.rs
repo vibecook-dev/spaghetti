@@ -59,6 +59,7 @@ mod artifact_evidence;
 mod artifact_wire;
 mod capability_snapshot_wire;
 mod close_wire;
+mod completion_wire;
 mod continuity_wire;
 mod replacement_manifest_wire;
 mod scope_coverage_wire;
@@ -74,6 +75,8 @@ pub type ScopedArtifactAvailabilityRevision =
     artifact_availability::ScopedArtifactAvailabilityRevision;
 pub type ScopedArtifactAvailabilitySnapshot =
     artifact_availability::ScopedArtifactAvailabilitySnapshot;
+pub type ScopedCompletionEnvelopeConsumerContext =
+    completion_wire::ScopedCompletionEnvelopeConsumerContext;
 
 /// Maximum artifact disclosure one observer attachment may request. The
 /// ordering is intentional: metadata discloses less than a hash, and a hash
@@ -2809,6 +2812,7 @@ pub struct ScopedObservationYieldedEnvelope {
     pub envelope: ScopedObservationEnvelope,
     application_receipt: ScopedObservationApplicationReceipt,
     artifact_availability_context: Option<ScopedArtifactAvailabilityEnvelopeConsumerContext>,
+    completion_context: Option<ScopedCompletionEnvelopeConsumerContext>,
 }
 
 impl ScopedObservationYieldedEnvelope {
@@ -2823,6 +2827,13 @@ impl ScopedObservationYieldedEnvelope {
         &self,
     ) -> Option<&ScopedArtifactAvailabilityEnvelopeConsumerContext> {
         self.artifact_availability_context.as_ref()
+    }
+
+    /// Exact caller-held authority for consuming an ordered bootstrap or
+    /// resync-completion envelope. It exists only for those two event families
+    /// and retains the attachment's verified support/offer context privately.
+    pub fn completion_context(&self) -> Option<&ScopedCompletionEnvelopeConsumerContext> {
+        self.completion_context.as_ref()
     }
 }
 
@@ -2913,6 +2924,8 @@ struct ScopedObservationPendingApplication {
 /// successfully applied the exact yielded envelope.
 pub struct ScopedObservationConsumerDrain {
     mapper: ScopedObservationEnvelopeMapper,
+    completion_capability_context:
+        Arc<capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext>,
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
     authority: Arc<ScopedObservationApplicationAuthority>,
@@ -2931,6 +2944,9 @@ pub struct ScopedObservationConsumerDrain {
 impl ScopedObservationConsumerDrain {
     fn new(
         mapper: ScopedObservationEnvelopeMapper,
+        completion_capability_context: Arc<
+            capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext,
+        >,
         attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
         lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
         limits: ScopedObservationDeliveryLimits,
@@ -2938,6 +2954,7 @@ impl ScopedObservationConsumerDrain {
         let authority = Arc::new(ScopedObservationApplicationAuthority);
         Ok(Self {
             mapper,
+            completion_capability_context,
             attachment_authority,
             lifecycle,
             authority,
@@ -2997,6 +3014,14 @@ impl ScopedObservationConsumerDrain {
             .mapper
             .map(preview)
             .map_err(ScopedObservationDrainError::Envelope)?;
+        let completion_context = ScopedCompletionEnvelopeConsumerContext::from_scoped_envelope(
+            &envelope,
+            &self.mapper.root,
+            Arc::clone(&self.completion_capability_context),
+        )
+        .map_err(|_| {
+            ScopedObservationDrainError::Envelope(ScopedEnvelopeError::DeliveryMismatch)
+        })?;
         let delivered = self
             .delivery
             .dequeue_next()
@@ -3040,6 +3065,7 @@ impl ScopedObservationConsumerDrain {
             envelope,
             application_receipt: receipt,
             artifact_availability_context,
+            completion_context,
         }))
     }
 
@@ -11223,13 +11249,21 @@ struct ScopedCompletionSnapshotComponents<'a> {
 fn bootstrap_snapshot_digest(
     snapshot: ScopedCompletionSnapshotComponents<'_>,
 ) -> Result<ScopedBootstrapSnapshotDigest, ScopedBootstrapBarrierError> {
-    let capability_digest =
-        completion_capability_digest(snapshot.observation_capabilities, snapshot.family_manifest)
-            .map_err(|()| ScopedBootstrapBarrierError::InvalidSnapshot)?;
+    let capability_digest = completion_capability_digest(
+        snapshot.observation_capabilities,
+        snapshot.family_manifest,
+        snapshot.source_coverage,
+    )
+    .map_err(|()| ScopedBootstrapBarrierError::InvalidSnapshot)?;
     if snapshot.scope_coverage.root_present() != Some(snapshot.root_present)
         || !snapshot
             .scope_coverage
             .validate_against(snapshot.root, snapshot.source_coverage)
+        || !completion_source_coverage_matches_authority(
+            snapshot.root,
+            snapshot.observation_capabilities,
+            snapshot.source_coverage,
+        )
         || !snapshot
             .artifact_availability
             .validate_for_root(snapshot.root.session_key)
@@ -11318,12 +11352,18 @@ fn replacement_snapshot_digest(
 fn completion_capability_digest(
     observation_capabilities: &ObservationCapabilities,
     family_manifest: &[ScopedReplacementFamilyManifest],
+    source_coverage: &[SourceCoverageSet],
 ) -> Result<[u8; 32], ()> {
     observation_capabilities.validate().map_err(|_| ())?;
     let selected = &observation_capabilities
         .selection
         .contract_versions
         .fact_family_versions;
+    let mut completeness = selected_replacement_coverage_completeness(
+        &observation_capabilities.selection.contract_versions,
+        source_coverage,
+    )
+    .map_err(|_| ())?;
     if selected.len() != family_manifest.len()
         || family_manifest.windows(2).any(|window| {
             (&window[0].fact_family, window[0].contract_version)
@@ -11333,12 +11373,30 @@ fn completion_capability_digest(
             |((selected_family, selected_version), manifest)| {
                 selected_family == &manifest.fact_family
                     && selected_version == &manifest.contract_version
+                    && completeness.remove(selected_family.as_str()) == Some(manifest.completeness)
             },
         )
+        || !completeness.is_empty()
     {
         return Err(());
     }
     capability_snapshot_wire::derive_capability_digest(observation_capabilities).map_err(|_| ())
+}
+
+fn completion_source_coverage_matches_authority(
+    root: &ScopedObservationRootIdentity,
+    observation_capabilities: &ObservationCapabilities,
+    source_coverage: &[SourceCoverageSet],
+) -> bool {
+    let Ok(support_release_id) = observation_capabilities.selected_support_release_id() else {
+        return false;
+    };
+    source_coverage.iter().all(|coverage| {
+        coverage.scope.adapter_id == root.adapter_id.as_str()
+            && coverage.scope.source_instance_key == root.source_instance_key
+            && coverage.scope.root_entity_key == Some(root.session_key)
+            && coverage.scope.support_release_id == support_release_id
+    })
 }
 
 fn bootstrap_barrier_snapshot_is_valid(barrier: &ScopedBootstrapBarrier) -> bool {
@@ -13177,6 +13235,8 @@ pub struct ScopedObservationAccessHost {
     compatibility: CompatibilityDecision,
     observation_contract: ObservationContractSelection,
     observation_capabilities: ObservationCapabilities,
+    completion_capability_context:
+        Arc<capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext>,
     artifact_access_policy: ScopedArtifactAccessPolicy,
     authorization: TypedAccessAuthorization,
     root_identity: ScopedObservationRootIdentity,
@@ -13237,6 +13297,25 @@ impl ScopedObservationAccessHost {
             compatibility.support_release_id(),
             SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
         )?;
+        let support_release_id = compatibility.support_release_id().ok_or_else(|| {
+            ScopedObservationAccessError::Authorization(
+                "scoped typed observation did not select a support release".to_owned(),
+            )
+        })?;
+        let completion_capability_context = Arc::new(
+            capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext::from_expected(
+                &observation_contract,
+                &request.observation_contract_offer,
+                compatibility.compatibility_class(),
+                support_release_id,
+                &observation_capabilities,
+            )
+            .map_err(|error| {
+                ScopedObservationAccessError::Authorization(format!(
+                    "scoped capability context is inconsistent: {error}"
+                ))
+            })?,
+        );
         let root_identity = request.root_identity.resolve(
             &adapter_id,
             observation_contract
@@ -13264,6 +13343,7 @@ impl ScopedObservationAccessHost {
             compatibility,
             observation_contract,
             observation_capabilities,
+            completion_capability_context,
             artifact_access_policy: request.artifact_access_policy,
             authorization,
             root_identity,
@@ -13384,6 +13464,7 @@ impl ScopedObservationAccessHost {
                 self.root_identity.clone(),
                 self.observation_contract.clone(),
             ),
+            Arc::clone(&self.completion_capability_context),
             Arc::clone(&self.attachment_authority),
             Arc::clone(&self.lifecycle),
             limits,
@@ -17210,8 +17291,22 @@ mod projection_tests {
         compatibility: crate::adapter::CompatibilityClass,
         support_release_id: &str,
     ) -> ObservationCapabilities {
+        let offer = observation_offer_for_selection(selection);
+        ObservationCapabilities::from_negotiation(
+            selection.clone(),
+            &offer,
+            compatibility,
+            Some(support_release_id),
+            SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
+        )
+        .unwrap()
+    }
+
+    fn observation_offer_for_selection(
+        selection: &ObservationContractSelection,
+    ) -> ObservationContractOffer {
         let selected = &selection.contract_versions;
-        let offer = ObservationContractOffer::new(
+        ObservationContractOffer::new(
             ContractVersionOffer {
                 selection_contract_version: selected.selection_contract_version,
                 model_major: selected.model_major,
@@ -17236,15 +17331,24 @@ mod projection_tests {
             vec![selection.event_contract_version],
             vec![selection.lifecycle_contract_version],
         )
-        .unwrap();
-        ObservationCapabilities::from_negotiation(
-            selection.clone(),
-            &offer,
-            compatibility,
-            Some(support_release_id),
-            SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
-        )
         .unwrap()
+    }
+
+    fn capability_context_for_selection(
+        selection: &ObservationContractSelection,
+    ) -> Arc<capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext> {
+        let offer = observation_offer_for_selection(selection);
+        let capabilities = observation_capabilities_for_selection(selection);
+        Arc::new(
+            capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext::from_expected(
+                selection,
+                &offer,
+                crate::adapter::CompatibilityClass::ExactSupported,
+                "fixture-support-v1",
+                &capabilities,
+            )
+            .unwrap(),
+        )
     }
 
     fn fixture_manifest_for_selection(
@@ -17832,12 +17936,51 @@ mod projection_tests {
         )
     }
 
+    fn fixture_completion_coverage(
+        root: &ScopedObservationRootIdentity,
+        root_present: bool,
+    ) -> Vec<SourceCoverageSet> {
+        fixture_completion_coverage_for_selection(
+            root,
+            root_present,
+            &observation_contract_selection(),
+        )
+    }
+
+    fn fixture_completion_coverage_for_selection(
+        root: &ScopedObservationRootIdentity,
+        root_present: bool,
+        selection: &ObservationContractSelection,
+    ) -> Vec<SourceCoverageSet> {
+        let mut coverage = vec![fixture_decode_coverage(root, root_present)];
+        coverage.extend(selection.contract_versions.fact_family_versions.iter().map(
+            |(family, version)| {
+                empty_family_coverage_for_root(
+                    root,
+                    family,
+                    *version,
+                    CoverageSetCompleteness::Complete,
+                )
+            },
+        ));
+        coverage
+    }
+
     fn empty_family_coverage(
         family: &str,
         version: u32,
         completeness: CoverageSetCompleteness,
     ) -> SourceCoverageSet {
         let root = root_identity();
+        empty_family_coverage_for_root(&root, family, version, completeness)
+    }
+
+    fn empty_family_coverage_for_root(
+        root: &ScopedObservationRootIdentity,
+        family: &str,
+        version: u32,
+        completeness: CoverageSetCompleteness,
+    ) -> SourceCoverageSet {
         SourceCoverageSet::new(
             CoverageDomain::FactFamily {
                 family: family.to_owned(),
@@ -18111,8 +18254,10 @@ mod projection_tests {
         max_source_control_items: usize,
     ) -> ScopedObservationConsumerDrain {
         let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
+        let selection = observation_contract_selection();
         let mut drain = ScopedObservationConsumerDrain::new(
-            envelope_mapper(root),
+            ScopedObservationEnvelopeMapper::new(root, selection.clone()),
+            capability_context_for_selection(&selection),
             next_scoped_attachment_authority().unwrap(),
             Arc::clone(&lifecycle),
             ScopedObservationDeliveryLimits {
@@ -18801,7 +18946,7 @@ mod projection_tests {
             )],
         );
         let scope_coverage = fixture_scope_coverage(&root, true);
-        let source_coverage = vec![fixture_decode_coverage(&root, true)];
+        let source_coverage = fixture_completion_coverage(&root, true);
         let selection = observation_contract_selection();
         let capabilities = observation_capabilities_for_selection(&selection);
         let family_manifest = fixture_manifest_for_selection(&selection);
@@ -18866,7 +19011,7 @@ mod projection_tests {
         );
         let manifest = fixture_manifest_for_selection(&selection);
         let scope_coverage = fixture_scope_coverage(&root, true);
-        let source_coverage = vec![fixture_decode_coverage(&root, true)];
+        let source_coverage = fixture_completion_coverage(&root, true);
         let artifact_availability = empty_artifact_availability(&root);
 
         let exact_digest = replacement_snapshot_digest(fixture_completion_components(
@@ -18890,7 +19035,7 @@ mod projection_tests {
         ))
         .unwrap();
         assert_ne!(exact_digest, range_digest);
-        let alternate_release_digest = replacement_snapshot_digest(fixture_completion_components(
+        assert!(replacement_snapshot_digest(fixture_completion_components(
             &root,
             true,
             &alternate_release,
@@ -18899,19 +19044,60 @@ mod projection_tests {
             &source_coverage,
             &artifact_availability,
         ))
+        .is_err());
+        let mut alternate_source_coverage = source_coverage.clone();
+        for coverage in &mut alternate_source_coverage {
+            coverage.scope.support_release_id = "fixture-support-v2".to_owned();
+        }
+        let alternate_release_digest = replacement_snapshot_digest(fixture_completion_components(
+            &root,
+            true,
+            &alternate_release,
+            &manifest,
+            &scope_coverage,
+            &alternate_source_coverage,
+            &artifact_availability,
+        ))
         .unwrap();
         assert_ne!(exact_digest, alternate_release_digest);
 
+        let decode_only = vec![fixture_decode_coverage(&root, true)];
+        assert!(replacement_snapshot_digest(fixture_completion_components(
+            &root,
+            true,
+            &exact,
+            &manifest,
+            &scope_coverage,
+            &decode_only,
+            &artifact_availability,
+        ))
+        .is_err());
+
         let multi_selection = multi_family_observation_contract_selection();
         let multi_capabilities = observation_capabilities_for_selection(&multi_selection);
-        assert!(completion_capability_digest(&multi_capabilities, &manifest).is_err());
+        assert!(
+            completion_capability_digest(&multi_capabilities, &manifest, &source_coverage,)
+                .is_err()
+        );
         let multi_manifest = fixture_manifest_for_selection(&multi_selection);
+        let multi_coverage =
+            fixture_completion_coverage_for_selection(&root, true, &multi_selection);
         let mut reversed_manifest = multi_manifest.clone();
         reversed_manifest.reverse();
-        assert!(completion_capability_digest(&multi_capabilities, &reversed_manifest).is_err());
+        assert!(completion_capability_digest(
+            &multi_capabilities,
+            &reversed_manifest,
+            &multi_coverage,
+        )
+        .is_err());
         let mut reversed_capabilities = multi_capabilities.clone();
         reversed_capabilities.fact_families.reverse();
-        assert!(completion_capability_digest(&reversed_capabilities, &multi_manifest).is_err());
+        assert!(completion_capability_digest(
+            &reversed_capabilities,
+            &multi_manifest,
+            &multi_coverage,
+        )
+        .is_err());
 
         let mut delivery = delivery_lane(1, 1);
         let before = delivery.state();
@@ -18938,7 +19124,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            source_coverage: fixture_completion_coverage(&root, true),
             observation_capabilities: exact,
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
@@ -19658,7 +19844,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
-            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            source_coverage: fixture_completion_coverage(&root, true),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -19735,7 +19921,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
-            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            source_coverage: fixture_completion_coverage(&root, true),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -19991,7 +20177,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            source_coverage: fixture_completion_coverage(&root, false),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -20089,7 +20275,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: 2,
             offered_through_sequence: 5,
-            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            source_coverage: fixture_completion_coverage(&root, false),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -20163,7 +20349,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 1,
-            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            source_coverage: fixture_completion_coverage(&root, true),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -20396,7 +20582,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            source_coverage: fixture_completion_coverage(&root, false),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -20529,7 +20715,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: 1,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            source_coverage: fixture_completion_coverage(&root, false),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -20903,7 +21089,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, false)],
+            source_coverage: fixture_completion_coverage(&root, false),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -20957,7 +21143,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            source_coverage: fixture_completion_coverage(&root, true),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
@@ -21099,7 +21285,7 @@ mod projection_tests {
             semantic_digest: replacement_semantic_digest,
         }];
         let scope_coverage = fixture_scope_coverage(&root, true);
-        let source_coverage = vec![fixture_decode_coverage(&root, true)];
+        let source_coverage = fixture_completion_coverage(&root, true);
         let replacement_snapshot_digest =
             replacement_snapshot_digest(fixture_completion_components(
                 &root,
@@ -21199,7 +21385,11 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            source_coverage: fixture_completion_coverage_for_selection(
+                &root,
+                true,
+                &multi_family_observation_contract_selection(),
+            ),
             observation_capabilities: observation_capabilities_for_selection(
                 &multi_family_observation_contract_selection(),
             ),
@@ -21396,7 +21586,7 @@ mod projection_tests {
             root: root.clone(),
             scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
             offered_through_sequence: 0,
-            source_coverage: vec![fixture_decode_coverage(&root, true)],
+            source_coverage: fixture_completion_coverage(&root, true),
             observation_capabilities: observation_capabilities_for_selection(
                 &observation_contract_selection(),
             ),
