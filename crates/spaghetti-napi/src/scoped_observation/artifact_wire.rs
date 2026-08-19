@@ -183,6 +183,10 @@ impl ScopedValidatedArtifactReadCommand<'_> {
         self.command.expected_generation
     }
 
+    pub(super) fn scope_epoch(&self) -> u64 {
+        self._active.scope_epoch
+    }
+
     pub(super) fn evidence_revision(&self) -> [u8; DIGEST_BYTES] {
         *self
             .command

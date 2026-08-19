@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use crate::adapter::{
     AdapterId, CanonicalEntityKey, CanonicalSourceInstanceKey, ContractVersionOffer,
-    ContractVersionRequest,
+    ContractVersionRequest, CoverageObjectKey, CoverageStreamKey,
 };
 use crate::observation_contract::{
     negotiate_observation_contract, ObservationContractOffer, ObservationContractRequest,
@@ -17,9 +17,11 @@ use crate::source::AccessObjectToken;
 
 use super::super::artifact_availability::{
     ScopedArtifactAvailabilityObservation, ScopedArtifactAvailabilityReducer,
-    ScopedArtifactAvailabilitySnapshot, ScopedArtifactAvailabilityState,
+    ScopedArtifactAvailabilitySnapshot, ScopedArtifactAvailabilitySourceOccurrence,
+    ScopedArtifactAvailabilityState,
 };
 use super::super::artifact_evidence::ScopedArtifactEvidenceSelection;
+use super::super::ScopedSourceObjectIdentity;
 use super::*;
 
 const FROZEN_FIXTURE: &str = include_str!(concat!(
@@ -136,6 +138,19 @@ fn populated_snapshot() -> ScopedArtifactAvailabilitySnapshot {
             ],
         )
         .unwrap();
+        let source_generation = match state {
+            ScopedArtifactAvailabilityState::Available { generation, .. }
+            | ScopedArtifactAvailabilityState::OverLimit { generation, .. } => generation,
+            ScopedArtifactAvailabilityState::Missing {
+                observed_generation,
+                ..
+            } => observed_generation.unwrap_or(1),
+            ScopedArtifactAvailabilityState::Unstable => 1,
+        };
+        let source_instance_key =
+            CanonicalSourceInstanceKey::derive(1, b"availability-wire-source").unwrap();
+        let stream_key = CoverageStreamKey::derive("fixture", relation_id.as_bytes()).unwrap();
+        let object_key = CoverageObjectKey::derive(relation_id, object_token.as_bytes()).unwrap();
         current.insert((artifact_key, *evidence.revision().as_bytes()));
         reducer
             .observe(ScopedArtifactAvailabilityObservation::new(
@@ -143,6 +158,16 @@ fn populated_snapshot() -> ScopedArtifactAvailabilitySnapshot {
                 Arc::from(artifact_kind),
                 Arc::from(relation_id),
                 object_token,
+                ScopedArtifactAvailabilitySourceOccurrence::new(
+                    [9; 32],
+                    ScopedSourceObjectIdentity {
+                        adapter_id: AdapterId::new("fixture").unwrap(),
+                        source_instance_key,
+                        stream_key,
+                        object_key,
+                    },
+                    source_generation,
+                ),
                 state,
             ))
             .unwrap();

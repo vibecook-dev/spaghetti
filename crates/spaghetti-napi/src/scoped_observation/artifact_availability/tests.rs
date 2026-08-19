@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::adapter::{AdapterId, CanonicalEntityKey, CanonicalSourceInstanceKey};
+use crate::adapter::{
+    AdapterId, CanonicalEntityKey, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
+};
 use crate::source::AccessObjectToken;
 
 use super::*;
@@ -43,11 +45,34 @@ fn observation(
         ],
     )
     .unwrap();
+    let source_generation = match state {
+        ScopedArtifactAvailabilityState::Available { generation, .. }
+        | ScopedArtifactAvailabilityState::OverLimit { generation, .. } => generation,
+        ScopedArtifactAvailabilityState::Missing {
+            observed_generation,
+            ..
+        } => observed_generation.unwrap_or(1),
+        ScopedArtifactAvailabilityState::Unstable => 1,
+    };
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"availability-source").unwrap();
+    let stream_key = CoverageStreamKey::derive("fixture", relation.as_bytes()).unwrap();
+    let object_key = CoverageObjectKey::derive(relation, token.as_bytes()).unwrap();
     ScopedArtifactAvailabilityObservation::new(
         selection,
         Arc::from(kind),
         Arc::from(relation),
         token,
+        ScopedArtifactAvailabilitySourceOccurrence::new(
+            [9; 32],
+            ScopedSourceObjectIdentity {
+                adapter_id: AdapterId::new("fixture").unwrap(),
+                source_instance_key,
+                stream_key,
+                object_key,
+            },
+            source_generation,
+        ),
         state,
     )
 }
@@ -245,4 +270,66 @@ fn latest_observation_replaces_one_key_and_capacity_is_exact() {
         reducer.observations.len(),
         MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS
     );
+}
+
+#[test]
+fn prepare_offer_commit_is_atomic_replay_safe_and_source_bound() {
+    let root = identity(b"root", "session");
+    let artifact = identity(b"artifact", "artifact");
+    let evidence = selection(root, artifact, 7, 1);
+    let observation = observation(
+        evidence,
+        "workflow_definition",
+        "file-artifact",
+        ScopedArtifactAvailabilityState::Unstable,
+    );
+    let mut reducer = ScopedArtifactAvailabilityReducer::new();
+    let prepared = reducer
+        .prepare_observe(root, observation.clone())
+        .unwrap()
+        .unwrap();
+    assert!(reducer.observations.is_empty());
+    assert!(prepared.occurrence().validate_for_root(root));
+    let first_event_id = super::super::artifact_availability_event_id(prepared.occurrence());
+    let first_revision = prepared.occurrence().entry().revision();
+    reducer.commit_observe(prepared);
+    assert_eq!(reducer.observations.len(), 1);
+    assert!(reducer
+        .prepare_observe(root, observation.clone())
+        .unwrap()
+        .is_none());
+
+    let mut declaration_drift = observation.clone();
+    declaration_drift.source.source_declaration_digest = [10; 32];
+    let prepared = reducer
+        .prepare_observe(root, declaration_drift)
+        .unwrap()
+        .unwrap();
+    assert_eq!(prepared.occurrence().entry().revision(), first_revision);
+    assert_ne!(
+        super::super::artifact_availability_event_id(prepared.occurrence()),
+        first_event_id
+    );
+    assert_eq!(reducer.observations.len(), 1);
+
+    let mut generation_drift = observation.clone();
+    generation_drift.source.generation = 2;
+    let prepared = reducer
+        .prepare_observe(root, generation_drift)
+        .unwrap()
+        .unwrap();
+    assert_eq!(prepared.occurrence().entry().revision(), first_revision);
+    assert_ne!(
+        super::super::artifact_availability_event_id(prepared.occurrence()),
+        first_event_id
+    );
+
+    let mut invalid_generation = observation;
+    invalid_generation.state = ScopedArtifactAvailabilityState::Available {
+        generation: 2,
+        provenance_ref: [3; 32],
+        size_bytes: 1,
+    };
+    assert!(reducer.prepare_observe(root, invalid_generation).is_err());
+    assert_eq!(reducer.observations.len(), 1);
 }

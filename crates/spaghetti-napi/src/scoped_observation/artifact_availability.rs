@@ -2,7 +2,9 @@
 //!
 //! A completed confined read may update this reducer only after it has passed
 //! the strict artifact-result contract. The reducer retains no native locator,
-//! file identity, content, or content hash. Its snapshot filters observations
+//! file identity, content, or content hash. Changed observations are prepared
+//! without mutation, offered through the attachment's ordered lane, and
+//! committed only after that offer succeeds. Its snapshot filters observations
 //! through the exact current metadata-evidence selection, so a correction or
 //! retraction makes an old native observation unobservable rather than
 //! relabeling it as missing.
@@ -12,12 +14,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::adapter::CanonicalEntityKey;
-use crate::source::AccessObjectToken;
+use crate::source::{validate_relation_id, AccessObjectToken};
 
 use super::artifact_evidence::{
     ScopedArtifactEvidenceSelection, MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS,
 };
-use super::{ScopedObservationProjectionSink, ScopedProjectionError};
+use super::{ScopedObservationProjectionSink, ScopedProjectionError, ScopedSourceObjectIdentity};
 
 pub(super) const SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION: u32 = 1;
 const JS_SAFE_INTEGER_MAX: u64 = 9_007_199_254_740_991;
@@ -42,12 +44,34 @@ pub(super) enum ScopedArtifactAvailabilityState {
     Unstable,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct ScopedArtifactAvailabilitySourceOccurrence {
+    source_declaration_digest: [u8; 32],
+    source: ScopedSourceObjectIdentity,
+    generation: u64,
+}
+
+impl ScopedArtifactAvailabilitySourceOccurrence {
+    pub(super) fn new(
+        source_declaration_digest: [u8; 32],
+        source: ScopedSourceObjectIdentity,
+        generation: u64,
+    ) -> Self {
+        Self {
+            source_declaration_digest,
+            source,
+            generation,
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct ScopedArtifactAvailabilityObservation {
     evidence: ScopedArtifactEvidenceSelection,
     artifact_kind: Arc<str>,
     relation_id: Arc<str>,
     object_token: AccessObjectToken,
+    source: ScopedArtifactAvailabilitySourceOccurrence,
     state: ScopedArtifactAvailabilityState,
 }
 
@@ -57,6 +81,7 @@ impl ScopedArtifactAvailabilityObservation {
         artifact_kind: Arc<str>,
         relation_id: Arc<str>,
         object_token: AccessObjectToken,
+        source: ScopedArtifactAvailabilitySourceOccurrence,
         state: ScopedArtifactAvailabilityState,
     ) -> Self {
         Self {
@@ -64,8 +89,71 @@ impl ScopedArtifactAvailabilityObservation {
             artifact_kind,
             relation_id,
             object_token,
+            source,
             state,
         }
+    }
+
+    fn validate_for_root(&self, root_session: CanonicalEntityKey) -> bool {
+        self.evidence.root_session() == root_session
+            && root_session.as_bytes().iter().any(|byte| *byte != 0)
+            && self
+                .evidence
+                .artifact_key()
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+            && self.evidence.version() > 0
+            && self.evidence.version() <= JS_SAFE_INTEGER_MAX
+            && self
+                .evidence
+                .revision()
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+            && validate_artifact_kind(&self.artifact_kind)
+            && validate_relation_id(&self.relation_id).is_ok()
+            && self.object_token.as_bytes().iter().any(|byte| *byte != 0)
+            && self
+                .source
+                .source_declaration_digest
+                .iter()
+                .any(|byte| *byte != 0)
+            && self
+                .source
+                .source
+                .source_instance_key
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+            && self
+                .source
+                .source
+                .stream_key
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+            && self
+                .source
+                .source
+                .object_key
+                .as_bytes()
+                .iter()
+                .any(|byte| *byte != 0)
+            && self.source.generation > 0
+            && self.source.generation <= JS_SAFE_INTEGER_MAX
+            && validate_availability_state(self.state)
+            && match self.state {
+                ScopedArtifactAvailabilityState::Available { generation, .. }
+                | ScopedArtifactAvailabilityState::OverLimit { generation, .. } => {
+                    generation == self.source.generation
+                }
+                ScopedArtifactAvailabilityState::Missing {
+                    observed_generation,
+                    ..
+                } => observed_generation.unwrap_or(1) == self.source.generation,
+                ScopedArtifactAvailabilityState::Unstable => true,
+            }
     }
 }
 
@@ -115,6 +203,87 @@ impl ScopedArtifactAvailabilityEntry {
 
     pub(super) fn state(&self) -> ScopedArtifactAvailabilityState {
         self.state
+    }
+}
+
+impl fmt::Debug for ScopedArtifactAvailabilityEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = match self.state {
+            ScopedArtifactAvailabilityState::Available { .. } => "available",
+            ScopedArtifactAvailabilityState::Missing { .. } => "missing",
+            ScopedArtifactAvailabilityState::OverLimit { .. } => "over_limit",
+            ScopedArtifactAvailabilityState::Unstable => "unstable",
+        };
+        formatter
+            .debug_struct("ScopedArtifactAvailabilityEntry")
+            .field("artifact_key", &"<redacted>")
+            .field("artifact_kind", &self.artifact_kind)
+            .field("revision", &self.revision)
+            .field("state", &state)
+            .finish()
+    }
+}
+
+/// One checked, path-free source occurrence for an availability change. The
+/// exact source declaration digest and common source coordinate remain
+/// private; they bind event identity without becoming locator disclosure.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopedArtifactAvailabilityOccurrence {
+    root_session: CanonicalEntityKey,
+    observation: ScopedArtifactAvailabilityObservation,
+    entry: ScopedArtifactAvailabilityEntry,
+}
+
+impl ScopedArtifactAvailabilityOccurrence {
+    pub(super) fn root_session(&self) -> CanonicalEntityKey {
+        self.root_session
+    }
+
+    pub(super) fn source(&self) -> &ScopedSourceObjectIdentity {
+        &self.observation.source.source
+    }
+
+    pub(super) fn source_generation(&self) -> u64 {
+        self.observation.source.generation
+    }
+
+    pub(super) fn source_declaration_digest(&self) -> &[u8; 32] {
+        &self.observation.source.source_declaration_digest
+    }
+
+    pub(super) fn entry(&self) -> &ScopedArtifactAvailabilityEntry {
+        &self.entry
+    }
+
+    pub(super) fn validate_for_root(&self, root_session: CanonicalEntityKey) -> bool {
+        self.root_session == root_session
+            && self.observation.validate_for_root(root_session)
+            && self.entry == entry_for_observation(root_session, &self.observation)
+    }
+}
+
+impl fmt::Debug for ScopedArtifactAvailabilityOccurrence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedArtifactAvailabilityOccurrence")
+            .field("source_declaration_digest", &"sha256:<redacted>")
+            .field("source_generation", &self.observation.source.generation)
+            .field("source_coordinate", &"<redacted>")
+            .field("entry", &self.entry)
+            .finish()
+    }
+}
+
+#[must_use = "a prepared availability change must be offered before it is committed"]
+pub(super) struct ScopedArtifactAvailabilityPreparedObservation {
+    key: (CanonicalEntityKey, Arc<str>),
+    observation: ScopedArtifactAvailabilityObservation,
+    occurrence: ScopedArtifactAvailabilityOccurrence,
+}
+
+impl ScopedArtifactAvailabilityPreparedObservation {
+    pub(super) fn occurrence(&self) -> &ScopedArtifactAvailabilityOccurrence {
+        &self.occurrence
     }
 }
 
@@ -229,21 +398,57 @@ impl ScopedArtifactAvailabilityReducer {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn observe(
         &mut self,
         observation: ScopedArtifactAvailabilityObservation,
     ) -> Result<(), ()> {
+        let Some(prepared) =
+            self.prepare_observe(observation.evidence.root_session(), observation)?
+        else {
+            return Ok(());
+        };
+        self.commit_observe(prepared);
+        Ok(())
+    }
+
+    pub(super) fn prepare_observe(
+        &self,
+        root_session: CanonicalEntityKey,
+        observation: ScopedArtifactAvailabilityObservation,
+    ) -> Result<Option<ScopedArtifactAvailabilityPreparedObservation>, ()> {
+        if !observation.validate_for_root(root_session) {
+            return Err(());
+        }
         let key = (
             observation.evidence.artifact_key(),
             Arc::clone(&observation.artifact_kind),
         );
+        if self.observations.get(&key) == Some(&observation) {
+            return Ok(None);
+        }
         if !self.observations.contains_key(&key)
             && self.observations.len() >= MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS
         {
             return Err(());
         }
-        self.observations.insert(key, observation);
-        Ok(())
+        let entry = entry_for_observation(root_session, &observation);
+        Ok(Some(ScopedArtifactAvailabilityPreparedObservation {
+            key,
+            occurrence: ScopedArtifactAvailabilityOccurrence {
+                root_session,
+                observation: observation.clone(),
+                entry,
+            },
+            observation,
+        }))
+    }
+
+    pub(super) fn commit_observe(
+        &mut self,
+        prepared: ScopedArtifactAvailabilityPreparedObservation,
+    ) {
+        self.observations.insert(prepared.key, prepared.observation);
     }
 
     pub(super) fn snapshot(
@@ -274,13 +479,9 @@ impl ScopedArtifactAvailabilityReducer {
             {
                 continue;
             }
-            let revision = derive_entry_revision(root_session, observation);
-            entries.push(ScopedArtifactAvailabilityEntry {
-                artifact_key: *artifact_key,
-                artifact_kind: Arc::clone(artifact_kind),
-                revision,
-                state: observation.state,
-            });
+            debug_assert_eq!(*artifact_key, observation.evidence.artifact_key());
+            debug_assert_eq!(artifact_kind.as_ref(), observation.artifact_kind.as_ref());
+            entries.push(entry_for_observation(root_session, observation));
         }
         let entry_count = u64::try_from(entries.len())
             .map_err(|_| ScopedProjectionError::ArtifactEvidenceCapacityFull)?;
@@ -291,6 +492,18 @@ impl ScopedArtifactAvailabilityReducer {
             semantic_digest: derive_snapshot_digest(root_session, entry_count, &entries),
             entries,
         })
+    }
+}
+
+fn entry_for_observation(
+    root_session: CanonicalEntityKey,
+    observation: &ScopedArtifactAvailabilityObservation,
+) -> ScopedArtifactAvailabilityEntry {
+    ScopedArtifactAvailabilityEntry {
+        artifact_key: observation.evidence.artifact_key(),
+        artifact_kind: Arc::clone(&observation.artifact_kind),
+        revision: derive_entry_revision(root_session, observation),
+        state: observation.state,
     }
 }
 

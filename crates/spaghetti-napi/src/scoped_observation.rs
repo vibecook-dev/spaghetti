@@ -65,6 +65,8 @@ mod source_wire;
 mod usage_wire;
 
 pub type ScopedArtifactAvailabilityEntry = artifact_availability::ScopedArtifactAvailabilityEntry;
+pub type ScopedArtifactAvailabilityOccurrence =
+    artifact_availability::ScopedArtifactAvailabilityOccurrence;
 pub type ScopedArtifactAvailabilityRevision =
     artifact_availability::ScopedArtifactAvailabilityRevision;
 pub type ScopedArtifactAvailabilitySnapshot =
@@ -1895,6 +1897,12 @@ pub enum ScopedProjectedObservation {
         lane_ordinal: u64,
         event: Box<ScopedActorAffiliationEvent>,
     },
+    ArtifactAvailability {
+        observed_at: i64,
+        phase: ScopedAppendDeliveryPhase,
+        event_id: ScopedObservationEventId,
+        occurrence: Box<ScopedArtifactAvailabilityOccurrence>,
+    },
     ObserverBootstrapComplete {
         source: ScopedSourceObjectIdentity,
         observed_at: i64,
@@ -1936,6 +1944,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => event.event_id,
             Self::ActorRun { event, .. } => event.event_id,
             Self::ActorAffiliation { event, .. } => event.event_id,
+            Self::ArtifactAvailability { event_id, .. } => *event_id,
             Self::ObserverBootstrapComplete { event_id, .. } => *event_id,
             Self::ObserverResyncRequired { event_id, .. } => *event_id,
             Self::ObserverResyncStarted { event_id, .. } => *event_id,
@@ -1949,6 +1958,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => Some(event.semantic_revision_ref),
             Self::ActorRun { event, .. } => Some(event.semantic_revision_ref),
             Self::ActorAffiliation { event, .. } => Some(event.semantic_revision_ref),
+            Self::ArtifactAvailability { .. } => None,
             Self::SourcePresence { .. }
             | Self::SourceReset { .. }
             | Self::SourceObjectError { .. }
@@ -1967,6 +1977,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => event.phase,
             Self::ActorRun { event, .. } => event.phase,
             Self::ActorAffiliation { event, .. } => event.phase,
+            Self::ArtifactAvailability { phase, .. } => *phase,
             Self::ObserverBootstrapComplete { .. } => ScopedAppendDeliveryPhase::Bootstrap,
             Self::ObserverResyncRequired { .. } => ScopedAppendDeliveryPhase::Live,
             Self::ObserverResyncStarted { .. } => ScopedAppendDeliveryPhase::Correction,
@@ -1983,6 +1994,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => &event.source.object,
             Self::ActorRun { event, .. } => &event.source.object,
             Self::ActorAffiliation { event, .. } => &event.source.object,
+            Self::ArtifactAvailability { occurrence, .. } => occurrence.source(),
             Self::ObserverBootstrapComplete { source, .. } => source,
             Self::ObserverResyncRequired { source, .. } => source,
             Self::ObserverResyncStarted { source, .. } => source,
@@ -2000,6 +2012,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => event.observed_at,
             Self::ActorRun { event, .. } => event.observed_at,
             Self::ActorAffiliation { event, .. } => event.observed_at,
+            Self::ArtifactAvailability { observed_at, .. } => *observed_at,
             Self::ObserverBootstrapComplete { observed_at, .. } => *observed_at,
             Self::ObserverResyncRequired { observed_at, .. } => *observed_at,
             Self::ObserverResyncStarted { observed_at, .. } => *observed_at,
@@ -2188,6 +2201,9 @@ pub enum ScopedObservationEvent {
         operation: ScopedRevisionedEntityOperation,
         retraction: Option<ScopedRevisionedEntityRetractionCause>,
         revision: Box<ActorAffiliationRevisionFact>,
+    },
+    ArtifactAvailability {
+        entry: ScopedArtifactAvailabilityEntry,
     },
     ObserverBootstrapComplete {
         barrier: Arc<ScopedBootstrapBarrier>,
@@ -2980,6 +2996,7 @@ impl ScopedObservationConsumerDrain {
             | ScopedObservationEvent::UsageV2 { .. }
             | ScopedObservationEvent::ActorRun { .. }
             | ScopedObservationEvent::ActorAffiliation { .. }
+            | ScopedObservationEvent::ArtifactAvailability { .. }
             | ScopedObservationEvent::ObserverResyncRequired { .. }
             | ScopedObservationEvent::ObserverResyncStarted { .. }
             | ScopedObservationEvent::ObserverFailed { .. } => {
@@ -6704,6 +6721,57 @@ impl ScopedObservationEnvelopeMapper {
                     native_evidence: ScopedNativeEvidence::EngineControl,
                 }
             }
+            ScopedProjectedObservation::ArtifactAvailability {
+                observed_at,
+                phase,
+                event_id: projected_event_id,
+                occurrence,
+            } => {
+                if semantic_revision_ref.is_some()
+                    || !matches!(
+                        phase,
+                        ScopedAppendDeliveryPhase::Bootstrap | ScopedAppendDeliveryPhase::Live
+                    )
+                    || !occurrence.validate_for_root(self.root.session_key)
+                    || occurrence.source() != &delivered.source
+                    || projected_event_id != artifact_availability_event_id(&occurrence)
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                let entry = occurrence.entry().clone();
+                let completeness = match entry.state() {
+                    artifact_availability::ScopedArtifactAvailabilityState::Unstable => {
+                        ContractCompleteness::Unknown
+                    }
+                    artifact_availability::ScopedArtifactAvailabilityState::Available {
+                        ..
+                    }
+                    | artifact_availability::ScopedArtifactAvailabilityState::Missing { .. }
+                    | artifact_availability::ScopedArtifactAvailabilityState::OverLimit {
+                        ..
+                    } => ContractCompleteness::Complete,
+                };
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: self.root.root_actor_run_key,
+                    actor_attribution: ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::SourceLifecycleControl,
+                    },
+                    source: scoped_control_envelope_source(
+                        &delivered.source,
+                        occurrence.source_generation(),
+                    ),
+                    native_time: None,
+                    observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority: ScopedEnvelopeEvidenceAuthority::CommonReducer,
+                        quality: QualifiedValueQuality::Derived,
+                        effective_at: None,
+                        completeness,
+                    },
+                    event: ScopedObservationEvent::ArtifactAvailability { entry },
+                    native_evidence: ScopedNativeEvidence::EngineControl,
+                }
+            }
             ScopedProjectedObservation::UsageV2 { event, .. } => {
                 if self
                     .contract_selection
@@ -8693,7 +8761,8 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
     match value {
         ScopedProjectedObservation::UsageV2 { .. }
         | ScopedProjectedObservation::ActorRun { .. }
-        | ScopedProjectedObservation::ActorAffiliation { .. } => (true, 0),
+        | ScopedProjectedObservation::ActorAffiliation { .. }
+        | ScopedProjectedObservation::ArtifactAvailability { .. } => (true, 0),
         ScopedProjectedObservation::SourcePresence { .. }
         | ScopedProjectedObservation::SourceReset { .. }
         | ScopedProjectedObservation::SourceObjectError { .. }
@@ -11325,6 +11394,28 @@ fn observer_failed_event_id(
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
 
+fn artifact_availability_event_id(
+    occurrence: &ScopedArtifactAvailabilityOccurrence,
+) -> ScopedObservationEventId {
+    let source = occurrence.source();
+    let entry = occurrence.entry();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
+    hasher.update(&SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION.to_be_bytes());
+    hash_event_component(&mut hasher, b"artifact.availability");
+    hash_event_component(&mut hasher, source.adapter_id.as_str().as_bytes());
+    hash_event_component(&mut hasher, source.source_instance_key.as_bytes());
+    hash_event_component(&mut hasher, source.stream_key.as_bytes());
+    hash_event_component(&mut hasher, source.object_key.as_bytes());
+    hash_event_component(&mut hasher, occurrence.root_session().as_bytes());
+    hasher.update(&occurrence.source_generation().to_be_bytes());
+    hash_event_component(&mut hasher, occurrence.source_declaration_digest());
+    hash_event_component(&mut hasher, entry.artifact_key().as_bytes());
+    hash_event_component(&mut hasher, entry.artifact_kind().as_bytes());
+    hash_event_component(&mut hasher, entry.revision().as_bytes());
+    ScopedObservationEventId(*hasher.finalize().as_bytes())
+}
+
 fn source_control_event_hasher(
     source: &ScopedSourceObjectIdentity,
     event_kind: &[u8],
@@ -13131,10 +13222,11 @@ impl ScopedObservationAccessHost {
         &self.root_identity
     }
 
-    /// Freeze only completed artifact observations whose exact metadata
-    /// selection is still current in this active epoch. This state is kept
-    /// separate from the watermark until an ordered artifact-availability
-    /// event can bind it to the observer sequence.
+    /// Freeze only ordered artifact observations whose exact metadata
+    /// selection is still current in this active epoch. A changed observation
+    /// reaches this reducer only after its semantic event enters the same
+    /// attachment-owned sequence; barriers can therefore bind the snapshot
+    /// without racing an unoffered availability mutation.
     fn artifact_availability_snapshot(
         &self,
         active: &ScopedObservationEpochState,

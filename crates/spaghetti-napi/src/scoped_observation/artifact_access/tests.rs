@@ -21,7 +21,8 @@ use super::*;
 use crate::scoped_observation::{
     scoped_record_evidence, ScopedArtifactContentPolicy, ScopedArtifactRelationGrant,
     ScopedDecodedAppendItem, ScopedObservationAccessHost, ScopedObservationAdmissionLane,
-    ScopedObservationEpochState, ScopedObservationProjectionLimits, ScopedObservationQueueLimits,
+    ScopedObservationDeliveryLimits, ScopedObservationEpochState, ScopedObservationEvent,
+    ScopedObservationProjectionLimits, ScopedObservationQueueLimits, ScopedProjectionError,
     ScopedQueuedObservationFrame, ScopedRootIdentityRequest, ScopedSourceObjectIdentity,
 };
 
@@ -320,7 +321,7 @@ fn observed_artifact(
         .unwrap()
         .read_confined()
         .unwrap();
-    serde_json::to_value(capture.into_observed().unwrap()).unwrap()
+    serde_json::to_value(capture.into_observed_for_test().unwrap()).unwrap()
 }
 
 #[test]
@@ -668,6 +669,13 @@ fn completed_capture_updates_current_availability_without_disclosure_policy_drif
     let initial = host.artifact_availability_snapshot(&active).unwrap();
     assert_eq!(initial.entry_count(), 0);
 
+    let mut drain = host
+        .open_consumer_drain(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
     let pass = host.begin_pass().unwrap();
     let command = artifact_command(
         &host,
@@ -680,7 +688,7 @@ fn completed_capture_updates_current_availability_without_disclosure_policy_drif
     let validated = host
         .validate_evidence_bound_artifact_command(&active, &command)
         .unwrap();
-    let capture = pass
+    let mut capture = pass
         .reserve_artifact_relation_from_evidence(validated)
         .unwrap()
         .read_confined()
@@ -692,34 +700,119 @@ fn completed_capture_updates_current_availability_without_disclosure_policy_drif
         0,
         "a native capture is not published before strict result construction"
     );
-    capture.into_observed().unwrap();
+    let (observed, first_receipt) = capture.offer_observed(&mut drain, 1_000).unwrap();
+    assert_eq!(
+        serde_json::to_value(observed).unwrap()["outcome"]["kind"],
+        "available"
+    );
+    let first_receipt = first_receipt.unwrap();
+    assert_eq!(first_receipt.first_offered_sequence, Some(1));
+    assert_eq!(first_receipt.offered_through_sequence, 1);
     let first = host.artifact_availability_snapshot(&active).unwrap();
     assert_eq!(first.entry_count(), 1);
 
-    observed_artifact(
+    std::fs::write(&path, b"second revision\n").unwrap();
+    let command = artifact_command(
         &host,
         &active,
-        &pass,
-        artifact_key,
-        Some(1),
-        128,
-        ScopedArtifactContentPolicy::MetadataOnly,
-    );
-    let policy_replay = host.artifact_availability_snapshot(&active).unwrap();
-    assert_eq!(policy_replay.semantic_digest(), first.semantic_digest());
-
-    std::fs::write(path, b"second revision\n").unwrap();
-    observed_artifact(
-        &host,
-        &active,
-        &pass,
         artifact_key,
         Some(1),
         128,
         ScopedArtifactContentPolicy::HashOnly,
     );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let mut revised_capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    assert_eq!(
+        revised_capture
+            .offer_observed(&mut drain, 2_000)
+            .unwrap_err(),
+        ScopedArtifactObservationOfferError::Delivery(ScopedDeliveryError::SemanticQueueFull)
+    );
+    assert!(!revised_capture.offered);
+    assert_eq!(
+        host.artifact_availability_snapshot(&active)
+            .unwrap()
+            .semantic_digest(),
+        first.semantic_digest()
+    );
+    assert_eq!(drain.delivery_lane().state().offered_through_sequence, 1);
+    assert_eq!(
+        revised_capture
+            .offer_observed(&mut drain, 2_001)
+            .unwrap_err(),
+        ScopedArtifactObservationOfferError::ObservationTimeDrift
+    );
+    assert_eq!(drain.delivery_lane().state().offered_through_sequence, 1);
+
+    let yielded = drain.next().unwrap().unwrap();
+    assert_eq!(yielded.envelope.observer_sequence, 1);
+    assert_eq!(yielded.envelope.source.generation, 1);
+    assert!(yielded.envelope.source.locator_id.is_none());
+    assert!(yielded.envelope.source.source_record_id.is_none());
+    assert!(yielded.envelope.source.cursor_start.is_none());
+    assert!(yielded.envelope.source.cursor_end.is_none());
+    assert!(matches!(
+        &yielded.envelope.event,
+        ScopedObservationEvent::ArtifactAvailability { entry }
+            if entry.artifact_key() == artifact_key
+                && matches!(
+                    entry.state(),
+                    ScopedArtifactAvailabilityState::Available {
+                        generation: 1,
+                        size_bytes: 15,
+                        ..
+                    }
+                )
+    ));
+    drain
+        .acknowledge_applied(yielded.application_receipt())
+        .unwrap();
+
+    let (_, revised_receipt) = revised_capture.offer_observed(&mut drain, 2_000).unwrap();
+    let revised_receipt = revised_receipt.unwrap();
+    assert_eq!(revised_receipt.first_offered_sequence, Some(2));
+    assert_eq!(revised_receipt.offered_through_sequence, 2);
     let revised = host.artifact_availability_snapshot(&active).unwrap();
     assert_ne!(revised.semantic_digest(), first.semantic_digest());
+    let yielded = drain.next().unwrap().unwrap();
+    assert_eq!(yielded.envelope.observer_sequence, 2);
+    drain
+        .acknowledge_applied(yielded.application_receipt())
+        .unwrap();
+
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        Some(1),
+        128,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let mut replay = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    let (_, replay_receipt) = replay.offer_observed(&mut drain, 3_000).unwrap();
+    assert!(replay_receipt.is_none());
+    assert_eq!(
+        replay.offer_observed(&mut drain, 3_001).unwrap_err(),
+        ScopedArtifactObservationOfferError::AlreadyOffered
+    );
+    let policy_replay = host.artifact_availability_snapshot(&active).unwrap();
+    assert_eq!(policy_replay.semantic_digest(), revised.semantic_digest());
+    assert_eq!(drain.delivery_lane().state().offered_through_sequence, 2);
+    assert!(drain.next().unwrap().is_none());
+
     let debug = format!("{revised:?}");
     for secret in [
         temp.path().to_string_lossy().as_ref(),
@@ -728,6 +821,95 @@ fn completed_capture_updates_current_availability_without_disclosure_policy_drif
     ] {
         assert!(!debug.contains(secret));
     }
+}
+
+#[test]
+fn ordered_availability_rejects_foreign_and_wrong_epoch_drains_without_mutation() {
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "ordered-binding", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    write_artifact(&temp, "ordered-binding", b"bound\n");
+    let mut drain = host
+        .open_consumer_drain(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+    let foreign_host = artifact_host(&temp, "ordered-foreign", true);
+    let mut foreign_drain = foreign_host
+        .open_consumer_drain(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+    let pass = host.begin_pass().unwrap();
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        64,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let mut capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+
+    assert_eq!(
+        capture.offer_observed(&mut foreign_drain, 1).unwrap_err(),
+        ScopedArtifactObservationOfferError::ForeignDrain
+    );
+    assert_eq!(
+        host.artifact_availability_snapshot(&active)
+            .unwrap()
+            .entry_count(),
+        0
+    );
+    assert_eq!(
+        foreign_drain
+            .delivery_lane()
+            .state()
+            .offered_through_sequence,
+        0
+    );
+
+    drain.delivery.scope_epoch = 2;
+    assert_eq!(
+        capture.offer_observed(&mut drain, 2).unwrap_err(),
+        ScopedArtifactObservationOfferError::InvalidEpoch
+    );
+    assert_eq!(
+        host.artifact_availability_snapshot(&active)
+            .unwrap()
+            .entry_count(),
+        0
+    );
+    assert_eq!(drain.delivery_lane().state().offered_through_sequence, 0);
+
+    drain.delivery.scope_epoch = 1;
+    let exact_declaration_digest = capture.source_binding.source_declaration_digest;
+    capture.source_binding.source_declaration_digest = [88; 32];
+    assert_eq!(
+        capture.offer_observed(&mut drain, 3).unwrap_err(),
+        ScopedArtifactObservationOfferError::InvalidSourceBinding
+    );
+    assert_eq!(drain.delivery_lane().state().offered_through_sequence, 0);
+    capture.source_binding.source_declaration_digest = exact_declaration_digest;
+    let (_, receipt) = capture.offer_observed(&mut drain, 3).unwrap();
+    assert_eq!(receipt.unwrap().first_offered_sequence, Some(1));
+    assert_eq!(
+        host.artifact_availability_snapshot(&active)
+            .unwrap()
+            .entry_count(),
+        1
+    );
 }
 
 #[test]
@@ -773,6 +955,13 @@ fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosur
     let temp = TempDir::new().unwrap();
     let host = artifact_host(&temp, "bounds", true);
     let (active, artifact_key) = active_with_content_evidence(&host);
+    let mut drain = host
+        .open_consumer_drain(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
     let pass = host.begin_pass().unwrap();
 
     let command = artifact_command(
@@ -786,7 +975,7 @@ fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosur
     let validated = host
         .validate_evidence_bound_artifact_command(&active, &command)
         .unwrap();
-    let capture = pass
+    let mut capture = pass
         .reserve_artifact_relation_from_evidence(validated)
         .unwrap()
         .read_confined()
@@ -795,10 +984,28 @@ fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosur
         &capture.state,
         ScopedArtifactConfinedCaptureState::Missing { .. }
     ));
-    let missing = serde_json::to_value(capture.into_observed().unwrap()).unwrap();
+    let (missing, receipt) = capture.offer_observed(&mut drain, 1_000).unwrap();
+    let missing = serde_json::to_value(missing).unwrap();
     assert_eq!(missing["outcome"]["reason"], "missing");
     assert!(missing["outcome"]["observed_generation"].is_null());
     assert!(missing["outcome"]["provenance_ref"].is_null());
+    assert_eq!(receipt.unwrap().first_offered_sequence, Some(1));
+    let yielded = drain.next().unwrap().unwrap();
+    assert_eq!(yielded.envelope.source.generation, 1);
+    assert!(matches!(
+        &yielded.envelope.event,
+        ScopedObservationEvent::ArtifactAvailability { entry }
+            if matches!(
+                entry.state(),
+                ScopedArtifactAvailabilityState::Missing {
+                    observed_generation: None,
+                    provenance_ref: None,
+                }
+            )
+    ));
+    drain
+        .acknowledge_applied(yielded.application_receipt())
+        .unwrap();
 
     let path = write_artifact(&temp, "bounds", b"123456789");
     let command = artifact_command(
@@ -824,7 +1031,7 @@ fn confined_capture_accounts_missing_oversized_and_path_escape_without_disclosur
             ..
         }
     ));
-    let oversized = serde_json::to_value(capture.into_observed().unwrap()).unwrap();
+    let oversized = serde_json::to_value(capture.into_observed_for_test().unwrap()).unwrap();
     assert_eq!(oversized["outcome"]["reason"], "over_limit");
     assert_eq!(oversized["outcome"]["observed_generation"], 1);
     assert_eq!(oversized["outcome"]["observed_bytes"], 9);
@@ -946,6 +1153,13 @@ fn confined_capture_cannot_publish_after_attachment_close() {
     let host = artifact_host(&temp, "close-after-read", true);
     let (active, artifact_key) = active_with_content_evidence(&host);
     write_artifact(&temp, "close-after-read", b"read then discard");
+    let mut drain = host
+        .open_consumer_drain(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
     let command = artifact_command(
         &host,
         &active,
@@ -958,15 +1172,20 @@ fn confined_capture_cannot_publish_after_attachment_close() {
         .validate_evidence_bound_artifact_command(&active, &command)
         .unwrap();
     let pass = host.begin_pass().unwrap();
-    let capture = pass
+    let mut capture = pass
         .reserve_artifact_relation_from_evidence(validated)
         .unwrap()
         .read_confined()
         .unwrap();
     host.close();
     assert_eq!(
-        capture.into_observed().unwrap_err(),
-        ScopedArtifactContractError::Closed
+        capture.offer_observed(&mut drain, 1).unwrap_err(),
+        ScopedArtifactObservationOfferError::Closed
+    );
+    assert_eq!(drain.delivery_lane().state().offered_through_sequence, 0);
+    assert_eq!(
+        host.artifact_availability_snapshot(&active).unwrap_err(),
+        ScopedProjectionError::InvalidLifecycle
     );
     let report = pass.report();
     let relation = report

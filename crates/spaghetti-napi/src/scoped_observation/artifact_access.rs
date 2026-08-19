@@ -6,7 +6,9 @@
 //! consumed reservation may then use the common no-follow stable-file driver
 //! to produce a bounded private capture. An attachment-owned generation ledger
 //! binds that capture to common ReplaceDocument-style presence lineage before
-//! the existing strict wire contract may serialize an outcome.
+//! the existing strict wire contract may serialize an outcome. A changed
+//! availability occurrence enters the attachment's ordered semantic lane
+//! before its reducer mutation commits, so backpressure advances neither.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -25,7 +27,8 @@ use crate::source::{
 };
 
 use super::artifact_availability::{
-    ScopedArtifactAvailabilityObservation, ScopedArtifactAvailabilityState,
+    ScopedArtifactAvailabilityObservation, ScopedArtifactAvailabilitySourceOccurrence,
+    ScopedArtifactAvailabilityState,
 };
 use super::artifact_evidence::MAX_SCOPED_ARTIFACT_EVIDENCE_ASSERTIONS;
 use super::artifact_wire::{
@@ -33,9 +36,12 @@ use super::artifact_wire::{
     ScopedObservedArtifactWire, ScopedValidatedArtifactReadCommand,
 };
 use super::{
-    ScopedAccessRootGrant, ScopedArtifactContentPolicy, ScopedArtifactRelationGrant,
-    ScopedKnownObjectGrant, ScopedObservationAccessError, ScopedObservationAccessPass,
-    ScopedSourceFailureClass, ScopedSourceObjectIdentity,
+    artifact_availability_event_id, source_belongs_to_root, ScopedAccessRootGrant,
+    ScopedAppendDeliveryPhase, ScopedArtifactContentPolicy, ScopedArtifactRelationGrant,
+    ScopedDeliveryError, ScopedKnownObjectGrant, ScopedObservationAccessError,
+    ScopedObservationAccessPass, ScopedObservationConsumerDrain, ScopedObservationContinuity,
+    ScopedObservationOfferReceipt, ScopedProjectedObservation, ScopedSourceFailureClass,
+    ScopedSourceObjectIdentity,
 };
 
 const ARTIFACT_IDENTITY_INPUTS: [&str; 3] =
@@ -57,6 +63,28 @@ pub(crate) enum ScopedArtifactRelationAccessError {
     GenerationExhausted,
     #[error(transparent)]
     Access(#[from] AccessBudgetError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ScopedArtifactObservationOfferError {
+    #[error("scoped artifact capture was already offered")]
+    AlreadyOffered,
+    #[error("scoped artifact consumer drain belongs to another attachment")]
+    ForeignDrain,
+    #[error("scoped artifact attachment or consumer drain is closed")]
+    Closed,
+    #[error("scoped artifact capture does not belong to the current delivery epoch")]
+    InvalidEpoch,
+    #[error("scoped artifact capture lost its exact authorized source binding")]
+    InvalidSourceBinding,
+    #[error("scoped artifact offer retry changed its frozen observation time")]
+    ObservationTimeDrift,
+    #[error("scoped artifact availability reducer is full or rejected the occurrence")]
+    AvailabilityRejected,
+    #[error(transparent)]
+    Contract(#[from] ScopedArtifactContractError),
+    #[error("scoped artifact availability event could not enter delivery: {0}")]
+    Delivery(ScopedDeliveryError),
 }
 
 /// One exact relation reservation whose native inputs remain private. The
@@ -175,6 +203,12 @@ impl ScopedArtifactGenerationLedger {
         );
         Ok(Some(generation))
     }
+
+    fn current_or_initial_generation(&self, object_token: AccessObjectToken) -> u64 {
+        self.objects
+            .get(&object_token)
+            .map_or(1, |entry| entry.generation)
+    }
 }
 
 enum ScopedArtifactConfinedCaptureState {
@@ -187,7 +221,9 @@ enum ScopedArtifactConfinedCaptureState {
         generation: u64,
         provenance_ref: [u8; 32],
     },
-    Unstable,
+    Unstable {
+        source_generation: u64,
+    },
     Stable {
         _file_identity: FileIdentity,
         _modified_ns: i128,
@@ -211,6 +247,8 @@ pub(crate) struct ScopedArtifactConfinedCapture<'command, 'pass> {
     object_token: AccessObjectToken,
     source_binding: ScopedArtifactSourceObjectBinding,
     state: ScopedArtifactConfinedCaptureState,
+    offer_observed_at: Option<i64>,
+    offered: bool,
 }
 
 /// Unforgeable zero-sized witness that portable outcome construction consumed
@@ -242,8 +280,8 @@ impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
             ScopedArtifactConfinedCaptureState::Oversized { observed_bytes, .. } => {
                 ("oversized", Some(*observed_bytes), true, true, false, false)
             }
-            ScopedArtifactConfinedCaptureState::Unstable => {
-                ("unstable", None, false, false, false, false)
+            ScopedArtifactConfinedCaptureState::Unstable { .. } => {
+                ("unstable", None, true, false, false, false)
             }
             ScopedArtifactConfinedCaptureState::Stable {
                 size_bytes,
@@ -277,113 +315,139 @@ impl fmt::Debug for ScopedArtifactConfinedCapture<'_, '_> {
 }
 
 impl ScopedArtifactConfinedCapture<'_, '_> {
-    /// Convert a generation-bound private capture into the frozen portable
-    /// artifact shape. Generation mismatch is resolved before any retained
-    /// content can enter the wire; the exact validated command performs the
-    /// final request/content-policy checks.
-    pub(crate) fn into_observed(
-        self,
-    ) -> Result<ScopedObservedArtifactWire, ScopedArtifactContractError> {
-        let Self {
-            _validated: validated,
-            _pass: pass,
-            object_token,
-            source_binding: _,
-            state,
-        } = self;
-        if pass.state.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(ScopedArtifactContractError::Closed);
+    /// Atomically offer one changed availability occurrence before committing
+    /// its reducer mutation. Backpressure consumes neither observer sequence
+    /// nor availability state, so this same bounded capture can be retried.
+    pub(crate) fn offer_observed(
+        &mut self,
+        drain: &mut ScopedObservationConsumerDrain,
+        observed_at: i64,
+    ) -> Result<
+        (
+            ScopedObservedArtifactWire,
+            Option<ScopedObservationOfferReceipt>,
+        ),
+        ScopedArtifactObservationOfferError,
+    > {
+        if self.offered {
+            return Err(ScopedArtifactObservationOfferError::AlreadyOffered);
         }
-        let availability_observation =
-            artifact_availability_observation(&validated, object_token, &state);
-        let expected_generation = validated.expected_generation();
-        let outcome = match state {
-            ScopedArtifactConfinedCaptureState::Missing {
-                observed_generation,
-                provenance_ref,
-            } => ScopedArtifactReadOutcome::Unavailable {
-                reason: if generation_changed(expected_generation, observed_generation) {
-                    ScopedArtifactUnavailableReason::ChangedGeneration
-                } else {
-                    ScopedArtifactUnavailableReason::Missing
-                },
-                observed_generation,
-                observed_bytes: None,
-                provenance_ref,
-            },
-            ScopedArtifactConfinedCaptureState::Oversized {
-                observed_bytes,
-                generation,
-                provenance_ref,
-            } => {
-                let changed = generation_changed(expected_generation, Some(generation));
-                ScopedArtifactReadOutcome::Unavailable {
-                    reason: if changed {
-                        ScopedArtifactUnavailableReason::ChangedGeneration
-                    } else {
-                        ScopedArtifactUnavailableReason::OverLimit
-                    },
-                    observed_generation: Some(generation),
-                    observed_bytes: (!changed).then_some(observed_bytes),
-                    provenance_ref: Some(provenance_ref),
-                }
+        if !Arc::ptr_eq(
+            &self._pass.attachment_authority,
+            &drain.attachment_authority,
+        ) {
+            return Err(ScopedArtifactObservationOfferError::ForeignDrain);
+        }
+        if drain.is_closed()
+            || self
+                ._pass
+                .state
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ScopedArtifactObservationOfferError::Closed);
+        }
+        let delivery_state = drain.delivery_lane().state();
+        let phase = match delivery_state.continuity {
+            ScopedObservationContinuity::Bootstrap => ScopedAppendDeliveryPhase::Bootstrap,
+            ScopedObservationContinuity::Valid => ScopedAppendDeliveryPhase::Live,
+            ScopedObservationContinuity::ResyncRequired
+            | ScopedObservationContinuity::Resyncing
+            | ScopedObservationContinuity::Failed => {
+                return Err(ScopedArtifactObservationOfferError::InvalidEpoch);
             }
-            ScopedArtifactConfinedCaptureState::Unstable => {
-                ScopedArtifactReadOutcome::Unavailable {
-                    reason: ScopedArtifactUnavailableReason::Unstable,
-                    observed_generation: None,
-                    observed_bytes: None,
-                    provenance_ref: None,
-                }
-            }
-            ScopedArtifactConfinedCaptureState::Stable {
-                generation,
-                provenance_ref,
-                ..
-            } if generation_changed(expected_generation, Some(generation)) => {
-                ScopedArtifactReadOutcome::Unavailable {
-                    reason: ScopedArtifactUnavailableReason::ChangedGeneration,
-                    observed_generation: Some(generation),
-                    observed_bytes: None,
-                    provenance_ref: Some(provenance_ref),
-                }
-            }
-            ScopedArtifactConfinedCaptureState::Stable {
-                generation,
-                provenance_ref,
-                size_bytes,
-                content_hash,
-                content,
-                ..
-            } => ScopedArtifactReadOutcome::Available {
-                generation,
-                provenance_ref,
-                size_bytes,
-                content_hash,
-                content,
-            },
         };
-        let observed = validated.observed(ScopedArtifactOutcomeAuthority(()), outcome)?;
-        let mut availability = pass
+        if self._validated.scope_epoch() != delivery_state.scope_epoch {
+            return Err(ScopedArtifactObservationOfferError::InvalidEpoch);
+        }
+        if self.source_binding.source_declaration_digest
+            != *self._pass.plan.source_declaration_digest()
+            || !source_belongs_to_root(&self.source_binding.source, &self._pass.root_identity)
+            || self._validated.command.max_bytes > self.source_binding.max_object_bytes
+        {
+            return Err(ScopedArtifactObservationOfferError::InvalidSourceBinding);
+        }
+
+        let observed = self._validated.observed(
+            ScopedArtifactOutcomeAuthority(()),
+            artifact_read_outcome(&self.state, self._validated.expected_generation()),
+        )?;
+        match self.offer_observed_at {
+            Some(expected) if expected != observed_at => {
+                return Err(ScopedArtifactObservationOfferError::ObservationTimeDrift);
+            }
+            Some(_) => {}
+            None => self.offer_observed_at = Some(observed_at),
+        }
+        let observation = artifact_availability_observation(
+            &self._validated,
+            self.object_token,
+            &self.source_binding,
+            &self.state,
+        );
+        let mut availability = self
+            ._pass
             .state
             .artifact_availability
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if pass.state.closed.load(std::sync::atomic::Ordering::Acquire) {
+        if self
+            ._pass
+            .state
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+            || drain.is_closed()
+        {
+            return Err(ScopedArtifactObservationOfferError::Closed);
+        }
+        let Some(prepared) = availability
+            .prepare_observe(self._validated.command.root.session_key, observation)
+            .map_err(|()| ScopedArtifactObservationOfferError::AvailabilityRejected)?
+        else {
+            self.offered = true;
+            return Ok((observed, None));
+        };
+        let occurrence = prepared.occurrence().clone();
+        let event_id = artifact_availability_event_id(&occurrence);
+        let receipt = drain
+            .delivery_lane_mut()
+            .offer_projected(vec![ScopedProjectedObservation::ArtifactAvailability {
+                observed_at,
+                phase,
+                event_id,
+                occurrence: Box::new(occurrence),
+            }])
+            .map_err(|failure| ScopedArtifactObservationOfferError::Delivery(failure.error))?;
+        availability.commit_observe(prepared);
+        self.offered = true;
+        Ok((observed, Some(receipt)))
+    }
+
+    /// Low-level fixture helper for the already-frozen artifact result wire.
+    /// It deliberately performs no availability mutation or ordered offer.
+    #[cfg(test)]
+    pub(crate) fn into_observed_for_test(
+        self,
+    ) -> Result<ScopedObservedArtifactWire, ScopedArtifactContractError> {
+        if self
+            ._pass
+            .state
+            .closed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(ScopedArtifactContractError::Closed);
         }
-        availability
-            .observe(availability_observation)
-            .map_err(|()| ScopedArtifactContractError::Invalid {
-                message: "scoped artifact availability capacity is exhausted".to_string(),
-            })?;
-        Ok(observed)
+        self._validated.observed(
+            ScopedArtifactOutcomeAuthority(()),
+            artifact_read_outcome(&self.state, self._validated.expected_generation()),
+        )
     }
 }
 
 fn artifact_availability_observation(
     validated: &ScopedValidatedArtifactReadCommand<'_>,
     object_token: AccessObjectToken,
+    source_binding: &ScopedArtifactSourceObjectBinding,
     state: &ScopedArtifactConfinedCaptureState,
 ) -> ScopedArtifactAvailabilityObservation {
     let native_state = match state {
@@ -404,7 +468,9 @@ fn artifact_availability_observation(
             observed_bytes: *observed_bytes,
             request_max_bytes: validated.command.max_bytes,
         },
-        ScopedArtifactConfinedCaptureState::Unstable => ScopedArtifactAvailabilityState::Unstable,
+        ScopedArtifactConfinedCaptureState::Unstable { .. } => {
+            ScopedArtifactAvailabilityState::Unstable
+        }
         ScopedArtifactConfinedCaptureState::Stable {
             generation,
             provenance_ref,
@@ -432,8 +498,97 @@ fn artifact_availability_observation(
                 .expect("a validated artifact capture retains an exact relation"),
         ),
         object_token,
+        ScopedArtifactAvailabilitySourceOccurrence::new(
+            source_binding.source_declaration_digest,
+            source_binding.source.clone(),
+            source_generation(state),
+        ),
         native_state,
     )
+}
+
+fn source_generation(state: &ScopedArtifactConfinedCaptureState) -> u64 {
+    match state {
+        ScopedArtifactConfinedCaptureState::Missing {
+            observed_generation,
+            ..
+        } => observed_generation.unwrap_or(1),
+        ScopedArtifactConfinedCaptureState::Oversized { generation, .. }
+        | ScopedArtifactConfinedCaptureState::Stable { generation, .. } => *generation,
+        ScopedArtifactConfinedCaptureState::Unstable { source_generation } => *source_generation,
+    }
+}
+
+fn artifact_read_outcome(
+    state: &ScopedArtifactConfinedCaptureState,
+    expected_generation: Option<u64>,
+) -> ScopedArtifactReadOutcome {
+    match state {
+        ScopedArtifactConfinedCaptureState::Missing {
+            observed_generation,
+            provenance_ref,
+        } => ScopedArtifactReadOutcome::Unavailable {
+            reason: if generation_changed(expected_generation, *observed_generation) {
+                ScopedArtifactUnavailableReason::ChangedGeneration
+            } else {
+                ScopedArtifactUnavailableReason::Missing
+            },
+            observed_generation: *observed_generation,
+            observed_bytes: None,
+            provenance_ref: *provenance_ref,
+        },
+        ScopedArtifactConfinedCaptureState::Oversized {
+            observed_bytes,
+            generation,
+            provenance_ref,
+        } => {
+            let changed = generation_changed(expected_generation, Some(*generation));
+            ScopedArtifactReadOutcome::Unavailable {
+                reason: if changed {
+                    ScopedArtifactUnavailableReason::ChangedGeneration
+                } else {
+                    ScopedArtifactUnavailableReason::OverLimit
+                },
+                observed_generation: Some(*generation),
+                observed_bytes: (!changed).then_some(*observed_bytes),
+                provenance_ref: Some(*provenance_ref),
+            }
+        }
+        ScopedArtifactConfinedCaptureState::Unstable { .. } => {
+            ScopedArtifactReadOutcome::Unavailable {
+                reason: ScopedArtifactUnavailableReason::Unstable,
+                observed_generation: None,
+                observed_bytes: None,
+                provenance_ref: None,
+            }
+        }
+        ScopedArtifactConfinedCaptureState::Stable {
+            generation,
+            provenance_ref,
+            ..
+        } if generation_changed(expected_generation, Some(*generation)) => {
+            ScopedArtifactReadOutcome::Unavailable {
+                reason: ScopedArtifactUnavailableReason::ChangedGeneration,
+                observed_generation: Some(*generation),
+                observed_bytes: None,
+                provenance_ref: Some(*provenance_ref),
+            }
+        }
+        ScopedArtifactConfinedCaptureState::Stable {
+            generation,
+            provenance_ref,
+            size_bytes,
+            content_hash,
+            content,
+            ..
+        } => ScopedArtifactReadOutcome::Available {
+            generation: *generation,
+            provenance_ref: *provenance_ref,
+            size_bytes: *size_bytes,
+            content_hash: *content_hash,
+            content: content.clone(),
+        },
+    }
 }
 
 fn generation_changed(expected: Option<u64>, observed: Option<u64>) -> bool {
@@ -552,8 +707,9 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
                 }
             }
             StableRead::Unstable => {
+                let source_generation = generations.current_or_initial_generation(object_token);
                 reservation.fail_conservative();
-                ScopedArtifactConfinedCaptureState::Unstable
+                ScopedArtifactConfinedCaptureState::Unstable { source_generation }
             }
             StableRead::Stable {
                 stamp,
@@ -606,6 +762,8 @@ impl<'command, 'pass> ScopedArtifactRelationReservation<'command, 'pass> {
             object_token,
             source_binding,
             state,
+            offer_observed_at: None,
+            offered: false,
         })
     }
 }
