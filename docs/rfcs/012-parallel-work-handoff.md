@@ -241,6 +241,37 @@ If agents cannot message `/root` directly, the repository owner should paste
 each checkpoint into the primary thread. Ask for review immediately when a
 checkpoint is ready; do not wait for the other lanes.
 
+### 4.1 Active Wave 1 policy decisions
+
+The following decisions were frozen by the primary integrator on 2026-08-19
+after the A1/C1 and A2 scope audits. They are review constraints, not permission
+to broaden either lane.
+
+For Agent A1/C1:
+
+- expose JSON-string parse helpers on the native addon; do not introduce
+  `#[napi(object)]` mirrors for these semantic values;
+- reject unknown fields in C1 `parseQualifiedValue` so its strictness matches
+  the A1 coverage boundary and RFC 012D parsers;
+- keep the already-committed value fixtures; retraction/replacement rows remain
+  a later semantic slice; and
+- import `@vibecook/spaghetti-sdk-native` directly in focused tests; do not add
+  `native.ts` or package-index barrel exports in this lane.
+
+For Agent A2:
+
+- bind one opaque, host-supplied, nonzero 32-byte `access_policy_digest` by
+  exact equality. RFC 012A assigns it no LOCAL/WITHHELD, catalog, or artifact
+  interpretation in this slice;
+- replay protection means a portable value never becomes authority and one
+  retrieval request is bound to one exact report digest. No durable nonce
+  table is introduced;
+- add no `adapter/mod.rs` or other public export unless compilation makes it
+  strictly necessary and the path expansion is reported before editing; and
+- do not edit `scoped_observation.rs`. The root-owned D slice `71afae4` already
+  replaced `ScopedKnownObjectGrant`'s path-leaking derived `Debug` with a
+  redacted implementation.
+
 ## 5. Timeline and spawn schedule
 
 Durations below are planning ranges, not release promises. Evidence access,
