@@ -53,6 +53,7 @@ use crate::source::{
 mod actor_wire;
 mod artifact_access;
 mod artifact_availability;
+mod artifact_availability_event_wire;
 mod artifact_availability_wire;
 mod artifact_evidence;
 mod artifact_wire;
@@ -65,6 +66,8 @@ mod source_wire;
 mod usage_wire;
 
 pub type ScopedArtifactAvailabilityEntry = artifact_availability::ScopedArtifactAvailabilityEntry;
+pub type ScopedArtifactAvailabilityEnvelopeConsumerContext =
+    artifact_availability_event_wire::ScopedArtifactAvailabilityEnvelopeConsumerContext;
 pub type ScopedArtifactAvailabilityOccurrence =
     artifact_availability::ScopedArtifactAvailabilityOccurrence;
 pub type ScopedArtifactAvailabilityRevision =
@@ -2803,11 +2806,21 @@ impl Drop for ScopedObservationStartupReconcilePass {
 pub struct ScopedObservationYieldedEnvelope {
     pub envelope: ScopedObservationEnvelope,
     application_receipt: ScopedObservationApplicationReceipt,
+    artifact_availability_context: Option<ScopedArtifactAvailabilityEnvelopeConsumerContext>,
 }
 
 impl ScopedObservationYieldedEnvelope {
     pub fn application_receipt(&self) -> &ScopedObservationApplicationReceipt {
         &self.application_receipt
+    }
+
+    /// Exact caller-held authority for consuming an ordered artifact-
+    /// availability envelope. It exists only for that event family and keeps
+    /// the verified source declaration digest out of the public envelope.
+    pub fn artifact_availability_context(
+        &self,
+    ) -> Option<&ScopedArtifactAvailabilityEnvelopeConsumerContext> {
+        self.artifact_availability_context.as_ref()
     }
 }
 
@@ -2971,6 +2984,13 @@ impl ScopedObservationConsumerDrain {
         let preview_sequence = preview.observer_sequence;
         let preview_epoch = preview.scope_epoch;
         let preview_event_id = preview.event_id;
+        let artifact_availability_context =
+            ScopedArtifactAvailabilityEnvelopeConsumerContext::from_delivered(
+                &self.mapper.contract_selection,
+                &self.mapper.root,
+                &preview,
+            )
+            .map_err(ScopedObservationDrainError::Envelope)?;
         let envelope = self
             .mapper
             .map(preview)
@@ -3017,6 +3037,7 @@ impl ScopedObservationConsumerDrain {
         Ok(Some(ScopedObservationYieldedEnvelope {
             envelope,
             application_receipt: receipt,
+            artifact_availability_context,
         }))
     }
 
@@ -11397,8 +11418,27 @@ fn observer_failed_event_id(
 fn artifact_availability_event_id(
     occurrence: &ScopedArtifactAvailabilityOccurrence,
 ) -> ScopedObservationEventId {
-    let source = occurrence.source();
     let entry = occurrence.entry();
+    artifact_availability_event_id_for_components(
+        occurrence.source(),
+        occurrence.root_session(),
+        occurrence.source_generation(),
+        occurrence.source_declaration_digest(),
+        entry.artifact_key(),
+        entry.artifact_kind(),
+        entry.revision().as_bytes(),
+    )
+}
+
+fn artifact_availability_event_id_for_components(
+    source: &ScopedSourceObjectIdentity,
+    root_session: CanonicalEntityKey,
+    source_generation: u64,
+    source_declaration_digest: &[u8; 32],
+    artifact_key: CanonicalEntityKey,
+    artifact_kind: &str,
+    artifact_revision: &[u8; 32],
+) -> ScopedObservationEventId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"spaghetti/rfc012d/observation-event-id\0");
     hasher.update(&SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION.to_be_bytes());
@@ -11407,12 +11447,12 @@ fn artifact_availability_event_id(
     hash_event_component(&mut hasher, source.source_instance_key.as_bytes());
     hash_event_component(&mut hasher, source.stream_key.as_bytes());
     hash_event_component(&mut hasher, source.object_key.as_bytes());
-    hash_event_component(&mut hasher, occurrence.root_session().as_bytes());
-    hasher.update(&occurrence.source_generation().to_be_bytes());
-    hash_event_component(&mut hasher, occurrence.source_declaration_digest());
-    hash_event_component(&mut hasher, entry.artifact_key().as_bytes());
-    hash_event_component(&mut hasher, entry.artifact_kind().as_bytes());
-    hash_event_component(&mut hasher, entry.revision().as_bytes());
+    hash_event_component(&mut hasher, root_session.as_bytes());
+    hasher.update(&source_generation.to_be_bytes());
+    hash_event_component(&mut hasher, source_declaration_digest);
+    hash_event_component(&mut hasher, artifact_key.as_bytes());
+    hash_event_component(&mut hasher, artifact_kind.as_bytes());
+    hash_event_component(&mut hasher, artifact_revision);
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
 

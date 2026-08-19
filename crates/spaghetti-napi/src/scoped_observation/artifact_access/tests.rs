@@ -88,6 +88,10 @@ const ARTIFACT_SCOPE_DOCUMENT: &[u8] = br#"{
   "claim_refs": ["scope-evidence"]
 }"#;
 
+const ORDERED_AVAILABILITY_FIXTURE: &str = include_str!(
+    "../../../fixtures/contracts/rfc012d-scoped-artifact-availability-envelope-v1.json"
+);
+
 fn exact_root_identity(with_native_claim: bool) -> ScopedRootIdentityRequest {
     let adapter_id = AdapterId::new("fixture").unwrap();
     let source_instance_key =
@@ -821,6 +825,80 @@ fn completed_capture_updates_current_availability_without_disclosure_policy_drif
     ] {
         assert!(!debug.contains(secret));
     }
+}
+
+#[test]
+fn ordered_availability_portable_fixture_is_produced_by_the_confined_pipeline() {
+    use crate::scoped_observation::artifact_availability_event_wire::ScopedArtifactAvailabilityEnvelopeWire;
+
+    let temp = TempDir::new().unwrap();
+    let host = artifact_host(&temp, "ordered-wire", true);
+    let (active, artifact_key) = active_with_content_evidence(&host);
+    let mut drain = host
+        .open_consumer_drain(ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        })
+        .unwrap();
+    let pass = host.begin_pass().unwrap();
+    let command = artifact_command(
+        &host,
+        &active,
+        artifact_key,
+        None,
+        128,
+        ScopedArtifactContentPolicy::MetadataOnly,
+    );
+    let validated = host
+        .validate_evidence_bound_artifact_command(&active, &command)
+        .unwrap();
+    let mut capture = pass
+        .reserve_artifact_relation_from_evidence(validated)
+        .unwrap()
+        .read_confined()
+        .unwrap();
+    let (_, receipt) = capture.offer_observed(&mut drain, 1_750_000_000).unwrap();
+    assert!(receipt.is_some());
+    let yielded = drain.next().unwrap().unwrap();
+    let context = yielded.artifact_availability_context().unwrap();
+    let wire =
+        ScopedArtifactAvailabilityEnvelopeWire::from_scoped_for_context(&yielded.envelope, context)
+            .unwrap();
+    let wire_value = serde_json::to_value(&wire).unwrap();
+    let parsed = ScopedArtifactAvailabilityEnvelopeWire::from_wire_value_for_context(
+        wire_value.clone(),
+        context,
+    )
+    .unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), wire_value);
+
+    let report = serde_json::json!({
+        "fixture_contract_version": 1,
+        "context": context.wire(),
+        "event": wire,
+        "expected": {
+            "ordered": true,
+            "rust_event_id_authority": "private_source_declaration_occurrence",
+            "portable_event_id_authority": "exact_rust_issued_context",
+            "native_evidence": "engine_control_only",
+            "source_declaration_digest_disclosed": false,
+            "snapshot_revision_contract": "unchanged_v1"
+        }
+    });
+    let expected: Value = serde_json::from_str(ORDERED_AVAILABILITY_FIXTURE).unwrap();
+    if expected != report {
+        panic!("{}", serde_json::to_string_pretty(&report).unwrap());
+    }
+    let encoded = serde_json::to_string(&report).unwrap();
+    assert!(!encoded.contains(temp.path().to_string_lossy().as_ref()));
+    assert!(!encoded.contains("backup-17@v7"));
+    assert!(!serde_json::to_string(&report["context"])
+        .unwrap()
+        .contains("source_declaration_digest"));
+    assert!(!serde_json::to_string(&report["event"])
+        .unwrap()
+        .contains("source_declaration_digest"));
 }
 
 #[test]

@@ -37,6 +37,7 @@ export * from './contracts/rfc012d.js';
 export * from './contracts/rfc012d-actor-envelope.js';
 export * from './contracts/rfc012d-artifact.js';
 export * from './contracts/rfc012d-artifact-availability.js';
+export * from './contracts/rfc012d-artifact-availability-envelope.js';
 export * from './contracts/rfc012d-capability-snapshot.js';
 export * from './contracts/rfc012d-close.js';
 export * from './contracts/rfc012d-continuity-envelope.js';

@@ -212,19 +212,26 @@ function compareOpaque(left: OpaqueContractReference, right: OpaqueContractRefer
   return 0;
 }
 
+function parseEntry(value: unknown, label: string): ScopedArtifactAvailabilityEntry {
+  const input = exactRecord(value, ['artifact_key', 'artifact_kind', 'revision', 'state'], label);
+  return {
+    artifact_key: fixedOpaque(input.artifact_key, `${label} artifact key`),
+    artifact_kind: boundedIdentifier(input.artifact_kind, `${label} artifact kind`),
+    revision: fixedOpaque(input.revision, `${label} revision`),
+    state: parseState(input.state),
+  };
+}
+
+/** Strict reusable parser for one frozen availability entry. */
+export function parseScopedArtifactAvailabilityEntry(value: unknown): ScopedArtifactAvailabilityEntry {
+  return parseEntry(value, 'artifact availability entry');
+}
+
 function parseEntries(value: unknown, expectedCount: number, label: string): ScopedArtifactAvailabilityEntry[] {
   if (!Array.isArray(value) || value.length > MAX_ARTIFACT_AVAILABILITY_ENTRIES || value.length !== expectedCount) {
     throw new ContractValidationError(`${label} has an invalid bounded entry count`);
   }
-  const entries = value.map((entry, index) => {
-    const input = exactRecord(entry, ['artifact_key', 'artifact_kind', 'revision', 'state'], `${label}[${index}]`);
-    return {
-      artifact_key: fixedOpaque(input.artifact_key, `${label}[${index}] artifact key`),
-      artifact_kind: boundedIdentifier(input.artifact_kind, `${label}[${index}] artifact kind`),
-      revision: fixedOpaque(input.revision, `${label}[${index}] revision`),
-      state: parseState(input.state),
-    };
-  });
+  const entries = value.map((entry, index) => parseEntry(entry, `${label}[${index}]`));
   for (let index = 1; index < entries.length; index += 1) {
     const prior = entries[index - 1]!;
     const current = entries[index]!;

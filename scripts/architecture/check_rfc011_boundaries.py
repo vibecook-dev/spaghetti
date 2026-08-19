@@ -605,6 +605,16 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     close_portable = REPO_ROOT / close_portable_relative
     artifact_portable_relative = "packages/sdk/src/contracts/rfc012d-artifact.ts"
     artifact_portable = REPO_ROOT / artifact_portable_relative
+    artifact_availability_portable_relative = (
+        "packages/sdk/src/contracts/rfc012d-artifact-availability.ts"
+    )
+    artifact_availability_portable = REPO_ROOT / artifact_availability_portable_relative
+    artifact_availability_envelope_portable_relative = (
+        "packages/sdk/src/contracts/rfc012d-artifact-availability-envelope.ts"
+    )
+    artifact_availability_envelope_portable = (
+        REPO_ROOT / artifact_availability_envelope_portable_relative
+    )
     scope_coverage_portable_relative = (
         "packages/sdk/src/contracts/rfc012d-scope-coverage.ts"
     )
@@ -617,6 +627,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         or not continuity_portable.exists()
         or not close_portable.exists()
         or not artifact_portable.exists()
+        or not artifact_availability_portable.exists()
+        or not artifact_availability_envelope_portable.exists()
         or not scope_coverage_portable.exists()
     ):
         found.add(portable_relative)
@@ -670,6 +682,34 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             found.add(
                 f"{artifact_portable_relative}#missing-attachment-bound-artifact-contract"
             )
+        artifact_availability_portable_text = read(artifact_availability_portable)
+        if (
+            "export interface ScopedArtifactAvailabilitySnapshot"
+            not in artifact_availability_portable_text
+            or "export function parseScopedArtifactAvailabilitySnapshot("
+            not in artifact_availability_portable_text
+            or "export function parseScopedArtifactAvailabilityEntry("
+            not in artifact_availability_portable_text
+        ):
+            found.add(
+                f"{artifact_availability_portable_relative}#missing-contextual-artifact-availability-contract"
+            )
+        artifact_availability_envelope_portable_text = read(
+            artifact_availability_envelope_portable
+        )
+        if (
+            "export interface ScopedArtifactAvailabilityEnvelopeContext"
+            not in artifact_availability_envelope_portable_text
+            or "export interface ScopedArtifactAvailabilityEnvelope"
+            not in artifact_availability_envelope_portable_text
+            or "export function parseScopedArtifactAvailabilityEnvelope("
+            not in artifact_availability_envelope_portable_text
+            or "expectedContextInput: unknown"
+            not in artifact_availability_envelope_portable_text
+        ):
+            found.add(
+                f"{artifact_availability_envelope_portable_relative}#missing-contextual-artifact-availability-envelope-contract"
+            )
         scope_coverage_portable_text = read(scope_coverage_portable)
         if (
             "export interface ScopedScopeCoverageContext"
@@ -688,6 +728,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
             continuity_portable,
             close_portable,
             artifact_portable,
+            artifact_availability_portable,
+            artifact_availability_envelope_portable,
             scope_coverage_portable,
         ]
         visited: set[Path] = set()
@@ -731,6 +773,18 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         read(sdk_index)
     ):
         found.add(f"{repo_path(sdk_index)}#missing-rfc012d-artifact-export")
+    if "./contracts/rfc012d-artifact-availability.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(
+            f"{repo_path(sdk_index)}#missing-rfc012d-artifact-availability-export"
+        )
+    if "./contracts/rfc012d-artifact-availability-envelope.js" not in RUNTIME_MODULE_RE.findall(
+        read(sdk_index)
+    ):
+        found.add(
+            f"{repo_path(sdk_index)}#missing-rfc012d-artifact-availability-envelope-export"
+        )
     if "./contracts/rfc012d-scope-coverage.js" not in RUNTIME_MODULE_RE.findall(
         read(sdk_index)
     ):

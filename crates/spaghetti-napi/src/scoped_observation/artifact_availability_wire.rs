@@ -44,7 +44,7 @@ impl ScopedArtifactAvailabilityContractError {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum ScopedArtifactAvailabilityStateWire {
+pub(super) enum ScopedArtifactAvailabilityStateWire {
     Available {
         generation: u64,
         provenance_ref: String,
@@ -66,7 +66,7 @@ enum ScopedArtifactAvailabilityStateWire {
 }
 
 impl ScopedArtifactAvailabilityStateWire {
-    fn from_internal(state: ScopedArtifactAvailabilityState) -> Self {
+    pub(super) fn from_internal(state: ScopedArtifactAvailabilityState) -> Self {
         match state {
             ScopedArtifactAvailabilityState::Available {
                 generation,
@@ -99,7 +99,7 @@ impl ScopedArtifactAvailabilityStateWire {
         }
     }
 
-    fn validate_shape(&self) -> Result<(), ScopedArtifactAvailabilityContractError> {
+    pub(super) fn validate_shape(&self) -> Result<(), ScopedArtifactAvailabilityContractError> {
         match self {
             Self::Available {
                 generation,
@@ -153,19 +153,32 @@ impl ScopedArtifactAvailabilityStateWire {
             Self::Unstable => Ok(()),
         }
     }
+
+    pub(super) fn matches_source_generation(&self, source_generation: u64) -> bool {
+        match self {
+            Self::Available { generation, .. } | Self::OverLimit { generation, .. } => {
+                *generation == source_generation
+            }
+            Self::Missing {
+                observed_generation,
+                ..
+            } => observed_generation.unwrap_or(1) == source_generation,
+            Self::Unstable => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ScopedArtifactAvailabilityEntryWire {
-    artifact_key: CanonicalEntityKey,
-    artifact_kind: String,
-    revision: String,
-    state: ScopedArtifactAvailabilityStateWire,
+pub(super) struct ScopedArtifactAvailabilityEntryWire {
+    pub(super) artifact_key: CanonicalEntityKey,
+    pub(super) artifact_kind: String,
+    pub(super) revision: String,
+    pub(super) state: ScopedArtifactAvailabilityStateWire,
 }
 
 impl ScopedArtifactAvailabilityEntryWire {
-    fn from_internal(entry: &super::ScopedArtifactAvailabilityEntry) -> Self {
+    pub(super) fn from_internal(entry: &super::ScopedArtifactAvailabilityEntry) -> Self {
         Self {
             artifact_key: entry.artifact_key(),
             artifact_kind: entry.artifact_kind().to_owned(),
@@ -174,7 +187,7 @@ impl ScopedArtifactAvailabilityEntryWire {
         }
     }
 
-    fn validate_shape(&self) -> Result<(), ScopedArtifactAvailabilityContractError> {
+    pub(super) fn validate_shape(&self) -> Result<(), ScopedArtifactAvailabilityContractError> {
         validate_identifier(&self.artifact_kind, "artifact availability kind")?;
         decode_opaque_exact(&self.revision, "artifact availability revision")?;
         self.state.validate_shape()
@@ -404,30 +417,7 @@ fn preflight_wire_value(value: &JsonValue) -> Result<(), ScopedArtifactAvailabil
         ));
     }
     for entry in entries {
-        let entry = entry.as_object().ok_or_else(|| {
-            ScopedArtifactAvailabilityContractError::invalid(
-                "artifact availability entry must be an object",
-            )
-        })?;
-        let entry_fields = ["artifact_key", "artifact_kind", "revision", "state"];
-        if entry.len() != entry_fields.len()
-            || entry_fields.iter().any(|field| !entry.contains_key(*field))
-            || !has_exact_reference_length(entry.get("artifact_key"))
-            || entry
-                .get("artifact_kind")
-                .and_then(JsonValue::as_str)
-                .is_none_or(|value| value.len() > MAX_ARTIFACT_KIND_BYTES)
-            || !has_exact_reference_length(entry.get("revision"))
-        {
-            return Err(ScopedArtifactAvailabilityContractError::invalid(
-                "artifact availability entry exceeds a pre-decode bound",
-            ));
-        }
-        preflight_state(entry.get("state").ok_or_else(|| {
-            ScopedArtifactAvailabilityContractError::invalid(
-                "artifact availability entry is missing state",
-            )
-        })?)?;
+        preflight_entry_value(entry)?;
     }
     Ok(())
 }
@@ -469,6 +459,35 @@ fn preflight_state(value: &JsonValue) -> Result<(), ScopedArtifactAvailabilityCo
         ));
     }
     Ok(())
+}
+
+pub(super) fn preflight_entry_value(
+    value: &JsonValue,
+) -> Result<(), ScopedArtifactAvailabilityContractError> {
+    let entry = value.as_object().ok_or_else(|| {
+        ScopedArtifactAvailabilityContractError::invalid(
+            "artifact availability entry must be an object",
+        )
+    })?;
+    let entry_fields = ["artifact_key", "artifact_kind", "revision", "state"];
+    if entry.len() != entry_fields.len()
+        || entry_fields.iter().any(|field| !entry.contains_key(*field))
+        || !has_exact_reference_length(entry.get("artifact_key"))
+        || entry
+            .get("artifact_kind")
+            .and_then(JsonValue::as_str)
+            .is_none_or(|value| value.len() > MAX_ARTIFACT_KIND_BYTES)
+        || !has_exact_reference_length(entry.get("revision"))
+    {
+        return Err(ScopedArtifactAvailabilityContractError::invalid(
+            "artifact availability entry exceeds a pre-decode bound",
+        ));
+    }
+    preflight_state(entry.get("state").ok_or_else(|| {
+        ScopedArtifactAvailabilityContractError::invalid(
+            "artifact availability entry is missing state",
+        )
+    })?)
 }
 
 fn has_exact_reference_length(value: Option<&JsonValue>) -> bool {
