@@ -51,6 +51,7 @@ use crate::source::{
 };
 
 mod actor_wire;
+mod artifact_access;
 mod artifact_evidence;
 mod artifact_wire;
 mod capability_snapshot_wire;
@@ -73,8 +74,8 @@ pub enum ScopedArtifactContentPolicy {
 }
 
 /// Immutable artifact-request ceiling selected by the trusted Rust host at
-/// attachment time. This is not native locator or read authority; a future
-/// mediator must still prove one exact in-scope artifact relation.
+/// attachment time. This is not native locator or read authority; the artifact
+/// mediator must still prove one exact in-scope relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopedArtifactAccessPolicy {
     Disabled,
@@ -114,6 +115,34 @@ pub struct ScopedKnownObjectGrant {
     pub relative_path: PathBuf,
 }
 
+/// One host-approved absolute root named by selected scoped relations. Native
+/// paths remain trusted in-process inputs and never enter access reports or
+/// portable observer state.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopedAccessRootGrant {
+    pub access_root: String,
+    pub root: PathBuf,
+}
+
+impl std::fmt::Debug for ScopedAccessRootGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedAccessRootGrant")
+            .field("access_root", &self.access_root)
+            .field("root", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Trusted adapter/support selection of one artifact kind's declared relation.
+/// The relation supplies its access root, locator identifier, identity-input
+/// names, and budget; portable consumers cannot select or override it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedArtifactRelationGrant {
+    pub artifact_kind: String,
+    pub relation_id: String,
+}
+
 /// Internal attachment request. The artifact probe and artifact-access ceiling
 /// are supplied by the trusted Rust composition root, never by a portable
 /// runtime consumer.
@@ -127,6 +156,8 @@ pub struct ScopedObservationAccessRequest {
     pub root_identity: ScopedRootIdentityRequest,
     pub program_id: String,
     pub known_objects: Vec<ScopedKnownObjectGrant>,
+    pub access_roots: Vec<ScopedAccessRootGrant>,
+    pub artifact_relations: Vec<ScopedArtifactRelationGrant>,
 }
 
 /// Pre-access root identity inputs selected by the trusted adapter/support
@@ -12932,6 +12963,8 @@ pub struct ScopedObservationAccessHost {
     program_id: String,
     scope_program_digest: Sha256Digest,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
+    access_roots: Arc<BTreeMap<String, ScopedAccessRootGrant>>,
+    artifact_relations: Arc<BTreeMap<String, Arc<str>>>,
     root_relation_id: Arc<str>,
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     lifecycle: Arc<ScopedObservationAttachmentLifecycle>,
@@ -12997,6 +13030,14 @@ impl ScopedObservationAccessHost {
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)?;
         let root_relation_id: Arc<str> = Arc::from(plan.root_relation_id());
         let known_objects = validate_known_object_grants(&plan, request.known_objects)?;
+        let artifact_relations =
+            artifact_access::validate_artifact_relation_grants(&plan, request.artifact_relations)?;
+        let access_roots = artifact_access::validate_access_root_grants(
+            &plan,
+            &known_objects,
+            &artifact_relations,
+            request.access_roots,
+        )?;
         let attachment_authority = next_scoped_attachment_authority()?;
         Ok(Self {
             adapter,
@@ -13009,6 +13050,8 @@ impl ScopedObservationAccessHost {
             program_id: request.program_id,
             scope_program_digest,
             known_objects: Arc::new(known_objects),
+            access_roots: Arc::new(access_roots),
+            artifact_relations: Arc::new(artifact_relations),
             root_relation_id,
             attachment_authority,
             lifecycle: Arc::new(ScopedObservationAttachmentLifecycle::default()),
@@ -14405,7 +14448,10 @@ impl ScopedObservationAccessHost {
             pass_id,
             plan,
             known_objects: Arc::clone(&self.known_objects),
+            access_roots: Arc::clone(&self.access_roots),
+            artifact_relations: Arc::clone(&self.artifact_relations),
             root_identity: self.root_identity.clone(),
+            attachment_authority: Arc::clone(&self.attachment_authority),
             state: Arc::clone(&self.state),
             _operation: operation,
             released: false,
@@ -14456,7 +14502,10 @@ pub struct ScopedObservationAccessPass {
     pass_id: u64,
     plan: AuthorizedScopeAccessPlan,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
+    access_roots: Arc<BTreeMap<String, ScopedAccessRootGrant>>,
+    artifact_relations: Arc<BTreeMap<String, Arc<str>>>,
     root_identity: ScopedObservationRootIdentity,
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     state: Arc<ScopedObservationAccessState>,
     _operation: ScopedObservationOperationGuard,
     released: bool,

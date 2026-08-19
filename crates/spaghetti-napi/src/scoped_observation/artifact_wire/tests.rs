@@ -153,6 +153,7 @@ fn evidence_selection(version: u64, revision: u8) -> ScopedArtifactEvidenceSelec
     ScopedArtifactEvidenceSelection::fixture(
         root_identity().session_key,
         artifact_key(),
+        "backup-17@v7",
         version,
         [revision; 32],
     )
@@ -179,6 +180,7 @@ fn evidence_bound_command_preserves_read_generation_and_private_request_identity
         contract_selection(),
         root_identity(),
         evidence_selection(7, 1),
+        Arc::from("fixture-artifact-relation"),
         ScopedEvidenceBoundArtifactReadParameters {
             artifact_kind: "workflow_definition".to_owned(),
             expected_generation: Some(91),
@@ -193,6 +195,22 @@ fn evidence_bound_command_preserves_read_generation_and_private_request_identity
         first.contract_selection.clone(),
         first.root.clone(),
         evidence_selection(7, 2),
+        Arc::from("fixture-artifact-relation"),
+        ScopedEvidenceBoundArtifactReadParameters {
+            artifact_kind: "workflow_definition".to_owned(),
+            expected_generation: Some(91),
+            max_bytes: 4096,
+            content_policy: ScopedArtifactContentPolicy::Inline,
+        },
+    )
+    .unwrap();
+    let relation_drift = ScopedArtifactReadCommand::new_from_evidence(
+        Arc::clone(&first.attachment_authority),
+        first.artifact_access_policy,
+        first.contract_selection.clone(),
+        first.root.clone(),
+        evidence_selection(7, 1),
+        Arc::from("alternate-artifact-relation"),
         ScopedEvidenceBoundArtifactReadParameters {
             artifact_kind: "workflow_definition".to_owned(),
             expected_generation: Some(91),
@@ -204,6 +222,7 @@ fn evidence_bound_command_preserves_read_generation_and_private_request_identity
     assert_eq!(first.expected_generation, Some(91));
     assert!(first.artifact_evidence.is_some());
     assert_ne!(first.request_id, revised.request_id);
+    assert_ne!(first.request_id, relation_drift.request_id);
     let debug = format!("{first:?}");
     assert!(debug.contains("evidence_bound: true"));
     assert!(!debug.contains("v1:<redacted>"));
@@ -215,8 +234,13 @@ fn evidence_bound_command_preserves_read_generation_and_private_request_identity
         b"foreign-session",
     )
     .unwrap();
-    let foreign =
-        ScopedArtifactEvidenceSelection::fixture(foreign_root, artifact_key(), 7, [3; 32]);
+    let foreign = ScopedArtifactEvidenceSelection::fixture(
+        foreign_root,
+        artifact_key(),
+        "backup-17@v7",
+        7,
+        [3; 32],
+    );
     assert_eq!(
         ScopedArtifactReadCommand::new_from_evidence(
             Arc::new(ScopedObservationAttachmentAuthority { token: 82 }),
@@ -224,6 +248,7 @@ fn evidence_bound_command_preserves_read_generation_and_private_request_identity
             contract_selection(),
             root_identity(),
             foreign,
+            Arc::from("fixture-artifact-relation"),
             ScopedEvidenceBoundArtifactReadParameters {
                 artifact_kind: "workflow_definition".to_owned(),
                 expected_generation: Some(91),

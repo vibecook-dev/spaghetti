@@ -175,7 +175,7 @@ impl AdapterRegistry {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -199,15 +199,15 @@ mod tests {
         ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
     };
     use crate::scoped_observation::{
-        ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
-        ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
-        ScopedAppendObservation, ScopedAppendPresenceChange, ScopedAppendReconcileRequest,
-        ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy, ScopedBootstrapBarrierError,
-        ScopedContinuityError, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
-        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority,
-        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
-        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
-        ScopedObservationAccessPass, ScopedObservationAccessRequest,
+        ScopedAccessRootGrant, ScopedActorAttribution, ScopedActorFallbackReason,
+        ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
+        ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendPresenceChange,
+        ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy,
+        ScopedBootstrapBarrierError, ScopedContinuityError, ScopedCoverageAssemblyError,
+        ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedDeliveryError,
+        ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
+        ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
+        ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
         ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
         ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
         ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
@@ -455,6 +455,15 @@ mod tests {
             .unwrap()
     }
 
+    pub(crate) fn supported_fixture_registry_with_scope(scope_document: &[u8]) -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(scope_document);
+        AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
+            .build_supported(catalog)
+            .unwrap()
+    }
+
     fn stateful_supported_fixture_registry() -> AdapterRegistry {
         let (catalog, binding, scope_programs) = promoted_fixture_catalog();
         AdapterRegistryBuilder::new()
@@ -493,7 +502,7 @@ mod tests {
             .unwrap()
     }
 
-    fn scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
+    pub(crate) fn scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
         ScopedObservationAccessRequest {
             adapter_id: "fixture".to_string(),
             artifact_probe: NativeArtifactProbe {
@@ -559,9 +568,14 @@ mod tests {
                 scope_root: true,
                 access_root: "root".to_string(),
                 locator_id: "known-object".to_string(),
-                root,
+                root: root.clone(),
                 relative_path: "session.jsonl".into(),
             }],
+            access_roots: vec![ScopedAccessRootGrant {
+                access_root: "root".to_string(),
+                root,
+            }],
+            artifact_relations: Vec::new(),
         }
     }
 

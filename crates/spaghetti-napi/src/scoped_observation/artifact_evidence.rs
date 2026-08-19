@@ -81,12 +81,14 @@ pub(super) struct ScopedArtifactEvidenceEntry {
 
 /// One process-local proof that the current scoped reducer has complete,
 /// non-conflicting metadata naming a content-bearing artifact version.
-/// The native backup name deliberately remains in reducer-owned fact state;
-/// this proof cannot construct a locator or reserve source access.
+/// The native backup name remains private and is exposed only to the checked
+/// relation-reservation seam; this proof still cannot construct a locator or
+/// open source access.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct ScopedArtifactEvidenceSelection {
     root_session: CanonicalEntityKey,
     artifact_key: CanonicalEntityKey,
+    native_artifact_id: Arc<str>,
     version: u64,
     revision: ScopedArtifactEvidenceRevision,
 }
@@ -104,6 +106,10 @@ impl ScopedArtifactEvidenceSelection {
         self.version
     }
 
+    pub(super) fn native_artifact_id(&self) -> &Arc<str> {
+        &self.native_artifact_id
+    }
+
     pub(super) fn revision(&self) -> ScopedArtifactEvidenceRevision {
         self.revision
     }
@@ -112,12 +118,14 @@ impl ScopedArtifactEvidenceSelection {
     pub(super) fn fixture(
         root_session: CanonicalEntityKey,
         artifact_key: CanonicalEntityKey,
+        native_artifact_id: impl Into<Arc<str>>,
         version: u64,
         revision: [u8; 32],
     ) -> Self {
         Self {
             root_session,
             artifact_key,
+            native_artifact_id: native_artifact_id.into(),
             version,
             revision: ScopedArtifactEvidenceRevision(revision),
         }
@@ -417,9 +425,15 @@ impl ScopedArtifactEvidenceReducer {
             .ok_or(ScopedProjectionError::InvalidArtifactEvidence)?
             .1
             .version;
+        let native_artifact_id = assertions
+            .first()
+            .and_then(|(_, assertion)| assertion.native_artifact_id.as_ref())
+            .cloned()
+            .ok_or(ScopedProjectionError::InvalidArtifactEvidence)?;
         Ok(Some(ScopedArtifactEvidenceSelection {
             root_session,
             artifact_key,
+            native_artifact_id,
             version,
             revision,
         }))

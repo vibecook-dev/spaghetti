@@ -352,6 +352,7 @@ fn content_selection_is_exact_current_and_never_upgrades_conflicting_evidence() 
         .expect("content-bearing metadata selects the artifact");
     assert_eq!(first.root_session(), root_session());
     assert_eq!(first.artifact_key(), artifact);
+    assert_eq!(first.native_artifact_id().as_ref(), "selected-artifact@v1");
     assert_eq!(first.version(), 1);
     assert!(reducer.selection_is_current(&first).unwrap());
     assert!(!format!("{first:?}").contains("selected-artifact@v1"));
@@ -375,6 +376,10 @@ fn content_selection_is_exact_current_and_never_upgrades_conflicting_evidence() 
         .unwrap()
         .expect("the corrected evidence remains selectable");
     assert_eq!(revised.version(), 2);
+    assert_eq!(
+        revised.native_artifact_id().as_ref(),
+        "selected-artifact@v2"
+    );
     assert_ne!(first.revision(), revised.revision());
 
     admit(

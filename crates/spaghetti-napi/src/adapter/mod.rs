@@ -41,6 +41,10 @@ pub use facts::{
     UsageScope, UsageValueAuthority, UsageValueProvenance, ValueQuality, WorkflowMemberEventFact,
     WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
+#[cfg(test)]
+pub(crate) use registry::tests::{
+    scoped_access_request as fixture_scoped_access_request, supported_fixture_registry_with_scope,
+};
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use scope::{
     ScopeContractError, ScopeProgramDeclaration, ScopeProgramManifest, ScopeProgramStatus,
