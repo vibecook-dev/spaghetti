@@ -2645,6 +2645,21 @@ revision, or source-declaration digest. This adds a portable contract and SDK
 parser/export only: no N-API observer method, production transport, task-
 artifact discovery, support promotion, or D4 migration is claimed.
 
+The next bounded D3 prerequisite (`29ac300`) closes the remaining static
+capability gap in the internal completion aggregate. Watermark capture now
+freezes the attachment's exact negotiated `ObservationCapabilities`; both
+bootstrap and resync barriers retain it, require its selected family/version
+set to equal the canonical replacement manifest, and bind the existing
+capability-snapshot semantic digest into the version-3 coverage and replacement
+digests. Compatibility-class, support-release, selected-family, or canonical
+order drift therefore changes or invalidates the completion identity before
+queue mutation. Envelope mapping recomputes both stored barrier digests, and a
+clean bootstrap/resync pair at equal coverage retains identical capability,
+family, and replacement state. This remains a crate-private barrier contract:
+the contextual portable completion-barrier wire, dynamic discovered scope,
+non-append participants, executable task-artifact declaration, promoted
+support, public observer facade, and D4 transport remain open.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
