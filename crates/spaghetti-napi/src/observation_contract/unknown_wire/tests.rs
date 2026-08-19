@@ -145,7 +145,7 @@ fn sidecar_negotiation_and_carrier_match_the_frozen_portable_fixture() {
             payload_depth_limit: MAX_UNKNOWN_WIRE_DEPTH,
             payload_node_limit: MAX_UNKNOWN_WIRE_NODES,
             known_event_type_tags: KNOWN_EVENT_TYPE_TAGS,
-            runtime_unknown_emission: "not_yet_implemented",
+            runtime_unknown_emission: "attachment_bound_internal",
             native_transport: false,
         },
     })
@@ -158,6 +158,68 @@ fn sidecar_negotiation_and_carrier_match_the_frozen_portable_fixture() {
     assert_eq!(event.provenance().observer_sequence, 1);
     let debug = format!("{event:?}");
     assert!(!debug.contains("future_structured"));
+}
+
+#[test]
+fn runtime_payload_binds_delivery_without_exposing_or_reparsing_authority() {
+    let selected = Arc::new(selection());
+    let payload = ObservationUnknownWireRuntimePayload::new(
+        Arc::clone(&selected),
+        "runtime.message_delta_v2".to_owned(),
+        carrier_wire()["encoded_value"].clone(),
+        carrier_wire()["envelope_provenance"]["additional_envelope_provenance"].clone(),
+    )
+    .unwrap();
+    let source: JsonValue = serde_json::from_str(SOURCE_FIXTURE).unwrap();
+    let instance_key =
+        serde_json::from_value(source["created"]["source"]["instance_key"].clone()).unwrap();
+    let stream_key =
+        serde_json::from_value(source["created"]["source"]["stream_key"].clone()).unwrap();
+    let object_key =
+        serde_json::from_value(source["created"]["source"]["object_key"].clone()).unwrap();
+    let event = ObservationUnknownWireEvent::from_runtime_payload(
+        &payload,
+        7,
+        3,
+        &[9; DIGEST_BYTES],
+        None,
+        instance_key,
+        stream_key,
+        object_key,
+        2,
+        44,
+        "live",
+    )
+    .unwrap();
+
+    assert!(payload.belongs_to_selection(&selected));
+    assert!(event.belongs_to_runtime_selection(&selected));
+    assert_eq!(event.encoded_bytes(), payload.encoded_bytes());
+    assert_eq!(
+        event.wire_value()["envelope_provenance"]["observer_sequence"],
+        7
+    );
+    assert_eq!(event.wire_value()["envelope_provenance"]["scope_epoch"], 3);
+    assert_eq!(event.wire_value()["envelope_provenance"]["phase"], "live");
+    assert!(!format!("{payload:?}").contains("future_structured"));
+
+    let equal_but_foreign = Arc::new((*selected).clone());
+    assert!(!payload.belongs_to_selection(&equal_but_foreign));
+    assert!(!event.belongs_to_runtime_selection(&equal_but_foreign));
+    assert!(ObservationUnknownWireEvent::from_runtime_payload(
+        &payload,
+        7,
+        3,
+        &[9; DIGEST_BYTES],
+        None,
+        instance_key,
+        stream_key,
+        object_key,
+        2,
+        44,
+        "future",
+    )
+    .is_err());
 }
 
 #[test]

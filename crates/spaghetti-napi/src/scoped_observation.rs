@@ -38,7 +38,8 @@ use crate::decode_runtime::{
 use crate::observation_contract::unknown_wire::{
     negotiate_observation_unknown_wire, ObservationUnknownWireContractError,
     ObservationUnknownWireContractOffer, ObservationUnknownWireContractRequest,
-    ObservationUnknownWireContractSelection,
+    ObservationUnknownWireContractSelection, ObservationUnknownWireEvent,
+    ObservationUnknownWireRuntimePayload,
 };
 use crate::observation_contract::{
     negotiate_observation_contract, ObservationCapabilities, ObservationCapabilityContractError,
@@ -133,7 +134,7 @@ impl ScopedArtifactAccessPolicy {
 
 /// One exact host-approved object locator. The locator is installed during
 /// attachment and cannot be replaced by a decoder or by an access call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ScopedKnownObjectGrant {
     pub relation_id: String,
     /// Exactly one known-object grant is the attachment's semantic root. Barrier
@@ -143,6 +144,20 @@ pub struct ScopedKnownObjectGrant {
     pub locator_id: String,
     pub root: PathBuf,
     pub relative_path: PathBuf,
+}
+
+impl std::fmt::Debug for ScopedKnownObjectGrant {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedKnownObjectGrant")
+            .field("relation_id", &self.relation_id)
+            .field("scope_root", &self.scope_root)
+            .field("access_root", &self.access_root)
+            .field("locator_id", &"<redacted>")
+            .field("root", &"<redacted>")
+            .field("relative_path", &"<redacted>")
+            .finish()
+    }
 }
 
 /// One host-approved absolute root named by selected scoped relations. Native
@@ -1528,6 +1543,184 @@ impl ScopedObservationEventId {
     }
 }
 
+/// Opaque value supplied by one trusted Rust producer before attachment and
+/// source coordinates are bound. The key is identity input only; it is hashed
+/// into the final event ID and never crosses the observer boundary.
+pub(crate) struct ScopedObservationUnknownWireInput {
+    producer_event_key: [u8; 32],
+    type_tag: String,
+    encoded_value: serde_json::Value,
+    semantic_revision_ref: Option<SemanticRevisionRef>,
+    observed_at: i64,
+    phase: ScopedAppendDeliveryPhase,
+    additional_envelope_provenance: serde_json::Value,
+}
+
+impl ScopedObservationUnknownWireInput {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        producer_event_key: [u8; 32],
+        type_tag: impl Into<String>,
+        encoded_value: serde_json::Value,
+        semantic_revision_ref: Option<SemanticRevisionRef>,
+        observed_at: i64,
+        phase: ScopedAppendDeliveryPhase,
+        additional_envelope_provenance: serde_json::Value,
+    ) -> Result<Self, ScopedObservationUnknownWirePrepareError> {
+        if producer_event_key.iter().all(|byte| *byte == 0) {
+            return Err(ScopedObservationUnknownWirePrepareError::InvalidProducerEventKey);
+        }
+        Ok(Self {
+            producer_event_key,
+            type_tag: type_tag.into(),
+            encoded_value,
+            semantic_revision_ref,
+            observed_at,
+            phase,
+            additional_envelope_provenance,
+        })
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationUnknownWireInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationUnknownWireInput")
+            .field("producer_event_key", &"<redacted>")
+            .field("type_tag", &self.type_tag)
+            .field("encoded_value", &"<redacted-preserved-value>")
+            .field(
+                "has_semantic_revision",
+                &self.semantic_revision_ref.is_some(),
+            )
+            .field("observed_at", &self.observed_at)
+            .field("phase", &self.phase)
+            .field(
+                "additional_envelope_provenance",
+                &"<redacted-preserved-value>",
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct ScopedObservationPreparedUnknownWireEvent {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    selection: Arc<ObservationUnknownWireContractSelection>,
+    scope_epoch: u64,
+    source: ScopedSourceObjectIdentity,
+    generation: u64,
+    event_id: ScopedObservationEventId,
+    semantic_revision_ref: Option<SemanticRevisionRef>,
+    observed_at: i64,
+    phase: ScopedAppendDeliveryPhase,
+    payload: ObservationUnknownWireRuntimePayload,
+}
+
+impl std::fmt::Debug for ScopedObservationPreparedUnknownWireEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationPreparedUnknownWireEvent")
+            .field("scope_epoch", &self.scope_epoch)
+            .field("source", &self.source)
+            .field("generation", &self.generation)
+            .field("event_id", &self.event_id)
+            .field(
+                "has_semantic_revision",
+                &self.semantic_revision_ref.is_some(),
+            )
+            .field("observed_at", &self.observed_at)
+            .field("phase", &self.phase)
+            .field("payload", &self.payload)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Non-Serde prepared event bound to one exact attachment, sidecar, source,
+/// generation, and epoch. Failed delivery returns this owner unchanged so
+/// queue pressure cannot silently drop or renumber the preserved event.
+pub(crate) struct ScopedObservationUnknownWireOffer {
+    prepared: Arc<ScopedObservationPreparedUnknownWireEvent>,
+}
+
+impl std::fmt::Debug for ScopedObservationUnknownWireOffer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationUnknownWireOffer")
+            .field("prepared", &self.prepared)
+            .finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ScopedObservationUnknownWirePrepareError {
+    #[error("unknown-wire preservation was not negotiated for this attachment")]
+    NotNegotiated,
+    #[error("unknown-wire preparation requires the attachment's exact consumer drain")]
+    ForeignDrain,
+    #[error("unknown-wire attachment or consumer drain is closed")]
+    Closed,
+    #[error("unknown-wire producer event key must be nonzero")]
+    InvalidProducerEventKey,
+    #[error("unknown-wire preparation requires the attachment's current active epoch")]
+    InvalidEpoch,
+    #[error("unknown-wire preparation requires one exact declared relation")]
+    InvalidRelation,
+    #[error("unknown-wire preparation requires a committed present source generation")]
+    InvalidSourceState,
+    #[error("unknown-wire preserved value is invalid: {0}")]
+    Contract(#[from] ObservationUnknownWireContractError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ScopedObservationUnknownWireOfferError {
+    #[error("unknown-wire offer belongs to another observer attachment")]
+    ForeignAttachment,
+    #[error("unknown-wire consumer drain is closed")]
+    Closed,
+    #[error("unknown-wire consumer operation accounting is exhausted")]
+    OperationCapacityExhausted,
+    #[error("unknown-wire offer no longer matches the active epoch or sidecar")]
+    StaleBinding,
+    #[error("unknown-wire delivery coordinates are outside the portable contract")]
+    NonPortableCoordinates,
+    #[error("unknown-wire delivery failed: {0}")]
+    Delivery(ScopedDeliveryError),
+}
+
+pub(crate) struct ScopedObservationUnknownWireOfferFailure {
+    error: ScopedObservationUnknownWireOfferError,
+    offer: ScopedObservationUnknownWireOffer,
+}
+
+impl ScopedObservationUnknownWireOfferFailure {
+    pub(crate) fn error(&self) -> ScopedObservationUnknownWireOfferError {
+        self.error
+    }
+
+    pub(crate) fn into_offer(self) -> ScopedObservationUnknownWireOffer {
+        self.offer
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationUnknownWireOfferFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationUnknownWireOfferFailure")
+            .field("error", &self.error)
+            .field("offer", &self.offer)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ScopedObservationUnknownWireOfferFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ScopedObservationUnknownWireOfferFailure {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ScopedReplacementSemanticDigest([u8; 32]);
 
@@ -1899,6 +2092,24 @@ pub struct ScopedResyncBarrier {
 /// frame remains a control input for the future ordered public multiplexer;
 /// usage events already have final deterministic event IDs and canonical
 /// semantic references.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopedProjectedUnknownWireEvent {
+    prepared: Arc<ScopedObservationPreparedUnknownWireEvent>,
+}
+
+impl std::fmt::Debug for ScopedProjectedUnknownWireEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedProjectedUnknownWireEvent")
+            .field("scope_epoch", &self.prepared.scope_epoch)
+            .field("source", &self.prepared.source)
+            .field("generation", &self.prepared.generation)
+            .field("event_id", &self.prepared.event_id)
+            .field("retained_bytes", &self.prepared.payload.encoded_bytes())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopedProjectedObservation {
     SourcePresence {
@@ -1944,6 +2155,9 @@ pub enum ScopedProjectedObservation {
         event_id: ScopedObservationEventId,
         occurrence: Box<ScopedArtifactAvailabilityOccurrence>,
     },
+    UnknownWire {
+        event: ScopedProjectedUnknownWireEvent,
+    },
     ObserverBootstrapComplete {
         source: ScopedSourceObjectIdentity,
         observed_at: i64,
@@ -1986,6 +2200,7 @@ impl ScopedProjectedObservation {
             Self::ActorRun { event, .. } => event.event_id,
             Self::ActorAffiliation { event, .. } => event.event_id,
             Self::ArtifactAvailability { event_id, .. } => *event_id,
+            Self::UnknownWire { event } => event.prepared.event_id,
             Self::ObserverBootstrapComplete { event_id, .. } => *event_id,
             Self::ObserverResyncRequired { event_id, .. } => *event_id,
             Self::ObserverResyncStarted { event_id, .. } => *event_id,
@@ -2000,6 +2215,7 @@ impl ScopedProjectedObservation {
             Self::ActorRun { event, .. } => Some(event.semantic_revision_ref),
             Self::ActorAffiliation { event, .. } => Some(event.semantic_revision_ref),
             Self::ArtifactAvailability { .. } => None,
+            Self::UnknownWire { event } => event.prepared.semantic_revision_ref,
             Self::SourcePresence { .. }
             | Self::SourceReset { .. }
             | Self::SourceObjectError { .. }
@@ -2019,6 +2235,7 @@ impl ScopedProjectedObservation {
             Self::ActorRun { event, .. } => event.phase,
             Self::ActorAffiliation { event, .. } => event.phase,
             Self::ArtifactAvailability { phase, .. } => *phase,
+            Self::UnknownWire { event } => event.prepared.phase,
             Self::ObserverBootstrapComplete { .. } => ScopedAppendDeliveryPhase::Bootstrap,
             Self::ObserverResyncRequired { .. } => ScopedAppendDeliveryPhase::Live,
             Self::ObserverResyncStarted { .. } => ScopedAppendDeliveryPhase::Correction,
@@ -2036,6 +2253,7 @@ impl ScopedProjectedObservation {
             Self::ActorRun { event, .. } => &event.source.object,
             Self::ActorAffiliation { event, .. } => &event.source.object,
             Self::ArtifactAvailability { occurrence, .. } => occurrence.source(),
+            Self::UnknownWire { event } => &event.prepared.source,
             Self::ObserverBootstrapComplete { source, .. } => source,
             Self::ObserverResyncRequired { source, .. } => source,
             Self::ObserverResyncStarted { source, .. } => source,
@@ -2054,6 +2272,7 @@ impl ScopedProjectedObservation {
             Self::ActorRun { event, .. } => event.observed_at,
             Self::ActorAffiliation { event, .. } => event.observed_at,
             Self::ArtifactAvailability { observed_at, .. } => *observed_at,
+            Self::UnknownWire { event } => event.prepared.observed_at,
             Self::ObserverBootstrapComplete { observed_at, .. } => *observed_at,
             Self::ObserverResyncRequired { observed_at, .. } => *observed_at,
             Self::ObserverResyncStarted { observed_at, .. } => *observed_at,
@@ -2065,8 +2284,8 @@ impl ScopedProjectedObservation {
 
 /// Bounded post-reducer capacity. Native bytes retained during decode remain
 /// charged to the admission lane until projection succeeds; this second byte
-/// budget is for future projected unknown/native evidence that is intentionally
-/// carried into delivery.
+/// budget is for negotiated projected unknown/native evidence that is
+/// intentionally carried into delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopedObservationDeliveryLimits {
     pub max_semantic_events: usize,
@@ -2126,6 +2345,7 @@ pub struct ScopedActorRunRef {
 pub enum ScopedActorFallbackReason {
     SourceLifecycleControl,
     ObserverLifecycleControl,
+    UnknownWireEvent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2180,6 +2400,7 @@ pub enum ScopedEnvelopeEvidenceAuthority {
     NativeRecord,
     CommonReducer,
     EngineControl,
+    PreservedUnknownWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2209,7 +2430,39 @@ pub enum ScopedNativeEvidence {
         payload_hash: RecordHash,
         reason: ScopedNativeEvidenceWithheldReason,
     },
+    PreservedUnknownWire {
+        retained_bytes: u64,
+    },
     EngineControl,
+}
+
+/// Public-contract-shaped view of one uninterpreted additive event. The
+/// preserved JSON stays private and is available only through the strict,
+/// attachment-bound outer-union projection on the yielded delivery.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopedObservationUnknownWireEvent {
+    carrier: ObservationUnknownWireEvent,
+}
+
+impl ScopedObservationUnknownWireEvent {
+    pub fn type_tag(&self) -> &str {
+        self.carrier.type_tag()
+    }
+
+    pub fn retained_bytes(&self) -> u64 {
+        self.carrier.encoded_bytes()
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationUnknownWireEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationUnknownWireEvent")
+            .field("type_tag", &self.type_tag())
+            .field("retained_bytes", &self.retained_bytes())
+            .field("carrier", &"<redacted-preserved-value>")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Public-contract-shaped event payload. Internal object tokens, admission
@@ -2245,6 +2498,9 @@ pub enum ScopedObservationEvent {
     },
     ArtifactAvailability {
         entry: ScopedArtifactAvailabilityEntry,
+    },
+    UnknownWire {
+        event: Box<ScopedObservationUnknownWireEvent>,
     },
     ObserverBootstrapComplete {
         barrier: Arc<ScopedBootstrapBarrier>,
@@ -2845,7 +3101,7 @@ impl Drop for ScopedObservationStartupReconcilePass {
 pub struct ScopedObservationYieldedEnvelope {
     pub envelope: ScopedObservationEnvelope,
     application_receipt: ScopedObservationApplicationReceipt,
-    known_envelope: ScopedObservationKnownEnvelope,
+    event_union_envelope: event_wire::ScopedObservationEventUnionEnvelope,
     artifact_availability_context: Option<ScopedArtifactAvailabilityEnvelopeConsumerContext>,
     completion_context: Option<ScopedCompletionEnvelopeConsumerContext>,
     continuity_context: Option<ScopedContinuityEnvelopeConsumerContext>,
@@ -2858,15 +3114,15 @@ impl ScopedObservationYieldedEnvelope {
 
     /// Attachment-bound strict wire projection for every currently known event
     /// family. Specialist consumers may continue using this narrower view.
-    pub fn known_envelope(&self) -> &ScopedObservationKnownEnvelope {
-        &self.known_envelope
+    pub fn known_envelope(&self) -> Option<&ScopedObservationKnownEnvelope> {
+        self.event_union_envelope.known()
     }
 
     /// Complete portable RFC 012D outer-union value for this delivery. The
-    /// current runtime emits only known branches; an unknown branch additionally
-    /// requires the drain's exact negotiated sidecar and a trusted producer.
+    /// Unknown branches exist only when a trusted Rust producer prepared the
+    /// value under this drain's exact negotiated preservation sidecar.
     pub fn event_union_value(&self) -> serde_json::Value {
-        self.known_envelope.event_union_value()
+        self.event_union_envelope.event_union_value()
     }
 
     /// Exact caller-held authority for consuming an ordered artifact-
@@ -3058,6 +3314,81 @@ impl ScopedObservationConsumerDrain {
         self.unknown_wire_selection.as_deref()
     }
 
+    fn offer_prepared_unknown_wire(
+        &mut self,
+        attachment_authority: &Arc<ScopedObservationAttachmentAuthority>,
+        selected_sidecar: Option<&Arc<ObservationUnknownWireContractSelection>>,
+        offer: ScopedObservationUnknownWireOffer,
+    ) -> Result<ScopedObservationOfferReceipt, ScopedObservationUnknownWireOfferFailure> {
+        let prepared = offer.prepared;
+        let fail = |error, prepared| ScopedObservationUnknownWireOfferFailure {
+            error,
+            offer: ScopedObservationUnknownWireOffer { prepared },
+        };
+        if !Arc::ptr_eq(&self.attachment_authority, attachment_authority)
+            || !Arc::ptr_eq(&prepared.attachment_authority, attachment_authority)
+        {
+            return Err(fail(
+                ScopedObservationUnknownWireOfferError::ForeignAttachment,
+                prepared,
+            ));
+        }
+        if self.closed {
+            return Err(fail(
+                ScopedObservationUnknownWireOfferError::Closed,
+                prepared,
+            ));
+        }
+        if prepared.scope_epoch != self.delivery.state().scope_epoch
+            || selected_sidecar.is_none_or(|selection| !Arc::ptr_eq(selection, &prepared.selection))
+            || self
+                .unknown_wire_selection
+                .as_ref()
+                .is_none_or(|selection| !Arc::ptr_eq(selection, &prepared.selection))
+            || !prepared.payload.belongs_to_selection(&prepared.selection)
+        {
+            return Err(fail(
+                ScopedObservationUnknownWireOfferError::StaleBinding,
+                prepared,
+            ));
+        }
+        if prepared
+            .payload
+            .validate_runtime_coordinates(
+                self.delivery.next_observer_sequence,
+                prepared.scope_epoch,
+                prepared.generation,
+            )
+            .is_err()
+        {
+            return Err(fail(
+                ScopedObservationUnknownWireOfferError::NonPortableCoordinates,
+                prepared,
+            ));
+        }
+        let projected = ScopedProjectedObservation::UnknownWire {
+            event: ScopedProjectedUnknownWireEvent {
+                prepared: Arc::clone(&prepared),
+            },
+        };
+        self.delivery
+            .offer_projected(vec![projected])
+            .map_err(|mut failure| {
+                let queued = failure
+                    .projected
+                    .pop()
+                    .expect("one failed unknown-wire offer retains one projected value");
+                let ScopedProjectedObservation::UnknownWire { event } = queued else {
+                    unreachable!("unknown-wire offer failure retains its exact event")
+                };
+                debug_assert!(Arc::ptr_eq(&event.prepared, &prepared));
+                fail(
+                    ScopedObservationUnknownWireOfferError::Delivery(failure.error),
+                    event.prepared,
+                )
+            })
+    }
+
     /// Yield one mapped envelope. The next envelope remains unavailable until
     /// the caller acknowledges successful application of this exact delivery.
     /// Mapping is validated against a clone before dequeue, so a mapper failure
@@ -3090,50 +3421,64 @@ impl ScopedObservationConsumerDrain {
         let preview_sequence = preview.observer_sequence;
         let preview_epoch = preview.scope_epoch;
         let preview_event_id = preview.event_id;
-        let artifact_availability_context =
+        let envelope = self
+            .mapper
+            .map(preview.clone())
+            .map_err(ScopedObservationDrainError::Envelope)?;
+        let unknown = matches!(&envelope.event, ScopedObservationEvent::UnknownWire { .. });
+        let artifact_availability_context = if unknown {
+            None
+        } else {
             ScopedArtifactAvailabilityEnvelopeConsumerContext::from_delivered(
                 &self.mapper.contract_selection,
                 &self.mapper.root,
                 &preview,
             )
-            .map_err(ScopedObservationDrainError::Envelope)?;
-        let envelope = self
-            .mapper
-            .map(preview.clone())
-            .map_err(ScopedObservationDrainError::Envelope)?;
-        let completion_context = ScopedCompletionEnvelopeConsumerContext::from_scoped_envelope(
-            &envelope,
-            &self.mapper.root,
-            Arc::clone(&self.completion_capability_context),
-        )
-        .map_err(|_| {
-            ScopedObservationDrainError::Envelope(ScopedEnvelopeError::DeliveryMismatch)
-        })?;
-        let continuity_context = ScopedContinuityEnvelopeConsumerContext::from_delivered(
-            &envelope,
-            &self.mapper.root,
-            Arc::clone(&self.attachment_authority),
-            &self.delivery,
-        )
-        .map_err(|_| {
-            ScopedObservationDrainError::Envelope(ScopedEnvelopeError::DeliveryMismatch)
-        })?;
+            .map_err(ScopedObservationDrainError::Envelope)?
+        };
+        let completion_context = if unknown {
+            None
+        } else {
+            ScopedCompletionEnvelopeConsumerContext::from_scoped_envelope(
+                &envelope,
+                &self.mapper.root,
+                Arc::clone(&self.completion_capability_context),
+            )
+            .map_err(|_| {
+                ScopedObservationDrainError::Envelope(ScopedEnvelopeError::DeliveryMismatch)
+            })?
+        };
+        let continuity_context = if unknown {
+            None
+        } else {
+            ScopedContinuityEnvelopeConsumerContext::from_delivered(
+                &envelope,
+                &self.mapper.root,
+                Arc::clone(&self.attachment_authority),
+                &self.delivery,
+            )
+            .map_err(|_| {
+                ScopedObservationDrainError::Envelope(ScopedEnvelopeError::DeliveryMismatch)
+            })?
+        };
         debug_assert!(continuity_context
             .as_ref()
             .is_none_or(|context| { context.belongs_to_attachment(&self.attachment_authority) }));
-        let known_envelope = ScopedObservationKnownEnvelope::from_predequeue(
-            &envelope,
-            &self.mapper.root,
-            Arc::clone(&self.attachment_authority),
-            &preview,
-            event_wire::ScopedSpecializedEnvelopeContexts {
-                artifact_availability: artifact_availability_context.as_ref(),
-                completion: completion_context.as_ref(),
-                continuity: continuity_context.as_ref(),
-            },
-        )
-        .map_err(ScopedObservationDrainError::Envelope)?;
-        debug_assert!(known_envelope.belongs_to_attachment(&self.attachment_authority));
+        let event_union_envelope =
+            event_wire::ScopedObservationEventUnionEnvelope::from_predequeue(
+                &envelope,
+                &self.mapper.root,
+                Arc::clone(&self.attachment_authority),
+                &preview,
+                event_wire::ScopedSpecializedEnvelopeContexts {
+                    artifact_availability: artifact_availability_context.as_ref(),
+                    completion: completion_context.as_ref(),
+                    continuity: continuity_context.as_ref(),
+                },
+                self.unknown_wire_selection.as_ref().map(Arc::clone),
+            )
+            .map_err(ScopedObservationDrainError::Envelope)?;
+        debug_assert!(event_union_envelope.belongs_to_attachment(&self.attachment_authority));
         let delivered = self
             .delivery
             .dequeue_next()
@@ -3156,6 +3501,7 @@ impl ScopedObservationConsumerDrain {
             | ScopedObservationEvent::ActorRun { .. }
             | ScopedObservationEvent::ActorAffiliation { .. }
             | ScopedObservationEvent::ArtifactAvailability { .. }
+            | ScopedObservationEvent::UnknownWire { .. }
             | ScopedObservationEvent::ObserverResyncRequired { .. }
             | ScopedObservationEvent::ObserverResyncStarted { .. }
             | ScopedObservationEvent::ObserverFailed { .. } => {
@@ -3176,7 +3522,7 @@ impl ScopedObservationConsumerDrain {
         Ok(Some(ScopedObservationYieldedEnvelope {
             envelope,
             application_receipt: receipt,
-            known_envelope,
+            event_union_envelope,
             artifact_availability_context,
             completion_context,
             continuity_context,
@@ -6947,6 +7293,53 @@ impl ScopedObservationEnvelopeMapper {
                     native_evidence: ScopedNativeEvidence::EngineControl,
                 }
             }
+            ScopedProjectedObservation::UnknownWire { event } => {
+                let prepared = event.prepared;
+                if prepared.scope_epoch != scope_epoch
+                    || prepared.source != delivered.source
+                    || prepared.event_id != event_id
+                    || prepared.semantic_revision_ref != semantic_revision_ref
+                    || prepared.phase != phase
+                    || prepared.selection.observation_selection() != &self.contract_selection
+                    || !prepared.payload.belongs_to_selection(&prepared.selection)
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                let carrier = ObservationUnknownWireEvent::from_runtime_payload(
+                    &prepared.payload,
+                    observer_sequence,
+                    scope_epoch,
+                    event_id.as_bytes(),
+                    semantic_revision_ref,
+                    delivered.source.source_instance_key,
+                    delivered.source.stream_key,
+                    delivered.source.object_key,
+                    prepared.generation,
+                    prepared.observed_at,
+                    scoped_delivery_phase_wire_name(phase),
+                )
+                .map_err(|_| ScopedEnvelopeError::DeliveryMismatch)?;
+                let retained_bytes = carrier.encoded_bytes();
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: self.root.root_actor_run_key,
+                    actor_attribution: ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::UnknownWireEvent,
+                    },
+                    source: scoped_control_envelope_source(&delivered.source, prepared.generation),
+                    native_time: None,
+                    observed_at: prepared.observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority: ScopedEnvelopeEvidenceAuthority::PreservedUnknownWire,
+                        quality: QualifiedValueQuality::Exact,
+                        effective_at: None,
+                        completeness: ContractCompleteness::Unknown,
+                    },
+                    event: ScopedObservationEvent::UnknownWire {
+                        event: Box::new(ScopedObservationUnknownWireEvent { carrier }),
+                    },
+                    native_evidence: ScopedNativeEvidence::PreservedUnknownWire { retained_bytes },
+                }
+            }
             ScopedProjectedObservation::UsageV2 { event, .. } => {
                 if self
                     .contract_selection
@@ -8936,6 +9329,9 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
         | ScopedProjectedObservation::ActorRun { .. }
         | ScopedProjectedObservation::ActorAffiliation { .. }
         | ScopedProjectedObservation::ArtifactAvailability { .. } => (true, 0),
+        ScopedProjectedObservation::UnknownWire { event } => {
+            (true, event.prepared.payload.encoded_bytes())
+        }
         ScopedProjectedObservation::SourcePresence { .. }
         | ScopedProjectedObservation::SourceReset { .. }
         | ScopedProjectedObservation::SourceObjectError { .. }
@@ -11347,6 +11743,38 @@ fn source_object_error_event_id(error: &ScopedSourceObjectError) -> ScopedObserv
     ScopedObservationEventId(*hasher.finalize().as_bytes())
 }
 
+fn unknown_wire_event_id(
+    source: &ScopedSourceObjectIdentity,
+    generation: u64,
+    producer_event_key: &[u8; 32],
+    payload: &ObservationUnknownWireRuntimePayload,
+    semantic_revision_ref: Option<&SemanticRevisionRef>,
+) -> ScopedObservationEventId {
+    let mut hasher = source_control_event_hasher(source, b"unknown-wire-event");
+    hasher.update(&generation.to_be_bytes());
+    hash_event_component(&mut hasher, producer_event_key);
+    hash_event_component(&mut hasher, payload.identity_digest());
+    match semantic_revision_ref {
+        Some(reference) => {
+            hasher.update(&[1]);
+            hasher.update(&reference.semantic_reference_contract_version.to_be_bytes());
+            hash_event_component(&mut hasher, reference.fact_revision_id.as_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    ScopedObservationEventId(*hasher.finalize().as_bytes())
+}
+
+fn scoped_delivery_phase_wire_name(phase: ScopedAppendDeliveryPhase) -> &'static str {
+    match phase {
+        ScopedAppendDeliveryPhase::Bootstrap => "bootstrap",
+        ScopedAppendDeliveryPhase::Live => "live",
+        ScopedAppendDeliveryPhase::Correction => "correction",
+    }
+}
+
 fn observer_control_source(
     root: &ScopedObservationRootIdentity,
 ) -> Result<ScopedSourceObjectIdentity, ()> {
@@ -13378,8 +13806,8 @@ pub struct ScopedObservationAccessHost {
     compatibility: CompatibilityDecision,
     observation_contract: ObservationContractSelection,
     /// Exact optional sidecar selected before source authority. The
-    /// non-cloneable attachment host retains it until a later trusted runtime
-    /// producer can emit bounded unknown events.
+    /// non-cloneable attachment host retains it for its crate-private trusted
+    /// producer and sole bounded event drain.
     unknown_wire_selection: Option<Arc<ObservationUnknownWireContractSelection>>,
     observation_capabilities: ObservationCapabilities,
     completion_capability_context:
@@ -13561,8 +13989,9 @@ impl ScopedObservationAccessHost {
     }
 
     /// Optional bounded additive-event preservation contract selected before
-    /// any support or source-access authority. Retention alone does not create
-    /// an unknown-event producer or a portable observer transport.
+    /// any support or source-access authority. It enables only the
+    /// attachment-bound crate-private producer; it creates no vendor event or
+    /// portable observer transport by itself.
     pub(crate) fn unknown_wire_contract_selection(
         &self,
     ) -> Option<&ObservationUnknownWireContractSelection> {
@@ -13805,6 +14234,161 @@ impl ScopedObservationAccessHost {
         admission
             .offer_next(projection, drain.delivery_lane_mut())
             .map_err(Into::into)
+    }
+
+    /// Prepare one uninterpreted additive event from the exact active source
+    /// owner. This does not offer or sequence the value: it only validates and
+    /// freezes the negotiated payload plus attachment/source/epoch authority.
+    pub(crate) fn prepare_unknown_wire_event(
+        &self,
+        active: &ScopedObservationEpochState,
+        drain: &ScopedObservationConsumerDrain,
+        relation_id: &str,
+        input: ScopedObservationUnknownWireInput,
+    ) -> Result<ScopedObservationUnknownWireOffer, ScopedObservationUnknownWirePrepareError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedObservationUnknownWirePrepareError::ForeignDrain);
+        }
+        if drain.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.lifecycle.is_closing()
+        {
+            return Err(ScopedObservationUnknownWirePrepareError::Closed);
+        }
+        let selection = self
+            .unknown_wire_selection
+            .as_ref()
+            .ok_or(ScopedObservationUnknownWirePrepareError::NotNegotiated)?;
+        if drain
+            .unknown_wire_selection
+            .as_ref()
+            .is_none_or(|drain_selection| !Arc::ptr_eq(selection, drain_selection))
+        {
+            return Err(ScopedObservationUnknownWirePrepareError::ForeignDrain);
+        }
+        if !Arc::ptr_eq(&active.attachment_authority, &self.attachment_authority)
+            || active.root != self.root_identity
+            || active.scope_epoch != drain.delivery.state().scope_epoch
+        {
+            return Err(ScopedObservationUnknownWirePrepareError::InvalidEpoch);
+        }
+        if !self.known_objects.contains_key(relation_id) {
+            return Err(ScopedObservationUnknownWirePrepareError::InvalidRelation);
+        }
+        let object = active
+            .append_objects
+            .get(relation_id)
+            .ok_or(ScopedObservationUnknownWirePrepareError::InvalidRelation)?;
+        if object.relation_id.as_deref() != Some(relation_id)
+            || !source_belongs_to_root(&object.source, &self.root_identity)
+        {
+            return Err(ScopedObservationUnknownWirePrepareError::InvalidRelation);
+        }
+        let phase_valid = match object.lifecycle {
+            ScopedAppendObjectLifecycle::Active => match input.phase {
+                ScopedAppendDeliveryPhase::Bootstrap => {
+                    object.bootstrap_active && active.scope_epoch == SCOPED_INITIAL_SCOPE_EPOCH
+                }
+                ScopedAppendDeliveryPhase::Live | ScopedAppendDeliveryPhase::Correction => {
+                    !object.bootstrap_active
+                }
+            },
+            ScopedAppendObjectLifecycle::Replacement { scope_epoch, .. } => {
+                input.phase == ScopedAppendDeliveryPhase::Correction
+                    && scope_epoch == active.scope_epoch
+            }
+            ScopedAppendObjectLifecycle::Frozen { .. } | ScopedAppendObjectLifecycle::Retired => {
+                false
+            }
+        };
+        let generation = object
+            .checkpoint
+            .as_ref()
+            .map(|checkpoint| checkpoint.generation);
+        if !phase_valid
+            || object.pending.is_some()
+            || !object.presence_state.is_present()
+            || generation.is_none()
+        {
+            return Err(ScopedObservationUnknownWirePrepareError::InvalidSourceState);
+        }
+        let generation = generation.expect("validated present source retains its generation");
+        let payload = ObservationUnknownWireRuntimePayload::new(
+            Arc::clone(selection),
+            input.type_tag,
+            input.encoded_value,
+            input.additional_envelope_provenance,
+        )?;
+        payload.validate_producer_metadata(
+            input.semantic_revision_ref.as_ref(),
+            input.observed_at,
+            scoped_delivery_phase_wire_name(input.phase),
+        )?;
+        payload.validate_runtime_coordinates(1, active.scope_epoch, generation)?;
+        let event_id = unknown_wire_event_id(
+            &object.source,
+            generation,
+            &input.producer_event_key,
+            &payload,
+            input.semantic_revision_ref.as_ref(),
+        );
+        Ok(ScopedObservationUnknownWireOffer {
+            prepared: Arc::new(ScopedObservationPreparedUnknownWireEvent {
+                attachment_authority: Arc::clone(&self.attachment_authority),
+                selection: Arc::clone(selection),
+                scope_epoch: active.scope_epoch,
+                source: object.source.clone(),
+                generation,
+                event_id,
+                semantic_revision_ref: input.semantic_revision_ref,
+                observed_at: input.observed_at,
+                phase: input.phase,
+                payload,
+            }),
+        })
+    }
+
+    /// Sequence one already-prepared event. Every failed path returns the
+    /// exact offer owner, including bounded queue pressure, so retry does not
+    /// regenerate identity or advance the observer sequence.
+    pub(crate) fn offer_unknown_wire_event(
+        &self,
+        drain: &mut ScopedObservationConsumerDrain,
+        offer: ScopedObservationUnknownWireOffer,
+    ) -> Result<ScopedObservationOfferReceipt, ScopedObservationUnknownWireOfferFailure> {
+        let fail = |error, offer| ScopedObservationUnknownWireOfferFailure { error, offer };
+        if !self.owns_consumer_drain(drain) {
+            return Err(fail(
+                ScopedObservationUnknownWireOfferError::ForeignAttachment,
+                offer,
+            ));
+        }
+        if drain.is_closed()
+            || self.state.closed.load(Ordering::Acquire)
+            || self.lifecycle.is_closing()
+        {
+            return Err(fail(ScopedObservationUnknownWireOfferError::Closed, offer));
+        }
+        let _operation = match self
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+        {
+            Ok(operation) => operation,
+            Err(ScopedObservationOperationStartError::Closing) => {
+                return Err(fail(ScopedObservationUnknownWireOfferError::Closed, offer));
+            }
+            Err(ScopedObservationOperationStartError::CapacityExhausted) => {
+                return Err(fail(
+                    ScopedObservationUnknownWireOfferError::OperationCapacityExhausted,
+                    offer,
+                ));
+            }
+        };
+        drain.offer_prepared_unknown_wire(
+            &self.attachment_authority,
+            self.unknown_wire_selection.as_ref(),
+            offer,
+        )
     }
 
     fn offer_consumer_object_error(
@@ -17415,6 +17999,8 @@ fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecution
 
 #[cfg(test)]
 mod projection_tests {
+    use serde_json::{json, Value as JsonValue};
+
     use crate::adapter::{
         ContractCompleteness, ContractVersionOffer, ContractVersionRequest,
         CoverageMembershipRevision, NativeIdentity, QualifiedTimestamp, QualifiedValue,
@@ -18508,6 +19094,352 @@ mod projection_tests {
         drain
     }
 
+    fn unknown_wire_selection_for(
+        selection: &ObservationContractSelection,
+    ) -> Arc<ObservationUnknownWireContractSelection> {
+        let request = ObservationUnknownWireContractRequest::new(
+            crate::observation_contract::unknown_wire::ObservationUnknownWireCapability::preserving(
+                4_096,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let offer = ObservationUnknownWireContractOffer::new(
+            crate::observation_contract::unknown_wire::ObservationUnknownWireCapability::preserving(
+                4_096,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        Arc::new(negotiate_observation_unknown_wire(&request, &offer, selection).unwrap())
+    }
+
+    fn unknown_wire_drain(
+        root: ScopedObservationRootIdentity,
+        selection: ObservationContractSelection,
+        sidecar: Arc<ObservationUnknownWireContractSelection>,
+        max_semantic_events: usize,
+        max_retained_native_bytes: u64,
+    ) -> (
+        Arc<ScopedObservationAttachmentAuthority>,
+        ScopedObservationConsumerDrain,
+    ) {
+        let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
+        let authority = next_scoped_attachment_authority().unwrap();
+        let mut drain = ScopedObservationConsumerDrain::new_with_unknown_wire(
+            ScopedObservationEnvelopeMapper::new(root, selection.clone()),
+            capability_context_for_selection(&selection),
+            Some(sidecar),
+            Arc::clone(&authority),
+            Arc::clone(&lifecycle),
+            ScopedObservationDeliveryLimits {
+                max_semantic_events,
+                max_retained_native_bytes,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        lifecycle
+            .open_consumer_drain(&drain.delivery.event_completion)
+            .unwrap();
+        drain.lifecycle_registered = true;
+        (authority, drain)
+    }
+
+    fn unknown_wire_offer(
+        authority: Arc<ScopedObservationAttachmentAuthority>,
+        selection: Arc<ObservationUnknownWireContractSelection>,
+        source: ScopedSourceObjectIdentity,
+        producer_key: [u8; 32],
+        encoded_value: JsonValue,
+    ) -> ScopedObservationUnknownWireOffer {
+        let payload = ObservationUnknownWireRuntimePayload::new(
+            Arc::clone(&selection),
+            "runtime.message_delta_v2".to_owned(),
+            encoded_value,
+            json!({"producer_axis": "future_v2"}),
+        )
+        .unwrap();
+        let generation = 3;
+        let event_id = unknown_wire_event_id(&source, generation, &producer_key, &payload, None);
+        ScopedObservationUnknownWireOffer {
+            prepared: Arc::new(ScopedObservationPreparedUnknownWireEvent {
+                attachment_authority: authority,
+                selection,
+                scope_epoch: SCOPED_INITIAL_SCOPE_EPOCH,
+                source,
+                generation,
+                event_id,
+                semantic_revision_ref: None,
+                observed_at: 44,
+                phase: ScopedAppendDeliveryPhase::Bootstrap,
+                payload,
+            }),
+        }
+    }
+
+    #[test]
+    fn known_object_grant_debug_redacts_native_locator_material() {
+        let grant = ScopedKnownObjectGrant {
+            relation_id: "root-object".to_owned(),
+            scope_root: true,
+            access_root: "fixture-root".to_owned(),
+            locator_id: "/Users/alice/private/session.jsonl".to_owned(),
+            root: PathBuf::from("/Users/alice/private"),
+            relative_path: PathBuf::from("session.jsonl"),
+        };
+        let debug = format!("{grant:?}");
+        assert!(debug.contains("root-object"));
+        assert!(debug.contains("fixture-root"));
+        assert!(!debug.contains("alice"));
+        assert!(!debug.contains("session.jsonl"));
+        assert_eq!(debug.matches("<redacted>").count(), 3);
+    }
+
+    #[test]
+    fn scoped_unknown_wire_offer_is_attachment_bound_byte_charged_and_union_exact() {
+        let root = root_identity();
+        let selection = observation_contract_selection();
+        let sidecar = unknown_wire_selection_for(&selection);
+        let source = source_identity();
+        let (authority, mut drain) = unknown_wire_drain(
+            root.clone(),
+            selection.clone(),
+            Arc::clone(&sidecar),
+            1,
+            4_096,
+        );
+        let offer = unknown_wire_offer(
+            Arc::clone(&authority),
+            Arc::clone(&sidecar),
+            source.clone(),
+            [7; 32],
+            json!({"secret_payload": [1, 2, 3]}),
+        );
+        let expected_bytes = offer.prepared.payload.encoded_bytes();
+        let expected_event_id = offer.prepared.event_id;
+        let receipt = drain
+            .offer_prepared_unknown_wire(&authority, Some(&sidecar), offer)
+            .unwrap();
+        assert_eq!(receipt.first_offered_sequence, Some(1));
+        assert_eq!(receipt.semantic_events, 1);
+        assert_eq!(receipt.retained_native_bytes, expected_bytes);
+        assert_eq!(
+            drain.delivery.state().queued_retained_native_bytes,
+            expected_bytes
+        );
+
+        let yielded = drain.next().unwrap().unwrap();
+        assert!(yielded.known_envelope().is_none());
+        assert_eq!(yielded.envelope.event_id, expected_event_id);
+        assert_eq!(
+            yielded.envelope.actor_attribution,
+            ScopedActorAttribution::ScopeFallback {
+                reason: ScopedActorFallbackReason::UnknownWireEvent,
+            }
+        );
+        assert_eq!(
+            yielded.envelope.evidence.authority,
+            ScopedEnvelopeEvidenceAuthority::PreservedUnknownWire
+        );
+        assert_eq!(
+            yielded.envelope.evidence.completeness,
+            ContractCompleteness::Unknown
+        );
+        assert_eq!(
+            yielded.envelope.native_evidence,
+            ScopedNativeEvidence::PreservedUnknownWire {
+                retained_bytes: expected_bytes,
+            }
+        );
+        let union = yielded.event_union_value();
+        assert_eq!(union["family"], "unknown_wire_event");
+        assert_eq!(union["event"]["type_tag"], "runtime.message_delta_v2");
+        assert_eq!(
+            union["event"]["encoded_value"],
+            json!({"secret_payload": [1, 2, 3]})
+        );
+        assert_eq!(
+            union["event"]["envelope_provenance"]["observer_sequence"],
+            1
+        );
+        assert_eq!(
+            union["event"]["envelope_provenance"]["scope_epoch"],
+            SCOPED_INITIAL_SCOPE_EPOCH
+        );
+        assert_eq!(
+            union["context"]["contract_selection"],
+            serde_json::to_value(selection).unwrap()
+        );
+        assert_eq!(
+            union["context"]["authorized_sources"][0]["object_key"],
+            serde_json::to_value(source.object_key).unwrap()
+        );
+        assert_eq!(drain.delivery.state().queued_retained_native_bytes, 0);
+        let debug = format!("{yielded:?}");
+        assert!(!debug.contains("secret_payload"));
+        let receipt = yielded.application_receipt().clone();
+        drain.acknowledge_applied(&receipt).unwrap();
+    }
+
+    #[test]
+    fn scoped_unknown_wire_backpressure_returns_the_exact_offer_without_sequence_drift() {
+        let root = root_identity();
+        let selection = observation_contract_selection();
+        let sidecar = unknown_wire_selection_for(&selection);
+        let source = source_identity();
+        let first = unknown_wire_offer(
+            next_scoped_attachment_authority().unwrap(),
+            Arc::clone(&sidecar),
+            source.clone(),
+            [1; 32],
+            json!({"ordinal": 1}),
+        );
+        let byte_limit = first.prepared.payload.encoded_bytes();
+        let authority = Arc::clone(&first.prepared.attachment_authority);
+        let (drain_authority, mut drain) =
+            unknown_wire_drain(root, selection, Arc::clone(&sidecar), 2, byte_limit);
+        // Rebind only the fixture offer to this drain's exact unforgeable
+        // attachment; production offers can be created only by the host.
+        let first = unknown_wire_offer(
+            Arc::clone(&drain_authority),
+            Arc::clone(&sidecar),
+            source.clone(),
+            [1; 32],
+            json!({"ordinal": 1}),
+        );
+        let second = unknown_wire_offer(
+            Arc::clone(&drain_authority),
+            Arc::clone(&sidecar),
+            source,
+            [2; 32],
+            json!({"ordinal": 2}),
+        );
+        let second_event_id = second.prepared.event_id;
+        drain
+            .offer_prepared_unknown_wire(&drain_authority, Some(&sidecar), first)
+            .unwrap();
+        let failure = drain
+            .offer_prepared_unknown_wire(&drain_authority, Some(&sidecar), second)
+            .unwrap_err();
+        assert_eq!(
+            failure.error(),
+            ScopedObservationUnknownWireOfferError::Delivery(
+                ScopedDeliveryError::RetainedNativeQueueFull
+            )
+        );
+        assert_eq!(drain.delivery.state().offered_through_sequence, 1);
+        let second = failure.into_offer();
+        assert_eq!(second.prepared.event_id, second_event_id);
+
+        let first = drain.next().unwrap().unwrap();
+        let receipt = first.application_receipt().clone();
+        drain.acknowledge_applied(&receipt).unwrap();
+        let retried = drain
+            .offer_prepared_unknown_wire(&drain_authority, Some(&sidecar), second)
+            .unwrap();
+        assert_eq!(retried.first_offered_sequence, Some(2));
+        let second = drain.next().unwrap().unwrap();
+        assert_eq!(second.envelope.event_id, second_event_id);
+        assert_eq!(
+            second.event_union_value()["event"]["encoded_value"]["ordinal"],
+            2
+        );
+
+        let nonportable = unknown_wire_offer(
+            Arc::clone(&drain_authority),
+            Arc::clone(&sidecar),
+            source_identity(),
+            [4; 32],
+            json!({"ordinal": 4}),
+        );
+        drain.delivery.next_observer_sequence = 9_007_199_254_740_992;
+        assert_eq!(
+            drain
+                .offer_prepared_unknown_wire(&drain_authority, Some(&sidecar), nonportable)
+                .unwrap_err()
+                .error(),
+            ScopedObservationUnknownWireOfferError::NonPortableCoordinates
+        );
+
+        let foreign_offer = unknown_wire_offer(
+            authority,
+            Arc::clone(&sidecar),
+            source_identity(),
+            [3; 32],
+            json!({"ordinal": 3}),
+        );
+        assert_eq!(
+            drain
+                .offer_prepared_unknown_wire(&drain_authority, Some(&sidecar), foreign_offer,)
+                .unwrap_err()
+                .error(),
+            ScopedObservationUnknownWireOfferError::ForeignAttachment
+        );
+
+        let equal_but_foreign_sidecar = Arc::new((*sidecar).clone());
+        let foreign_selection_offer = unknown_wire_offer(
+            Arc::clone(&drain_authority),
+            equal_but_foreign_sidecar,
+            source_identity(),
+            [5; 32],
+            json!({"ordinal": 5}),
+        );
+        assert_eq!(
+            drain
+                .offer_prepared_unknown_wire(
+                    &drain_authority,
+                    Some(&sidecar),
+                    foreign_selection_offer,
+                )
+                .unwrap_err()
+                .error(),
+            ScopedObservationUnknownWireOfferError::StaleBinding
+        );
+    }
+
+    #[test]
+    fn scoped_unknown_wire_offer_cannot_enter_a_drain_without_the_exact_sidecar() {
+        let root = root_identity();
+        let selection = observation_contract_selection();
+        let sidecar = unknown_wire_selection_for(&selection);
+        let lifecycle = Arc::new(ScopedObservationAttachmentLifecycle::default());
+        let authority = next_scoped_attachment_authority().unwrap();
+        let mut drain = ScopedObservationConsumerDrain::new_with_unknown_wire(
+            ScopedObservationEnvelopeMapper::new(root, selection.clone()),
+            capability_context_for_selection(&selection),
+            None,
+            Arc::clone(&authority),
+            Arc::clone(&lifecycle),
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 4_096,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        lifecycle
+            .open_consumer_drain(&drain.delivery.event_completion)
+            .unwrap();
+        drain.lifecycle_registered = true;
+        let offer = unknown_wire_offer(
+            Arc::clone(&authority),
+            sidecar,
+            source_identity(),
+            [6; 32],
+            json!({"ordinal": 6}),
+        );
+        let before = drain.delivery.state();
+        let failure = drain
+            .offer_prepared_unknown_wire(&authority, None, offer)
+            .unwrap_err();
+        assert_eq!(
+            failure.error(),
+            ScopedObservationUnknownWireOfferError::StaleBinding
+        );
+        assert_eq!(drain.delivery.state(), before);
+    }
+
     #[test]
     fn scoped_known_envelope_routes_common_families_with_exact_attachment_context() {
         let root = root_identity();
@@ -18542,7 +19474,7 @@ mod projection_tests {
             (ScopedObservationKnownEventFamily::Usage, "usage_v2"),
         ] {
             let yielded = drain.next().unwrap().unwrap();
-            let known = yielded.known_envelope();
+            let known = yielded.known_envelope().unwrap();
             assert_eq!(known.family(), family);
             assert_eq!(known.wire_value()["event"]["kind"], kind);
             assert!(crate::observation_contract::unknown_wire::is_known_event_type_tag(kind));
@@ -18596,7 +19528,7 @@ mod projection_tests {
             }])
             .unwrap();
         let yielded = drain.next().unwrap().unwrap();
-        let known = yielded.known_envelope();
+        let known = yielded.known_envelope().unwrap();
         assert_eq!(known.family(), ScopedObservationKnownEventFamily::Source);
         assert_eq!(known.wire_value()["event"]["kind"], "source_created");
         assert_eq!(
@@ -18727,7 +19659,7 @@ mod projection_tests {
 
         let yielded = continuity_drain.next().unwrap().unwrap();
         assert_eq!(
-            yielded.known_envelope().family(),
+            yielded.known_envelope().unwrap().family(),
             ScopedObservationKnownEventFamily::Continuity
         );
     }
@@ -20473,11 +21405,11 @@ mod projection_tests {
                 if Arc::ptr_eq(barrier, &engine_barrier)
         ));
         assert_eq!(
-            complete.known_envelope().family(),
+            complete.known_envelope().unwrap().family(),
             ScopedObservationKnownEventFamily::Completion
         );
         assert_eq!(
-            complete.known_envelope().context_value(),
+            complete.known_envelope().unwrap().context_value(),
             &serde_json::to_value(complete.completion_context().unwrap().wire()).unwrap()
         );
         let complete_receipt = complete.application_receipt().clone();
@@ -20736,11 +21668,11 @@ mod projection_tests {
                 .is_some()
         );
         assert_eq!(
-            invalidation.known_envelope().family(),
+            invalidation.known_envelope().unwrap().family(),
             ScopedObservationKnownEventFamily::Continuity
         );
         assert_eq!(
-            invalidation.known_envelope().context_value(),
+            invalidation.known_envelope().unwrap().context_value(),
             &invalidation_context.wire_value().unwrap()
         );
         assert!(invalidation.artifact_availability_context().is_none());
@@ -20784,11 +21716,11 @@ mod projection_tests {
             Some(required.control_sequence)
         );
         assert_eq!(
-            started_delivery.known_envelope().family(),
+            started_delivery.known_envelope().unwrap().family(),
             ScopedObservationKnownEventFamily::Continuity
         );
         assert_eq!(
-            started_delivery.known_envelope().context_value(),
+            started_delivery.known_envelope().unwrap().context_value(),
             &started_context.wire_value().unwrap()
         );
         drain
@@ -20847,11 +21779,11 @@ mod projection_tests {
         assert!(completed.continuity_context().is_none());
         assert!(completed.completion_context().is_some());
         assert_eq!(
-            completed.known_envelope().family(),
+            completed.known_envelope().unwrap().family(),
             ScopedObservationKnownEventFamily::Completion
         );
         assert_eq!(
-            completed.known_envelope().context_value(),
+            completed.known_envelope().unwrap().context_value(),
             &serde_json::to_value(completed.completion_context().unwrap().wire()).unwrap()
         );
         let state = drain

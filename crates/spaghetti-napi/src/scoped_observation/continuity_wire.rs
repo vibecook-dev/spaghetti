@@ -566,6 +566,7 @@ impl ScopedContinuityEnvelopeConsumerContext {
             | ScopedObservationEvent::ActorRun { .. }
             | ScopedObservationEvent::ActorAffiliation { .. }
             | ScopedObservationEvent::ArtifactAvailability { .. }
+            | ScopedObservationEvent::UnknownWire { .. }
             | ScopedObservationEvent::ObserverBootstrapComplete { .. }
             | ScopedObservationEvent::ObserverResyncComplete { .. } => return Ok(None),
         };

@@ -813,7 +813,8 @@ impl ScopedActorEnvelopeWire {
             ScopedEnvelopeEvidenceAuthority::CommonReducer => {
                 ActorEvidenceAuthorityWire::CommonReducer
             }
-            ScopedEnvelopeEvidenceAuthority::EngineControl => {
+            ScopedEnvelopeEvidenceAuthority::EngineControl
+            | ScopedEnvelopeEvidenceAuthority::PreservedUnknownWire => {
                 return Err(ScopedActorEnvelopeContractError::UnsupportedEvent)
             }
         };

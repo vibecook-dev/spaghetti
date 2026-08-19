@@ -1,10 +1,10 @@
 //! Pre-transport RFC 012D dispatch for every currently implemented event.
 //!
-//! The wrapper is intentionally named `Known`: event-contract v1 still lacks
-//! the bounded `unknown_wire_event` carrier required for an additive complete
-//! union. It is non-Serde, attachment-bound, and constructed from the delivery
-//! preview before dequeue. Each known family is serialized only through its
-//! already-frozen strict specialist contract.
+//! Known families still route through the strict specialist wrapper. A
+//! negotiated additive event instead routes through a separate non-Serde,
+//! attachment-bound carrier that preserves its bounded value without claiming
+//! known semantics. Both are constructed from the delivery preview before
+//! dequeue; public native transport remains a separate gate.
 
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ use crate::adapter::{
     CanonicalEntityKey, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
     ExternalEntityRef, NativeIdentityClaim,
 };
+use crate::observation_contract::unknown_wire::ObservationUnknownWireContractSelection;
 use crate::observation_contract::ObservationContractSelection;
 
 use super::actor_wire::ScopedActorEnvelopeWire;
@@ -116,6 +117,20 @@ pub(crate) struct ScopedObservationKnownEnvelope {
     scope_epoch: u64,
 }
 
+pub(crate) struct ScopedObservationUnknownEnvelope {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    _selection: Arc<ObservationUnknownWireContractSelection>,
+    carrier: crate::observation_contract::unknown_wire::ObservationUnknownWireEvent,
+    context_value: JsonValue,
+    observer_sequence: u64,
+    scope_epoch: u64,
+}
+
+pub(crate) enum ScopedObservationEventUnionEnvelope {
+    Known(ScopedObservationKnownEnvelope),
+    Unknown(Box<ScopedObservationUnknownEnvelope>),
+}
+
 impl std::fmt::Debug for ScopedObservationKnownEnvelope {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -138,18 +153,7 @@ impl ScopedObservationKnownEnvelope {
         contexts: ScopedSpecializedEnvelopeContexts<'_>,
     ) -> Result<Self, ScopedEnvelopeError> {
         validate_delivery(envelope, expected_root, delivered)?;
-        let common_context = || {
-            serde_json::to_value(KnownEnvelopeContextWire {
-                contract_selection: envelope.contract_selection.clone(),
-                root: expected_root.into(),
-                authorized_sources: vec![KnownEnvelopeSourceWire {
-                    instance_key: delivered.source.source_instance_key,
-                    stream_key: delivered.source.stream_key,
-                    object_key: delivered.source.object_key,
-                }],
-            })
-            .map_err(|_| ScopedEnvelopeError::DeliveryMismatch)
-        };
+        let common_context = || common_context_value(envelope, expected_root, delivered);
         let (family, wire_value, context_value) = match &envelope.event {
             ScopedObservationEvent::UsageV2 { .. } => {
                 require_no_specialized_contexts(&contexts)?;
@@ -251,6 +255,9 @@ impl ScopedObservationKnownEnvelope {
                         .map_err(|_| ScopedEnvelopeError::DeliveryMismatch)?,
                 )
             }
+            ScopedObservationEvent::UnknownWire { .. } => {
+                return Err(ScopedEnvelopeError::DeliveryMismatch);
+            }
         };
 
         Ok(Self {
@@ -287,10 +294,8 @@ impl ScopedObservationKnownEnvelope {
         )
     }
 
-    /// Complete outer-union shape for a currently known event. The same union
-    /// also admits `unknown_wire_event` only when its separate preservation
-    /// contract was negotiated; this runtime still has no internal unknown
-    /// event variant and therefore emits only these checked known branches.
+    /// Complete outer-union shape for a currently known event. Negotiated
+    /// unknown branches use `ScopedObservationUnknownEnvelope` instead.
     pub(crate) fn event_union_value(&self) -> JsonValue {
         known_event_union_wire_value(
             self.family,
@@ -307,6 +312,132 @@ impl ScopedObservationKnownEnvelope {
     }
 }
 
+impl ScopedObservationUnknownEnvelope {
+    fn from_predequeue(
+        envelope: &ScopedObservationEnvelope,
+        expected_root: &ScopedObservationRootIdentity,
+        attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        delivered: &ScopedDeliveredObservation,
+        selection: Arc<ObservationUnknownWireContractSelection>,
+    ) -> Result<Self, ScopedEnvelopeError> {
+        validate_delivery(envelope, expected_root, delivered)?;
+        let ScopedObservationEvent::UnknownWire { event } = &envelope.event else {
+            return Err(ScopedEnvelopeError::DeliveryMismatch);
+        };
+        if selection.observation_selection() != &envelope.contract_selection
+            || !event.carrier.belongs_to_runtime_selection(&selection)
+        {
+            return Err(ScopedEnvelopeError::DeliveryMismatch);
+        }
+        Ok(Self {
+            attachment_authority,
+            _selection: selection,
+            carrier: event.carrier.clone(),
+            context_value: common_context_value(envelope, expected_root, delivered)?,
+            observer_sequence: envelope.observer_sequence,
+            scope_epoch: envelope.scope_epoch,
+        })
+    }
+
+    fn event_union_value(&self) -> JsonValue {
+        serde_json::json!({
+            "scoped_observation_event_union_contract_version":
+                SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION,
+            "family": "unknown_wire_event",
+            "context": self.context_value.clone(),
+            "event": self.carrier.wire_value(),
+        })
+    }
+
+    fn belongs_to_attachment(&self, authority: &Arc<ScopedObservationAttachmentAuthority>) -> bool {
+        Arc::ptr_eq(&self.attachment_authority, authority)
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationUnknownEnvelope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationUnknownEnvelope")
+            .field("observer_sequence", &self.observer_sequence)
+            .field("scope_epoch", &self.scope_epoch)
+            .field("selection", &"<attachment-bound>")
+            .field("wire", &"<redacted>")
+            .field("context", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl ScopedObservationEventUnionEnvelope {
+    pub(super) fn from_predequeue(
+        envelope: &ScopedObservationEnvelope,
+        expected_root: &ScopedObservationRootIdentity,
+        attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+        delivered: &ScopedDeliveredObservation,
+        contexts: ScopedSpecializedEnvelopeContexts<'_>,
+        unknown_selection: Option<Arc<ObservationUnknownWireContractSelection>>,
+    ) -> Result<Self, ScopedEnvelopeError> {
+        if matches!(&envelope.event, ScopedObservationEvent::UnknownWire { .. }) {
+            require_no_specialized_contexts(&contexts)?;
+            let selection = unknown_selection.ok_or(ScopedEnvelopeError::DeliveryMismatch)?;
+            return ScopedObservationUnknownEnvelope::from_predequeue(
+                envelope,
+                expected_root,
+                attachment_authority,
+                delivered,
+                selection,
+            )
+            .map(Box::new)
+            .map(Self::Unknown);
+        }
+        if unknown_selection.as_ref().is_some_and(|selection| {
+            selection.observation_selection() != &envelope.contract_selection
+        }) {
+            return Err(ScopedEnvelopeError::DeliveryMismatch);
+        }
+        ScopedObservationKnownEnvelope::from_predequeue(
+            envelope,
+            expected_root,
+            attachment_authority,
+            delivered,
+            contexts,
+        )
+        .map(Self::Known)
+    }
+
+    pub(crate) fn known(&self) -> Option<&ScopedObservationKnownEnvelope> {
+        match self {
+            Self::Known(envelope) => Some(envelope),
+            Self::Unknown(_) => None,
+        }
+    }
+
+    pub(crate) fn event_union_value(&self) -> JsonValue {
+        match self {
+            Self::Known(envelope) => envelope.event_union_value(),
+            Self::Unknown(envelope) => envelope.event_union_value(),
+        }
+    }
+
+    pub(super) fn belongs_to_attachment(
+        &self,
+        authority: &Arc<ScopedObservationAttachmentAuthority>,
+    ) -> bool {
+        match self {
+            Self::Known(envelope) => envelope.belongs_to_attachment(authority),
+            Self::Unknown(envelope) => envelope.belongs_to_attachment(authority),
+        }
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationEventUnionEnvelope {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Known(envelope) => formatter.debug_tuple("Known").field(envelope).finish(),
+            Self::Unknown(envelope) => formatter.debug_tuple("Unknown").field(envelope).finish(),
+        }
+    }
+}
+
 fn known_wire_value(
     family: ScopedObservationKnownEventFamily,
     context: JsonValue,
@@ -319,6 +450,23 @@ fn known_wire_value(
         "context": context,
         "event": event,
     })
+}
+
+fn common_context_value(
+    envelope: &ScopedObservationEnvelope,
+    expected_root: &ScopedObservationRootIdentity,
+    delivered: &ScopedDeliveredObservation,
+) -> Result<JsonValue, ScopedEnvelopeError> {
+    serde_json::to_value(KnownEnvelopeContextWire {
+        contract_selection: envelope.contract_selection.clone(),
+        root: expected_root.into(),
+        authorized_sources: vec![KnownEnvelopeSourceWire {
+            instance_key: delivered.source.source_instance_key,
+            stream_key: delivered.source.stream_key,
+            object_key: delivered.source.object_key,
+        }],
+    })
+    .map_err(|_| ScopedEnvelopeError::DeliveryMismatch)
 }
 
 fn known_event_union_wire_value(

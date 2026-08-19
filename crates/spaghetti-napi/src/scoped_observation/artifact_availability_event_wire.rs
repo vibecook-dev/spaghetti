@@ -391,6 +391,13 @@ impl ScopedArtifactAvailabilityEnvelopeWire {
                     ScopedActorAttribution::ScopeFallback {
                         reason: ScopedActorFallbackReason::ObserverLifecycleControl,
                     } => "observer_lifecycle_control",
+                    ScopedActorAttribution::ScopeFallback {
+                        reason: ScopedActorFallbackReason::UnknownWireEvent,
+                    } => {
+                        return Err(
+                            ScopedArtifactAvailabilityEnvelopeContractError::UnsupportedEvent,
+                        )
+                    }
                     ScopedActorAttribution::NativeExact | ScopedActorAttribution::DerivedExact => "",
                 },
             }),
@@ -426,7 +433,8 @@ impl ScopedArtifactAvailabilityEnvelopeWire {
                         ArtifactAvailabilityEvidenceAuthorityWire::CommonReducer
                     }
                     ScopedEnvelopeEvidenceAuthority::NativeRecord
-                    | ScopedEnvelopeEvidenceAuthority::EngineControl => {
+                    | ScopedEnvelopeEvidenceAuthority::EngineControl
+                    | ScopedEnvelopeEvidenceAuthority::PreservedUnknownWire => {
                         return Err(
                             ScopedArtifactAvailabilityEnvelopeContractError::UnsupportedEvent,
                         )

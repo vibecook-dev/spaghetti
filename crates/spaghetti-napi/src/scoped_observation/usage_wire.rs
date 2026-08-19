@@ -803,7 +803,8 @@ impl ScopedUsageEnvelopeWire {
             ScopedEnvelopeEvidenceAuthority::CommonReducer => {
                 UsageEvidenceAuthorityWire::CommonReducer
             }
-            ScopedEnvelopeEvidenceAuthority::EngineControl => {
+            ScopedEnvelopeEvidenceAuthority::EngineControl
+            | ScopedEnvelopeEvidenceAuthority::PreservedUnknownWire => {
                 return Err(ScopedUsageEnvelopeContractError::UnsupportedEvent)
             }
         };

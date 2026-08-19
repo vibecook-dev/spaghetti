@@ -868,12 +868,12 @@ fn ordered_availability_portable_fixture_is_produced_by_the_confined_pipeline() 
             .unwrap();
     let wire_value = serde_json::to_value(&wire).unwrap();
     assert_eq!(
-        yielded.known_envelope().family(),
+        yielded.known_envelope().unwrap().family(),
         ScopedObservationKnownEventFamily::ArtifactAvailability
     );
-    assert_eq!(yielded.known_envelope().wire_value(), &wire_value);
+    assert_eq!(yielded.known_envelope().unwrap().wire_value(), &wire_value);
     assert_eq!(
-        yielded.known_envelope().context_value(),
+        yielded.known_envelope().unwrap().context_value(),
         &serde_json::to_value(context.wire()).unwrap()
     );
     let parsed = ScopedArtifactAvailabilityEnvelopeWire::from_wire_value_for_context(

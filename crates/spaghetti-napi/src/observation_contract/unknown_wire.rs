@@ -3,12 +3,14 @@
 //! This contract is deliberately separate from the already-frozen base
 //! observation selection. When negotiated, it is selected against that exact
 //! caller-held value before source access, and it never upgrades an unknown
-//! event into a known semantic family. Runtime attachment, emission, and public
+//! event into a known semantic family. The internal runtime may now bind a
+//! trusted bounded producer to one attachment; vendor production and public
 //! transport remain separate gates.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Write};
+use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::de::Error as _;
@@ -447,7 +449,6 @@ pub(crate) struct ObservationUnknownWireProvenance {
     generation: u64,
     observed_at: i64,
     phase: String,
-    additional_envelope_provenance: BTreeMap<String, JsonValue>,
 }
 
 impl fmt::Debug for ObservationUnknownWireProvenance {
@@ -466,21 +467,154 @@ impl fmt::Debug for ObservationUnknownWireProvenance {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct ObservationUnknownWireEvent {
+    preserved: Arc<ObservationUnknownWirePreservedValue>,
+    provenance: ObservationUnknownWireProvenance,
+    runtime_selection: Option<Arc<ObservationUnknownWireContractSelection>>,
+}
+
+impl PartialEq for ObservationUnknownWireEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.preserved == other.preserved && self.provenance == other.provenance
+    }
+}
+
+impl Eq for ObservationUnknownWireEvent {}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ObservationUnknownWirePreservedValue {
     type_tag: String,
     encoded_value: JsonValue,
-    provenance: ObservationUnknownWireProvenance,
+    additional_envelope_provenance: BTreeMap<String, JsonValue>,
+    encoded_bytes: u64,
+    identity_digest: [u8; DIGEST_BYTES],
+}
+
+/// Bounded opaque value prepared by a trusted Rust producer under one exact
+/// negotiated sidecar. It is intentionally non-Serde and carries no sequence,
+/// epoch, source, or event authority until the attachment-owned delivery lane
+/// binds those coordinates.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ObservationUnknownWireRuntimePayload {
+    selection: Arc<ObservationUnknownWireContractSelection>,
+    preserved: Arc<ObservationUnknownWirePreservedValue>,
 }
 
 impl fmt::Debug for ObservationUnknownWireEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ObservationUnknownWireEvent")
-            .field("type_tag", &self.type_tag)
+            .field("type_tag", &self.preserved.type_tag)
             .field("encoded_value", &"<redacted-preserved-value>")
             .field("provenance", &self.provenance)
             .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ObservationUnknownWireRuntimePayload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservationUnknownWireRuntimePayload")
+            .field("type_tag", &self.preserved.type_tag)
+            .field("encoded_value", &"<redacted-preserved-value>")
+            .field("encoded_bytes", &self.preserved.encoded_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ObservationUnknownWireRuntimePayload {
+    pub(crate) fn new(
+        selection: Arc<ObservationUnknownWireContractSelection>,
+        type_tag: String,
+        encoded_value: JsonValue,
+        additional_envelope_provenance: JsonValue,
+    ) -> Result<Self, ObservationUnknownWireContractError> {
+        selection.validate()?;
+        validate_type_tag(&type_tag)?;
+        let mut budget = UnknownWireBudget::new(selection.capability.max_preserved_bytes as usize);
+        let encoded_value = clone_bounded_json(&encoded_value, 1, &mut budget)?;
+        let additional_envelope_provenance = additional_envelope_provenance
+            .as_object()
+            .ok_or_else(|| {
+                ObservationUnknownWireContractError::invalid(
+                    "unknown-wire additional envelope provenance must be an object",
+                )
+            })
+            .and_then(|values| clone_bounded_fields(values, &mut budget))?;
+        let encoded_bytes = validate_exact_encoded_bound(
+            &encoded_value,
+            &additional_envelope_provenance,
+            selection.capability.max_preserved_bytes as usize,
+        )?;
+        let encoded_bytes = u64::try_from(encoded_bytes).map_err(|_| {
+            ObservationUnknownWireContractError::invalid(
+                "unknown-wire encoded byte count is not portable",
+            )
+        })?;
+        let identity_digest = unknown_wire_preserved_identity_digest(
+            &type_tag,
+            &encoded_value,
+            &additional_envelope_provenance,
+        )?;
+        Ok(Self {
+            selection,
+            preserved: Arc::new(ObservationUnknownWirePreservedValue {
+                type_tag,
+                encoded_value,
+                additional_envelope_provenance,
+                encoded_bytes,
+                identity_digest,
+            }),
+        })
+    }
+
+    pub(crate) fn encoded_bytes(&self) -> u64 {
+        self.preserved.encoded_bytes
+    }
+
+    pub(crate) fn identity_digest(&self) -> &[u8; DIGEST_BYTES] {
+        &self.preserved.identity_digest
+    }
+
+    pub(crate) fn validate_producer_metadata(
+        &self,
+        semantic_revision_ref: Option<&SemanticRevisionRef>,
+        observed_at: i64,
+        phase: &str,
+    ) -> Result<(), ObservationUnknownWireContractError> {
+        if semantic_revision_ref.is_some_and(|reference| {
+            reference.semantic_reference_contract_version
+                != self
+                    .selection
+                    .observation_selection
+                    .contract_versions
+                    .semantic_revision_reference_version
+        }) {
+            return Err(ObservationUnknownWireContractError::invalid(
+                "unknown-wire semantic revision does not match the selected contract",
+            ));
+        }
+        validate_safe_i64("unknown-wire observed_at", observed_at)?;
+        validate_phase(phase)
+    }
+
+    pub(crate) fn validate_runtime_coordinates(
+        &self,
+        observer_sequence: u64,
+        scope_epoch: u64,
+        generation: u64,
+    ) -> Result<(), ObservationUnknownWireContractError> {
+        validate_positive_portable("unknown-wire observer sequence", observer_sequence)?;
+        validate_positive_portable("unknown-wire scope epoch", scope_epoch)?;
+        validate_positive_portable("unknown-wire source generation", generation)
+    }
+
+    pub(crate) fn belongs_to_selection(
+        &self,
+        selection: &Arc<ObservationUnknownWireContractSelection>,
+    ) -> bool {
+        Arc::ptr_eq(&self.selection, selection)
     }
 }
 
@@ -577,14 +711,29 @@ impl ObservationUnknownWireEvent {
                 )
             })
             .and_then(|values| clone_bounded_fields(values, &mut budget))?;
-        validate_exact_encoded_bound(
+        let encoded_bytes = validate_exact_encoded_bound(
             &encoded_value,
             &additional_envelope_provenance,
             selection.capability.max_preserved_bytes as usize,
         )?;
+        let encoded_bytes = u64::try_from(encoded_bytes).map_err(|_| {
+            ObservationUnknownWireContractError::invalid(
+                "unknown-wire encoded byte count is not portable",
+            )
+        })?;
+        let identity_digest = unknown_wire_preserved_identity_digest(
+            &wire.type_tag,
+            &encoded_value,
+            &additional_envelope_provenance,
+        )?;
         let value = Self {
-            type_tag: wire.type_tag,
-            encoded_value,
+            preserved: Arc::new(ObservationUnknownWirePreservedValue {
+                type_tag: wire.type_tag,
+                encoded_value,
+                additional_envelope_provenance,
+                encoded_bytes,
+                identity_digest,
+            }),
             provenance: ObservationUnknownWireProvenance {
                 observation_selection,
                 observer_sequence: wire.envelope_provenance.observer_sequence,
@@ -597,26 +746,80 @@ impl ObservationUnknownWireEvent {
                 generation: wire.envelope_provenance.source.generation,
                 observed_at: wire.envelope_provenance.observed_at,
                 phase: wire.envelope_provenance.phase,
-                additional_envelope_provenance,
             },
+            runtime_selection: None,
         };
         Ok(value)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_runtime_payload(
+        payload: &ObservationUnknownWireRuntimePayload,
+        observer_sequence: u64,
+        scope_epoch: u64,
+        event_id: &[u8; DIGEST_BYTES],
+        semantic_revision_ref: Option<SemanticRevisionRef>,
+        source_instance_key: CanonicalSourceInstanceKey,
+        stream_key: CoverageStreamKey,
+        object_key: CoverageObjectKey,
+        generation: u64,
+        observed_at: i64,
+        phase: &str,
+    ) -> Result<Self, ObservationUnknownWireContractError> {
+        payload.selection.validate()?;
+        payload.validate_runtime_coordinates(observer_sequence, scope_epoch, generation)?;
+        if event_id.iter().all(|byte| *byte == 0) {
+            return Err(ObservationUnknownWireContractError::invalid(
+                "unknown-wire event ID must be nonzero",
+            ));
+        }
+        payload.validate_producer_metadata(semantic_revision_ref.as_ref(), observed_at, phase)?;
+        Ok(Self {
+            preserved: Arc::clone(&payload.preserved),
+            provenance: ObservationUnknownWireProvenance {
+                observation_selection: payload.selection.observation_selection.clone(),
+                observer_sequence,
+                scope_epoch,
+                event_id: format!("v1:{}", URL_SAFE_NO_PAD.encode(event_id)),
+                semantic_revision_ref,
+                source_instance_key,
+                stream_key,
+                object_key,
+                generation,
+                observed_at,
+                phase: phase.to_owned(),
+            },
+            runtime_selection: Some(Arc::clone(&payload.selection)),
+        })
+    }
+
     pub(crate) fn type_tag(&self) -> &str {
-        &self.type_tag
+        &self.preserved.type_tag
     }
 
     pub(crate) fn provenance(&self) -> &ObservationUnknownWireProvenance {
         &self.provenance
     }
 
+    pub(crate) fn encoded_bytes(&self) -> u64 {
+        self.preserved.encoded_bytes
+    }
+
+    pub(crate) fn belongs_to_runtime_selection(
+        &self,
+        selection: &Arc<ObservationUnknownWireContractSelection>,
+    ) -> bool {
+        self.runtime_selection
+            .as_ref()
+            .is_some_and(|bound| Arc::ptr_eq(bound, selection))
+    }
+
     pub(crate) fn wire_value(&self) -> JsonValue {
         serde_json::json!({
             "unknown_wire_event_contract_version": OBSERVATION_UNKNOWN_WIRE_EVENT_CONTRACT_VERSION,
             "family": UNKNOWN_WIRE_FAMILY,
-            "type_tag": self.type_tag,
-            "encoded_value": self.encoded_value,
+            "type_tag": self.preserved.type_tag,
+            "encoded_value": self.preserved.encoded_value,
             "envelope_provenance": {
                 "observation_selection": self.provenance.observation_selection,
                 "observer_sequence": self.provenance.observer_sequence,
@@ -631,7 +834,7 @@ impl ObservationUnknownWireEvent {
                 },
                 "observed_at": self.provenance.observed_at,
                 "phase": self.provenance.phase,
-                "additional_envelope_provenance": self.provenance.additional_envelope_provenance,
+                "additional_envelope_provenance": self.preserved.additional_envelope_provenance,
             }
         })
     }
@@ -676,6 +879,15 @@ fn validate_safe_i64(label: &str, value: i64) -> Result<(), ObservationUnknownWi
         return Err(ObservationUnknownWireContractError::invalid(format!(
             "{label} must be a JavaScript-safe integer"
         )));
+    }
+    Ok(())
+}
+
+fn validate_phase(value: &str) -> Result<(), ObservationUnknownWireContractError> {
+    if !matches!(value, "bootstrap" | "live" | "correction") {
+        return Err(ObservationUnknownWireContractError::invalid(
+            "unknown-wire phase is not canonical",
+        ));
     }
     Ok(())
 }
@@ -870,7 +1082,7 @@ fn validate_exact_encoded_bound(
     encoded_value: &JsonValue,
     additional_envelope_provenance: &BTreeMap<String, JsonValue>,
     max_bytes: usize,
-) -> Result<(), ObservationUnknownWireContractError> {
+) -> Result<usize, ObservationUnknownWireContractError> {
     let mut counter = BoundedJsonCounter {
         bytes: 0,
         max_bytes,
@@ -885,7 +1097,27 @@ fn validate_exact_encoded_bound(
             "unknown-wire encoded value exceeds the negotiated {max_bytes} byte bound"
         ))
     })?;
-    Ok(())
+    Ok(counter.bytes)
+}
+
+fn unknown_wire_preserved_identity_digest(
+    type_tag: &str,
+    encoded_value: &JsonValue,
+    additional_envelope_provenance: &BTreeMap<String, JsonValue>,
+) -> Result<[u8; DIGEST_BYTES], ObservationUnknownWireContractError> {
+    let encoded =
+        serde_json::to_vec(encoded_value).map_err(ObservationUnknownWireContractError::invalid)?;
+    let additional = serde_json::to_vec(additional_envelope_provenance)
+        .map_err(ObservationUnknownWireContractError::invalid)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti.observation.unknown-wire.preserved.v1\0");
+    hasher.update(&(type_tag.len() as u64).to_be_bytes());
+    hasher.update(type_tag.as_bytes());
+    hasher.update(&(encoded.len() as u64).to_be_bytes());
+    hasher.update(&encoded);
+    hasher.update(&(additional.len() as u64).to_be_bytes());
+    hasher.update(&additional);
+    Ok(*hasher.finalize().as_bytes())
 }
 
 #[cfg(test)]
