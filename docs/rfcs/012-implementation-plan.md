@@ -2397,6 +2397,18 @@ on artifact-availability revisions, dynamic/discovered scope authority, and
 the complete event/control union; no N-API observer method or public attachment
 authority is added here.
 
+The next bounded D3 prerequisite (`9448ba3`) gives Claude file-history
+metadata and content topology-neutral canonical session and artifact identities
+plus canonical value-derived semantic revisions while retaining the RFC 011
+durable keys in parallel. Named metadata and content derive the same artifact
+key; numeric registration/source topology and observation time cannot perturb
+canonical fact or revision identity, metadata entry order is canonical, and a
+normalized metadata or content change revises the fact without rekeying it.
+Legacy durable artifact projection and ingest parity remain unchanged. This
+does not create artifact-availability state, evidence-derived locator
+authority, native reads, a complete event/control union or barrier, support
+promotion, or public transport.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
