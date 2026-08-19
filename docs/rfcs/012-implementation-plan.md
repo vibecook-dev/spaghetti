@@ -2409,6 +2409,18 @@ does not create artifact-availability state, evidence-derived locator
 authority, native reads, a complete event/control union or barrier, support
 promotion, or public transport.
 
+The next bounded D3 prerequisite (`1968694`) makes canonical artifact metadata
+a root-bound, lifecycle-owned scoped evidence state. Only facts committed
+through the existing admission/offer transaction enter the bounded reducer;
+reset, deletion, replacement rollback, and resync staging preserve exact
+source ownership. A path-free canonical snapshot distinguishes
+content-expected, explicit not-captured, and conflicting evidence and derives
+topology-neutral revisions from canonical fact, revision, and source-record
+identities while withholding native locator material. It does not reserve
+`ArtifactLocatorFromEvidence`, construct or open a locator, claim content
+availability, enter the portable artifact DTO or completion barrier, promote
+support, or expose public transport.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
