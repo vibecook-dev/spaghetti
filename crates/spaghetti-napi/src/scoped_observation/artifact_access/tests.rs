@@ -50,7 +50,7 @@ const ARTIFACT_SCOPE_DOCUMENT: &[u8] = br#"{
         "relation_id": "file-artifact",
         "primitive": "ArtifactLocatorFromEvidence",
         "access_root": "artifact",
-        "locator": "declared-artifact-locator",
+        "locator": "file-history/{native-session-id}/{backup-name}",
         "identity_inputs": ["native-session-id", "backup-name", "artifact-version"],
         "bounds": {"max_fan_out": 4, "max_depth": 3, "max_objects": 4, "max_bytes": 4096, "max_rows": 0},
         "unavailable_behavior": "skip_optional",
@@ -62,6 +62,16 @@ const ARTIFACT_SCOPE_DOCUMENT: &[u8] = br#"{
         "access_root": "artifact",
         "locator": "wrong-artifact-locator",
         "identity_inputs": ["native-session-id", "backup-name"],
+        "bounds": {"max_fan_out": 1, "max_depth": 2, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
+        "unavailable_behavior": "skip_optional",
+        "claim_refs": ["scope-evidence"]
+      },
+      {
+        "relation_id": "conceptual-artifact",
+        "primitive": "ArtifactLocatorFromEvidence",
+        "access_root": "artifact",
+        "locator": "conceptual-artifact-locator",
+        "identity_inputs": ["native-session-id", "backup-name", "artifact-version"],
         "bounds": {"max_fan_out": 1, "max_depth": 2, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
         "unavailable_behavior": "skip_optional",
         "claim_refs": ["scope-evidence"]
@@ -290,14 +300,21 @@ fn exact_evidence_relation_reservation_is_bound_redacted_and_conservative() {
     assert_eq!(proof.object_token, expected);
     assert_eq!(proof.relation_id.as_ref(), "file-artifact");
     assert_eq!(proof.access_root.as_ref(), "artifact");
-    assert_eq!(proof.locator_id.as_ref(), "declared-artifact-locator");
+    assert_eq!(
+        proof.locator_id.as_ref(),
+        "file-history/{native-session-id}/{backup-name}"
+    );
+    assert_eq!(
+        proof._relative_path,
+        std::path::PathBuf::from("file-history/native-session/backup-17@v7")
+    );
     assert_eq!(proof._native_session_id.as_ref(), "native-session");
     assert_eq!(proof._native_artifact_id.as_ref(), "backup-17@v7");
     assert_eq!(proof._artifact_version.as_ref(), "7");
     let debug = format!("{proof:?}");
     for secret in [
         temp.path().to_string_lossy().as_ref(),
-        "native-session",
+        "/native-session/",
         "backup-17@v7",
         "/private/never/exposed.txt",
     ] {
@@ -370,6 +387,21 @@ fn relation_roots_axes_native_identity_and_attachment_fail_closed() {
     }];
     assert!(matches!(
         ScopedObservationAccessHost::authorize(&registry, wrong_axis),
+        Err(ScopedObservationAccessError::InvalidGrant(_))
+    ));
+
+    let mut conceptual = scoped_access_request(temp.path().join("conceptual-known"));
+    conceptual.root_identity = exact_root_identity(true);
+    conceptual.access_roots.push(ScopedAccessRootGrant {
+        access_root: "artifact".to_string(),
+        root: temp.path().join("conceptual-artifacts"),
+    });
+    conceptual.artifact_relations = vec![ScopedArtifactRelationGrant {
+        artifact_kind: "workflow_definition".to_string(),
+        relation_id: "conceptual-artifact".to_string(),
+    }];
+    assert!(matches!(
+        ScopedObservationAccessHost::authorize(&registry, conceptual),
         Err(ScopedObservationAccessError::InvalidGrant(_))
     ));
 

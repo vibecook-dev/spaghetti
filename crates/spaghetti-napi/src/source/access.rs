@@ -6,6 +6,7 @@
 //! prevents retries, panics, and partial reads from bypassing a scope budget.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 
 const MAX_RELATION_ID_BYTES: usize = 128;
 const MAX_TRACE_CAPACITY: usize = 16_384;
+const MAX_RENDERED_SCOPE_LOCATOR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -806,6 +808,34 @@ impl ScopeAccessReservation {
         self.object_token
     }
 
+    /// Render the declaration's exact evidence locator using the same named
+    /// values that minted this reservation's opaque object token. The result
+    /// is only a confined relative path; this method neither joins it to a
+    /// native root nor opens an object.
+    pub(crate) fn render_evidence_locator(
+        &self,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+    ) -> Result<PathBuf, AccessBudgetError> {
+        validate_evidence_locator_template(&self.declaration)?;
+        if identity_inputs.len() != self.declaration.identity_inputs.len()
+            || identity_inputs
+                .iter()
+                .zip(&self.declaration.identity_inputs)
+                .any(|(actual, expected)| actual.name != expected)
+        {
+            return Err(invalid_locator_template());
+        }
+        let mut token_components = Vec::with_capacity(identity_inputs.len() * 2);
+        for input in identity_inputs {
+            token_components.push(input.name.as_bytes());
+            token_components.push(input.value);
+        }
+        if AccessObjectToken::derive(self.relation_id(), &token_components)? != self.object_token {
+            return Err(invalid_locator_template());
+        }
+        render_evidence_locator(&self.declaration.locator, identity_inputs)
+    }
+
     pub fn complete(
         mut self,
         bytes_read: u64,
@@ -824,6 +854,126 @@ impl ScopeAccessReservation {
             .expect("scope reservation is consumed only once")
             .fail_conservative();
     }
+}
+
+pub(crate) fn validate_evidence_locator_template(
+    declaration: &ScopeRelationDeclaration,
+) -> Result<(), AccessBudgetError> {
+    if declaration.primitive != ScopeRelationPrimitive::ArtifactLocatorFromEvidence {
+        return Err(invalid_locator_template());
+    }
+    let placeholders = locator_placeholders(&declaration.locator)?;
+    if placeholders.is_empty()
+        || placeholders.iter().any(|(_, _, name)| {
+            !declaration
+                .identity_inputs
+                .iter()
+                .any(|declared| declared == name)
+        })
+    {
+        return Err(invalid_locator_template());
+    }
+    Ok(())
+}
+
+fn render_evidence_locator(
+    template: &str,
+    identity_inputs: &[ScopeIdentityInput<'_>],
+) -> Result<PathBuf, AccessBudgetError> {
+    let placeholders = locator_placeholders(template)?;
+    let values = identity_inputs
+        .iter()
+        .map(|input| {
+            let value = std::str::from_utf8(input.value).map_err(|_| invalid_locator_template())?;
+            if value.is_empty()
+                || value
+                    .bytes()
+                    .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
+            {
+                return Err(invalid_locator_template());
+            }
+            Ok((input.name, value))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    if values.len() != identity_inputs.len() {
+        return Err(invalid_locator_template());
+    }
+
+    let mut output_len = template.len();
+    for (start, end, name) in &placeholders {
+        let value = values.get(name).ok_or_else(invalid_locator_template)?;
+        output_len = output_len
+            .checked_sub(end - start)
+            .and_then(|length| length.checked_add(value.len()))
+            .ok_or_else(invalid_locator_template)?;
+    }
+    if output_len == 0 || output_len > MAX_RENDERED_SCOPE_LOCATOR_BYTES {
+        return Err(invalid_locator_template());
+    }
+    let mut output = String::new();
+    output
+        .try_reserve_exact(output_len)
+        .map_err(|_| invalid_locator_template())?;
+    let mut cursor = 0;
+    for (start, end, name) in placeholders {
+        output.push_str(&template[cursor..start]);
+        output.push_str(values.get(name).ok_or_else(invalid_locator_template)?);
+        cursor = end;
+    }
+    output.push_str(&template[cursor..]);
+    let first_component = output.split('/').next().unwrap_or_default().as_bytes();
+    let has_windows_drive_prefix = first_component.len() >= 2
+        && first_component[0].is_ascii_alphabetic()
+        && first_component[1] == b':';
+    if output.len() != output_len
+        || output.starts_with('/')
+        || has_windows_drive_prefix
+        || output.contains('\\')
+        || output
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(invalid_locator_template());
+    }
+    let path = PathBuf::from(output);
+    super::file::confined_relative_path_key(&path).map_err(|_| invalid_locator_template())?;
+    Ok(path)
+}
+
+fn locator_placeholders(locator: &str) -> Result<Vec<(usize, usize, &str)>, AccessBudgetError> {
+    let bytes = locator.as_bytes();
+    let mut placeholders = Vec::new();
+    let mut names = BTreeSet::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'{' => {
+                let end = bytes[cursor + 1..]
+                    .iter()
+                    .position(|byte| *byte == b'}')
+                    .map(|offset| cursor + 1 + offset)
+                    .ok_or_else(invalid_locator_template)?;
+                let name = &locator[cursor + 1..end];
+                if name.as_bytes().contains(&b'{')
+                    || validate_relation_id(name).is_err()
+                    || !names.insert(name)
+                {
+                    return Err(invalid_locator_template());
+                }
+                placeholders.push((cursor, end + 1, name));
+                cursor = end + 1;
+            }
+            b'}' => return Err(invalid_locator_template()),
+            _ => cursor += 1,
+        }
+    }
+    Ok(placeholders)
+}
+
+fn invalid_locator_template() -> AccessBudgetError {
+    AccessBudgetError::InvalidConfig(
+        "artifact locator template or bound identity input is invalid".to_string(),
+    )
 }
 
 fn primitive_allows_operation(
@@ -1349,6 +1499,164 @@ mod tests {
             "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
         )))
         .unwrap()
+    }
+
+    fn artifact_scope_plan(locator: &str) -> ScopeAccessPlan {
+        let mut manifest = grok_scope_manifest();
+        let relation = manifest.programs[0]
+            .relations
+            .iter_mut()
+            .find(|relation| relation.relation_id == "summary-sidecar")
+            .unwrap();
+        relation.primitive = ScopeRelationPrimitive::ArtifactLocatorFromEvidence;
+        relation.locator = locator.to_string();
+        relation.identity_inputs = vec![
+            "native-session-id".to_string(),
+            "backup-name".to_string(),
+            "artifact-version".to_string(),
+        ];
+        ScopeAccessPlan::for_program(&manifest, "observe-session-sidecars").unwrap()
+    }
+
+    fn render_artifact_locator(
+        locator: &str,
+        native_session_id: &[u8],
+        backup_name: &[u8],
+        artifact_version: &[u8],
+    ) -> Result<PathBuf, AccessBudgetError> {
+        let plan = artifact_scope_plan(locator);
+        let identity = [
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: native_session_id,
+            },
+            ScopeIdentityInput {
+                name: "backup-name",
+                value: backup_name,
+            },
+            ScopeIdentityInput {
+                name: "artifact-version",
+                value: artifact_version,
+            },
+        ];
+        plan.reserve(ScopeAccessRequest {
+            relation_id: "summary-sidecar",
+            operation: AccessOperation::ObjectRead,
+            phase: AccessPhase::Revalidation,
+            parent_token: None,
+            identity_inputs: &identity,
+            depth: 1,
+            max_bytes: 1,
+            max_rows: 0,
+        })?
+        .render_evidence_locator(&identity)
+    }
+
+    #[test]
+    fn artifact_locator_templates_render_only_exact_bound_identity_inputs() {
+        assert_eq!(
+            render_artifact_locator(
+                "file-history/{native-session-id}/{backup-name}.{artifact-version}",
+                b"session-7",
+                b"backup-a",
+                b"9",
+            )
+            .unwrap(),
+            PathBuf::from("file-history/session-7/backup-a.9")
+        );
+
+        let plan = artifact_scope_plan("file-history/{native-session-id}/{backup-name}");
+        let reserved_identity = [
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"session-7",
+            },
+            ScopeIdentityInput {
+                name: "backup-name",
+                value: b"backup-a",
+            },
+            ScopeIdentityInput {
+                name: "artifact-version",
+                value: b"9",
+            },
+        ];
+        let reservation = plan
+            .reserve(ScopeAccessRequest {
+                relation_id: "summary-sidecar",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Revalidation,
+                parent_token: None,
+                identity_inputs: &reserved_identity,
+                depth: 1,
+                max_bytes: 1,
+                max_rows: 0,
+            })
+            .unwrap();
+        let substituted_identity = [
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"other-session",
+            },
+            reserved_identity[1],
+            reserved_identity[2],
+        ];
+        assert!(reservation
+            .render_evidence_locator(&substituted_identity)
+            .is_err());
+    }
+
+    #[test]
+    fn artifact_locator_templates_reject_conceptual_or_ambiguous_shapes() {
+        for locator in [
+            "declared-artifact-locator",
+            "file-history/{unknown-input}",
+            "file-history/{backup-name}/{backup-name}",
+            "file-history/{backup-name",
+            "file-history/backup-name}",
+            "file-history/{{backup-name}}",
+        ] {
+            let plan = artifact_scope_plan(locator);
+            let declaration = plan.relation("summary-sidecar").unwrap();
+            assert!(
+                validate_evidence_locator_template(declaration).is_err(),
+                "accepted {locator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_locator_rendering_is_confined_and_bounded_before_retention() {
+        for native_session_id in [
+            b"..".as_slice(),
+            b".".as_slice(),
+            b"C:".as_slice(),
+            b"nested/session".as_slice(),
+            b"nested\\session".as_slice(),
+            b"line\nbreak".as_slice(),
+            b"\xff".as_slice(),
+        ] {
+            assert!(
+                render_artifact_locator(
+                    "{native-session-id}/{backup-name}",
+                    native_session_id,
+                    b"backup-a",
+                    b"9",
+                )
+                .is_err(),
+                "accepted {native_session_id:?}"
+            );
+        }
+
+        let exact = vec![b'a'; MAX_RENDERED_SCOPE_LOCATOR_BYTES];
+        assert_eq!(
+            render_artifact_locator("{backup-name}", b"session-7", &exact, b"9")
+                .unwrap()
+                .as_os_str()
+                .len(),
+            MAX_RENDERED_SCOPE_LOCATOR_BYTES
+        );
+        let oversized = vec![b'a'; MAX_RENDERED_SCOPE_LOCATOR_BYTES + 1];
+        assert!(render_artifact_locator("{backup-name}", b"session-7", &oversized, b"9").is_err());
     }
 
     #[test]

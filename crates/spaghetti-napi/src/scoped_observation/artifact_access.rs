@@ -1,9 +1,10 @@
 //! Non-I/O artifact relation authorization.
 //!
 //! This seam consumes current admitted artifact metadata only far enough to
-//! reserve one exact promoted `ArtifactLocatorFromEvidence` relation. It does
-//! not interpret the declaration locator, construct a path, open an object, or
-//! claim artifact availability.
+//! reserve one exact promoted `ArtifactLocatorFromEvidence` relation and
+//! render its declaration template from already-bound identity evidence. It
+//! retains only a confined relative path; it does not join a native root, open
+//! an object, or claim artifact availability.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -12,8 +13,9 @@ use std::sync::Arc;
 
 use crate::adapter::{ContractCompleteness, QualifiedValueQuality, ScopeRelationPrimitive};
 use crate::source::{
-    AccessBudgetError, AccessObjectToken, AccessOperation, AccessPhase, AuthorizedScopeAccessPlan,
-    ScopeAccessRequest, ScopeAccessReservation, ScopeIdentityInput,
+    validate_evidence_locator_template, AccessBudgetError, AccessObjectToken, AccessOperation,
+    AccessPhase, AuthorizedScopeAccessPlan, ScopeAccessRequest, ScopeAccessReservation,
+    ScopeIdentityInput,
 };
 
 use super::artifact_wire::ScopedValidatedArtifactReadCommand;
@@ -50,6 +52,7 @@ pub(crate) struct ScopedArtifactRelationReservation<'command, 'pass> {
     object_token: AccessObjectToken,
     max_bytes: u64,
     _root: PathBuf,
+    _relative_path: PathBuf,
     _native_session_id: Arc<str>,
     _native_artifact_id: Arc<str>,
     _artifact_version: Arc<str>,
@@ -92,6 +95,7 @@ pub(super) fn validate_artifact_relation_grants(
                 .iter()
                 .map(String::as_str)
                 .ne(ARTIFACT_IDENTITY_INPUTS)
+            || validate_evidence_locator_template(relation).is_err()
         {
             return Err(ScopedObservationAccessError::InvalidGrant(format!(
                 "relation {:?} is not an exact evidence-derived artifact relation",
@@ -274,6 +278,13 @@ impl ScopedObservationAccessPass {
             reservation.fail_conservative();
             return Err(ScopedArtifactRelationAccessError::InvalidBinding);
         }
+        let relative_path = match reservation.render_evidence_locator(&identity_inputs) {
+            Ok(relative_path) => relative_path,
+            Err(error) => {
+                reservation.fail_conservative();
+                return Err(ScopedArtifactRelationAccessError::Access(error));
+            }
+        };
         let object_token = reservation.object_token();
         Ok(ScopedArtifactRelationReservation {
             relation_id: Arc::from(relation_id),
@@ -283,6 +294,7 @@ impl ScopedObservationAccessPass {
             object_token,
             max_bytes: validated.command.max_bytes,
             _root: root.root.clone(),
+            _relative_path: relative_path,
             _native_session_id: Arc::from(native_session.native_id.as_str()),
             _native_artifact_id: Arc::clone(evidence.native_artifact_id()),
             _artifact_version: artifact_version,
