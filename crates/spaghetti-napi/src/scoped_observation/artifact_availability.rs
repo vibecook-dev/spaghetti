@@ -69,11 +69,16 @@ impl ScopedArtifactAvailabilityObservation {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) struct ScopedArtifactAvailabilityRevision([u8; 32]);
+pub struct ScopedArtifactAvailabilityRevision([u8; 32]);
 
 impl ScopedArtifactAvailabilityRevision {
-    pub(super) fn as_bytes(&self) -> &[u8; 32] {
+    pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -87,14 +92,28 @@ impl fmt::Debug for ScopedArtifactAvailabilityRevision {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct ScopedArtifactAvailabilityEntry {
+pub struct ScopedArtifactAvailabilityEntry {
     artifact_key: CanonicalEntityKey,
     artifact_kind: Arc<str>,
     revision: ScopedArtifactAvailabilityRevision,
 }
 
+impl ScopedArtifactAvailabilityEntry {
+    pub fn artifact_key(&self) -> CanonicalEntityKey {
+        self.artifact_key
+    }
+
+    pub fn artifact_kind(&self) -> &str {
+        &self.artifact_kind
+    }
+
+    pub fn revision(&self) -> ScopedArtifactAvailabilityRevision {
+        self.revision
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct ScopedArtifactAvailabilitySnapshot {
+pub struct ScopedArtifactAvailabilitySnapshot {
     contract_version: u32,
     root_session: CanonicalEntityKey,
     entry_count: u64,
@@ -103,12 +122,73 @@ pub(super) struct ScopedArtifactAvailabilitySnapshot {
 }
 
 impl ScopedArtifactAvailabilitySnapshot {
-    pub(super) fn entry_count(&self) -> u64 {
+    pub fn entry_count(&self) -> u64 {
         self.entry_count
     }
 
-    pub(super) fn semantic_digest(&self) -> ScopedArtifactAvailabilityRevision {
+    pub fn semantic_digest(&self) -> ScopedArtifactAvailabilityRevision {
         self.semantic_digest
+    }
+
+    pub fn entries(&self) -> &[ScopedArtifactAvailabilityEntry] {
+        &self.entries
+    }
+
+    pub(super) fn validate_for_root(&self, root_session: CanonicalEntityKey) -> bool {
+        self.contract_version == SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION
+            && self.root_session == root_session
+            && u64::try_from(self.entries.len()) == Ok(self.entry_count)
+            && self.entries.windows(2).all(|window| {
+                (&window[0].artifact_key, window[0].artifact_kind.as_ref())
+                    < (&window[1].artifact_key, window[1].artifact_kind.as_ref())
+            })
+            && self.semantic_digest
+                == derive_snapshot_digest(root_session, self.entry_count, &self.entries)
+    }
+
+    #[cfg(test)]
+    pub(super) fn empty_fixture(root_session: CanonicalEntityKey) -> Self {
+        let entries = Vec::new();
+        Self {
+            contract_version: SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION,
+            root_session,
+            entry_count: 0,
+            semantic_digest: derive_snapshot_digest(root_session, 0, &entries),
+            entries,
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture(
+        root_session: CanonicalEntityKey,
+        entries: Vec<(
+            CanonicalEntityKey,
+            impl Into<Arc<str>>,
+            ScopedArtifactAvailabilityRevision,
+        )>,
+    ) -> Self {
+        let mut entries = entries
+            .into_iter()
+            .map(
+                |(artifact_key, artifact_kind, revision)| ScopedArtifactAvailabilityEntry {
+                    artifact_key,
+                    artifact_kind: artifact_kind.into(),
+                    revision,
+                },
+            )
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            (&left.artifact_key, left.artifact_kind.as_ref())
+                .cmp(&(&right.artifact_key, right.artifact_kind.as_ref()))
+        });
+        let entry_count = entries.len() as u64;
+        Self {
+            contract_version: SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION,
+            root_session,
+            entry_count,
+            semantic_digest: derive_snapshot_digest(root_session, entry_count, &entries),
+            entries,
+        }
     }
 }
 
@@ -189,24 +269,32 @@ impl ScopedArtifactAvailabilityReducer {
         }
         let entry_count = u64::try_from(entries.len())
             .map_err(|_| ScopedProjectionError::ArtifactEvidenceCapacityFull)?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"spaghetti/rfc012d/artifact-availability-snapshot/v1\0");
-        hasher.update(&SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION.to_be_bytes());
-        hash_component(&mut hasher, root_session.as_bytes());
-        hasher.update(&entry_count.to_be_bytes());
-        for entry in &entries {
-            hash_component(&mut hasher, entry.artifact_key.as_bytes());
-            hash_component(&mut hasher, entry.artifact_kind.as_bytes());
-            hash_component(&mut hasher, entry.revision.as_bytes());
-        }
         Ok(ScopedArtifactAvailabilitySnapshot {
             contract_version: SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION,
             root_session,
             entry_count,
-            semantic_digest: ScopedArtifactAvailabilityRevision(*hasher.finalize().as_bytes()),
+            semantic_digest: derive_snapshot_digest(root_session, entry_count, &entries),
             entries,
         })
     }
+}
+
+fn derive_snapshot_digest(
+    root_session: CanonicalEntityKey,
+    entry_count: u64,
+    entries: &[ScopedArtifactAvailabilityEntry],
+) -> ScopedArtifactAvailabilityRevision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/artifact-availability-snapshot/v1\0");
+    hasher.update(&SCOPED_ARTIFACT_AVAILABILITY_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, root_session.as_bytes());
+    hasher.update(&entry_count.to_be_bytes());
+    for entry in entries {
+        hash_component(&mut hasher, entry.artifact_key.as_bytes());
+        hash_component(&mut hasher, entry.artifact_kind.as_bytes());
+        hash_component(&mut hasher, entry.revision.as_bytes());
+    }
+    ScopedArtifactAvailabilityRevision(*hasher.finalize().as_bytes())
 }
 
 fn derive_entry_revision(

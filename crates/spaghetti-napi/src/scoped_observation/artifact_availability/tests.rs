@@ -105,6 +105,14 @@ fn snapshot_is_canonical_current_evidence_bound_and_path_free() {
     let reversed_snapshot = snapshot_with(&reversed, root, &current);
     assert_eq!(forward_snapshot, reversed_snapshot);
     assert_eq!(forward_snapshot.entry_count(), 2);
+    assert!(forward_snapshot.validate_for_root(root));
+    assert!(!forward_snapshot.validate_for_root(identity(b"foreign", "session")));
+    let mut malformed = forward_snapshot.clone();
+    malformed.entries.reverse();
+    assert!(!malformed.validate_for_root(root));
+    let mut wrong_count = forward_snapshot.clone();
+    wrong_count.entry_count += 1;
+    assert!(!wrong_count.validate_for_root(root));
 
     let stale = BTreeSet::from([(first_key, [9; 32])]);
     let stale_snapshot = snapshot_with(&forward, root, &stale);
