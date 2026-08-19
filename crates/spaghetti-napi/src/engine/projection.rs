@@ -1513,12 +1513,20 @@ fn persist_facts(
     let (usage_v2_facts, remaining_facts): (Vec<_>, Vec<_>) = durable_facts
         .into_iter()
         .partition(|(envelope, _)| matches!(envelope.value, Fact::UsageRevisionV2(_)));
-    let (revisioned_entity_facts, ordinary_facts): (Vec<_>, Vec<_>) =
+    let (revisioned_entity_facts, remaining_facts): (Vec<_>, Vec<_>) =
         remaining_facts.into_iter().partition(|(envelope, _)| {
             matches!(
                 envelope.value,
                 Fact::ActorRunRevision(_) | Fact::ActorAffiliationRevision(_)
             )
+        });
+    let (semantic_artifact_facts, ordinary_facts): (Vec<_>, Vec<_>) =
+        remaining_facts.into_iter().partition(|(envelope, _)| {
+            envelope.semantic_revision.is_some()
+                && matches!(
+                    envelope.value,
+                    Fact::ArtifactMetadataSnapshot(_) | Fact::ArtifactContent(_)
+                )
         });
     persist_fact_rows(
         transaction,
@@ -1529,6 +1537,15 @@ fn persist_facts(
         source_generation,
         commit_seq,
         SemanticRevisionConflict::Reject,
+    )?;
+    persist_semantic_artifact_fact_rows(
+        transaction,
+        &semantic_artifact_facts,
+        source_instance_id,
+        source_stream_id,
+        source_object_id,
+        source_generation,
+        commit_seq,
     )?;
     replace_revisioned_entity_generation_fact_rows(
         transaction,
@@ -1606,6 +1623,138 @@ enum SemanticRevisionConflict {
     Reject,
     Ignore,
     RefreshExisting,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_semantic_artifact_fact_rows(
+    transaction: &Transaction<'_>,
+    fact_rows: &[(&FactEnvelope, &EncodedFactPayload)],
+    source_instance_id: i64,
+    source_stream_id: i64,
+    source_object_id: i64,
+    source_generation: i64,
+    commit_seq: i64,
+) -> Result<(), EngineError> {
+    // Artifact metadata checkpoints can restate an identical canonical value
+    // later in the same transcript, and replace-document content can replay
+    // unchanged bytes in a newer generation. Those are occurrences of the
+    // same semantic revision, not a second semantic fact. The current schema
+    // cannot retain independent ownership by two source objects, so that case
+    // remains a fail-closed conflict rather than silently discarding evidence.
+    let mut replay_fact_ids = Vec::new();
+    for (envelope, _) in fact_rows {
+        let semantic = envelope.semantic_revision.as_ref().ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "canonical artifact fact is missing its semantic revision".to_string(),
+            )
+        })?;
+        if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+            return Err(EngineError::InvalidCommit(
+                "canonical artifact semantic reference does not match its fact revision"
+                    .to_string(),
+            ));
+        }
+        let revision_key = match &envelope.value {
+            Fact::ArtifactMetadataSnapshot(fact) => fact.semantic_revision_key(),
+            Fact::ArtifactContent(fact) => fact.semantic_revision_key(),
+            _ => unreachable!("semantic artifact partition admits only artifact facts"),
+        }
+        .map_err(|error| {
+            EngineError::InvalidCommit(format!(
+                "cannot derive canonical artifact semantic revision: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "semantic artifact fact omitted its canonical value identity".to_string(),
+            )
+        })?;
+        let expected_revision = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+            .map_err(|error| {
+                EngineError::InvalidCommit(format!(
+                    "cannot validate canonical artifact semantic revision: {error}"
+                ))
+            })?;
+        if semantic.fact_revision_id != expected_revision {
+            return Err(EngineError::InvalidCommit(
+                "canonical artifact fact revision does not identify its normalized value"
+                    .to_string(),
+            ));
+        }
+        let existing = transaction
+            .query_row(
+                r#"
+                SELECT fact_id, fact_kind, semantic_fact_id, source_instance_id,
+                       source_stream_id, source_object_id, source_generation
+                FROM fact_records
+                WHERE semantic_fact_revision_id = ?1
+                "#,
+                [semantic.fact_revision_id.as_bytes().as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| sqlite_error("read canonical artifact replay owner", error))?;
+        let Some((
+            fact_id,
+            fact_kind,
+            semantic_fact_id,
+            existing_source_instance_id,
+            existing_source_stream_id,
+            existing_source_object_id,
+            existing_source_generation,
+        )) = existing
+        else {
+            continue;
+        };
+        if fact_kind != envelope.value.kind()
+            || semantic_fact_id != semantic.fact_id.as_bytes()
+            || existing_source_instance_id != source_instance_id
+            || existing_source_stream_id != source_stream_id
+        {
+            return Err(EngineError::InvalidCommit(
+                "canonical artifact revision changed its semantic owner".to_string(),
+            ));
+        }
+        if existing_source_object_id != source_object_id {
+            return Err(EngineError::InvalidCommit(
+                "canonical artifact revision crossed source objects without occurrence authority"
+                    .to_string(),
+            ));
+        }
+        if existing_source_generation > source_generation {
+            return Err(EngineError::InvalidCommit(
+                "canonical artifact revision replayed from an older source generation".to_string(),
+            ));
+        }
+        replay_fact_ids.push(fact_id);
+    }
+    for fact_id in replay_fact_ids {
+        transaction
+            .execute("DELETE FROM fact_records WHERE fact_id = ?1", [fact_id])
+            .map_err(|error| sqlite_error("replace canonical artifact replay owner", error))?;
+    }
+
+    persist_fact_rows(
+        transaction,
+        fact_rows,
+        source_instance_id,
+        source_stream_id,
+        source_object_id,
+        source_generation,
+        commit_seq,
+        SemanticRevisionConflict::Reject,
+    )?;
+    Ok(())
 }
 
 fn replace_revisioned_entity_generation_fact_rows(
@@ -4929,6 +5078,54 @@ mod tests {
             content: content.as_bytes().to_vec(),
             size_bytes: content.len() as u64,
         }
+    }
+
+    fn push_canonical_artifact_pair(
+        batch: &mut FactBatch,
+        record: &SourceRecord,
+    ) -> (crate::adapter::FactId, crate::adapter::FactId) {
+        let canonical_session = batch
+            .canonical_entity_key("session", SESSION.as_bytes())
+            .unwrap();
+        let canonical_artifact = batch
+            .canonical_entity_key("artifact", b"named-backup")
+            .unwrap();
+        let artifact = entity("artifact", "named-backup");
+        let mut metadata = artifact_metadata_fact(
+            "canonical-replay",
+            vec![artifact_metadata_entry(
+                artifact.clone(),
+                Some("71f902cd51ee4c6e@v1"),
+                "src/lib.rs",
+                "2026-08-11T00:00:01.000Z",
+                ArtifactCapture::ContentExpected,
+            )],
+        );
+        metadata.canonical_session = Some(canonical_session);
+        metadata.artifacts[0].canonical_artifact = Some(canonical_artifact);
+        let metadata_revision = metadata.semantic_revision_key().unwrap().unwrap();
+        let metadata_id = batch
+            .push_native_with_revision(
+                record,
+                b"artifact-metadata/canonical-replay",
+                &metadata_revision,
+                Fact::ArtifactMetadataSnapshot(metadata),
+            )
+            .unwrap();
+
+        let mut content = artifact_content_fact(artifact, "canonical content\n");
+        content.canonical_session = Some(canonical_session);
+        content.canonical_artifact = Some(canonical_artifact);
+        let content_revision = content.semantic_revision_key().unwrap().unwrap();
+        let content_id = batch
+            .push_native_with_revision(
+                record,
+                b"artifact-content/canonical-replay",
+                &content_revision,
+                Fact::ArtifactContent(content),
+            )
+            .unwrap();
+        (metadata_id, content_id)
     }
 
     fn workflow_snapshot_fact(
@@ -10900,6 +11097,161 @@ mod tests {
         assert_eq!(
             resolved,
             ("resolved".to_string(), 1, 0, "primary".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_artifact_replay_refreshes_one_same_source_owner_and_rejects_cross_object_loss() {
+        let mut connection = database();
+        register_object(&mut connection);
+
+        let first_record = direct_record(1, 0, 1, 20, b"canonical-artifact-first");
+        let mut first =
+            FactBatch::new_with_semantic_context(2, 1, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        let (metadata_owner, content_owner) =
+            push_canonical_artifact_pair(&mut first, &first_record);
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 21, &first);
+
+        let replay_record = direct_record(1, 1, 2, 30, b"canonical-artifact-replay");
+        let mut replay =
+            FactBatch::new_with_semantic_context(2, 1, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        let (replay_metadata_id, replay_content_id) =
+            push_canonical_artifact_pair(&mut replay, &replay_record);
+        assert_ne!(metadata_owner, replay_metadata_id);
+        assert_ne!(content_owner, replay_content_id);
+        for index in 0..2 {
+            let first_semantic = first.facts()[index].semantic_revision.unwrap();
+            let replay_semantic = replay.facts()[index].semantic_revision.unwrap();
+            assert_ne!(
+                first_semantic.source_record_id,
+                replay_semantic.source_record_id
+            );
+            assert_eq!(first_semantic.fact_id, replay_semantic.fact_id);
+            assert_eq!(
+                first_semantic.fact_revision_id,
+                replay_semantic.fact_revision_id
+            );
+        }
+        commit_direct_batch(&mut connection, &replay_record, 1, 1, 31, &replay);
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE fact_kind IN ('artifact_metadata_snapshot', 'artifact_content')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "exact semantic replays retain one durable row per artifact fact",
+        );
+        assert_eq!(count(&connection, "artifact_snapshot_assertions"), 1);
+        assert_eq!(count(&connection, "artifact_metadata_assertions"), 1);
+        assert_eq!(count(&connection, "artifact_content_assertions"), 1);
+        for (kind, initial_id, replay_id) in [
+            (
+                "artifact_metadata_snapshot",
+                metadata_owner,
+                replay_metadata_id,
+            ),
+            ("artifact_content", content_owner, replay_content_id),
+        ] {
+            let (fact_id, generation, cursor_end, last_commit_seq):
+                (Vec<u8>, i64, Vec<u8>, i64) = connection
+                .query_row(
+                    "SELECT fact_id, source_generation, cursor_end, last_commit_seq FROM fact_records WHERE fact_kind = ?1",
+                    [kind],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .unwrap();
+            assert_ne!(fact_id, initial_id.as_bytes());
+            assert_eq!(fact_id, replay_id.as_bytes());
+            assert_eq!(generation, 1);
+            assert_eq!(cursor_end, replay_record.cursor_end.as_bytes());
+            assert_eq!(last_commit_seq, 3);
+        }
+
+        let rewrite_record = direct_record(2, 0, 1, 40, b"canonical-artifact-rewrite");
+        let mut rewrite =
+            FactBatch::new_with_semantic_context(2, 1, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        let (rewrite_metadata_id, rewrite_content_id) =
+            push_canonical_artifact_pair(&mut rewrite, &rewrite_record);
+        commit_direct_batch(&mut connection, &rewrite_record, 1, 2, 41, &rewrite);
+        assert_eq!(count(&connection, "artifact_snapshot_assertions"), 1);
+        assert_eq!(count(&connection, "artifact_content_assertions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT fact_id FROM fact_records WHERE fact_kind = 'artifact_metadata_snapshot'",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .unwrap(),
+            rewrite_metadata_id.as_bytes(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT fact_id FROM fact_records WHERE fact_kind = 'artifact_content'",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .unwrap(),
+            rewrite_content_id.as_bytes(),
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM fact_records WHERE source_generation = 2 AND fact_kind IN ('artifact_metadata_snapshot', 'artifact_content')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2,
+            "a generation rewrite transfers the same-source semantic owners",
+        );
+
+        let other_object = b"canonical-artifact-other-object";
+        register_object_key(&mut connection, other_object, 50);
+        let other_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(1),
+            51,
+            b"canonical-artifact-cross-object",
+        );
+        let mut cross_object =
+            FactBatch::new_with_semantic_context(2, 1, semantic_context(other_object)).unwrap();
+        push_canonical_artifact_pair(&mut cross_object, &other_record);
+        let error = apply_fact_observation_commit(
+            &mut connection,
+            &request_for_object(
+                other_object,
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: SourceCursor::append_offset(0).into_bytes(),
+                },
+                1,
+                other_record.cursor_end.as_bytes().to_vec(),
+                52,
+            ),
+            &cross_object,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("crossed source objects"));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT committed_cursor FROM source_objects WHERE object_key = ?1",
+                    [other_object.as_slice()],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .unwrap(),
+            SourceCursor::append_offset(0).into_bytes(),
         );
     }
 
