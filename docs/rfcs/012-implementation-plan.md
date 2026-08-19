@@ -2172,6 +2172,21 @@ Current landing status (2026-08-19):
   application receipt. The runtime still produces only known branches; the
   sidecar cannot manufacture an unknown event, widen source authority, or act
   as transport ownership; and
+- the attachment-bound unknown-delivery slice (`71afae4`) adds the first
+  crate-private trusted producer without widening source or transport
+  authority. Preparation consumes one opaque producer occurrence and binds its
+  canonical type tag, bounded JSON value, optional semantic revision, exact
+  declared relation/source generation, active scope epoch, attachment, and the
+  identical negotiated sidecar before sequencing. The drain revalidates those
+  process-local authorities, charges the exact preserved JSON bytes, and
+  returns the same non-cloneable offer on every backpressure or lifecycle
+  failure so retry cannot renumber or silently discard it. Dequeue emits the
+  already-frozen `unknown_wire_event` outer branch, while specialist known-
+  family access becomes explicitly optional and preserved values remain
+  redacted from diagnostics. The same slice removes native path material from
+  `ScopedKnownObjectGrant` diagnostics. No concrete adapter produces this
+  event yet, and no N-API/SDK iterator, public attachment authority, native
+  source read, or semantic reinterpretation is added; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2182,10 +2197,10 @@ canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2, coverage-complete durable query exposure, selected
 and portable actor/affiliation replacement integrity, event variants outside
 the current usage, actor, source-lifecycle, artifact-availability, continuity,
-and completion specialist families, trusted runtime production and emission of
-negotiated typed-unknown events, the public N-API/SDK iterator transport for the
-current contextual watermark and event contracts over the internal async
-lifecycle runtime,
+and completion specialist families, concrete adapter production and emission
+of negotiated typed-unknown events, the public N-API/SDK iterator transport
+for the current contextual watermark and event contracts over the internal
+async lifecycle runtime,
 portable dynamic/discovered scope coverage beyond the current exact
 known-object relation/root summary, dynamic/discovered scope membership beyond
 the attachment's current exact known-object grants and family coverage beyond
@@ -2202,7 +2217,7 @@ public watermark and consumer-ready helper until dynamic scope membership/
 coverage, runtime-bound public close invocation, the native transport owner,
 and the remaining negotiated lifecycle surface are defined. The usage-v2 sink
 and delivery lane remain crate-private until the remaining lifecycle surface,
-unknown-event production/emission, and runtime-bound negotiated portable
+concrete unknown-event production, and runtime-bound negotiated portable
 transport exist.
 
 ### D2. Claude scope composition
