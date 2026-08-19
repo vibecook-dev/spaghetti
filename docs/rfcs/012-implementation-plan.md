@@ -2473,6 +2473,22 @@ Candidate locator remains conceptual and therefore non-executable; declaring
 and proving its exact file-history template remains a separate conformance
 gate.
 
+The next bounded D3 prerequisite (`827772c`) closes that Claude file-history
+template gate without promoting or executing the scope program. The Candidate
+declaration now names the exact
+`file-history/{native-session-id}/{backup-name}` relative locator while keeping
+the independently bound positive artifact version in the reservation identity.
+Executable conformance renders both sanitized small-corpus file-history
+objects through the common guard, matches the durable stream selector and
+home root, and passes the resulting UUID/lowercase-hash/canonical-version paths
+through Claude's real artifact bootstrap parser. The updated scope-document
+SHA-256 is bound by both the support release and compiled adapter. The scope
+program remains `incomplete`, the support release remains Candidate, scoped
+observation remains unsupported, and the task-artifact locator remains
+conceptual. This adds no root join, native read, availability result, barrier,
+or public transport; the file-history source-declaration/runtime decoder-ID
+drift and a confined common read mediator remain separate promotion gates.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
