@@ -131,7 +131,7 @@ prerequisite for early vertical slices.
 | C2. Usage-v2 shadow projection           | 012C                | In progress | frozen/private corpus plus native affiliation parity           |
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
 | C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
-| D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close, no SQLite/global scan             |
+| D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close/deps; no store/global scan         |
 | D2. Claude scope composition             | 012D                | Not started | root/current/future actor and sidecar conformance              |
 | D3. Control lane and epoch replacement   | 012D                | In progress | overflow/disappearance/duplicate/fairness matrix               |
 | D4. SDK and Chopsticks migration         | 012D                | Not started | feature-flagged shadow comparison and rollback                 |
@@ -2237,12 +2237,29 @@ Current landing status (2026-08-19):
   crate-private, `close()` has no N-API/SDK transport yet, and this adds no
   source access, dynamic scope, unknown-event producer, or portable attachment
   authority; and
+- the declared decoder-dependency slice (`a7cfcb6`) now resolves an adapter's
+  object dependency only when its access root plus canonical object key names
+  one unambiguous `KnownObject` grant in the exact current scoped pass. The
+  complete relation set and every established object access identity are
+  checked before the first native read, and dependency reads plus canonical
+  revalidation consume the same declaration-sized pass ledger. Stable,
+  missing, and oversized objects use the same common dependency-revision
+  domains as durable decode. Every dependency actually used during decoding
+  is re-read before decoder state is staged; change or instability is a
+  transient whole-batch failure, so discard/retry advances neither the primary
+  cursor nor decoder state. Live polling and automatic replacement replay use
+  this mediator, while direct/manual decode remains dependency-denied.
+  Omitted, duplicate, ambiguous, foreign-root, escaping, over-bound, and
+  cross-relation-forged requests fail without exposing native paths or values.
+  Parameterized database queries and object listings remain denied, and this
+  adds no public N-API/SDK surface, concrete adapter dependency, dynamic scope,
+  or reinterpretation of RFC 012D unknown-wire events; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
 
 D1 remains `In progress`: multi-object discovery/cursor orchestration,
-declared relation-backed decoder dependency access, built-in
+parameterized-query and object-listing decoder dependency composition, built-in
 canonical fact-revision adoption beyond the current runtime families, scoped
 reducers beyond usage-v2, coverage-complete durable query exposure, selected
 and portable actor/affiliation replacement integrity, event variants outside
@@ -3042,8 +3059,8 @@ The next execution order is:
    and snapshot pagination while completing the remaining C1-C3 compatibility
    report and semantic-contract work;
 5. build the portable async lifecycle facade over the landed watcher-before-
-   scan coordinator while finishing D2 dynamic Claude scope and declared
-   decoder dependencies;
+   scan coordinator while finishing D2 dynamic Claude scope and the remaining
+   parameterized-query/object-listing decoder dependency primitives;
 6. complete D3 multi-family and D-owned replacement manifests, non-append
    participants, concrete watcher source-pass/portable-host wiring, policy
    calibration, and multi-observer fairness;
