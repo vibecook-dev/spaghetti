@@ -3196,6 +3196,8 @@ pub enum ScopedObservationOpenDrainError {
     Closed,
     #[error("scoped observation consumer drain was already opened")]
     AlreadyOpened,
+    #[error("scoped observation close contract could not be bound")]
+    InvalidCloseContract,
     #[error("scoped observation delivery lane could not be created: {0}")]
     Delivery(ScopedDeliveryError),
 }
@@ -3680,6 +3682,7 @@ impl Drop for ScopedObservationConsumerDrain {
 
 struct ScopedObservationAsyncRuntimeShared {
     host: ScopedObservationAccessHost,
+    close_command: close_wire::ScopedCloseCommand,
     drain: Mutex<ScopedObservationConsumerDrain>,
 }
 
@@ -3690,11 +3693,19 @@ impl ScopedObservationAsyncRuntimeShared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn request_close(&self) -> ScopedObservationCloseBarrier {
+    fn request_contextual_close(
+        &self,
+    ) -> Result<close_wire::ScopedObservationCloseOperation, close_wire::ScopedCloseContractError>
+    {
         let mut drain = self.lock_drain();
         self.host
-            .close_with_consumer(&mut drain)
-            .expect("the async runtime retains its attachment-owned consumer drain")
+            .close_portable_with_consumer(&self.close_command, &mut drain)
+    }
+
+    fn request_close(&self) -> ScopedObservationCloseBarrier {
+        self.request_contextual_close()
+            .expect("the async runtime retains its exact close command and consumer drain")
+            .barrier()
     }
 
     /// Preserve an already-admitted terminal failure for the event owner. The
@@ -3705,8 +3716,8 @@ impl ScopedObservationAsyncRuntimeShared {
         let mut drain = self.lock_drain();
         if drain.delivery_lane().state().continuity != ScopedObservationContinuity::Failed {
             self.host
-                .close_with_consumer(&mut drain)
-                .expect("the async runtime retains its attachment-owned consumer drain");
+                .close_portable_with_consumer(&self.close_command, &mut drain)
+                .expect("the async runtime retains its exact close command and consumer drain");
         }
     }
 }
@@ -3932,6 +3943,16 @@ impl ScopedObservationAsyncHandle {
         self.shared.request_close()
     }
 
+    /// Request cancellation through the exact attachment-bound close command
+    /// retained when this runtime opened. The operation owns the matching
+    /// command until the two-part close barrier can issue a strict receipt.
+    pub(crate) fn request_contextual_close(
+        &self,
+    ) -> Result<close_wire::ScopedObservationCloseOperation, close_wire::ScopedCloseContractError>
+    {
+        self.shared.request_contextual_close()
+    }
+
     /// Resolve engine-level bootstrap readiness concurrently with the sole
     /// event drain. This proves the offered barrier only; a consumer-ready
     /// helper must also acknowledge the matching completion envelope.
@@ -4118,7 +4139,20 @@ impl ScopedObservationAsyncHandle {
     }
 
     pub async fn close(&self) -> ScopedObservationCloseState {
-        self.request_close().wait_async().await
+        let operation = self
+            .request_contextual_close()
+            .expect("the async handle retains its exact close binding");
+        operation
+            .wait_async()
+            .await
+            .expect("a completed close barrier can issue its retained receipt");
+        operation.state()
+    }
+
+    pub(crate) async fn close_contextual(
+        &self,
+    ) -> Result<close_wire::ScopedCloseReceiptWire, close_wire::ScopedCloseContractError> {
+        self.request_contextual_close()?.wait_async().await
     }
 }
 
@@ -4661,10 +4695,14 @@ impl ScopedObservationAsyncRuntime {
         host: ScopedObservationAccessHost,
         limits: ScopedObservationDeliveryLimits,
     ) -> Result<Self, ScopedObservationOpenDrainError> {
+        let close_command = host
+            .prepare_portable_close()
+            .map_err(|_| ScopedObservationOpenDrainError::InvalidCloseContract)?;
         let drain = host.open_consumer_drain(limits)?;
         Ok(Self {
             shared: Arc::new(ScopedObservationAsyncRuntimeShared {
                 host,
+                close_command,
                 drain: Mutex::new(drain),
             }),
         })
@@ -4729,10 +4767,33 @@ impl ScopedObservationAsyncRuntime {
         self.shared.request_close()
     }
 
+    /// Begin the same attachment-bound contextual close used by the cloneable
+    /// runtime handle. Repeated calls share the lifecycle barrier and retain
+    /// identical context/request identity.
+    pub(crate) fn request_contextual_close(
+        &self,
+    ) -> Result<close_wire::ScopedObservationCloseOperation, close_wire::ScopedCloseContractError>
+    {
+        self.shared.request_contextual_close()
+    }
+
     /// Request cancellation, close the sole drain, and await watcher/native
     /// acknowledgement without holding the consumer lock.
     pub async fn close(&self) -> ScopedObservationCloseState {
-        self.request_close().wait_async().await
+        let operation = self
+            .request_contextual_close()
+            .expect("the async runtime retains its exact close binding");
+        operation
+            .wait_async()
+            .await
+            .expect("a completed close barrier can issue its retained receipt");
+        operation.state()
+    }
+
+    pub(crate) async fn close_contextual(
+        &self,
+    ) -> Result<close_wire::ScopedCloseReceiptWire, close_wire::ScopedCloseContractError> {
+        self.request_contextual_close()?.wait_async().await
     }
 }
 

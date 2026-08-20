@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
+use tempfile::TempDir;
 
 use crate::adapter::{
-    AdapterId, ContractCompleteness, ContractVersionOffer, ContractVersionRequest,
-    FactSemanticContext, NativeIdentity, QualifiedValue, QualifiedValueQuality,
+    fixture_scoped_access_request, supported_fixture_registry_with_scope, AdapterId,
+    ContractCompleteness, ContractVersionOffer, ContractVersionRequest, FactSemanticContext,
+    NativeIdentity, QualifiedValue, QualifiedValueQuality,
 };
 use crate::observation_contract::{
     negotiate_observation_contract, ObservationContractOffer, ObservationContractRequest,
@@ -15,6 +17,7 @@ use super::*;
 
 const FROZEN_FIXTURE: &str =
     include_str!("../../../fixtures/contracts/rfc012d-scoped-close-v1.json");
+const SINGLE_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
 fn contract_selection() -> ObservationContractSelection {
     let families = BTreeMap::from([("runtime.usage-v2".to_owned(), vec![1])]);
@@ -239,6 +242,60 @@ async fn async_close_retains_completion_before_first_poll_and_is_idempotent() {
         &operation,
     )
     .is_ok());
+}
+
+#[tokio::test]
+async fn async_runtime_close_retains_one_context_and_owns_the_exact_drain() {
+    let registry = supported_fixture_registry_with_scope(SINGLE_OBJECT_SCOPE_DOCUMENT);
+    let temp = TempDir::new().unwrap();
+    let host = ScopedObservationAccessHost::authorize(
+        &registry,
+        fixture_scoped_access_request(temp.path().join("runtime-close")),
+    )
+    .unwrap();
+    let watcher = host.register_watcher_task().unwrap();
+    let runtime = ScopedObservationAsyncRuntime::open(
+        host,
+        ScopedObservationDeliveryLimits {
+            max_semantic_events: 1,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        },
+    )
+    .unwrap();
+    let handle = runtime.handle();
+
+    let first = handle.request_contextual_close().unwrap();
+    let repeated = runtime.request_contextual_close().unwrap();
+    assert_eq!(
+        serde_json::to_value(first.context_wire()).unwrap(),
+        serde_json::to_value(repeated.context_wire()).unwrap()
+    );
+    assert_eq!(
+        first.receipt_if_complete(),
+        Err(ScopedCloseContractError::NotComplete)
+    );
+    assert!(first.state().close_requested);
+    assert_eq!(first.state().active_watcher_tasks, 1);
+    assert!(!first.state().consumer_drain_pending);
+
+    drop(watcher);
+    let first_receipt = tokio::time::timeout(std::time::Duration::from_secs(2), first.wait_async())
+        .await
+        .unwrap()
+        .unwrap();
+    let repeated_receipt = repeated.wait_async().await.unwrap();
+    assert_eq!(first_receipt, repeated_receipt);
+    assert_eq!(
+        first
+            .parse_receipt(serde_json::to_value(&repeated_receipt).unwrap())
+            .unwrap(),
+        repeated_receipt
+    );
+
+    assert_eq!(handle.close_contextual().await.unwrap(), first_receipt);
+    assert_eq!(runtime.close_contextual().await.unwrap(), first_receipt);
+    assert!(runtime.close().await.complete);
 }
 
 #[test]

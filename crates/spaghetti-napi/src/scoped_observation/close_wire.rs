@@ -130,6 +130,14 @@ pub(crate) struct ScopedObservationCloseOperation {
 }
 
 impl ScopedObservationCloseOperation {
+    pub(crate) fn context_wire(&self) -> ScopedCloseContextWire {
+        self.command.context_wire()
+    }
+
+    pub(crate) fn barrier(&self) -> ScopedObservationCloseBarrier {
+        self.barrier.clone()
+    }
+
     pub(crate) fn state(&self) -> ScopedObservationCloseState {
         self.barrier.state()
     }
