@@ -5042,6 +5042,13 @@ pub struct ScopedObservationNativeWatcherState {
     pub routing_failed: bool,
     pub reinstalling: bool,
     pub closed: bool,
+    pending_continuity_loss: Option<ScopedResyncReason>,
+}
+
+impl ScopedObservationNativeWatcherState {
+    pub fn continuity_loss_pending(self) -> bool {
+        self.pending_continuity_loss.is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -5069,15 +5076,36 @@ impl ScopedObservationNativeWatcherCompletion {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn publish(&self, backend_failed: bool, routing_failed: bool) {
+    fn publish(
+        &self,
+        backend_failed: bool,
+        routing_failed: bool,
+        continuity_loss: Option<ScopedResyncReason>,
+    ) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.backend_failed |= backend_failed;
         state.routing_failed |= routing_failed;
+        if state.pending_continuity_loss.is_none() {
+            state.pending_continuity_loss = continuity_loss;
+        }
         advance_scoped_native_watcher_generation(&mut state);
         self.async_changed.send_replace(*state);
+    }
+
+    fn clear_continuity_loss(&self, reason: ScopedResyncReason) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert_eq!(state.pending_continuity_loss, Some(reason));
+        if state.pending_continuity_loss == Some(reason) {
+            state.pending_continuity_loss = None;
+            advance_scoped_native_watcher_generation(&mut state);
+            self.async_changed.send_replace(*state);
+        }
     }
 
     fn mark_initial_backend_installed(&self) {
@@ -5554,7 +5582,16 @@ fn scoped_native_watch_callback(
             return;
         }
         let mut routing_failed = false;
+        let mut continuity_loss = None;
+        let watcher_is_live = matches!(
+            coordinator.phase(),
+            ScopedObservationWatcherPhase::Live { .. }
+        );
         for hint in ingress.hints {
+            if watcher_is_live && hint.reason == DirtyReason::WatcherOverflow {
+                continuity_loss = Some(ScopedResyncReason::WatcherOverflow);
+                continue;
+            }
             match coordinator.record_hint(handle.host(), hint) {
                 Ok(ScopedObservationWatcherHintAction::Buffered(_))
                 | Ok(ScopedObservationWatcherHintAction::PollRequested { .. }) => {}
@@ -5562,7 +5599,7 @@ fn scoped_native_watch_callback(
                 Err(_) => routing_failed = true,
             }
         }
-        completion.publish(ingress.backend_failed, routing_failed);
+        completion.publish(ingress.backend_failed, routing_failed, continuity_loss);
     })
 }
 
@@ -5718,15 +5755,50 @@ impl ScopedObservationNativeWatcher {
         };
         match self.coordinator.record_hint(self.handle.host(), hint) {
             Ok(action) => {
-                self.completion.publish(false, false);
+                self.completion.publish(false, false, None);
                 Ok(action)
             }
             Err(error) => {
                 if !matches!(error, ScopedObservationStartupError::Closed) {
-                    self.completion.publish(false, true);
+                    self.completion.publish(false, true, None);
                 }
                 Err(error.into())
             }
+        }
+    }
+
+    /// Convert a retained native continuity-loss signal into the exact
+    /// attachment control. If replacement start is offered but not delivered,
+    /// capture the dequeue generation and retry once before waiting so the
+    /// delivery-between-error-and-wait race cannot lose its wakeup.
+    fn apply_pending_continuity_loss(
+        &self,
+        reason: ScopedResyncReason,
+        observed_at: i64,
+    ) -> Result<Option<(ScopedObservationDeliveryCapacityWaiter, u128)>, ScopedContinuityError>
+    {
+        match self.handle.require_resync(reason, observed_at) {
+            Ok(_) => {
+                self.completion.clear_continuity_loss(reason);
+                return Ok(None);
+            }
+            Err(ScopedContinuityError::ResyncStartNotDelivered) => {}
+            Err(error) => return Err(error),
+        }
+
+        let (waiter, generation) = {
+            let drain = self.handle.shared.lock_drain();
+            let waiter = drain.delivery_capacity_waiter();
+            let generation = waiter.snapshot().generation;
+            (waiter, generation)
+        };
+        match self.handle.require_resync(reason, observed_at) {
+            Ok(_) => {
+                self.completion.clear_continuity_loss(reason);
+                Ok(None)
+            }
+            Err(ScopedContinuityError::ResyncStartNotDelivered) => Ok(Some((waiter, generation))),
+            Err(error) => Err(error),
         }
     }
 
@@ -5892,6 +5964,36 @@ impl ScopedObservationNativeWatcher {
                         }
                         Err(_) => {}
                     }
+                }
+                continue;
+            }
+
+            if let Some(reason) = state.pending_continuity_loss {
+                match self.apply_pending_continuity_loss(reason, observed_at()) {
+                    Ok(None) => {
+                        observed_generation = self.state().generation;
+                    }
+                    Ok(Some((capacity_waiter, capacity_generation))) => {
+                        let watcher_waiter = self.waiter();
+                        tokio::select! {
+                            biased;
+                            _ = self.coordinator.wait_for_cancellation_async() => {
+                                return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
+                            }
+                            changed = watcher_waiter.wait_after(observed_generation) => {
+                                observed_generation = changed.generation;
+                            }
+                            released = capacity_waiter.wait_after_async(capacity_generation) => {
+                                if released.closed {
+                                    return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
+                                }
+                            }
+                        }
+                    }
+                    Err(ScopedContinuityError::Closed) => {
+                        return Ok(ScopedObservationNativeWatcherRunExit::Cancelled);
+                    }
+                    Err(error) => return Err(error),
                 }
                 continue;
             }
@@ -23076,7 +23178,7 @@ mod projection_tests {
         let completion = ScopedObservationNativeWatcherCompletion::default();
         completion.mark_initial_backend_installed();
         completion.begin_reinstall();
-        completion.publish(true, false);
+        completion.publish(true, false, None);
         assert!(matches!(
             completion.finish_reinstall_success(),
             Err(ScopedObservationNativeWatcherError::CallbackFailedDuringReinstall)
@@ -23089,7 +23191,7 @@ mod projection_tests {
         let routing = ScopedObservationNativeWatcherCompletion::default();
         routing.mark_initial_backend_installed();
         routing.begin_reinstall();
-        routing.publish(false, true);
+        routing.publish(false, true, None);
         assert!(matches!(
             routing.finish_reinstall_success(),
             Err(ScopedObservationNativeWatcherError::RoutingFailed)
@@ -23098,6 +23200,20 @@ mod projection_tests {
         assert!(failed.routing_failed);
         assert!(!failed.reinstalling);
         assert_eq!(failed.backend_generation, 1);
+    }
+
+    #[test]
+    fn scoped_native_watcher_continuity_loss_is_sticky_across_backend_recovery() {
+        let completion = ScopedObservationNativeWatcherCompletion::default();
+        completion.mark_initial_backend_installed();
+        completion.publish(false, false, Some(ScopedResyncReason::WatcherOverflow));
+        assert!(completion.snapshot().continuity_loss_pending());
+
+        completion.begin_reinstall();
+        completion.finish_reinstall_success().unwrap();
+        assert!(completion.snapshot().continuity_loss_pending());
+        completion.clear_continuity_loss(ScopedResyncReason::WatcherOverflow);
+        assert!(!completion.snapshot().continuity_loss_pending());
     }
 
     #[test]

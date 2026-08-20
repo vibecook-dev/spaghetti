@@ -253,6 +253,7 @@ pub(crate) mod tests {
         unrelated: PathBuf,
         registrations: Arc<std::sync::Mutex<Vec<(PathBuf, notify::RecursiveMode)>>>,
         fail_registration: bool,
+        emit_rescan: bool,
     }
 
     impl ScopedObservationNativeWatchBackend for ImmediateScopedWatchBackend {
@@ -276,6 +277,10 @@ pub(crate) mod tests {
                 notify::event::CreateKind::File,
             ))
             .add_path(self.target.clone())));
+            if self.emit_rescan {
+                (self.callback)(Ok(notify::Event::new(notify::EventKind::Other)
+                    .set_flag(notify::event::Flag::Rescan)));
+            }
             Ok(())
         }
     }
@@ -4932,6 +4937,177 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_native_rescan_invalidates_live_epoch_and_reoverflows_after_start_offer() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("native-rescan-reoverflow-root");
+        let (mut runtime, handle, pair, target, drops, callback_slot) =
+            automatic_single_object_pair_with_watcher_policy(
+                &registry,
+                root,
+                b"native-rescan-reoverflow-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+                ScopedObservationNativeWatcherRecoveryPolicy::new(
+                    std::time::Duration::from_secs(60),
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(1),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await;
+
+        std::fs::write(&target, b"rec-01\n").unwrap();
+        let poll_before = handle.host().poll_state();
+        callback_slot.lock().unwrap().as_mut().unwrap()(Ok(notify::Event::new(
+            notify::EventKind::Other,
+        )
+        .set_flag(notify::event::Flag::Rescan)));
+        assert_eq!(handle.host().poll_state(), poll_before);
+
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("a live native rescan must retain the owner pair for replacement");
+        };
+        assert!(matches!(
+            handoff.source().exit(),
+            ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(invalidation)
+                if invalidation.control().unwrap().reason == ScopedResyncReason::WatcherOverflow
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let watcher_loss_attempts = Arc::new(AtomicUsize::new(0));
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            {
+                let watcher_loss_attempts = Arc::clone(&watcher_loss_attempts);
+                move || {
+                    watcher_loss_attempts.fetch_add(1, Ordering::SeqCst);
+                    80
+                }
+            },
+            || 90,
+        ));
+
+        let required = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncRequired { control } = &required.envelope.event
+        else {
+            panic!("native rescan must first deliver its required control");
+        };
+        assert_eq!(control.reason, ScopedResyncReason::WatcherOverflow);
+        assert_eq!(control.invalid_scope_epoch, 1);
+        runtime
+            .acknowledge_applied(required.application_receipt())
+            .unwrap();
+
+        let started = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = handle.with_attachment(|_, drain| {
+                    let delivery = drain.delivery_lane();
+                    (delivery.state(), delivery.resync_started())
+                });
+                if let (delivery, Some(started)) = state {
+                    if delivery.continuity == ScopedObservationContinuity::Resyncing {
+                        assert_eq!(delivery.scope_epoch, 2);
+                        assert!(delivery.delivered_through_sequence < started.control_sequence);
+                        break started;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        callback_slot.lock().unwrap().as_mut().unwrap()(Ok(notify::Event::new(
+            notify::EventKind::Other,
+        )
+        .set_flag(notify::event::Flag::Rescan)));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while watcher_loss_attempts.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        handle.with_attachment(|_, drain| {
+            let delivery = drain.delivery_lane();
+            let state = delivery.state();
+            assert_eq!(state.continuity, ScopedObservationContinuity::Resyncing);
+            assert_eq!(state.scope_epoch, 2);
+            assert!(state.delivered_through_sequence < started.control_sequence);
+        });
+
+        let started_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncStarted {
+            control: delivered_started,
+        } = &started_event.envelope.event
+        else {
+            panic!("the first replacement start must remain delivery-owned");
+        };
+        assert!(Arc::ptr_eq(delivered_started, &started));
+        runtime
+            .acknowledge_applied(started_event.application_receipt())
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = handle.with_attachment(|_, drain| drain.delivery_lane().state());
+                if state.continuity == ScopedObservationContinuity::ResyncRequired {
+                    assert_eq!(state.scope_epoch, 2);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        acknowledge_clean_automatic_resync_epoch(
+            &mut runtime,
+            2,
+            3,
+            ScopedResyncReason::WatcherOverflow,
+        )
+        .await;
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let resumed_task =
+            tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        let resolution = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(watermark) = resolution else {
+            panic!("the epoch-3 owner must service later poll demand");
+        };
+        assert_eq!(watermark.scope_epoch, 3);
+        assert!(watermark.explicit_object_errors.is_empty());
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), resumed_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn scoped_automatic_resync_recovers_source_and_pair_binding_reoverflows() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
@@ -5772,6 +5948,7 @@ pub(crate) mod tests {
                         unrelated,
                         registrations,
                         fail_registration: false,
+                        emit_rescan: true,
                     }))
                 }
             })
@@ -5781,11 +5958,12 @@ pub(crate) mod tests {
             watcher.coordinator().phase(),
             ScopedObservationWatcherPhase::WatcherInstalled
         );
-        assert_eq!(watcher.state().generation, 1);
+        assert_eq!(watcher.state().generation, 2);
         assert!(!watcher.state().backend_failed);
         assert!(!watcher.state().routing_failed);
+        assert!(!watcher.state().continuity_loss_pending());
         let signalled = watcher.waiter().wait_after(0).await;
-        assert_eq!(signalled.generation, 1);
+        assert_eq!(signalled.generation, 2);
         {
             let registered = registrations.lock().unwrap();
             assert_eq!(registered.len(), 1);
@@ -5889,6 +6067,7 @@ pub(crate) mod tests {
                     unrelated,
                     registrations: Arc::new(std::sync::Mutex::new(Vec::new())),
                     fail_registration: true,
+                    emit_rescan: false,
                 }))
             }
         });
@@ -5908,6 +6087,7 @@ pub(crate) mod tests {
                         unrelated,
                         registrations: Arc::new(std::sync::Mutex::new(Vec::new())),
                         fail_registration: false,
+                        emit_rescan: false,
                     }))
                 }
             })
