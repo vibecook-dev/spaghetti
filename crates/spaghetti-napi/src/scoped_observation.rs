@@ -877,9 +877,61 @@ struct ScopedCoverageMembershipIdentity {
     coverage_domains: Vec<CoverageDomain>,
 }
 
+/// One complete dynamic-relation membership scan retained at the admission
+/// boundary. The checkpoint describes the relation's membership source, not
+/// any one discovered child. Child source objects keep their own canonical
+/// coordinates when the D2 orchestrator admits them later.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ScopedRelationMembershipObservation {
+    membership: ScopedCoverageMembershipIdentity,
+    coverage: ScopedOfferedDecodeCoverage,
+}
+
+impl ScopedRelationMembershipObservation {
+    pub(crate) fn from_directory_checkpoint(
+        relation_id: &str,
+        source: ScopedSourceObjectIdentity,
+        checkpoint: &crate::source::DirectoryCheckpoint,
+    ) -> Result<Self, ScopedAdmissionError> {
+        validate_relation_id(relation_id).map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
+        if checkpoint.generation == 0 {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        let position = CoveragePosition::derive(
+            CoveragePositionKind::SnapshotRevision,
+            checkpoint.revision.as_bytes(),
+            None,
+        )
+        .map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
+        let point = scoped_decode_coverage_point(
+            &source,
+            checkpoint.generation,
+            Some(position),
+            CoverageStatus::ExactSnapshot,
+        )
+        .map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
+        Ok(Self {
+            membership: ScopedCoverageMembershipIdentity {
+                relation_id: Arc::from(relation_id),
+                stream_key: Arc::from(source.stream_key.as_bytes().as_slice()),
+                object_key: Arc::from(source.object_key.as_bytes().as_slice()),
+                coverage_domains: Vec::new(),
+            },
+            coverage: ScopedOfferedDecodeCoverage {
+                source,
+                point: Some(point),
+                explicit_absence_or_deletion: None,
+                explicit_errors: Vec::new(),
+                completeness: CoverageSetCompleteness::Complete,
+            },
+        })
+    }
+}
+
 /// Two bounded internal capacity domains multiplexed by one admission ordinal.
-/// Coverage membership is a one-to-one accounting of exact host-authorized
-/// known-object relations: two semantic objects cannot claim one relation.
+/// Coverage membership accounts separately for exact host-authorized objects
+/// and complete dynamic-relation membership sources. No two sources may claim
+/// one declared relation.
 /// The ordinal is not an RFC 012D `observer_sequence`; public sequencing begins
 /// only after canonical semantic projection is available.
 pub struct ScopedObservationAdmissionLane {
@@ -891,6 +943,8 @@ pub struct ScopedObservationAdmissionLane {
     next_lane_ordinal: u64,
     offered_lane_ordinal: u64,
     known_coverage_objects: BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
+    relation_membership_objects:
+        BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
     offered_access_pass_ids: BTreeMap<ScopedSourceObjectIdentity, u64>,
@@ -914,6 +968,7 @@ impl ScopedObservationAdmissionLane {
             next_lane_ordinal: 1,
             offered_lane_ordinal: 0,
             known_coverage_objects: BTreeMap::new(),
+            relation_membership_objects: BTreeMap::new(),
             pending_coverage_updates: VecDeque::new(),
             offered_decode_coverage: BTreeMap::new(),
             offered_access_pass_ids: BTreeMap::new(),
@@ -951,6 +1006,9 @@ impl ScopedObservationAdmissionLane {
             .known_coverage_objects
             .get(&object.source)
             .is_some_and(|known| known != &membership_identity)
+            || self
+                .relation_membership_objects
+                .contains_key(&object.source)
         {
             return Err(ScopedAdmissionFailure {
                 error: ScopedAdmissionError::InvalidCoverage,
@@ -961,6 +1019,7 @@ impl ScopedObservationAdmissionLane {
             && self
                 .known_coverage_objects
                 .values()
+                .chain(self.relation_membership_objects.values())
                 .any(|known| known.relation_id.as_ref() == membership_identity.relation_id.as_ref())
         {
             return Err(ScopedAdmissionFailure {
@@ -968,7 +1027,13 @@ impl ScopedObservationAdmissionLane {
                 decoded,
             });
         }
-        if source_is_new && self.known_coverage_objects.len() >= self.limits.max_coverage_objects {
+        if source_is_new
+            && self
+                .known_coverage_objects
+                .len()
+                .saturating_add(self.relation_membership_objects.len())
+                >= self.limits.max_coverage_objects
+        {
             return Err(ScopedAdmissionFailure {
                 error: ScopedAdmissionError::CoverageObjectCapacityFull,
                 decoded,
@@ -1121,6 +1186,68 @@ impl ScopedObservationAdmissionLane {
             retained_native_bytes,
             control_items: control_items as u32,
         })
+    }
+
+    /// Retain one complete dynamic-relation membership checkpoint after its
+    /// authorized directory pass. This is deliberately event-free: callers
+    /// may use it only at an already-drained bootstrap/replacement admission
+    /// boundary. Live membership changes require their ordered child source
+    /// controls before this seam can be opened to the D2 orchestrator.
+    pub(crate) fn record_relation_membership(
+        &mut self,
+        access_pass_id: u64,
+        phase: ScopedAppendDeliveryPhase,
+        observation: ScopedRelationMembershipObservation,
+    ) -> Result<(), ScopedAdmissionError> {
+        if access_pass_id == 0 || phase == ScopedAppendDeliveryPhase::Live || !self.is_empty() {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        let source = observation.coverage.source.clone();
+        let membership = observation.membership;
+        if source.stream_key.as_bytes() != membership.stream_key.as_ref()
+            || source.object_key.as_bytes() != membership.object_key.as_ref()
+            || self.known_coverage_objects.contains_key(&source)
+            || self
+                .known_coverage_objects
+                .values()
+                .any(|known| known.relation_id == membership.relation_id)
+        {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+
+        let source_is_new = !self.relation_membership_objects.contains_key(&source);
+        if self
+            .relation_membership_objects
+            .get(&source)
+            .is_some_and(|known| known != &membership)
+            || (source_is_new
+                && self
+                    .relation_membership_objects
+                    .values()
+                    .any(|known| known.relation_id == membership.relation_id))
+        {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        if source_is_new
+            && self
+                .known_coverage_objects
+                .len()
+                .saturating_add(self.relation_membership_objects.len())
+                >= self.limits.max_coverage_objects
+        {
+            return Err(ScopedAdmissionError::CoverageObjectCapacityFull);
+        }
+
+        if source_is_new {
+            self.relation_membership_objects.insert(source, membership);
+        }
+        self.stage_coverage_update(
+            self.offered_lane_ordinal,
+            access_pass_id,
+            ScopedCoveragePassEvidence::AccessAttempt,
+            observation.coverage,
+        );
+        Ok(())
     }
 
     /// Test-only low-level ownership transfer for admission/order conformance.
@@ -1425,6 +1552,7 @@ impl ScopedObservationAdmissionLane {
     ) -> Option<ScopedCoveragePassEvidence> {
         self.known_coverage_objects
             .iter()
+            .chain(self.relation_membership_objects.iter())
             .find(|(_, membership)| membership.relation_id.as_ref() == relation_id)
             .and_then(|(source, _)| {
                 (self.offered_access_pass_ids.get(source) == Some(&access_pass_id))
@@ -8618,9 +8746,9 @@ pub enum ScopedObservationContinuity {
 
 /// Path-free declared-relation summary paired with RFC 012A source coverage.
 /// It proves which exact authorized relation is the scope root and whether
-/// every declared known object has a Decode point (including explicit
-/// unavailable state) or an explicit absence. Cursor/position authority
-/// remains exclusively on `SourceCoverageSet`.
+/// every declared observation relation has a Decode point (including explicit
+/// unavailable state) or an explicit absence. Cursor/snapshot-position
+/// authority remains exclusively on `SourceCoverageSet`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopedScopeRelationState {
     Present { status: CoverageStatus },
@@ -8847,7 +8975,7 @@ pub enum ScopedCoverageAssemblyError {
     AdmissionNotDrained,
     #[error("scoped coverage has no observed source object")]
     NoObservedObject,
-    #[error("scoped coverage does not account for every authorized known-object relation")]
+    #[error("scoped coverage does not account for every authorized observation relation")]
     DeclaredObjectCoverageMismatch,
     #[error("scoped source coverage does not belong to the authorized adapter")]
     AdapterMismatch,
@@ -14516,6 +14644,7 @@ pub struct ScopedObservationAccessHost {
     program_id: String,
     scope_program_digest: Sha256Digest,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
+    scope_relations: Arc<BTreeMap<String, bool>>,
     access_roots: Arc<BTreeMap<String, ScopedAccessRootGrant>>,
     artifact_relations: Arc<BTreeMap<String, Arc<str>>>,
     root_relation_id: Arc<str>,
@@ -14627,13 +14756,22 @@ impl ScopedObservationAccessHost {
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
         let scope_program_digest = program.scope_program_digest();
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)?;
+        let root_relation_id: Arc<str> = Arc::from(plan.root_relation_id());
+        let scope_relations = plan
+            .observation_relations()
+            .map(|relation| {
+                (
+                    relation.relation_id.clone(),
+                    relation.relation_id == root_relation_id.as_ref(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         if plan.uncomposed_observation_relation_ids().next().is_some() {
             return Err(ScopedObservationAccessError::InvalidGrant(
                 "the authorized scope program contains an uncomposed observation relation"
                     .to_string(),
             ));
         }
-        let root_relation_id: Arc<str> = Arc::from(plan.root_relation_id());
         let known_objects = validate_known_object_grants(&plan, request.known_objects)?;
         let artifact_relations =
             artifact_access::validate_artifact_relation_grants(&plan, request.artifact_relations)?;
@@ -14657,6 +14795,7 @@ impl ScopedObservationAccessHost {
             program_id: request.program_id,
             scope_program_digest,
             known_objects: Arc::new(known_objects),
+            scope_relations: Arc::new(scope_relations),
             access_roots: Arc::new(access_roots),
             artifact_relations: Arc::new(artifact_relations),
             root_relation_id,
@@ -15730,11 +15869,14 @@ impl ScopedObservationAccessHost {
             projection,
         )?;
         let scope_coverage = assemble_scoped_scope_coverage(
-            &self.program_id,
-            self.scope_program_digest,
-            &self.root_relation_id,
-            &self.root_identity,
-            self.known_objects.as_ref(),
+            ScopedScopeCoverageAssemblyContext {
+                program_id: &self.program_id,
+                scope_program_digest: self.scope_program_digest,
+                root_relation_id: &self.root_relation_id,
+                root: &self.root_identity,
+                scope_relations: self.scope_relations.as_ref(),
+                known_objects: self.known_objects.as_ref(),
+            },
             admission,
             &source_coverage,
         )?;
@@ -17929,7 +18071,9 @@ fn assemble_scoped_coverage_sets(
     if !admission.is_empty() {
         return Err(ScopedCoverageAssemblyError::AdmissionNotDrained);
     }
-    if admission.known_coverage_objects.is_empty() {
+    if admission.known_coverage_objects.is_empty()
+        && admission.relation_membership_objects.is_empty()
+    {
         return Err(ScopedCoverageAssemblyError::NoObservedObject);
     }
     let support = manifest
@@ -17948,7 +18092,11 @@ fn assemble_scoped_coverage_sets(
             &ScopedOfferedDecodeCoverage,
         )>,
     >::new();
-    for (source, membership) in &admission.known_coverage_objects {
+    for (source, membership) in admission
+        .known_coverage_objects
+        .iter()
+        .chain(admission.relation_membership_objects.iter())
+    {
         if source.adapter_id != manifest.id
             || source.adapter_id != root.adapter_id
             || source.source_instance_key != root.source_instance_key
@@ -18065,16 +18213,29 @@ fn assemble_scoped_coverage_sets(
     Ok(sets)
 }
 
-fn assemble_scoped_scope_coverage(
-    program_id: &str,
+struct ScopedScopeCoverageAssemblyContext<'a> {
+    program_id: &'a str,
     scope_program_digest: Sha256Digest,
-    root_relation_id: &str,
-    root: &ScopedObservationRootIdentity,
-    known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
+    root_relation_id: &'a str,
+    root: &'a ScopedObservationRootIdentity,
+    scope_relations: &'a BTreeMap<String, bool>,
+    known_objects: &'a BTreeMap<String, ScopedKnownObjectGrant>,
+}
+
+fn assemble_scoped_scope_coverage(
+    context: ScopedScopeCoverageAssemblyContext<'_>,
     admission: &ScopedObservationAdmissionLane,
     source_coverage: &[SourceCoverageSet],
 ) -> Result<ScopedScopeCoverage, ScopedCoverageAssemblyError> {
-    validate_scoped_relation_coverage(known_objects, admission)?;
+    let ScopedScopeCoverageAssemblyContext {
+        program_id,
+        scope_program_digest,
+        root_relation_id,
+        root,
+        scope_relations,
+        known_objects,
+    } = context;
+    validate_observation_relation_coverage(scope_relations, known_objects, admission)?;
 
     let mut decode_sets = source_coverage
         .iter()
@@ -18087,13 +18248,17 @@ fn assemble_scoped_scope_coverage(
         || decode.scope.adapter_id != root.adapter_id.as_str()
         || decode.scope.source_instance_key != root.source_instance_key
         || decode.scope.root_entity_key != Some(root.session_key)
-        || decode.points.len() + decode.explicit_absence_or_deletion.len() != known_objects.len()
+        || decode.points.len() + decode.explicit_absence_or_deletion.len() != scope_relations.len()
     {
         return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
     }
 
     let mut by_relation = BTreeMap::new();
-    for (source, membership) in &admission.known_coverage_objects {
+    for (source, membership) in admission
+        .known_coverage_objects
+        .iter()
+        .chain(admission.relation_membership_objects.iter())
+    {
         let coverage = admission
             .offered_decode_coverage
             .get(source)
@@ -18106,9 +18271,9 @@ fn assemble_scoped_scope_coverage(
         }
     }
 
-    let mut relations = Vec::with_capacity(known_objects.len());
+    let mut relations = Vec::with_capacity(scope_relations.len());
     let mut completeness = CoverageSetCompleteness::Complete;
-    for (relation_id, grant) in known_objects {
+    for (relation_id, scope_root) in scope_relations {
         let (source, coverage) = by_relation
             .get(relation_id.as_str())
             .copied()
@@ -18145,7 +18310,7 @@ fn assemble_scoped_scope_coverage(
         completeness = merge_coverage_completeness(completeness, coverage.completeness);
         relations.push(ScopedScopeRelationCoverage {
             relation_id: Arc::from(relation_id.as_str()),
-            scope_root: grant.scope_root,
+            scope_root: *scope_root,
             source: source.clone(),
             generation,
             state,
@@ -18267,6 +18432,58 @@ fn validate_scoped_relation_coverage(
             .known_coverage_objects
             .values()
             .any(|membership| !known_objects.contains_key(membership.relation_id.as_ref()))
+    {
+        return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+    }
+    Ok(())
+}
+
+fn validate_observation_relation_coverage(
+    scope_relations: &BTreeMap<String, bool>,
+    known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
+    admission: &ScopedObservationAdmissionLane,
+) -> Result<(), ScopedCoverageAssemblyError> {
+    validate_scoped_relation_coverage(known_objects, admission)?;
+    if scope_relations.is_empty()
+        || scope_relations
+            .values()
+            .filter(|scope_root| **scope_root)
+            .count()
+            != 1
+        || scope_relations.get(
+            known_objects
+                .values()
+                .find(|grant| grant.scope_root)
+                .map(|grant| grant.relation_id.as_str())
+                .ok_or(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch)?,
+        ) != Some(&true)
+        || known_objects
+            .iter()
+            .any(|(relation_id, grant)| scope_relations.get(relation_id) != Some(&grant.scope_root))
+        || admission
+            .known_coverage_objects
+            .keys()
+            .any(|source| admission.relation_membership_objects.contains_key(source))
+    {
+        return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+    }
+
+    let mut observed = BTreeSet::new();
+    for membership in admission
+        .known_coverage_objects
+        .values()
+        .chain(admission.relation_membership_objects.values())
+    {
+        if !observed.insert(membership.relation_id.as_ref())
+            || !scope_relations.contains_key(membership.relation_id.as_ref())
+        {
+            return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+        }
+    }
+    if observed.len() != scope_relations.len()
+        || scope_relations
+            .keys()
+            .any(|relation_id| !observed.contains(relation_id.as_str()))
     {
         return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
     }
@@ -18806,13 +19023,13 @@ mod projection_tests {
     use serde_json::{json, Value as JsonValue};
 
     use crate::adapter::{
-        ContractCompleteness, ContractVersionOffer, ContractVersionRequest,
-        CoverageMembershipRevision, NativeIdentity, QualifiedTimestamp, QualifiedValue,
-        QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
-        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
+        AdapterManifest, AdapterSupportBinding, ContractCompleteness, ContractVersionOffer,
+        ContractVersionRequest, CoverageMembershipRevision, NativeIdentity, QualifiedTimestamp,
+        QualifiedValue, QualifiedValueQuality, TimestampQuality, UsageBucketsV2,
+        UsageQualifiedValue, UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
     };
     use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
-    use crate::source::RecordOrigin;
+    use crate::source::{DirectoryCheckpoint, FileIdentity, RecordOrigin};
 
     use super::actor_wire::ScopedActorEnvelopeWire;
     use super::usage_wire::ScopedUsageEnvelopeWire;
@@ -19514,6 +19731,338 @@ mod projection_tests {
             CoverageSetCompleteness::Complete,
         )
         .unwrap()
+    }
+
+    fn relation_membership_source(stable_relation_key: &[u8]) -> ScopedSourceObjectIdentity {
+        let root_source = source_identity();
+        ScopedSourceObjectIdentity {
+            adapter_id: root_source.adapter_id,
+            source_instance_key: root_source.source_instance_key,
+            stream_key: CoverageStreamKey::derive("fixture", b"scope-relation-membership").unwrap(),
+            object_key: CoverageObjectKey::derive("scope-relation-membership", stable_relation_key)
+                .unwrap(),
+        }
+    }
+
+    fn relation_directory_checkpoint(generation: u64, revision_seed: &[u8]) -> DirectoryCheckpoint {
+        DirectoryCheckpoint {
+            root_identity: FileIdentity::ConfinedPath(b"scope-membership-root".to_vec()),
+            generation,
+            revision: Revision::digest(revision_seed),
+            entries: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn dynamic_relation_membership_checkpoint_is_exact_bounded_and_boundary_only() {
+        let source = relation_membership_source(b"descendants");
+        let first_checkpoint = relation_directory_checkpoint(1, b"descendants-a");
+        let first = ScopedRelationMembershipObservation::from_directory_checkpoint(
+            "descendant-transcripts",
+            source.clone(),
+            &first_checkpoint,
+        )
+        .unwrap();
+        let first_point = first.coverage.point.as_ref().unwrap();
+        assert_eq!(first_point.status, CoverageStatus::ExactSnapshot);
+        assert_eq!(
+            first_point.position,
+            Some(
+                CoveragePosition::derive(
+                    CoveragePositionKind::SnapshotRevision,
+                    first_checkpoint.revision.as_bytes(),
+                    None,
+                )
+                .unwrap()
+            )
+        );
+        assert_eq!(
+            first.coverage.completeness,
+            CoverageSetCompleteness::Complete
+        );
+
+        assert!(
+            ScopedRelationMembershipObservation::from_directory_checkpoint(
+                "bad relation",
+                source.clone(),
+                &first_checkpoint,
+            )
+            .is_err()
+        );
+        assert!(
+            ScopedRelationMembershipObservation::from_directory_checkpoint(
+                "descendant-transcripts",
+                source.clone(),
+                &relation_directory_checkpoint(0, b"zero-generation"),
+            )
+            .is_err()
+        );
+
+        let mut lane = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 1,
+            max_retained_native_bytes: 0,
+            max_control_items: 1,
+            max_coverage_objects: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            lane.record_relation_membership(
+                0,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                first.clone(),
+            ),
+            Err(ScopedAdmissionError::InvalidCoverage)
+        );
+        assert!(lane.relation_membership_objects.is_empty());
+        lane.record_relation_membership(7, ScopedAppendDeliveryPhase::Bootstrap, first)
+            .unwrap();
+        assert!(lane.is_empty());
+        assert_eq!(lane.relation_membership_objects.len(), 1);
+        assert_eq!(
+            lane.relation_pass_evidence("descendant-transcripts", 7),
+            Some(ScopedCoveragePassEvidence::AccessAttempt)
+        );
+
+        let second_checkpoint = relation_directory_checkpoint(2, b"descendants-b");
+        let second = ScopedRelationMembershipObservation::from_directory_checkpoint(
+            "descendant-transcripts",
+            source.clone(),
+            &second_checkpoint,
+        )
+        .unwrap();
+        let retained_before_live = lane.offered_decode_coverage(&source).cloned().unwrap();
+        assert_eq!(
+            lane.record_relation_membership(8, ScopedAppendDeliveryPhase::Live, second.clone()),
+            Err(ScopedAdmissionError::InvalidCoverage)
+        );
+        assert_eq!(
+            lane.offered_decode_coverage(&source),
+            Some(&retained_before_live)
+        );
+
+        lane.record_relation_membership(8, ScopedAppendDeliveryPhase::Correction, second)
+            .unwrap();
+        let retained = lane.offered_decode_coverage(&source).unwrap();
+        assert_eq!(retained.point.as_ref().unwrap().generation, 2);
+        assert_eq!(
+            lane.relation_pass_evidence("descendant-transcripts", 8),
+            Some(ScopedCoveragePassEvidence::AccessAttempt)
+        );
+
+        let retargeted = ScopedRelationMembershipObservation::from_directory_checkpoint(
+            "descendant-transcripts",
+            relation_membership_source(b"retargeted-descendants"),
+            &second_checkpoint,
+        )
+        .unwrap();
+        assert_eq!(
+            lane.record_relation_membership(9, ScopedAppendDeliveryPhase::Correction, retargeted),
+            Err(ScopedAdmissionError::InvalidCoverage)
+        );
+
+        let relation_rebound = ScopedRelationMembershipObservation::from_directory_checkpoint(
+            "workflow-records",
+            source.clone(),
+            &second_checkpoint,
+        )
+        .unwrap();
+        assert_eq!(
+            lane.record_relation_membership(
+                9,
+                ScopedAppendDeliveryPhase::Correction,
+                relation_rebound,
+            ),
+            Err(ScopedAdmissionError::InvalidCoverage)
+        );
+
+        let excess = ScopedRelationMembershipObservation::from_directory_checkpoint(
+            "workflow-records",
+            relation_membership_source(b"workflows"),
+            &relation_directory_checkpoint(1, b"workflows-a"),
+        )
+        .unwrap();
+        assert_eq!(
+            lane.record_relation_membership(9, ScopedAppendDeliveryPhase::Correction, excess),
+            Err(ScopedAdmissionError::CoverageObjectCapacityFull)
+        );
+        assert_eq!(lane.relation_membership_objects.len(), 1);
+        assert_eq!(lane.offered_decode_coverage.len(), 1);
+    }
+
+    fn assembled_dynamic_scope_coverage(
+        root: &ScopedObservationRootIdentity,
+        checkpoint: &DirectoryCheckpoint,
+    ) -> (ScopedScopeCoverage, SourceCoverageSet) {
+        let root_source = source_identity();
+        let root_decode = fixture_decode_coverage(root, true);
+        let root_point = root_decode.points[0].clone();
+        let dynamic_source = relation_membership_source(b"descendants");
+        let dynamic = ScopedRelationMembershipObservation::from_directory_checkpoint(
+            "descendant-transcripts",
+            dynamic_source,
+            checkpoint,
+        )
+        .unwrap();
+
+        let mut admission = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 1,
+            max_retained_native_bytes: 0,
+            max_control_items: 1,
+            max_coverage_objects: 2,
+        })
+        .unwrap();
+        admission.known_coverage_objects.insert(
+            root_source.clone(),
+            ScopedCoverageMembershipIdentity {
+                relation_id: Arc::from("root-object"),
+                stream_key: Arc::from(root_source.stream_key.as_bytes().as_slice()),
+                object_key: Arc::from(root_source.object_key.as_bytes().as_slice()),
+                coverage_domains: Vec::new(),
+            },
+        );
+        admission.offered_decode_coverage.insert(
+            root_source.clone(),
+            ScopedOfferedDecodeCoverage {
+                source: root_source,
+                point: Some(root_point),
+                explicit_absence_or_deletion: None,
+                explicit_errors: Vec::new(),
+                completeness: CoverageSetCompleteness::Complete,
+            },
+        );
+        admission
+            .record_relation_membership(11, ScopedAppendDeliveryPhase::Bootstrap, dynamic)
+            .unwrap();
+
+        let selection = observation_contract_selection();
+        let manifest = AdapterManifest {
+            id: AdapterId::new("fixture").unwrap(),
+            display_name: "fixture".to_owned(),
+            adapter_version: "1.0.0".to_owned(),
+            contract_version: 1,
+            support_binding: Some(
+                AdapterSupportBinding::new(
+                    "fixture-support-v1",
+                    "1.0.0",
+                    1,
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                    "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+                )
+                .unwrap(),
+            ),
+            scope_programs: None,
+            source_schema_versions: Vec::new(),
+            capabilities: Vec::new(),
+        };
+        let projection = sink(1);
+        let mut source_coverage = assemble_scoped_coverage_sets(
+            &manifest,
+            &selection.contract_versions,
+            root,
+            &admission,
+            &projection,
+        )
+        .unwrap();
+        assert_eq!(source_coverage.len(), 1);
+        let decode = source_coverage.pop().unwrap();
+        assert_eq!(decode.coverage_domain, CoverageDomain::Decode);
+        assert_eq!(decode.points.len(), 2);
+        let scope_relations = BTreeMap::from([
+            ("descendant-transcripts".to_owned(), false),
+            ("root-object".to_owned(), true),
+        ]);
+        let known_objects = BTreeMap::from([(
+            "root-object".to_owned(),
+            ScopedKnownObjectGrant {
+                relation_id: "root-object".to_owned(),
+                scope_root: true,
+                access_root: "projects".to_owned(),
+                locator_id: "known-transcript".to_owned(),
+                root: PathBuf::from("/fixture"),
+                relative_path: PathBuf::from("root.jsonl"),
+            },
+        )]);
+        let scope = assemble_scoped_scope_coverage(
+            ScopedScopeCoverageAssemblyContext {
+                program_id: "session-observation",
+                scope_program_digest: Sha256Digest::of(b"fixture-scope-program"),
+                root_relation_id: "root-object",
+                root,
+                scope_relations: &scope_relations,
+                known_objects: &known_objects,
+            },
+            &admission,
+            std::slice::from_ref(&decode),
+        )
+        .unwrap();
+        (scope, decode)
+    }
+
+    #[test]
+    fn dynamic_membership_checkpoint_enters_scope_and_completion_snapshot_binding() {
+        let root = root_identity();
+        let (first_scope, first_decode) = assembled_dynamic_scope_coverage(
+            &root,
+            &relation_directory_checkpoint(1, b"descendants-a"),
+        );
+        assert_eq!(first_scope.relations().len(), 2);
+        let relation = first_scope
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id.as_ref() == "descendant-transcripts")
+            .unwrap();
+        assert!(!relation.scope_root);
+        assert!(matches!(
+            relation.state,
+            ScopedScopeRelationState::Present {
+                status: CoverageStatus::ExactSnapshot
+            }
+        ));
+        assert!(first_scope.validate_against(&root, std::slice::from_ref(&first_decode)));
+
+        let (second_scope, second_decode) = assembled_dynamic_scope_coverage(
+            &root,
+            &relation_directory_checkpoint(1, b"descendants-b"),
+        );
+        assert_eq!(first_scope.scope_revision(), second_scope.scope_revision());
+        assert_ne!(first_decode.points, second_decode.points);
+
+        let selection = observation_contract_selection();
+        let capabilities = observation_capabilities_for_selection(&selection);
+        let family_manifest = fixture_manifest_for_selection(&selection);
+        let artifact_availability = empty_artifact_availability(&root);
+        let mut first_coverage = vec![
+            first_decode,
+            empty_usage_coverage(CoverageSetCompleteness::Complete),
+        ];
+        let mut second_coverage = vec![
+            second_decode,
+            empty_usage_coverage(CoverageSetCompleteness::Complete),
+        ];
+        first_coverage.sort_by(|left, right| left.coverage_domain.cmp(&right.coverage_domain));
+        second_coverage.sort_by(|left, right| left.coverage_domain.cmp(&right.coverage_domain));
+        let first_digest = bootstrap_snapshot_digest(fixture_completion_components(
+            &root,
+            true,
+            &capabilities,
+            &family_manifest,
+            &first_scope,
+            &first_coverage,
+            &artifact_availability,
+        ))
+        .unwrap();
+        let second_digest = bootstrap_snapshot_digest(fixture_completion_components(
+            &root,
+            true,
+            &capabilities,
+            &family_manifest,
+            &second_scope,
+            &second_coverage,
+            &artifact_availability,
+        ))
+        .unwrap();
+        assert_ne!(first_digest, second_digest);
     }
 
     #[test]

@@ -331,17 +331,22 @@ impl AuthorizedScopeAccessPlan {
     /// attachment-bound availability contract and therefore do not enter this
     /// gate.
     pub(crate) fn uncomposed_observation_relation_ids(&self) -> impl Iterator<Item = &str> {
+        self.observation_relations()
+            .filter(|relation| relation.primitive != ScopeRelationPrimitive::KnownObject)
+            .map(|relation| relation.relation_id.as_str())
+    }
+
+    /// Every declared relation represented by RFC 012D scope coverage.
+    /// Artifact availability has its own contextual replacement contract and
+    /// is intentionally not folded into Decode membership.
+    pub(crate) fn observation_relations(&self) -> impl Iterator<Item = &ScopeRelationDeclaration> {
         self.inner
             .relations
             .values()
+            .map(|relation| &relation.declaration)
             .filter(|relation| {
-                !matches!(
-                    relation.declaration.primitive,
-                    ScopeRelationPrimitive::KnownObject
-                        | ScopeRelationPrimitive::ArtifactLocatorFromEvidence
-                )
+                relation.primitive != ScopeRelationPrimitive::ArtifactLocatorFromEvidence
             })
-            .map(|relation| relation.declaration.relation_id.as_str())
     }
 
     pub fn reserve(
