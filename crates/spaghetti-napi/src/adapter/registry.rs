@@ -371,6 +371,8 @@ pub(crate) mod tests {
 
     const DEPENDENCY_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"decoder-sidecar","primitive":"KnownObject","access_root":"root","locator":"decoder-sidecar","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
+    const UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{native-session-id}/children","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
     fn promoted_fixture_catalog_with_scope(
         scope_document: &[u8],
     ) -> (
@@ -1657,6 +1659,28 @@ pub(crate) mod tests {
             .family_manifest
             .iter()
             .all(|family| family.entity_or_event_count == 0));
+    }
+
+    #[test]
+    fn promoted_scoped_host_rejects_uncomposed_dynamic_relations() {
+        let registry = supported_fixture_registry_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("authorized-root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let error =
+            match ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)) {
+                Ok(_) => panic!("an uncomposed dynamic relation must fail attachment"),
+                Err(error) => error,
+            };
+        assert!(matches!(
+            error,
+            ScopedObservationAccessError::InvalidGrant(ref message)
+                if message == "the authorized scope program contains an uncomposed observation relation"
+        ));
+        let rendered = error.to_string();
+        assert!(!rendered.contains("descendant-objects"));
+        assert!(!rendered.contains("sessions/"));
     }
 
     #[test]

@@ -325,6 +325,25 @@ impl AuthorizedScopeAccessPlan {
             .map(|relation| relation.declaration.relation_id.as_str())
     }
 
+    /// Relation primitives whose source membership is not yet represented by
+    /// the scoped observer's exact known-object coverage vector. Evidence-
+    /// derived artifact relations are transported through their separate
+    /// attachment-bound availability contract and therefore do not enter this
+    /// gate.
+    pub(crate) fn uncomposed_observation_relation_ids(&self) -> impl Iterator<Item = &str> {
+        self.inner
+            .relations
+            .values()
+            .filter(|relation| {
+                !matches!(
+                    relation.declaration.primitive,
+                    ScopeRelationPrimitive::KnownObject
+                        | ScopeRelationPrimitive::ArtifactLocatorFromEvidence
+                )
+            })
+            .map(|relation| relation.declaration.relation_id.as_str())
+    }
+
     pub fn reserve(
         &self,
         request: ScopeAccessRequest<'_>,

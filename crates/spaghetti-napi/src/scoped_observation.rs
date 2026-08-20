@@ -14627,6 +14627,12 @@ impl ScopedObservationAccessHost {
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
         let scope_program_digest = program.scope_program_digest();
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)?;
+        if plan.uncomposed_observation_relation_ids().next().is_some() {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "the authorized scope program contains an uncomposed observation relation"
+                    .to_string(),
+            ));
+        }
         let root_relation_id: Arc<str> = Arc::from(plan.root_relation_id());
         let known_objects = validate_known_object_grants(&plan, request.known_objects)?;
         let artifact_relations =
