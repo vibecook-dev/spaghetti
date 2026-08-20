@@ -890,9 +890,9 @@ pub(super) fn validate_access_root_grants(
     artifact_relations: &BTreeMap<String, Arc<str>>,
     grants: Vec<ScopedAccessRootGrant>,
 ) -> Result<BTreeMap<String, ScopedAccessRootGrant>, ScopedObservationAccessError> {
-    let mut expected = known_objects
-        .values()
-        .map(|grant| grant.access_root.as_str())
+    let mut expected = plan
+        .observation_relations()
+        .map(|relation| relation.access_root.as_str())
         .collect::<BTreeSet<_>>();
     for relation_id in artifact_relations.values() {
         let relation = plan.relation(relation_id).ok_or_else(|| {

@@ -847,6 +847,27 @@ impl ScopeAccessReservation {
         identity_inputs: &[ScopeIdentityInput<'_>],
     ) -> Result<PathBuf, AccessBudgetError> {
         validate_evidence_locator_template(&self.declaration)?;
+        self.validate_locator_identity_binding(identity_inputs)?;
+        render_confined_locator(&self.declaration.locator, identity_inputs)
+    }
+
+    /// Render one `ChildDirectoryByNativeId` membership root after the exact
+    /// identity inputs have already minted this reservation's opaque object
+    /// token. The result remains a confined relative path; source-root
+    /// authority and native access stay with the scoped host.
+    pub(crate) fn render_child_directory_locator(
+        &self,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+    ) -> Result<PathBuf, AccessBudgetError> {
+        validate_child_directory_locator_template(&self.declaration)?;
+        self.validate_locator_identity_binding(identity_inputs)?;
+        render_confined_locator(&self.declaration.locator, identity_inputs)
+    }
+
+    fn validate_locator_identity_binding(
+        &self,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+    ) -> Result<(), AccessBudgetError> {
         if identity_inputs.len() != self.declaration.identity_inputs.len()
             || identity_inputs
                 .iter()
@@ -863,7 +884,7 @@ impl ScopeAccessReservation {
         if AccessObjectToken::derive(self.relation_id(), &token_components)? != self.object_token {
             return Err(invalid_locator_template());
         }
-        render_evidence_locator(&self.declaration.locator, identity_inputs)
+        Ok(())
     }
 
     pub fn complete(
@@ -889,7 +910,26 @@ impl ScopeAccessReservation {
 pub(crate) fn validate_evidence_locator_template(
     declaration: &ScopeRelationDeclaration,
 ) -> Result<(), AccessBudgetError> {
-    if declaration.primitive != ScopeRelationPrimitive::ArtifactLocatorFromEvidence {
+    validate_bound_locator_template(
+        declaration,
+        ScopeRelationPrimitive::ArtifactLocatorFromEvidence,
+    )
+}
+
+fn validate_child_directory_locator_template(
+    declaration: &ScopeRelationDeclaration,
+) -> Result<(), AccessBudgetError> {
+    validate_bound_locator_template(
+        declaration,
+        ScopeRelationPrimitive::ChildDirectoryByNativeId,
+    )
+}
+
+fn validate_bound_locator_template(
+    declaration: &ScopeRelationDeclaration,
+    expected_primitive: ScopeRelationPrimitive,
+) -> Result<(), AccessBudgetError> {
+    if declaration.primitive != expected_primitive {
         return Err(invalid_locator_template());
     }
     let placeholders = locator_placeholders(&declaration.locator)?;
@@ -906,7 +946,7 @@ pub(crate) fn validate_evidence_locator_template(
     Ok(())
 }
 
-fn render_evidence_locator(
+fn render_confined_locator(
     template: &str,
     identity_inputs: &[ScopeIdentityInput<'_>],
 ) -> Result<PathBuf, AccessBudgetError> {
@@ -1002,7 +1042,7 @@ fn locator_placeholders(locator: &str) -> Result<Vec<(usize, usize, &str)>, Acce
 
 fn invalid_locator_template() -> AccessBudgetError {
     AccessBudgetError::InvalidConfig(
-        "artifact locator template or bound identity input is invalid".to_string(),
+        "scope locator template or bound identity input is invalid".to_string(),
     )
 }
 
@@ -1580,6 +1620,142 @@ mod tests {
             max_rows: 0,
         })?
         .render_evidence_locator(&identity)
+    }
+
+    fn child_directory_scope_plan(locator: &str) -> ScopeAccessPlan {
+        let mut manifest = grok_scope_manifest();
+        let relation = manifest.programs[0]
+            .relations
+            .iter_mut()
+            .find(|relation| relation.relation_id == "summary-sidecar")
+            .unwrap();
+        relation.relation_id = "descendant-transcripts".to_owned();
+        relation.primitive = ScopeRelationPrimitive::ChildDirectoryByNativeId;
+        relation.locator = locator.to_owned();
+        relation.identity_inputs = vec!["project-key".to_owned(), "native-session-id".to_owned()];
+        ScopeAccessPlan::for_program(&manifest, "observe-session-sidecars").unwrap()
+    }
+
+    fn render_child_directory_locator(
+        locator: &str,
+        project_key: &[u8],
+        native_session_id: &[u8],
+    ) -> Result<PathBuf, AccessBudgetError> {
+        let plan = child_directory_scope_plan(locator);
+        let identity = [
+            ScopeIdentityInput {
+                name: "project-key",
+                value: project_key,
+            },
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: native_session_id,
+            },
+        ];
+        plan.reserve(ScopeAccessRequest {
+            relation_id: "descendant-transcripts",
+            operation: AccessOperation::ObjectListing,
+            phase: AccessPhase::Revalidation,
+            parent_token: None,
+            identity_inputs: &identity,
+            depth: 1,
+            max_bytes: 1,
+            max_rows: 0,
+        })?
+        .render_child_directory_locator(&identity)
+    }
+
+    #[test]
+    fn child_directory_locator_is_confined_and_bound_to_the_reserved_identity() {
+        assert_eq!(
+            render_child_directory_locator(
+                "{project-key}/{native-session-id}/subagents",
+                b"project-a",
+                b"session-7",
+            )
+            .unwrap(),
+            PathBuf::from("project-a/session-7/subagents")
+        );
+
+        let plan = child_directory_scope_plan("{project-key}/{native-session-id}/subagents");
+        let reserved_identity = [
+            ScopeIdentityInput {
+                name: "project-key",
+                value: b"project-a",
+            },
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"session-7",
+            },
+        ];
+        let reservation = plan
+            .reserve(ScopeAccessRequest {
+                relation_id: "descendant-transcripts",
+                operation: AccessOperation::ObjectListing,
+                phase: AccessPhase::Revalidation,
+                parent_token: None,
+                identity_inputs: &reserved_identity,
+                depth: 1,
+                max_bytes: 1,
+                max_rows: 0,
+            })
+            .unwrap();
+        let substituted_identity = [
+            reserved_identity[0],
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"other-session",
+            },
+        ];
+        assert!(reservation
+            .render_child_directory_locator(&substituted_identity)
+            .is_err());
+
+        for invalid in [
+            b"..".as_slice(),
+            b"nested/project".as_slice(),
+            b"nested\\project".as_slice(),
+            b"line\nbreak".as_slice(),
+            b"\xff".as_slice(),
+        ] {
+            assert!(render_child_directory_locator(
+                "{project-key}/{native-session-id}/subagents",
+                invalid,
+                b"session-7",
+            )
+            .is_err());
+        }
+
+        let artifact_plan = artifact_scope_plan("file-history/{native-session-id}");
+        let artifact_identity = [
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"session-7",
+            },
+            ScopeIdentityInput {
+                name: "backup-name",
+                value: b"backup-a",
+            },
+            ScopeIdentityInput {
+                name: "artifact-version",
+                value: b"9",
+            },
+        ];
+        let artifact_reservation = artifact_plan
+            .reserve(ScopeAccessRequest {
+                relation_id: "summary-sidecar",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Revalidation,
+                parent_token: None,
+                identity_inputs: &artifact_identity,
+                depth: 1,
+                max_bytes: 1,
+                max_rows: 0,
+            })
+            .unwrap();
+        assert!(artifact_reservation
+            .render_child_directory_locator(&artifact_identity)
+            .is_err());
     }
 
     #[test]
