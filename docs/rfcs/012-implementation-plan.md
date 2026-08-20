@@ -1392,7 +1392,7 @@ source/decoder registry used by the durable host. It must:
 - expose RFC 012A source/family coverage from poll and barriers; and
 - instrument every access for no-global-scan conformance.
 
-Current landing status (2026-08-19):
+Current landing status (2026-08-20):
 
 - the crate-private composition root performs strict support/contract/program
   selection before validating exact grants and exposes no spoofable N-API
@@ -2319,6 +2319,16 @@ Current landing status (2026-08-19):
   the exact overflow reason, fresh-epoch replay, later polling, and orderly
   close. This adds no public API, dynamic scope, policy value, or performance
   claim; and
+- the disappearance-replacement checkpoint (`d57e7c3`) now exercises the
+  automatic owner path from an applied, present epoch-1 root through live
+  watcher overflow to a complete absent epoch-2 snapshot. The replacement
+  barrier carries `root_present = false`, complete per-family zero-entity
+  manifests, explicit absent source coverage with no retained point or error,
+  and a matching absent scope relation; the rebound owner then serves a valid
+  absent-root poll and closes normally. This proves the D-owned static-root
+  disappearance case without cross-epoch tombstones. Dynamic membership,
+  semantic families not yet selected, and public consumer state replacement
+  remain open; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2383,7 +2393,7 @@ Gate compares clean-bootstrap and resync replacement digests per RFC 012C family
 at the same RFC 012A coverage vector, including disappeared entities, explicit
 unavailable coverage, and unchanged event IDs.
 
-Current landing status (2026-08-19): D3 is `In progress`. Native-derived
+Current landing status (2026-08-20): D3 is `In progress`. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have
@@ -2475,8 +2485,11 @@ state and its offered-coverage lane are staged from empty beside the reducer,
 then all three transfer only after the same successful completion-control
 offer. Old admitted-but-unoffered input is superseded and dropped; completion
 pressure preserves all active state; and re-overflow keeps the last valid epoch
-while a newer stage supersedes the failed continuity epoch. Complete
-multi-family and D-owned manifests, dynamic whole-scope discovery and
+while a newer stage supersedes the failed continuity epoch. Automatic-owner
+coverage now also starts from a delivered present root and proves that overflow
+replay against a disappeared file activates only the complete absent-root
+scope/source snapshot before later polls resume. Complete multi-family and
+D-owned manifests, dynamic whole-scope discovery and
 non-append participants, the public transport over the internal async applied
 runtime, and watcher policy calibration/concrete source-pass and portable-host
 integration remain open. The dedicated control lane now also carries one
