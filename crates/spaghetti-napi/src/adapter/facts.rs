@@ -19,6 +19,8 @@ const FACT_HASH_BYTES: usize = 32;
 const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_RESPONSE_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_PROVENANCE_FIELD_BYTES: usize = 256;
+const JS_SAFE_INTEGER_MAX_U64: u64 = 9_007_199_254_740_991;
+const JS_SAFE_INTEGER_MAX_I64: i64 = 9_007_199_254_740_991;
 const MAX_RUNTIME_SEMANTIC_TEXT_BYTES: usize = 8 * 1024;
 const MAX_CANONICAL_ARTIFACTS_PER_FACT: usize = 4 * 1024;
 
@@ -1405,15 +1407,8 @@ impl UsageRevisionV2Fact {
                 }
             }
         }
-        if self
-            .request_id
-            .as_ref()
-            .is_some_and(|value| value.is_empty())
-        {
-            return Err(AdapterError::invalid_contract(
-                "usage-v2 request_id must be non-empty when present",
-            ));
-        }
+        validate_runtime_semantic_text("native_message_id", self.native_message_id.as_deref())?;
+        validate_runtime_semantic_text("request_id", self.request_id.as_deref())?;
         for value in [
             &self.buckets.input_tokens,
             &self.buckets.output_tokens,
@@ -1421,13 +1416,18 @@ impl UsageRevisionV2Fact {
             &self.buckets.cache_read_input_tokens,
         ] {
             validate_usage_qualified_value(value)?;
+            if let Some(tokens) = value.value {
+                if tokens > JS_SAFE_INTEGER_MAX_U64 {
+                    return Err(AdapterError::invalid_contract(
+                        "usage-v2 token value exceeds the portable safe-integer range",
+                    ));
+                }
+            }
         }
-        for value in [&self.model, &self.effort].into_iter().flatten() {
-            validate_usage_qualified_value(value)?;
-            if value.value.as_ref().is_some_and(|value| value.is_empty()) {
-                return Err(AdapterError::invalid_contract(
-                    "usage-v2 model/effort value must be non-empty",
-                ));
+        for (field, value) in [("model", &self.model), ("effort", &self.effort)] {
+            if let Some(value) = value {
+                validate_usage_qualified_value(value)?;
+                validate_runtime_semantic_text(field, value.value.as_deref())?;
             }
         }
         validate_runtime_semantic_text(
@@ -1622,10 +1622,18 @@ fn validate_usage_qualified_value<T>(value: &UsageQualifiedValue<T>) -> Result<(
     }
     if value.provenance.native_field.is_empty()
         || value.provenance.native_field.len() > MAX_USAGE_PROVENANCE_FIELD_BYTES
+        || value.provenance.native_field.trim() != value.provenance.native_field
         || value.provenance.normalization_contract_version == 0
     {
         return Err(AdapterError::invalid_contract(
-            "usage-v2 value provenance is empty, oversized, or unversioned",
+            "usage-v2 value provenance is empty, oversized, uncanonical, or unversioned",
+        ));
+    }
+    if value.effective_at.is_some_and(|effective_at| {
+        !(-JS_SAFE_INTEGER_MAX_I64..=JS_SAFE_INTEGER_MAX_I64).contains(&effective_at)
+    }) {
+        return Err(AdapterError::invalid_contract(
+            "usage-v2 effective_at exceeds the portable safe-integer range",
         ));
     }
     Ok(())
@@ -3101,6 +3109,70 @@ mod tests {
         for variant in variants {
             assert_ne!(variant.semantic_revision_key().unwrap(), original_revision);
         }
+    }
+
+    #[test]
+    fn usage_v2_validate_enforces_portable_safe_integers_and_canonical_text() {
+        let batch = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        let valid = usage_v2_fact(&batch, 1);
+        assert!(valid.validate().is_ok());
+
+        let mut exact_tokens = valid.clone();
+        exact_tokens.buckets.input_tokens.value = Some(JS_SAFE_INTEGER_MAX_U64);
+        assert!(exact_tokens.validate().is_ok());
+        let mut oversized_tokens = valid.clone();
+        oversized_tokens.buckets.input_tokens.value = Some(JS_SAFE_INTEGER_MAX_U64 + 1);
+        assert!(oversized_tokens.validate().is_err());
+
+        let mut exact_effective_at = valid.clone();
+        exact_effective_at.buckets.input_tokens.effective_at = Some(JS_SAFE_INTEGER_MAX_I64);
+        assert!(exact_effective_at.validate().is_ok());
+        let mut oversized_effective_at = valid.clone();
+        oversized_effective_at.buckets.input_tokens.effective_at =
+            Some(JS_SAFE_INTEGER_MAX_I64 + 1);
+        assert!(oversized_effective_at.validate().is_err());
+
+        let mut exact_request = valid.clone();
+        exact_request.request_id = Some("r".repeat(MAX_RUNTIME_SEMANTIC_TEXT_BYTES));
+        assert!(exact_request.validate().is_ok());
+        let mut oversized_request = valid.clone();
+        oversized_request.request_id = Some("r".repeat(MAX_RUNTIME_SEMANTIC_TEXT_BYTES + 1));
+        assert!(oversized_request.validate().is_err());
+
+        let mut exact_provenance = valid.clone();
+        exact_provenance
+            .buckets
+            .input_tokens
+            .provenance
+            .native_field = "p".repeat(MAX_USAGE_PROVENANCE_FIELD_BYTES);
+        assert!(exact_provenance.validate().is_ok());
+        let mut oversized_provenance = valid.clone();
+        oversized_provenance
+            .buckets
+            .input_tokens
+            .provenance
+            .native_field = "p".repeat(MAX_USAGE_PROVENANCE_FIELD_BYTES + 1);
+        assert!(oversized_provenance.validate().is_err());
+
+        let mut empty_request = valid.clone();
+        empty_request.request_id = Some(String::new());
+        assert!(empty_request.validate().is_err());
+
+        let mut padded_request = valid.clone();
+        padded_request.request_id = Some(" request-1".to_string());
+        assert!(padded_request.validate().is_err());
+
+        let mut padded_provenance = valid.clone();
+        padded_provenance
+            .buckets
+            .input_tokens
+            .provenance
+            .native_field = " message.usage.input_tokens".to_string();
+        assert!(padded_provenance.validate().is_err());
+
+        let mut padded_model = valid.clone();
+        padded_model.model.as_mut().unwrap().value = Some(" model-1".to_string());
+        assert!(padded_model.validate().is_err());
     }
 
     #[test]

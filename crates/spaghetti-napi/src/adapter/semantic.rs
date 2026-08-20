@@ -661,6 +661,7 @@ impl<'de> Deserialize<'de> for SemanticRevisionRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeIdentity {
     pub native_namespace: String,
     pub native_id: String,
@@ -737,6 +738,9 @@ impl<T, A, P> QualifiedValue<T, A, P> {
                 "unknown_reason is present if and only if quality is Unknown",
             ));
         }
+        if let Some(effective_at) = effective_at {
+            validate_portable_i64("effective_at", effective_at)?;
+        }
         Ok(Self {
             value,
             quality,
@@ -760,16 +764,19 @@ where
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(bound(
-            deserialize = "T: Deserialize<'de>, A: Deserialize<'de>, P: Deserialize<'de>"
-        ))]
+        #[serde(
+            deny_unknown_fields,
+            bound(deserialize = "T: Deserialize<'de>, A: Deserialize<'de>, P: Deserialize<'de>")
+        )]
         struct Wire<T, A, P> {
             #[serde(deserialize_with = "deserialize_required_option")]
             value: Option<T>,
             quality: QualifiedValueQuality,
             authority: A,
             completeness: ContractCompleteness,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
             unknown_reason: Option<QualifiedUnknownReason>,
+            #[serde(default, deserialize_with = "deserialize_present_non_null")]
             effective_at: Option<i64>,
             provenance: P,
         }
@@ -817,6 +824,7 @@ impl NativeIdentityClaim {
 
     fn validate(&self) -> Result<(), SemanticContractError> {
         self.entity_ref.validate()?;
+        validate_identifier("qualified value authority", &self.identity.authority)?;
         if let Some(identity) = &self.identity.value {
             identity.validate()?;
         }
@@ -830,6 +838,7 @@ impl<'de> Deserialize<'de> for NativeIdentityClaim {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wire {
             entity_ref: ExternalEntityRef,
             identity: QualifiedValue<NativeIdentity>,
@@ -2034,6 +2043,34 @@ mod tests {
             "authority": "native-response",
             "completeness": "unknown",
             "unknown_reason": "missing",
+            "provenance": []
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<QualifiedValue<u64>>(json!({
+            "value": 0,
+            "quality": "exact",
+            "authority": "native-response",
+            "completeness": "complete",
+            "unknown_reason": null,
+            "provenance": []
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<QualifiedValue<u64>>(json!({
+            "value": 0,
+            "quality": "exact",
+            "authority": "native-response",
+            "completeness": "complete",
+            "effective_at": null,
+            "provenance": []
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<QualifiedValue<u64>>(json!({
+            "value": null,
+            "quality": "unknown",
+            "authority": "native-response",
+            "completeness": "unknown",
+            "unknown_reason": "missing",
+            "effective_at": null,
             "provenance": []
         }))
         .is_err());

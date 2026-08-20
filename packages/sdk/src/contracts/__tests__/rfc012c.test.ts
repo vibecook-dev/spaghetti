@@ -26,8 +26,12 @@ function reject(value: unknown, parse: (input: unknown) => unknown): void {
   assert.throws(() => parse(value), ContractValidationError);
 }
 
+function parseFixture(value: unknown) {
+  return parseRuntimeContractFixture(value, rawFixture);
+}
+
 test('Rust RFC 012C v1 fixture validates in the portable SDK', () => {
-  const fixture = parseRuntimeContractFixture(rawFixture);
+  const fixture = parseFixture(rawFixture);
   assert.equal(fixture.fixture_contract_version, RUNTIME_SEMANTIC_CONTRACT_VERSION);
   assert.equal(fixture.runtime_semantic_contract_version, RUNTIME_SEMANTIC_CONTRACT_VERSION);
   assert.deepEqual(
@@ -98,13 +102,60 @@ test('Rust RFC 012C v1 fixture validates in the portable SDK', () => {
   assert.equal(aba.b.revision.buckets.input_tokens.value, 20);
 });
 
-test('unknown extras are accepted without entering the typed value', () => {
-  const raw = clone(rawFixture) as {
-    usage: { native_message: { revision: { extra_future_field?: string } } };
-  };
-  raw.usage.native_message.revision.extra_future_field = 'ignored';
-  const parsed = parseRuntimeContractFixture(raw);
-  assert.equal(Object.prototype.hasOwnProperty.call(parsed.usage.native_message.revision, 'extra_future_field'), false);
+test('unknown extras are rejected at every nested runtime value', () => {
+  const extras: Array<[string, (value: Record<string, unknown>) => void]> = [
+    ['fixture', (value) => (value.future = true)],
+    [
+      'actor revision',
+      (value) => {
+        const revision = (value.actors as { root: { revision: Record<string, unknown> } }).root.revision;
+        revision.extra_future_field = 'ignored';
+      },
+    ],
+    [
+      'affiliation revision',
+      (value) => {
+        const revision = (value.affiliations as { child_team_present: { revision: Record<string, unknown> } })
+          .child_team_present.revision;
+        revision.extra_future_field = 'ignored';
+      },
+    ],
+    [
+      'usage revision',
+      (value) => {
+        const revision = (value.usage as { native_message: { revision: Record<string, unknown> } }).native_message
+          .revision;
+        revision.extra_future_field = 'ignored';
+      },
+    ],
+    [
+      'usage bucket',
+      (value) => {
+        const bucket = (
+          value.usage as {
+            native_message: { revision: { buckets: { input_tokens: Record<string, unknown> } } };
+          }
+        ).native_message.revision.buckets.input_tokens;
+        bucket.future = true;
+      },
+    ],
+    [
+      'usage provenance',
+      (value) => {
+        const provenance = (
+          value.usage as {
+            native_message: { revision: { buckets: { input_tokens: { provenance: Record<string, unknown> } } } };
+          }
+        ).native_message.revision.buckets.input_tokens.provenance;
+        provenance.future = true;
+      },
+    ],
+  ];
+  for (const [label, mutate] of extras) {
+    const raw = clone(rawFixture) as Record<string, unknown>;
+    mutate(raw);
+    assert.throws(() => parseFixture(raw), ContractValidationError, label);
+  }
 });
 
 test('portable parsing does not depend on the Node Buffer global', () => {
@@ -112,7 +163,7 @@ test('portable parsing does not depend on the Node Buffer global', () => {
   const originalBuffer = globals.Buffer;
   globals.Buffer = undefined;
   try {
-    const fixture = parseRuntimeContractFixture(rawFixture);
+    const fixture = parseFixture(rawFixture);
     assert.equal(fixture.usage.native_message.revision.native_message_id, 'msg_fixture_native_1');
   } finally {
     globals.Buffer = originalBuffer;
@@ -145,19 +196,19 @@ test('known native timestamp fields are preserved and validated', () => {
 test('unknown contract majors and malformed opaque references are rejected', () => {
   const fixture = clone(rawFixture) as { fixture_contract_version: number };
   fixture.fixture_contract_version = 2;
-  reject(fixture, parseRuntimeContractFixture);
+  reject(fixture, parseFixture);
 
   const semantic = clone(rawFixture) as { runtime_semantic_contract_version: number };
   semantic.runtime_semantic_contract_version = 2;
-  reject(semantic, parseRuntimeContractFixture);
+  reject(semantic, parseFixture);
 
   const family = clone(rawFixture) as { families: Array<{ version: number }> };
   family.families[2]!.version = 2;
-  reject(family, parseRuntimeContractFixture);
+  reject(family, parseFixture);
 
   const duplicateFamily = clone(rawFixture) as { families: Array<{ family: string; version: number }> };
   duplicateFamily.families.push({ ...duplicateFamily.families[0]! });
-  reject(duplicateFamily, parseRuntimeContractFixture);
+  reject(duplicateFamily, parseFixture);
 
   const actor = clone((rawFixture as { actors: { root: { revision: unknown } } }).actors.root.revision) as {
     actor_run: string;
@@ -180,19 +231,19 @@ test('unknown contract majors and malformed opaque references are rejected', () 
     actors: { root: { semantic_revision_ref: typeof ref } };
   };
   wrapped.actors.root.semantic_revision_ref = ref;
-  reject(wrapped, parseRuntimeContractFixture);
+  reject(wrapped, parseFixture);
 
   const actorRevisionKey = clone(rawFixture) as {
     actors: { root: { semantic_revision_key_hex: string } };
   };
   actorRevisionKey.actors.root.semantic_revision_key_hex = 'ABC';
-  reject(actorRevisionKey, parseRuntimeContractFixture);
+  reject(actorRevisionKey, parseFixture);
 
   const affiliationRevisionKey = clone(rawFixture) as {
     affiliations: { child_team_present: { semantic_revision_key_hex: string } };
   };
   affiliationRevisionKey.affiliations.child_team_present.semantic_revision_key_hex = '0'.repeat(63);
-  reject(affiliationRevisionKey, parseRuntimeContractFixture);
+  reject(affiliationRevisionKey, parseFixture);
 });
 
 test('actor lineage and affiliation enumerations are rejected when invalid', () => {
@@ -316,4 +367,99 @@ test('usage identity, base64, and token-value rejection classes are covered', ()
   native.buckets.input_tokens.value = 0;
   native.buckets.input_tokens.unknown_reason = 'missing';
   reject(native, parseUsageRevisionV2);
+});
+
+test('runtime fixture record() rejects non-plain objects', () => {
+  class RuntimeWire {}
+  reject(Object.assign(new RuntimeWire(), clone(rawFixture)), parseFixture);
+
+  class FamilyWire {}
+  const fixture = clone(rawFixture) as { families: unknown[] };
+  fixture.families[0] = Object.assign(new FamilyWire(), fixture.families[0]);
+  reject(fixture, parseFixture);
+});
+
+test('usage values accept exact portable bounds and reject one over', () => {
+  const native = clone(
+    (rawFixture as { usage: { native_message: { revision: unknown } } }).usage.native_message.revision,
+  ) as {
+    request_id: string | null;
+    native_message_id: string | null;
+    response_key: string;
+    buckets: { input_tokens: { value: unknown; effective_at?: number; provenance: { native_field: string } } };
+    model: { provenance: { normalization_contract_version: number } };
+  };
+
+  native.buckets.input_tokens.value = Number.MAX_SAFE_INTEGER;
+  assert.doesNotThrow(() => parseUsageRevisionV2(native));
+  native.buckets.input_tokens.value = Number.MAX_SAFE_INTEGER + 1;
+  reject(native, parseUsageRevisionV2);
+  native.buckets.input_tokens.value = 0;
+
+  native.buckets.input_tokens.effective_at = Number.MAX_SAFE_INTEGER;
+  assert.doesNotThrow(() => parseUsageRevisionV2(native));
+  native.buckets.input_tokens.effective_at = Number.MAX_SAFE_INTEGER + 1;
+  reject(native, parseUsageRevisionV2);
+  delete native.buckets.input_tokens.effective_at;
+
+  native.request_id = 'r'.repeat(8 * 1024);
+  assert.doesNotThrow(() => parseUsageRevisionV2(native));
+  native.request_id = 'r'.repeat(8 * 1024 + 1);
+  reject(native, parseUsageRevisionV2);
+  native.request_id = 'req_fixture_1';
+
+  native.buckets.input_tokens.provenance.native_field = 'p'.repeat(256);
+  assert.doesNotThrow(() => parseUsageRevisionV2(native));
+  native.buckets.input_tokens.provenance.native_field = 'p'.repeat(257);
+  reject(native, parseUsageRevisionV2);
+  native.buckets.input_tokens.provenance.native_field = 'message.usage.input_tokens';
+
+  native.model.provenance.normalization_contract_version = 0xffff_ffff;
+  assert.doesNotThrow(() => parseUsageRevisionV2(native));
+  native.model.provenance.normalization_contract_version = 2 ** 32;
+  reject(native, parseUsageRevisionV2);
+  native.model.provenance.normalization_contract_version = 1;
+
+  native.request_id = 'r'.repeat(100_000);
+  reject(native, parseUsageRevisionV2);
+  native.request_id = 'req_fixture_1';
+  native.buckets.input_tokens.provenance.native_field = 'p'.repeat(10_000);
+  reject(native, parseUsageRevisionV2);
+  native.buckets.input_tokens.provenance.native_field = 'message.usage.input_tokens';
+  const exactPayload = 'a'.repeat(8 * 1024);
+  native.native_message_id = exactPayload;
+  native.response_key = Buffer.from(exactPayload).toString('base64');
+  assert.doesNotThrow(() => parseUsageRevisionV2(native));
+  native.response_key = `${native.response_key}A`;
+  reject(native, parseUsageRevisionV2);
+  native.native_message_id = 'msg_fixture_native_1';
+  native.response_key = 'A'.repeat(100_000);
+  reject(native, parseUsageRevisionV2);
+
+  const hugeDigest = clone(rawFixture) as { actors: { root: { semantic_revision_key_hex: string } } };
+  hugeDigest.actors.root.semantic_revision_key_hex = 'a'.repeat(10_000);
+  reject(hugeDigest, parseFixture);
+
+  const driftedSource = clone(rawFixture) as {
+    actors: { root: { source_record_id: string } };
+    source: { session: { entity_key: string } };
+  };
+  driftedSource.actors.root.source_record_id = driftedSource.source.session.entity_key;
+  reject(driftedSource, parseFixture);
+
+  const exactAdapter = clone(rawFixture) as { source: { adapter_id: string } };
+  exactAdapter.source.adapter_id = 'a'.repeat(128);
+  assert.doesNotThrow(() => parseFixture(exactAdapter));
+  exactAdapter.source.adapter_id = 'a'.repeat(129);
+  reject(exactAdapter, parseFixture);
+  exactAdapter.source.adapter_id = 'a'.repeat(200_000);
+  reject(exactAdapter, parseFixture);
+
+  const exactSession = clone(rawFixture) as { source: { session: { native_session_id: string } } };
+  exactSession.source.session.native_session_id = 'a'.repeat(8 * 1024);
+  assert.doesNotThrow(() => parseFixture(exactSession));
+  exactSession.source.session.native_session_id = 'a'.repeat(8 * 1024 + 1);
+  reject(exactSession, parseFixture);
+  exactSession.source.session.native_session_id = 'a'.repeat(200_000);
+  reject(exactSession, parseFixture);
 });

@@ -71,6 +71,14 @@ RFC012_CATALOG_CONTRACT_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation|source)"
     r"|rusqlite|napi)(?:::|\b)"
 )
+RFC012_SEMANTIC_CONTRACT_FORBIDDEN_RE = re.compile(
+    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation|source|catalog_contract|observation_contract)"
+    r"|rusqlite|napi)(?:::|\b)"
+)
+RFC012_SEMANTIC_CONTRACT_NAPI_FORBIDDEN_RE = re.compile(
+    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation|source|catalog_contract|observation_contract)"
+    r"|rusqlite)(?:::|\b)"
+)
 BUILTIN_ADAPTER_PATHS = (
     "crates/spaghetti-napi/src/claude/adapter.rs",
     "crates/spaghetti-napi/src/codex/adapter.rs",
@@ -895,6 +903,178 @@ def discover_rfc012_decode_runtime_boundary_violations() -> set[str]:
     return set()
 
 
+def discover_rfc012_semantic_contract_boundary_violations() -> set[str]:
+    """RFC 012A/012C fixture JSON stays store-free; N-API helpers stay JSON-string only."""
+    found: set[str] = set()
+    contract_relative = "crates/spaghetti-napi/src/semantic_contract.rs"
+    napi_relative = "crates/spaghetti-napi/src/semantic_contract_napi.rs"
+    contract_path = REPO_ROOT / contract_relative
+    napi_path = REPO_ROOT / napi_relative
+    if not contract_path.exists() or RFC012_SEMANTIC_CONTRACT_FORBIDDEN_RE.search(
+        production_rust_text(contract_path)
+    ):
+        found.add(contract_relative)
+    napi_text = production_rust_text(napi_path) if napi_path.exists() else ""
+    napi_normalized = re.sub(r"\s+", " ", napi_text)
+    napi_helpers = re.findall(
+        r"pub fn (parse_[A-Za-z0-9_]+)\(([^)]*)\)\s*->\s*([^ {]+)",
+        napi_text,
+    )
+    required_helpers = {
+        ("parse_rfc012a_v1_json", "json: Utf16String", "Result<String>"),
+        ("parse_rfc012c_runtime_v1_json", "json: Utf16String", "Result<String>"),
+    }
+    napi_attr_count = len(re.findall(r"^#\[napi", napi_text, re.MULTILINE))
+    declarations = REPO_ROOT / "crates/spaghetti-napi/index.d.ts"
+    declared_helpers = (
+        re.findall(
+            r"^export declare function (parseRfc012[A-Za-z0-9]*)\(([^)]*)\):\s*(\S+)",
+            read(declarations),
+            re.MULTILINE,
+        )
+        if declarations.exists()
+        else []
+    )
+    required_declared_helpers = {
+        ("parseRfc012aV1Json", "json: string", "string"),
+        ("parseRfc012cRuntimeV1Json", "json: string", "string"),
+    }
+    if (
+        not napi_path.exists()
+        or RFC012_SEMANTIC_CONTRACT_NAPI_FORBIDDEN_RE.search(napi_text)
+        or re.search(r"^#\[napi\(object\)\]", napi_text, re.MULTILINE)
+        or "js_name = \"parseRfc012aV1Json\"" not in napi_text
+        or "js_name = \"parseRfc012cRuntimeV1Json\"" not in napi_text
+        or "pub fn parse_rfc012a_v1_json(json: Utf16String) -> Result<String>"
+        not in napi_normalized
+        or "pub fn parse_rfc012c_runtime_v1_json(json: Utf16String) -> Result<String>"
+        not in napi_normalized
+        or "String::from_utf16" not in napi_text
+        or "MAX_SEMANTIC_FIXTURE_JSON_BYTES" not in napi_text
+        or "json.len() > MAX_SEMANTIC_FIXTURE_JSON_BYTES" not in napi_normalized
+        or napi_text.find("json.len()") > napi_text.find("String::from_utf16")
+        or "invalid semantic fixture: unknown field" not in napi_text
+        or napi_attr_count != 2
+        or set(napi_helpers) != required_helpers
+        or set(declared_helpers) != required_declared_helpers
+    ):
+        found.add(napi_relative)
+    lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
+    lib_text = read(lib)
+    if re.search(r"^\s*pub\s+mod\s+semantic_contract(?:_napi)?\s*;", lib_text, re.MULTILINE):
+        found.add(f"{repo_path(lib)}#premature-public-semantic-contract")
+    if not re.search(r"^\s*mod\s+semantic_contract\s*;", lib_text, re.MULTILINE):
+        found.add(f"{repo_path(lib)}#missing-semantic-contract")
+    if not re.search(r"^\s*mod\s+semantic_contract_napi\s*;", lib_text, re.MULTILINE):
+        found.add(f"{repo_path(lib)}#missing-semantic-contract-napi")
+    portable_relatives = (
+        "packages/sdk/src/contracts/rfc012a.ts",
+        "packages/sdk/src/contracts/rfc012c.ts",
+    )
+    for relative in portable_relatives:
+        text = read(REPO_ROOT / relative)
+        if "@vibecook/spaghetti-sdk-native" in text:
+            found.add(relative)
+    rfc012a = read(REPO_ROOT / "packages/sdk/src/contracts/rfc012a.ts")
+    qualified_start = rfc012a.find("export function parseQualifiedValue")
+    qualified_end = rfc012a.find("export function parseNativeIdentityClaim")
+    qualified_body = rfc012a[qualified_start:qualified_end]
+    if (
+        qualified_start < 0
+        or qualified_end < 0
+        or "assertKnownFields(" not in qualified_body
+        or "unknown_reason cannot be explicit null" not in qualified_body
+        or "parseKnownValue" not in qualified_body
+        or "parseAuthority" not in qualified_body
+        or "parseProvenance" not in qualified_body
+        or "Array.isArray(provenance)" in qualified_body
+        or "Array.isArray(input.provenance)" in qualified_body
+    ):
+        found.add("packages/sdk/src/contracts/rfc012a.ts#parseQualifiedValue-unknown-fields")
+    if "export function parseRfc012aV1Fixture(" not in rfc012a:
+        found.add("packages/sdk/src/contracts/rfc012a.ts#missing-typed-fixture-consumer")
+    if (
+        "export function preflightSemanticFixtureJson(" in rfc012a
+        or "export function hasSurroundingRustWhitespace(" in rfc012a
+        or "export function assertNoUnpairedUtf16Surrogates(" in rfc012a
+    ):
+        found.add("packages/sdk/src/contracts/rfc012a.ts#leaked-internal-helpers")
+    semantic_json_relative = "packages/sdk/src/contracts/rfc012-semantic-json.ts"
+    semantic_json = read(REPO_ROOT / semantic_json_relative)
+    if (
+        "export function preflightSemanticFixtureJson(" not in semantic_json
+        or "MAX_SEMANTIC_FIXTURE_JSON_BYTES" not in semantic_json
+        or "MAX_SEMANTIC_FIXTURE_DEPTH" not in semantic_json
+        or "MAX_SEMANTIC_FIXTURE_NODES" not in semantic_json
+        or "json.length > MAX_SEMANTIC_FIXTURE_JSON_BYTES" not in semantic_json
+        or "noncanonical integer lexeme" not in semantic_json
+        or "unpaired UTF-16 surrogate" not in semantic_json
+        or "hasSurroundingRustWhitespace" not in semantic_json
+        or "Object.hasOwn(record, key)" not in semantic_json
+    ):
+        found.add(f"{semantic_json_relative}#missing-fixture-envelope")
+    if "./contracts/rfc012-semantic-json.js" in read(
+        REPO_ROOT / "packages/sdk/src/index.ts"
+    ):
+        found.add("packages/sdk/src/index.ts#barreled-semantic-json-helpers")
+    if (
+        "qualified unknown provenance must remain empty" not in rfc012a
+        or "native identity provenance must bind the fixture semantic revision reference"
+        not in rfc012a
+    ):
+        found.add("packages/sdk/src/contracts/rfc012a.ts#missing-typed-fixture-consumer")
+    rfc012c = read(REPO_ROOT / "packages/sdk/src/contracts/rfc012c.ts")
+    if (
+        "assertKnownFields(" not in rfc012c
+        or "must be a plain object" not in rfc012c
+        or "runtime fixture families must be actor-run, actor-affiliation, and usage-v2 v1"
+        not in rfc012c
+        or "workflow removal must mint a distinct semantic revision" not in rfc012c
+        or "fixture usage revisions must reference a fixture actor" not in rfc012c
+        or "expectedContextInput: unknown" not in rfc012c
+        or "caller-held revision identity" not in rfc012c
+        or "exceeds u32" not in rfc012c
+        or "fixture examples must share one source-record identity" not in rfc012c
+        or "parsed.source_record_id !== expected.source_record_id" not in rfc012c
+        or "MAX_ADAPTER_ID_BYTES" not in rfc012c
+    ):
+        found.add("packages/sdk/src/contracts/rfc012c.ts#missing-unknown-field-rejection")
+    contract_text = production_rust_text(contract_path) if contract_path.exists() else ""
+    if (
+        "pub(crate) const MAX_SEMANTIC_FIXTURE_JSON_BYTES" not in contract_text
+        or "json.len() > MAX_SEMANTIC_FIXTURE_JSON_BYTES" not in contract_text
+        or "MAX_SEMANTIC_FIXTURE_DEPTH" not in contract_text
+        or "MAX_SEMANTIC_FIXTURE_NODES" not in contract_text
+        or "fn strict_actor_run_revision" not in contract_text
+        or "fn strict_usage_revision" not in contract_text
+        or "fn validate_canonical_source_string" not in contract_text
+        or "workflow removal must mint a distinct semantic revision" not in contract_text
+        or "fixture usage revisions must reference a fixture actor" not in contract_text
+        or "native identity provenance must bind the fixture semantic revision reference"
+        not in contract_text
+        or "qualified unknown provenance must remain empty" not in contract_text
+        or "fixture examples must share one source-record identity" not in contract_text
+        or "response_key exceeds the bounded encoded base64 maximum" not in contract_text
+        or "MAX_ADAPTER_ID_BYTES" not in contract_text
+        or "MAX_AUTHORITY_BYTES" not in contract_text
+    ):
+        found.add(f"{contract_relative}#missing-strict-fixture-graph")
+    semantic_text = production_rust_text(
+        REPO_ROOT / "crates/spaghetti-napi/src/adapter/semantic.rs"
+    )
+    if 'deserialize_with = "deserialize_present_non_null"' not in semantic_text or (
+        "unknown_reason: Option<QualifiedUnknownReason>" not in semantic_text
+    ):
+        found.add(
+            "crates/spaghetti-napi/src/adapter/semantic.rs#qualified-value-explicit-nulls"
+        )
+    if "validate_identifier(\"qualified value authority\"" not in semantic_text:
+        found.add(
+            "crates/spaghetti-napi/src/adapter/semantic.rs#qualified-authority-canonical"
+        )
+    return found
+
+
 def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
     """Draft RFC 012B semantics cannot acquire storage, source, vendor, or transport authority."""
     relative = "crates/spaghetti-napi/src/catalog_contract.rs"
@@ -1084,6 +1264,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rfc012_scoped_host_boundary_violations": discover_rfc012_scoped_host_boundary_violations,
     "rfc012_decode_runtime_boundary_violations": discover_rfc012_decode_runtime_boundary_violations,
     "rfc012_catalog_contract_boundary_violations": discover_rfc012_catalog_contract_boundary_violations,
+    "rfc012_semantic_contract_boundary_violations": discover_rfc012_semantic_contract_boundary_violations,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,
     "playground_main_sdk_owner_bypasses": discover_playground_main_sdk_owner_bypasses,

@@ -11,6 +11,16 @@ export const SOURCE_COVERAGE_SET_CONTRACT_VERSION = 1 as const;
 export const SUPPORT_SELECTION_CONTRACT_VERSION = 1 as const;
 export const CONTRACT_VERSION_SELECTION_VERSION = 1 as const;
 
+import {
+  assertNoUnpairedUtf16Surrogates,
+  assertSemanticFixtureGraph,
+  ContractValidationError,
+  hasSurroundingRustWhitespace,
+  preflightSemanticFixtureJson,
+} from './rfc012-semantic-json.js';
+
+export { ContractValidationError } from './rfc012-semantic-json.js';
+
 const MAX_U32 = 0xffff_ffff;
 const MAX_IDENTIFIER_BYTES = 256;
 const MAX_COVERAGE_POINTS_PER_SET = 250_000;
@@ -165,7 +175,37 @@ export interface QualifiedValue<T = unknown, A = unknown, P = unknown> {
 
 export interface NativeIdentityClaim {
   entity_ref: ExternalEntityRef;
-  identity: QualifiedValue<NativeIdentity, unknown, unknown>;
+  identity: QualifiedValue<NativeIdentity, string, SemanticRevisionRef[]>;
+}
+
+export interface QualifiedValueDecoders<T, A, P> {
+  parseKnownValue?: (value: unknown, label: string) => T;
+  parseAuthority?: (value: unknown, label: string) => A;
+  parseProvenance?: (value: unknown, label: string) => P;
+}
+
+export const RFC012A_FIXTURE_CONTRACT_VERSION = 1 as const;
+
+export interface Rfc012aCoverageExpected {
+  dominant_vs_baseline: CoverageComparison;
+  baseline_vs_dominant: CoverageComparison;
+  reset_vs_baseline: CoverageComparison;
+}
+
+export interface Rfc012aV1Fixture {
+  fixture_contract_version: typeof RFC012A_FIXTURE_CONTRACT_VERSION;
+  canonical_source_instance_key: OpaqueContractReference;
+  external_entity_ref: ExternalEntityRef;
+  native_identity_claim: NativeIdentityClaim;
+  semantic_revision_ref: SemanticRevisionRef;
+  qualified_known_zero: QualifiedValue<number, string, SemanticRevisionRef[]>;
+  qualified_unknown: QualifiedValue<string, string, SemanticRevisionRef[]>;
+  coverage: {
+    baseline: SourceCoverageSet;
+    dominant: SourceCoverageSet;
+    reset: SourceCoverageSet;
+    expected: Rfc012aCoverageExpected;
+  };
 }
 
 export type CoverageDomain =
@@ -247,13 +287,6 @@ export interface SourceCoverageSet {
 
 export type CoverageComparison = 'equal' | 'dominates' | 'behind' | 'incomparable';
 
-export class ContractValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'ContractValidationError';
-  }
-}
-
 type UnknownRecord = Record<string, unknown>;
 
 function record(value: unknown, label: string): UnknownRecord {
@@ -275,7 +308,11 @@ function assertKnownFields(input: UnknownRecord, fields: readonly string[], labe
 }
 
 function nonEmptyString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new ContractValidationError(`${label} must be a non-empty canonical string`);
+  }
+  assertNoUnpairedUtf16Surrogates(value, label);
+  if (hasSurroundingRustWhitespace(value)) {
     throw new ContractValidationError(`${label} must be a non-empty canonical string`);
   }
   return value;
@@ -316,7 +353,7 @@ function nonNegativeInteger(value: unknown, label: string): number {
 }
 
 function safeInteger(value: unknown, label: string): number {
-  if (!Number.isSafeInteger(value)) {
+  if (!Number.isSafeInteger(value) || Object.is(value, -0)) {
     throw new ContractValidationError(`${label} must be a safe integer`);
   }
   return value as number;
@@ -473,7 +510,10 @@ function parseNativeArtifactProbe(value: unknown): NativeArtifactProbe {
   if (typeof input.contradictory_markers !== 'boolean') {
     throw new ContractValidationError('contradictory_markers must be boolean');
   }
-  if (typeof version === 'string' && (version.length === 0 || version.length > 128 || version.trim() !== version)) {
+  if (
+    typeof version === 'string' &&
+    (version.length === 0 || version.length > 128 || hasSurroundingRustWhitespace(version))
+  ) {
     throw new ContractValidationError('probed artifact version must be non-empty and canonical');
   }
   return {
@@ -877,8 +917,16 @@ export function parseSemanticRevisionRef(value: unknown): SemanticRevisionRef {
   };
 }
 
-export function parseQualifiedValue<T = unknown, A = unknown, P = unknown>(value: unknown): QualifiedValue<T, A, P> {
+export function parseQualifiedValue<T = unknown, A = unknown, P = unknown>(
+  value: unknown,
+  decoders?: QualifiedValueDecoders<T, A, P>,
+): QualifiedValue<T, A, P> {
   const input = record(value, 'qualified value');
+  assertKnownFields(
+    input,
+    ['value', 'quality', 'authority', 'completeness', 'unknown_reason', 'effective_at', 'provenance'],
+    'qualified value',
+  );
   const quality = input.quality;
   if (!['exact', 'native_claimed', 'derived', 'estimated', 'unknown'].includes(quality as string)) {
     throw new ContractValidationError('qualified value has an unsupported quality');
@@ -890,9 +938,18 @@ export function parseQualifiedValue<T = unknown, A = unknown, P = unknown>(value
   if (!Object.hasOwn(input, 'value') || !Object.hasOwn(input, 'authority') || !Object.hasOwn(input, 'provenance')) {
     throw new ContractValidationError('qualified value is missing value, authority, or provenance');
   }
+  if (input.authority === null || input.provenance === null) {
+    throw new ContractValidationError('qualified value authority and provenance cannot be null');
+  }
   const isUnknown = quality === 'unknown';
   if (isUnknown !== (input.value === null)) {
     throw new ContractValidationError('quality is unknown if and only if value is null');
+  }
+  if (Object.hasOwn(input, 'unknown_reason') && input.unknown_reason === null) {
+    throw new ContractValidationError('qualified value unknown_reason cannot be explicit null');
+  }
+  if (Object.hasOwn(input, 'effective_at') && input.effective_at === null) {
+    throw new ContractValidationError('qualified value effective_at cannot be explicit null');
   }
   const unknownReason = input.unknown_reason;
   const hasUnknownReason = unknownReason !== undefined;
@@ -906,26 +963,63 @@ export function parseQualifiedValue<T = unknown, A = unknown, P = unknown>(value
   ) {
     throw new ContractValidationError('qualified value has an unsupported unknown_reason');
   }
-  if (input.effective_at !== undefined) safeInteger(input.effective_at, 'effective_at');
-  return input as unknown as QualifiedValue<T, A, P>;
+  const effectiveAt = input.effective_at === undefined ? undefined : safeInteger(input.effective_at, 'effective_at');
+  const authority = decoders?.parseAuthority
+    ? decoders.parseAuthority(input.authority, 'qualified value authority')
+    : (input.authority as A);
+  const provenance = decoders?.parseProvenance
+    ? decoders.parseProvenance(input.provenance, 'qualified value provenance')
+    : (input.provenance as P);
+  const parsedValue = isUnknown
+    ? null
+    : decoders?.parseKnownValue
+      ? decoders.parseKnownValue(input.value, 'qualified value value')
+      : (input.value as T);
+  return {
+    value: parsedValue,
+    quality: quality as QualifiedValueQuality,
+    authority,
+    completeness: completeness as ContractCompleteness,
+    ...(hasUnknownReason ? { unknown_reason: unknownReason as QualifiedUnknownReason } : {}),
+    ...(effectiveAt === undefined ? {} : { effective_at: effectiveAt }),
+    provenance,
+  };
+}
+
+function parseNativeIdentityValue(value: unknown, label: string): NativeIdentity {
+  const nativeIdentity = record(value, label);
+  assertKnownFields(nativeIdentity, ['native_namespace', 'native_id'], label);
+  return {
+    native_namespace: boundedCanonicalString(
+      nativeIdentity.native_namespace,
+      `${label} namespace`,
+      MAX_IDENTIFIER_BYTES,
+    ),
+    native_id: boundedCanonicalString(nativeIdentity.native_id, `${label} id`, MAX_IDENTIFIER_BYTES),
+  };
+}
+
+function parseStringAuthority(value: unknown, label: string): string {
+  return boundedCanonicalString(value, label, MAX_IDENTIFIER_BYTES);
+}
+
+function parseSemanticRevisionProvenance(value: unknown, label: string): SemanticRevisionRef[] {
+  if (!Array.isArray(value)) {
+    throw new ContractValidationError(`${label} must be an array of semantic revision references`);
+  }
+  return value.map((item) => parseSemanticRevisionRef(item));
 }
 
 export function parseNativeIdentityClaim(value: unknown): NativeIdentityClaim {
   const input = record(value, 'native identity claim');
-  const identity = parseQualifiedValue<NativeIdentity>(input.identity);
-  const parsedIdentity =
-    identity.value === null
-      ? null
-      : (() => {
-          const nativeIdentity = record(identity.value, 'native identity');
-          return {
-            native_namespace: nonEmptyString(nativeIdentity.native_namespace, 'native identity namespace'),
-            native_id: nonEmptyString(nativeIdentity.native_id, 'native identity'),
-          };
-        })();
+  assertKnownFields(input, ['entity_ref', 'identity'], 'native identity claim');
   return {
     entity_ref: parseExternalEntityRef(input.entity_ref),
-    identity: { ...identity, value: parsedIdentity },
+    identity: parseQualifiedValue<NativeIdentity, string, SemanticRevisionRef[]>(input.identity, {
+      parseKnownValue: parseNativeIdentityValue,
+      parseAuthority: parseStringAuthority,
+      parseProvenance: parseSemanticRevisionProvenance,
+    }),
   };
 }
 
@@ -1341,4 +1435,143 @@ export function compareCoverage(
   if (candidateDominates) return 'dominates';
   if (baselineDominates) return 'behind';
   return 'incomparable';
+}
+
+function parseCoverageComparison(value: unknown, label: string): CoverageComparison {
+  if (value !== 'equal' && value !== 'dominates' && value !== 'behind' && value !== 'incomparable') {
+    throw new ContractValidationError(`${label} has an unsupported coverage comparison`);
+  }
+  return value;
+}
+
+function parseKnownNonNegativeInteger(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
+    throw new ContractValidationError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+const RFC012A_STRING_QUALIFIED_DECODERS = {
+  parseAuthority: parseStringAuthority,
+  parseProvenance: parseSemanticRevisionProvenance,
+} as const;
+
+export function parseRfc012aV1Json(json: string): Rfc012aV1Fixture {
+  return parseRfc012aV1Fixture(preflightSemanticFixtureJson(json));
+}
+
+export function parseRfc012aV1Fixture(value: unknown): Rfc012aV1Fixture {
+  assertSemanticFixtureGraph(value);
+  const input = record(value, 'RFC 012A fixture');
+  assertKnownFields(
+    input,
+    [
+      'fixture_contract_version',
+      'canonical_source_instance_key',
+      'external_entity_ref',
+      'native_identity_claim',
+      'semantic_revision_ref',
+      'qualified_known_zero',
+      'qualified_unknown',
+      'coverage',
+    ],
+    'RFC 012A fixture',
+  );
+  if (input.fixture_contract_version !== RFC012A_FIXTURE_CONTRACT_VERSION) {
+    throw new ContractValidationError('unsupported RFC 012A fixture contract version');
+  }
+  const canonicalSourceInstanceKey = parseOpaqueContractReference(
+    input.canonical_source_instance_key,
+    'canonical source instance key',
+  );
+  const coverageInput = record(input.coverage, 'RFC 012A coverage');
+  assertKnownFields(coverageInput, ['baseline', 'dominant', 'reset', 'expected'], 'RFC 012A coverage');
+  const baseline = parseSourceCoverageSet(coverageInput.baseline);
+  const dominant = parseSourceCoverageSet(coverageInput.dominant);
+  const reset = parseSourceCoverageSet(coverageInput.reset);
+  if (
+    canonicalSourceInstanceKey !== baseline.scope.source_instance_key ||
+    canonicalSourceInstanceKey !== dominant.scope.source_instance_key ||
+    canonicalSourceInstanceKey !== reset.scope.source_instance_key
+  ) {
+    throw new ContractValidationError('coverage scopes must use the fixture source instance');
+  }
+  const expectedInput = record(coverageInput.expected, 'RFC 012A coverage expected');
+  assertKnownFields(
+    expectedInput,
+    ['dominant_vs_baseline', 'baseline_vs_dominant', 'reset_vs_baseline'],
+    'RFC 012A coverage expected',
+  );
+  const expected: Rfc012aCoverageExpected = {
+    dominant_vs_baseline: parseCoverageComparison(expectedInput.dominant_vs_baseline, 'dominant_vs_baseline'),
+    baseline_vs_dominant: parseCoverageComparison(expectedInput.baseline_vs_dominant, 'baseline_vs_dominant'),
+    reset_vs_baseline: parseCoverageComparison(expectedInput.reset_vs_baseline, 'reset_vs_baseline'),
+  };
+  if (compareCoverage(dominant, baseline) !== expected.dominant_vs_baseline) {
+    throw new ContractValidationError('coverage comparison outcomes do not match the fixture');
+  }
+  if (compareCoverage(baseline, dominant) !== expected.baseline_vs_dominant) {
+    throw new ContractValidationError('coverage comparison outcomes do not match the fixture');
+  }
+  if (compareCoverage(reset, baseline) !== expected.reset_vs_baseline) {
+    throw new ContractValidationError('coverage comparison outcomes do not match the fixture');
+  }
+
+  const externalEntityRef = parseExternalEntityRef(input.external_entity_ref);
+  const nativeIdentityClaim = parseNativeIdentityClaim(input.native_identity_claim);
+  if (
+    nativeIdentityClaim.entity_ref.entity_key !== externalEntityRef.entity_key ||
+    nativeIdentityClaim.entity_ref.external_entity_reference_version !==
+      externalEntityRef.external_entity_reference_version
+  ) {
+    throw new ContractValidationError('native identity claim must use the fixture external entity reference');
+  }
+  const qualifiedKnownZero = parseQualifiedValue<number, string, SemanticRevisionRef[]>(input.qualified_known_zero, {
+    parseKnownValue: parseKnownNonNegativeInteger,
+    ...RFC012A_STRING_QUALIFIED_DECODERS,
+  });
+  if (qualifiedKnownZero.value !== 0) {
+    throw new ContractValidationError('qualified known zero must preserve exact zero');
+  }
+  const qualifiedUnknown = parseQualifiedValue<string, string, SemanticRevisionRef[]>(input.qualified_unknown, {
+    parseKnownValue: (raw, label) => nonEmptyString(raw, label),
+    ...RFC012A_STRING_QUALIFIED_DECODERS,
+  });
+  if (qualifiedUnknown.value !== null) {
+    throw new ContractValidationError('qualified unknown must keep a null value');
+  }
+  const semanticRevisionRef = parseSemanticRevisionRef(input.semantic_revision_ref);
+  const sameRef = (value: SemanticRevisionRef): boolean =>
+    value.semantic_reference_contract_version === semanticRevisionRef.semantic_reference_contract_version &&
+    value.fact_revision_id === semanticRevisionRef.fact_revision_id;
+  if (
+    nativeIdentityClaim.identity.provenance.length !== 1 ||
+    nativeIdentityClaim.identity.provenance[0] === undefined ||
+    !sameRef(nativeIdentityClaim.identity.provenance[0])
+  ) {
+    throw new ContractValidationError('native identity provenance must bind the fixture semantic revision reference');
+  }
+  if (
+    qualifiedKnownZero.provenance.length !== 1 ||
+    qualifiedKnownZero.provenance[0] === undefined ||
+    !sameRef(qualifiedKnownZero.provenance[0])
+  ) {
+    throw new ContractValidationError(
+      'qualified known zero provenance must bind the fixture semantic revision reference',
+    );
+  }
+  if (qualifiedUnknown.provenance.length !== 0) {
+    throw new ContractValidationError('qualified unknown provenance must remain empty');
+  }
+
+  return {
+    fixture_contract_version: RFC012A_FIXTURE_CONTRACT_VERSION,
+    canonical_source_instance_key: canonicalSourceInstanceKey,
+    external_entity_ref: externalEntityRef,
+    native_identity_claim: nativeIdentityClaim,
+    semantic_revision_ref: semanticRevisionRef,
+    qualified_known_zero: qualifiedKnownZero,
+    qualified_unknown: qualifiedUnknown,
+    coverage: { baseline, dominant, reset, expected },
+  };
 }

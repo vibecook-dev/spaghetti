@@ -1,8 +1,9 @@
 /** RFC 012C v1 portable runtime value contracts.
  *
  * Rust derives opaque keys and usage semantic revision identities. This
- * module independently validates the committed wire values. It does not
- * implement observer envelopes, epochs, or a second opaque-reference format.
+ * module validates committed wire values and binds each revision to a
+ * caller-held Rust-produced identity context. It does not implement
+ * observer envelopes, epochs, or a second opaque-reference format.
  */
 
 import {
@@ -16,6 +17,12 @@ import {
   type QualifiedValue,
   type SemanticRevisionRef,
 } from './rfc012a.js';
+import {
+  assertNoUnpairedUtf16Surrogates,
+  assertSemanticFixtureGraph,
+  hasSurroundingRustWhitespace,
+  preflightSemanticFixtureJson,
+} from './rfc012-semantic-json.js';
 
 export const RUNTIME_SEMANTIC_CONTRACT_VERSION = 1 as const;
 export const ACTOR_RUN_FAMILY = 'runtime.actor-run' as const;
@@ -163,30 +170,48 @@ export interface RuntimeContractFixture {
 type UnknownRecord = Record<string, unknown>;
 
 const MAX_RUNTIME_SEMANTIC_TEXT_BYTES = 8 * 1024;
+const MAX_ADAPTER_ID_BYTES = 128;
 const MAX_USAGE_RESPONSE_KEY_BYTES = 8 * 1024;
 const MAX_USAGE_PROVENANCE_FIELD_BYTES = 256;
+const MAX_U32 = 0xffff_ffff;
 const textEncoder = new TextEncoder();
 
 function record(value: unknown, label: string): UnknownRecord {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new ContractValidationError(`${label} must be an object`);
   }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new ContractValidationError(`${label} must be a plain object`);
+  }
   return value as UnknownRecord;
 }
 
+function assertKnownFields(input: UnknownRecord, fields: readonly string[], label: string): void {
+  const known = new Set(fields);
+  for (const key of Object.keys(input)) {
+    if (!known.has(key)) throw new ContractValidationError(`${label} contains unknown field ${key}`);
+  }
+}
+
 function nonEmptyString(value: unknown, label: string): string {
-  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new ContractValidationError(`${label} must be a non-empty canonical string`);
+  }
+  assertNoUnpairedUtf16Surrogates(value, label);
+  if (hasSurroundingRustWhitespace(value)) {
     throw new ContractValidationError(`${label} must be a non-empty canonical string`);
   }
   return value;
 }
 
-function optionalString(value: unknown, label: string): string | null {
-  if (value === undefined || value === null) return null;
-  return nonEmptyString(value, label);
-}
-
 function boundedText(value: unknown, label: string, maxBytes: number): string {
+  if (typeof value !== 'string') {
+    throw new ContractValidationError(`${label} must be a non-empty canonical string`);
+  }
+  if (value.length > maxBytes) {
+    throw new ContractValidationError(`${label} exceeds ${maxBytes} UTF-8 bytes`);
+  }
   const parsed = nonEmptyString(value, label);
   if (textEncoder.encode(parsed).byteLength > maxBytes) {
     throw new ContractValidationError(`${label} exceeds ${maxBytes} UTF-8 bytes`);
@@ -211,12 +236,22 @@ function positiveInteger(value: unknown, label: string): number {
   return value as number;
 }
 
+function positiveU32(value: unknown, label: string): number {
+  const result = positiveInteger(value, label);
+  if (result > MAX_U32) {
+    throw new ContractValidationError(`${label} exceeds u32`);
+  }
+  return result;
+}
+
 function tokenCount(value: unknown, label: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || Object.is(value, -0)) {
     throw new ContractValidationError(`${label} must be a non-negative safe integer`);
   }
   return value;
 }
+
+const MAX_USAGE_RESPONSE_KEY_BASE64_CHARS = Math.ceil(MAX_USAGE_RESPONSE_KEY_BYTES / 3) * 4;
 
 function parseCanonicalBase64(value: unknown, label: string): string {
   if (Array.isArray(value)) {
@@ -224,6 +259,9 @@ function parseCanonicalBase64(value: unknown, label: string): string {
   }
   if (typeof value !== 'string' || value.length === 0) {
     throw new ContractValidationError(`${label} must be non-empty canonical padded standard base64`);
+  }
+  if (value.length > MAX_USAGE_RESPONSE_KEY_BASE64_CHARS) {
+    throw new ContractValidationError(`${label} exceeds the bounded encoded base64 maximum`);
   }
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
     throw new ContractValidationError(`${label} is not canonical padded standard base64`);
@@ -273,6 +311,7 @@ function parseTimestampQuality(value: unknown, label: string): TimestampQuality 
 function parseOptionalQualifiedTimestamp(value: unknown, label: string): QualifiedTimestamp | null {
   if (value === undefined || value === null) return null;
   const input = record(value, label);
+  assertKnownFields(input, ['value', 'quality'], label);
   return {
     value: boundedText(input.value, `${label} value`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
     quality: parseTimestampQuality(input.quality, label),
@@ -280,18 +319,21 @@ function parseOptionalQualifiedTimestamp(value: unknown, label: string): Qualifi
 }
 
 function parseHexDigest(value: unknown, label: string): string {
-  const digest = nonEmptyString(value, label);
-  if (!/^[0-9a-f]{64}$/.test(digest)) {
+  if (typeof value !== 'string' || value.length !== 64) {
     throw new ContractValidationError(`${label} must be 32 lowercase hex bytes`);
   }
-  return digest;
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    throw new ContractValidationError(`${label} must be 32 lowercase hex bytes`);
+  }
+  return value;
 }
 
 function parseUsageProvenance(value: unknown): UsageValueProvenance {
   const input = record(value, 'usage provenance');
+  assertKnownFields(input, ['native_field', 'normalization_contract_version'], 'usage provenance');
   return {
     native_field: boundedText(input.native_field, 'usage provenance native_field', MAX_USAGE_PROVENANCE_FIELD_BYTES),
-    normalization_contract_version: positiveInteger(
+    normalization_contract_version: positiveU32(
       input.normalization_contract_version,
       'usage provenance normalization_contract_version',
     ),
@@ -310,31 +352,17 @@ function parseUsageQualifiedValue<T>(
   label: string,
   parseKnown: (raw: unknown, field: string) => T,
 ): UsageQualifiedValue<T> {
-  const parsed = parseQualifiedValue<T, UsageValueAuthority, UsageValueProvenance>(value);
-  const authority = parseUsageAuthority(parsed.authority, `${label} authority`);
-  const provenance = parseUsageProvenance(parsed.provenance);
+  const parsed = parseQualifiedValue<T, UsageValueAuthority, UsageValueProvenance>(value, {
+    parseKnownValue: parseKnown,
+    parseAuthority: parseUsageAuthority,
+    parseProvenance: parseUsageProvenance,
+  });
   if (parsed.quality === 'unknown') {
     if (parsed.completeness === 'complete') {
       throw new ContractValidationError(`${label} cannot claim complete coverage while unknown`);
     }
-    return {
-      value: null,
-      quality: 'unknown',
-      authority,
-      completeness: parsed.completeness,
-      unknown_reason: parsed.unknown_reason,
-      ...(parsed.effective_at === undefined ? {} : { effective_at: parsed.effective_at }),
-      provenance,
-    };
   }
-  return {
-    value: parseKnown(parsed.value, `${label} value`),
-    quality: parsed.quality,
-    authority,
-    completeness: parsed.completeness,
-    ...(parsed.effective_at === undefined ? {} : { effective_at: parsed.effective_at }),
-    provenance,
-  };
+  return parsed;
 }
 
 function parseTokenValue(value: unknown, label: string): number {
@@ -342,7 +370,7 @@ function parseTokenValue(value: unknown, label: string): number {
 }
 
 function parseTextValue(value: unknown, label: string): string {
-  return nonEmptyString(value, label);
+  return boundedText(value, label, MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
 }
 
 function parseOptionalUsageQualified<T>(
@@ -356,24 +384,44 @@ function parseOptionalUsageQualified<T>(
 
 function parseFamilyVersion(value: unknown): RuntimeFamilyVersion {
   const input = record(value, 'runtime family');
+  assertKnownFields(input, ['family', 'version'], 'runtime family');
   return {
     family: nonEmptyString(input.family, 'runtime family name'),
     version: positiveInteger(input.version, `runtime family ${String(input.family)} version`),
   };
 }
 
-function requireFamily(families: RuntimeFamilyVersion[], family: string, version: number): void {
-  const match = families.find((entry) => entry.family === family);
-  if (match === undefined) {
-    throw new ContractValidationError(`runtime fixture is missing family ${family}`);
+const CANONICAL_RUNTIME_FAMILIES: ReadonlyArray<readonly [string, number]> = [
+  [ACTOR_RUN_FAMILY, ACTOR_RUN_FAMILY_VERSION],
+  [ACTOR_AFFILIATION_FAMILY, ACTOR_AFFILIATION_FAMILY_VERSION],
+  [USAGE_V2_FAMILY, USAGE_V2_FAMILY_VERSION],
+];
+
+function parseCanonicalFamilies(value: unknown): RuntimeFamilyVersion[] {
+  if (!Array.isArray(value)) {
+    throw new ContractValidationError('runtime families must be an array');
   }
-  if (match.version !== version) {
-    throw new ContractValidationError(`unsupported ${family} version ${match.version}`);
+  const families = value.map(parseFamilyVersion);
+  if (
+    families.length !== CANONICAL_RUNTIME_FAMILIES.length ||
+    families.some(
+      (family, index) =>
+        family.family !== CANONICAL_RUNTIME_FAMILIES[index]![0] ||
+        family.version !== CANONICAL_RUNTIME_FAMILIES[index]![1],
+    )
+  ) {
+    throw new ContractValidationError('runtime fixture families must be actor-run, actor-affiliation, and usage-v2 v1');
   }
+  return families;
 }
 
 export function parseActorRunRevision(value: unknown): ActorRunRevision {
   const input = record(value, 'actor run revision');
+  assertKnownFields(
+    input,
+    ['actor_run', 'session', 'role', 'parent_actor_run', 'native_session_id', 'native_actor_id', 'native_actor_type'],
+    'actor run revision',
+  );
   const role = input.role;
   if (role !== 'root' && role !== 'child') {
     throw new ContractValidationError('unsupported actor run role');
@@ -402,6 +450,22 @@ export function parseActorRunRevision(value: unknown): ActorRunRevision {
 
 export function parseActorAffiliationRevision(value: unknown): ActorAffiliationRevision {
   const input = record(value, 'actor affiliation revision');
+  assertKnownFields(
+    input,
+    [
+      'affiliation',
+      'actor_run',
+      'session',
+      'dimension',
+      'target',
+      'member',
+      'native_target_id',
+      'native_member_id',
+      'state',
+      'effective_at',
+    ],
+    'actor affiliation revision',
+  );
   if (input.dimension !== 'team' && input.dimension !== 'workflow') {
     throw new ContractValidationError('unsupported actor affiliation dimension');
   }
@@ -424,11 +488,27 @@ export function parseActorAffiliationRevision(value: unknown): ActorAffiliationR
 
 export function parseUsageRevisionV2(value: unknown): UsageRevisionV2 {
   const input = record(value, 'usage revision');
+  assertKnownFields(
+    input,
+    [
+      'session',
+      'actor_run',
+      'response_key',
+      'response_identity',
+      'native_message_id',
+      'request_id',
+      'buckets',
+      'model',
+      'effort',
+      'source_time',
+    ],
+    'usage revision',
+  );
   if (input.response_identity !== 'native_message_id' && input.response_identity !== 'source_record_fallback') {
     throw new ContractValidationError('unsupported usage response identity');
   }
   const responseKey = parseCanonicalBase64(input.response_key, 'response_key');
-  const nativeMessageId = optionalString(input.native_message_id, 'native_message_id');
+  const nativeMessageId = optionalRuntimeSemanticText(input.native_message_id, 'native_message_id');
   if (input.response_identity === 'native_message_id') {
     if (nativeMessageId === null) {
       throw new ContractValidationError('native usage response identity requires native_message_id');
@@ -440,13 +520,18 @@ export function parseUsageRevisionV2(value: unknown): UsageRevisionV2 {
     throw new ContractValidationError('source-record usage fallback cannot claim a native_message_id');
   }
   const buckets = record(input.buckets, 'usage buckets');
+  assertKnownFields(
+    buckets,
+    ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'],
+    'usage buckets',
+  );
   return {
     session: parseOpaqueContractReference(input.session, 'usage session'),
     actor_run: parseOpaqueContractReference(input.actor_run, 'usage actor run'),
     response_key: responseKey,
     response_identity: input.response_identity,
     native_message_id: nativeMessageId,
-    request_id: optionalString(input.request_id, 'request_id'),
+    request_id: optionalRuntimeSemanticText(input.request_id, 'request_id'),
     buckets: {
       input_tokens: parseUsageQualifiedValue(buckets.input_tokens, 'input_tokens', parseTokenValue),
       output_tokens: parseUsageQualifiedValue(buckets.output_tokens, 'output_tokens', parseTokenValue),
@@ -469,6 +554,19 @@ export function parseUsageRevisionV2(value: unknown): UsageRevisionV2 {
 
 function parseActorExample(value: unknown): ActorRunExample {
   const input = record(value, 'actor run example');
+  assertKnownFields(
+    input,
+    [
+      'family',
+      'family_version',
+      'revision',
+      'semantic_revision_key_hex',
+      'fact_id',
+      'source_record_id',
+      'semantic_revision_ref',
+    ],
+    'actor run example',
+  );
   if (input.family !== ACTOR_RUN_FAMILY) {
     throw new ContractValidationError('actor example family must be runtime.actor-run');
   }
@@ -488,6 +586,19 @@ function parseActorExample(value: unknown): ActorRunExample {
 
 function parseAffiliationExample(value: unknown): ActorAffiliationExample {
   const input = record(value, 'actor affiliation example');
+  assertKnownFields(
+    input,
+    [
+      'family',
+      'family_version',
+      'revision',
+      'semantic_revision_key_hex',
+      'fact_id',
+      'source_record_id',
+      'semantic_revision_ref',
+    ],
+    'actor affiliation example',
+  );
   if (input.family !== ACTOR_AFFILIATION_FAMILY) {
     throw new ContractValidationError('affiliation example family must be runtime.actor-affiliation');
   }
@@ -507,6 +618,19 @@ function parseAffiliationExample(value: unknown): ActorAffiliationExample {
 
 function parseUsageExample(value: unknown): UsageRevisionExample {
   const input = record(value, 'usage example');
+  assertKnownFields(
+    input,
+    [
+      'family',
+      'family_version',
+      'revision',
+      'semantic_revision_key_hex',
+      'fact_id',
+      'source_record_id',
+      'semantic_revision_ref',
+    ],
+    'usage example',
+  );
   if (input.family !== USAGE_V2_FAMILY) {
     throw new ContractValidationError('usage example family must be runtime.usage-v2');
   }
@@ -524,34 +648,75 @@ function parseUsageExample(value: unknown): UsageRevisionExample {
   };
 }
 
-export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixture {
+function bindRevisionIdentity(
+  label: string,
+  parsed: {
+    revision: unknown;
+    semantic_revision_key_hex: string;
+    fact_id: OpaqueContractReference;
+    source_record_id: OpaqueContractReference;
+    semantic_revision_ref: SemanticRevisionRef;
+  },
+  expected: {
+    revision: unknown;
+    semantic_revision_key_hex: string;
+    fact_id: OpaqueContractReference;
+    source_record_id: OpaqueContractReference;
+    semantic_revision_ref: SemanticRevisionRef;
+  },
+): void {
+  if (
+    JSON.stringify(parsed.revision) !== JSON.stringify(expected.revision) ||
+    parsed.semantic_revision_key_hex !== expected.semantic_revision_key_hex ||
+    parsed.fact_id !== expected.fact_id ||
+    parsed.source_record_id !== expected.source_record_id ||
+    parsed.semantic_revision_ref.fact_revision_id !== expected.semantic_revision_ref.fact_revision_id ||
+    parsed.semantic_revision_ref.semantic_reference_contract_version !==
+      expected.semantic_revision_ref.semantic_reference_contract_version
+  ) {
+    throw new ContractValidationError(`${label} semantic content does not match the caller-held revision identity`);
+  }
+}
+
+function parseRuntimeContractFixtureShape(value: unknown): RuntimeContractFixture {
+  assertSemanticFixtureGraph(value);
   const input = record(value, 'runtime contract fixture');
+  assertKnownFields(
+    input,
+    [
+      'fixture_contract_version',
+      'runtime_semantic_contract_version',
+      'families',
+      'source',
+      'actors',
+      'affiliations',
+      'usage',
+    ],
+    'runtime contract fixture',
+  );
   if (input.fixture_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported runtime fixture contract version');
   }
   if (input.runtime_semantic_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION) {
     throw new ContractValidationError('unsupported runtime semantic contract version');
   }
-  if (!Array.isArray(input.families)) {
-    throw new ContractValidationError('runtime families must be an array');
-  }
-  const families = input.families.map(parseFamilyVersion);
-  if (new Set(families.map((family) => family.family)).size !== families.length) {
-    throw new ContractValidationError('runtime families must not contain duplicate names');
-  }
-  requireFamily(families, ACTOR_RUN_FAMILY, ACTOR_RUN_FAMILY_VERSION);
-  requireFamily(families, ACTOR_AFFILIATION_FAMILY, ACTOR_AFFILIATION_FAMILY_VERSION);
-  requireFamily(families, USAGE_V2_FAMILY, USAGE_V2_FAMILY_VERSION);
+  const families = parseCanonicalFamilies(input.families);
 
   const sourceInput = record(input.source, 'runtime source');
+  assertKnownFields(sourceInput, ['adapter_id', 'source_instance_key', 'session'], 'runtime source');
   const sessionInput = record(sourceInput.session, 'runtime session');
+  assertKnownFields(sessionInput, ['entity_key', 'external_ref', 'native_session_id'], 'runtime session');
   const source: RuntimeSourceIdentity = {
-    adapter_id: nonEmptyString(sourceInput.adapter_id, 'adapter_id'),
+    adapter_id: boundedText(sourceInput.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
     source_instance_key: parseOpaqueContractReference(sourceInput.source_instance_key, 'source instance key'),
     session: {
       entity_key: parseOpaqueContractReference(sessionInput.entity_key, 'session entity key'),
       external_ref: parseExternalEntityRef(sessionInput.external_ref),
-      native_session_id: nonEmptyString(sessionInput.native_session_id, 'native_session_id'),
+      native_session_id: boundedText(
+        sessionInput.native_session_id,
+        'native_session_id',
+        MAX_RUNTIME_SEMANTIC_TEXT_BYTES,
+      ),
     },
   };
   if (source.session.external_ref.entity_key !== source.session.entity_key) {
@@ -559,6 +724,7 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
   }
 
   const actorsInput = record(input.actors, 'runtime actors');
+  assertKnownFields(actorsInput, ['root', 'child'], 'runtime actors');
   const actors = {
     root: parseActorExample(actorsInput.root),
     child: parseActorExample(actorsInput.child),
@@ -577,6 +743,11 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
   }
 
   const affiliationsInput = record(input.affiliations, 'runtime affiliations');
+  assertKnownFields(
+    affiliationsInput,
+    ['child_team_present', 'child_workflow_present', 'child_workflow_removed'],
+    'runtime affiliations',
+  );
   const affiliations = {
     child_team_present: parseAffiliationExample(affiliationsInput.child_team_present),
     child_workflow_present: parseAffiliationExample(affiliationsInput.child_workflow_present),
@@ -610,13 +781,22 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
     affiliations.child_workflow_present.revision.affiliation !==
       affiliations.child_workflow_removed.revision.affiliation ||
     affiliations.child_workflow_present.revision.target !== affiliations.child_workflow_removed.revision.target ||
-    affiliations.child_workflow_present.revision.member !== affiliations.child_workflow_removed.revision.member
+    affiliations.child_workflow_present.revision.member !== affiliations.child_workflow_removed.revision.member ||
+    affiliations.child_workflow_present.fact_id !== affiliations.child_workflow_removed.fact_id
   ) {
     throw new ContractValidationError('workflow removal must revise the same affiliation identity');
   }
+  if (
+    affiliations.child_workflow_present.semantic_revision_ref.fact_revision_id ===
+    affiliations.child_workflow_removed.semantic_revision_ref.fact_revision_id
+  ) {
+    throw new ContractValidationError('workflow removal must mint a distinct semantic revision');
+  }
 
   const usageInput = record(input.usage, 'runtime usage');
+  assertKnownFields(usageInput, ['native_message', 'source_record_fallback', 'response_revisions'], 'runtime usage');
   const revisionsInput = record(usageInput.response_revisions, 'usage response revisions');
+  assertKnownFields(revisionsInput, ['native_message_id', 'a', 'b', 'a_repeat'], 'usage response revisions');
   const usage = {
     native_message: parseUsageExample(usageInput.native_message),
     source_record_fallback: parseUsageExample(usageInput.source_record_fallback),
@@ -669,6 +849,29 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
     if (example.revision.session !== source.session.entity_key) {
       throw new ContractValidationError('fixture usage revisions must reference the fixture session');
     }
+    if (
+      example.revision.actor_run !== actors.child.revision.actor_run &&
+      example.revision.actor_run !== actors.root.revision.actor_run
+    ) {
+      throw new ContractValidationError('fixture usage revisions must reference a fixture actor');
+    }
+  }
+
+  const sourceRecordId = actors.root.source_record_id;
+  for (const example of [
+    actors.child,
+    affiliations.child_team_present,
+    affiliations.child_workflow_present,
+    affiliations.child_workflow_removed,
+    usage.native_message,
+    usage.source_record_fallback,
+    usage.response_revisions.a,
+    usage.response_revisions.b,
+    usage.response_revisions.a_repeat,
+  ]) {
+    if (example.source_record_id !== sourceRecordId) {
+      throw new ContractValidationError('fixture examples must share one source-record identity');
+    }
   }
 
   return {
@@ -680,4 +883,44 @@ export function parseRuntimeContractFixture(value: unknown): RuntimeContractFixt
     affiliations,
     usage,
   };
+}
+
+export function parseRuntimeContractFixture(value: unknown, expectedContextInput: unknown): RuntimeContractFixture {
+  const expected = parseRuntimeContractFixtureShape(expectedContextInput);
+  const parsed = parseRuntimeContractFixtureShape(value);
+  bindRevisionIdentity('root actor', parsed.actors.root, expected.actors.root);
+  bindRevisionIdentity('child actor', parsed.actors.child, expected.actors.child);
+  bindRevisionIdentity(
+    'child team affiliation',
+    parsed.affiliations.child_team_present,
+    expected.affiliations.child_team_present,
+  );
+  bindRevisionIdentity(
+    'child workflow present affiliation',
+    parsed.affiliations.child_workflow_present,
+    expected.affiliations.child_workflow_present,
+  );
+  bindRevisionIdentity(
+    'child workflow removed affiliation',
+    parsed.affiliations.child_workflow_removed,
+    expected.affiliations.child_workflow_removed,
+  );
+  bindRevisionIdentity('native usage', parsed.usage.native_message, expected.usage.native_message);
+  bindRevisionIdentity(
+    'source-record usage fallback',
+    parsed.usage.source_record_fallback,
+    expected.usage.source_record_fallback,
+  );
+  bindRevisionIdentity('usage revision A', parsed.usage.response_revisions.a, expected.usage.response_revisions.a);
+  bindRevisionIdentity('usage revision B', parsed.usage.response_revisions.b, expected.usage.response_revisions.b);
+  bindRevisionIdentity(
+    'usage revision A-repeat',
+    parsed.usage.response_revisions.a_repeat,
+    expected.usage.response_revisions.a_repeat,
+  );
+  return parsed;
+}
+
+export function parseRfc012cRuntimeV1Json(json: string, expectedContextInput: unknown): RuntimeContractFixture {
+  return parseRuntimeContractFixture(preflightSemanticFixtureJson(json), expectedContextInput);
 }

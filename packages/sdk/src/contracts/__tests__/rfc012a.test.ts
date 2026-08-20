@@ -13,14 +13,23 @@ import {
   parseExternalEntityRef,
   parseNativeIdentityClaim,
   parseQualifiedValue,
+  parseRfc012aV1Fixture,
+  parseRfc012aV1Json,
   parseSemanticRevisionRef,
   parseSourceCoverageSet,
   selectContractVersions,
   type SourceCoverageSet,
 } from '../rfc012a.js';
+import {
+  MAX_SEMANTIC_FIXTURE_DEPTH,
+  MAX_SEMANTIC_FIXTURE_JSON_BYTES,
+  MAX_SEMANTIC_FIXTURE_NODES,
+  preflightSemanticFixtureJson,
+} from '../rfc012-semantic-json.js';
 
 interface ContractFixture {
   fixture_contract_version: number;
+  canonical_source_instance_key: string;
   external_entity_ref: unknown;
   native_identity_claim: unknown;
   semantic_revision_ref: unknown;
@@ -49,12 +58,11 @@ interface MutableCoverageWire extends MutableRecord {
   completeness: string;
 }
 
-const fixture = JSON.parse(
-  readFileSync(
-    new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-v1.json', import.meta.url),
-    'utf8',
-  ),
-) as ContractFixture;
+const fixtureJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-v1.json', import.meta.url),
+  'utf8',
+);
+const fixture = JSON.parse(fixtureJson) as ContractFixture;
 
 function partialCoverageWire(): MutableCoverageWire {
   const wire = structuredClone(fixture.coverage.baseline) as MutableCoverageWire;
@@ -294,12 +302,18 @@ function scopeAccessReportDigest(report: ScopeAccessReportWire): string {
 }
 
 test('Rust RFC 012A v1 fixture validates in the portable SDK', () => {
-  assert.equal(fixture.fixture_contract_version, 1);
-  assert.equal(parseExternalEntityRef(fixture.external_entity_ref).external_entity_reference_version, 1);
-  assert.equal(parseSemanticRevisionRef(fixture.semantic_revision_ref).semantic_reference_contract_version, 1);
-  assert.equal(parseNativeIdentityClaim(fixture.native_identity_claim).identity.value?.native_id, 'session-1');
-  assert.equal(parseQualifiedValue<number>(fixture.qualified_known_zero).value, 0);
-  assert.equal(parseQualifiedValue(fixture.qualified_unknown).unknown_reason, 'withheld');
+  const parsed = parseRfc012aV1Fixture(fixture);
+  assert.equal(parsed.fixture_contract_version, 1);
+  assert.equal(parsed.external_entity_ref.external_entity_reference_version, 1);
+  assert.equal(parsed.semantic_revision_ref.semantic_reference_contract_version, 1);
+  assert.equal(parsed.native_identity_claim.identity.value?.native_id, 'session-1');
+  assert.equal(parsed.qualified_known_zero.value, 0);
+  assert.equal(parsed.qualified_unknown.unknown_reason, 'withheld');
+  assert.equal(parsed.canonical_source_instance_key, parsed.coverage.baseline.scope.source_instance_key);
+  assert.equal(
+    compareCoverage(parsed.coverage.dominant, parsed.coverage.baseline),
+    parsed.coverage.expected.dominant_vs_baseline,
+  );
 });
 
 test('Rust and TypeScript coverage comparison outcomes agree', () => {
@@ -540,6 +554,44 @@ test('Rust, Python, and TypeScript access-report digests agree', () => {
   assert.notEqual(scopeAccessReportDigest(tampered), accessReportFixture.expected_digest);
 });
 
+test('qualified values and native identity claims reject unknown nested fields', () => {
+  const qualified = structuredClone(fixture.qualified_known_zero) as MutableRecord;
+  qualified.future = true;
+  assert.throws(() => parseQualifiedValue(qualified), ContractValidationError);
+
+  const provenance = structuredClone(fixture) as {
+    qualified_known_zero: { provenance: Array<Record<string, unknown>> };
+  };
+  provenance.qualified_known_zero.provenance[0]!.future = true;
+  assert.throws(() => parseRfc012aV1Fixture(provenance), ContractValidationError);
+
+  const identity = structuredClone(fixture.native_identity_claim) as MutableRecord;
+  identity.future = true;
+  assert.throws(() => parseNativeIdentityClaim(identity), ContractValidationError);
+
+  const nativeIdentity = structuredClone(fixture.native_identity_claim) as {
+    identity: { value: Record<string, unknown> };
+  };
+  nativeIdentity.identity.value.future = true;
+  assert.throws(() => parseNativeIdentityClaim(nativeIdentity), ContractValidationError);
+
+  const explicitNulls: Array<[string, MutableRecord]> = [
+    [
+      'unknown_reason',
+      Object.assign(structuredClone(fixture.qualified_known_zero) as MutableRecord, { unknown_reason: null }),
+    ],
+    [
+      'effective_at',
+      Object.assign(structuredClone(fixture.qualified_known_zero) as MutableRecord, { effective_at: null }),
+    ],
+    ['authority', Object.assign(structuredClone(fixture.qualified_known_zero) as MutableRecord, { authority: null })],
+    ['provenance', Object.assign(structuredClone(fixture.qualified_known_zero) as MutableRecord, { provenance: null })],
+  ];
+  for (const [label, value] of explicitNulls) {
+    assert.throws(() => parseQualifiedValue(value), ContractValidationError, label);
+  }
+});
+
 test('incompatible majors and malformed complete coverage are rejected', () => {
   assert.throws(
     () =>
@@ -574,4 +626,131 @@ test('incompatible majors and malformed complete coverage are rejected', () => {
   };
   malformedIdentity.identity.value.native_id = '';
   assert.throws(() => parseNativeIdentityClaim(malformedIdentity), ContractValidationError);
+});
+
+test('typed RFC 012A fixture consumer rejects invalid nested types and drifted source keys', () => {
+  class FixtureWire {}
+  assert.throws(
+    () => parseRfc012aV1Fixture(Object.assign(new FixtureWire(), structuredClone(fixture))),
+    ContractValidationError,
+  );
+
+  const authority = structuredClone(fixture) as { qualified_known_zero: { authority: unknown } };
+  authority.qualified_known_zero.authority = 1;
+  assert.throws(() => parseRfc012aV1Fixture(authority), ContractValidationError);
+
+  const provenanceShape = structuredClone(fixture) as { qualified_known_zero: { provenance: unknown } };
+  provenanceShape.qualified_known_zero.provenance = { kind: 'not-a-semantic-ref' };
+  assert.throws(() => parseRfc012aV1Fixture(provenanceShape), ContractValidationError);
+
+  const knownValue = structuredClone(fixture) as { qualified_known_zero: { value: unknown } };
+  knownValue.qualified_known_zero.value = '0';
+  assert.throws(() => parseRfc012aV1Fixture(knownValue), ContractValidationError);
+
+  const identityAuthority = structuredClone(fixture) as {
+    native_identity_claim: { identity: { authority: unknown } };
+  };
+  identityAuthority.native_identity_claim.identity.authority = 1;
+  assert.throws(() => parseRfc012aV1Fixture(identityAuthority), ContractValidationError);
+
+  const drifted = structuredClone(fixture) as { canonical_source_instance_key: string };
+  drifted.canonical_source_instance_key = 'v1:Up3RqSE5g49YtzL63uFtRuykhY0GLdTm-Z_JdpHkezs';
+  assert.throws(() => parseRfc012aV1Fixture(drifted), ContractValidationError);
+
+  const emptyAuthority = structuredClone(fixture) as { qualified_known_zero: { authority: unknown } };
+  emptyAuthority.qualified_known_zero.authority = '';
+  assert.throws(() => parseRfc012aV1Fixture(emptyAuthority), ContractValidationError);
+
+  const exactIdentity = structuredClone(fixture) as {
+    native_identity_claim: { identity: { value: { native_id: string } } };
+  };
+  exactIdentity.native_identity_claim.identity.value.native_id = 'a'.repeat(256);
+  assert.doesNotThrow(() => parseRfc012aV1Fixture(exactIdentity));
+  exactIdentity.native_identity_claim.identity.value.native_id = 'a'.repeat(257);
+  assert.throws(() => parseRfc012aV1Fixture(exactIdentity), ContractValidationError);
+  exactIdentity.native_identity_claim.identity.value.native_id = 'a'.repeat(10_000);
+  assert.throws(() => parseRfc012aV1Fixture(exactIdentity), ContractValidationError);
+
+  const exactAuthority = structuredClone(fixture) as { qualified_known_zero: { authority: string } };
+  exactAuthority.qualified_known_zero.authority = 'a'.repeat(256);
+  assert.doesNotThrow(() => parseRfc012aV1Fixture(exactAuthority));
+  exactAuthority.qualified_known_zero.authority = 'a'.repeat(257);
+  assert.throws(() => parseRfc012aV1Fixture(exactAuthority), ContractValidationError);
+  exactAuthority.qualified_known_zero.authority = 'a'.repeat(200_000);
+  assert.throws(() => parseRfc012aV1Fixture(exactAuthority), ContractValidationError);
+
+  const identityAuthorityBound = structuredClone(fixture) as {
+    native_identity_claim: { identity: { authority: string } };
+  };
+  identityAuthorityBound.native_identity_claim.identity.authority = 'a'.repeat(256);
+  assert.doesNotThrow(() => parseRfc012aV1Fixture(identityAuthorityBound));
+  identityAuthorityBound.native_identity_claim.identity.authority = 'a'.repeat(257);
+  assert.throws(() => parseRfc012aV1Fixture(identityAuthorityBound), ContractValidationError);
+
+  const driftedRef = structuredClone(fixture) as {
+    semantic_revision_ref: { fact_revision_id: string };
+    canonical_source_instance_key: string;
+  };
+  driftedRef.semantic_revision_ref.fact_revision_id = driftedRef.canonical_source_instance_key;
+  assert.throws(() => parseRfc012aV1Fixture(driftedRef), ContractValidationError);
+
+  const driftedKnownZero = structuredClone(fixture) as {
+    qualified_known_zero: { provenance: Array<{ fact_revision_id: string }> };
+    canonical_source_instance_key: string;
+  };
+  driftedKnownZero.qualified_known_zero.provenance[0]!.fact_revision_id =
+    driftedKnownZero.canonical_source_instance_key;
+  assert.throws(() => parseRfc012aV1Fixture(driftedKnownZero), ContractValidationError);
+
+  const driftedIdentity = structuredClone(fixture) as {
+    native_identity_claim: { identity: { provenance: Array<{ fact_revision_id: string }> } };
+    canonical_source_instance_key: string;
+  };
+  driftedIdentity.native_identity_claim.identity.provenance[0]!.fact_revision_id =
+    driftedIdentity.canonical_source_instance_key;
+  assert.throws(() => parseRfc012aV1Fixture(driftedIdentity), ContractValidationError);
+
+  const unknownProvenance = structuredClone(fixture) as {
+    qualified_unknown: { provenance: unknown[] };
+    semantic_revision_ref: unknown;
+  };
+  unknownProvenance.qualified_unknown.provenance = [unknownProvenance.semantic_revision_ref];
+  assert.throws(() => parseRfc012aV1Fixture(unknownProvenance), ContractValidationError);
+
+  const surrogateAuthority = structuredClone(fixture) as { qualified_known_zero: { authority: string } };
+  surrogateAuthority.qualified_known_zero.authority = '\ud800';
+  assert.throws(() => parseRfc012aV1Fixture(surrogateAuthority), ContractValidationError);
+});
+
+test('semantic fixture envelope accepts exact bounds and rejects one over', () => {
+  const compactJson = JSON.stringify(fixture);
+  const exactBytes = `${compactJson}${' '.repeat(MAX_SEMANTIC_FIXTURE_JSON_BYTES - new TextEncoder().encode(compactJson).length)}`;
+  assert.equal(new TextEncoder().encode(exactBytes).length, MAX_SEMANTIC_FIXTURE_JSON_BYTES);
+  assert.doesNotThrow(() => parseRfc012aV1Json(exactBytes));
+  assert.throws(() => parseRfc012aV1Json(`${exactBytes} `), ContractValidationError);
+  assert.throws(() => parseRfc012aV1Json(`${exactBytes}${' '.repeat(1_000_000)}`), ContractValidationError);
+
+  assert.throws(
+    () => parseRfc012aV1Json(fixtureJson.replace('"effective_at": 1776211200000', '"effective_at": 1776211200000.0')),
+    ContractValidationError,
+  );
+  assert.throws(
+    () => parseRfc012aV1Json(fixtureJson.replace('"authority": "native-response"', '"authority": "\\ud800"')),
+    ContractValidationError,
+  );
+
+  let exactDepth: unknown = 0;
+  for (let depth = 0; depth < MAX_SEMANTIC_FIXTURE_DEPTH - 1; depth += 1) {
+    exactDepth = { child: exactDepth };
+  }
+  assert.doesNotThrow(() => preflightSemanticFixtureJson(JSON.stringify(exactDepth)));
+  assert.throws(() => preflightSemanticFixtureJson(JSON.stringify({ child: exactDepth })), ContractValidationError);
+
+  assert.doesNotThrow(() =>
+    preflightSemanticFixtureJson(JSON.stringify(new Array(MAX_SEMANTIC_FIXTURE_NODES - 1).fill(0))),
+  );
+  assert.throws(
+    () => preflightSemanticFixtureJson(JSON.stringify(new Array(MAX_SEMANTIC_FIXTURE_NODES).fill(0))),
+    ContractValidationError,
+  );
 });

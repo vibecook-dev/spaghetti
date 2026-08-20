@@ -62,6 +62,10 @@
       "description": "The draft RFC 012B catalog semantic contract cannot depend on persistence, source runtime, N-API, scoped observation, or concrete adapters, and cannot be exported publicly before its transport contract is complete.",
       "allowed": []
     },
+    "rfc012_semantic_contract_boundary_violations": {
+      "description": "RFC 012A/012C fixture JSON parsers stay store-free, and the N-API helpers remain JSON-string only without becoming a public query or object-mirror surface.",
+      "allowed": []
+    },
     "migrated_client_direct_engine_queries": {
       "description": "Consumers already migrated to SpaghettiClient may keep native engine lifecycle ownership but cannot resume direct N-API query calls.",
       "allowed": []

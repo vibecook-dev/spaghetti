@@ -4,16 +4,18 @@
 //! affiliation, and usage-v2 values. It does not define observer envelopes,
 //! epochs, replacement snapshots, or durable query pages.
 
-use serde::{Deserialize, Serialize};
-
 use crate::adapter::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
-    ActorRunRevisionFact, ActorRunRole, AdapterId, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, ContractCompleteness, ExternalEntityRef, Fact, FactBatch,
-    FactSemanticContext, FactSemanticRevision, QualifiedTimestamp, QualifiedUnknownReason,
-    QualifiedValue, QualifiedValueQuality, SemanticRevisionRef, SourceRecordId, TimestampQuality,
-    UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
-    UsageValueAuthority, UsageValueProvenance,
+    ActorRunRevisionFact, ActorRunRole, AdapterId, CanonicalEntityKey, ContractCompleteness,
+    ExternalEntityRef, Fact, FactBatch, FactSemanticContext, FactSemanticRevision,
+    QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality,
+    SemanticRevisionRef, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
+    UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
+};
+use crate::semantic_contract::{
+    parse_rfc012c_runtime_v1_json, ActorExampleWire, ActorsWire, AffiliationExampleWire,
+    AffiliationsWire, FamilyVersionWire, RuntimeContractFixtureWire, SessionIdentityWire,
+    SourceWire, UsageAbaWire, UsageExampleWire, UsageWire,
 };
 use crate::source::{RecordOrigin, SourceCursor, SourceMediaType, SourceRecord};
 
@@ -39,98 +41,6 @@ const FALLBACK_RESPONSE_KEY: &[u8] = b"fixture-source-record-fallback-1";
 const REQUEST_ID: &str = "req_fixture_1";
 const COMMITTED_FIXTURE: &str = include_str!("../../fixtures/contracts/rfc012c-runtime-v1.json");
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct FamilyVersionWire {
-    family: String,
-    version: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct SessionIdentityWire {
-    entity_key: CanonicalEntityKey,
-    external_ref: ExternalEntityRef,
-    native_session_id: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct SourceWire {
-    adapter_id: String,
-    source_instance_key: CanonicalSourceInstanceKey,
-    session: SessionIdentityWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ActorExampleWire {
-    family: String,
-    family_version: u32,
-    revision: ActorRunRevisionFact,
-    semantic_revision_key_hex: String,
-    fact_id: CanonicalFactId,
-    source_record_id: SourceRecordId,
-    semantic_revision_ref: SemanticRevisionRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct ActorsWire {
-    root: ActorExampleWire,
-    child: ActorExampleWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct AffiliationExampleWire {
-    family: String,
-    family_version: u32,
-    revision: ActorAffiliationRevisionFact,
-    semantic_revision_key_hex: String,
-    fact_id: CanonicalFactId,
-    source_record_id: SourceRecordId,
-    semantic_revision_ref: SemanticRevisionRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct AffiliationsWire {
-    child_team_present: AffiliationExampleWire,
-    child_workflow_present: AffiliationExampleWire,
-    child_workflow_removed: AffiliationExampleWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct UsageExampleWire {
-    family: String,
-    family_version: u32,
-    revision: UsageRevisionV2Fact,
-    semantic_revision_key_hex: String,
-    fact_id: CanonicalFactId,
-    source_record_id: SourceRecordId,
-    semantic_revision_ref: SemanticRevisionRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct UsageAbaWire {
-    native_message_id: String,
-    a: UsageExampleWire,
-    b: UsageExampleWire,
-    a_repeat: UsageExampleWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct UsageWire {
-    native_message: UsageExampleWire,
-    source_record_fallback: UsageExampleWire,
-    response_revisions: UsageAbaWire,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct RuntimeContractFixtureWire {
-    fixture_contract_version: u32,
-    runtime_semantic_contract_version: u32,
-    families: Vec<FamilyVersionWire>,
-    source: SourceWire,
-    actors: ActorsWire,
-    affiliations: AffiliationsWire,
-    usage: UsageWire,
-}
-
 fn hex_digest(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -150,6 +60,24 @@ fn fixture_record() -> SourceRecord {
         SourceCursor::append_offset(3),
         0,
         b"{}".to_vec(),
+    )
+}
+
+fn alternate_registration_record(first: &SourceRecord) -> SourceRecord {
+    SourceRecord::new(
+        &RecordOrigin {
+            source_instance_id: 101,
+            stream_id: 202,
+            object_id: 303,
+            observed_at: 9_999,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/json").unwrap(),
+        },
+        first.generation,
+        first.cursor_start.clone(),
+        first.cursor_end.clone(),
+        77,
+        first.payload.clone(),
     )
 }
 
@@ -578,7 +506,11 @@ fn expected_fixture() -> RuntimeContractFixtureWire {
 }
 
 fn committed_fixture() -> RuntimeContractFixtureWire {
-    serde_json::from_str(COMMITTED_FIXTURE).expect("RFC 012C fixture must deserialize")
+    serde_json::from_str(
+        &parse_rfc012c_runtime_v1_json(COMMITTED_FIXTURE)
+            .expect("RFC 012C fixture must parse through the native JSON contract"),
+    )
+    .expect("parsed RFC 012C fixture must deserialize")
 }
 
 fn assert_usage_revision_identity(example: &UsageExampleWire) {
@@ -855,4 +787,117 @@ fn invalid_runtime_payloads_fail_the_existing_fact_contract() {
         quality: TimestampQuality::NativeExact,
     });
     assert!(usage.semantic_revision_key().is_err());
+}
+
+#[test]
+fn common_factbatch_emission_preserves_identity_across_registration_coordinates() {
+    // Distinct SourceRecord coordinates through the same FactBatch constructor
+    // prove registration-coordinate invariance. This is not scoped-observation
+    // host integration.
+    let fixture = expected_fixture();
+    let context = fixture_context();
+    let durable_record = fixture_record();
+    let scoped_record = alternate_registration_record(&durable_record);
+
+    let durable_root = actor_example(
+        &context,
+        &durable_record,
+        fixture.actors.root.revision.clone(),
+        ROOT_ACTOR_NATIVE_ID.as_bytes(),
+    );
+    let scoped_root = actor_example(
+        &context,
+        &scoped_record,
+        fixture.actors.root.revision.clone(),
+        ROOT_ACTOR_NATIVE_ID.as_bytes(),
+    );
+    assert_eq!(
+        durable_root.semantic_revision_ref,
+        scoped_root.semantic_revision_ref
+    );
+    assert_eq!(durable_root.fact_id, scoped_root.fact_id);
+    assert_eq!(durable_root.source_record_id, scoped_root.source_record_id);
+
+    let durable_child = actor_example(
+        &context,
+        &durable_record,
+        fixture.actors.child.revision.clone(),
+        CHILD_ACTOR_NATIVE_ID.as_bytes(),
+    );
+    let scoped_child = actor_example(
+        &context,
+        &scoped_record,
+        fixture.actors.child.revision.clone(),
+        CHILD_ACTOR_NATIVE_ID.as_bytes(),
+    );
+    assert_eq!(
+        durable_child.semantic_revision_ref,
+        scoped_child.semantic_revision_ref
+    );
+
+    let durable_team = affiliation_example(
+        &context,
+        &durable_record,
+        fixture.affiliations.child_team_present.revision.clone(),
+        b"fixture-child-actor/team/fixture-team-1",
+    );
+    let scoped_team = affiliation_example(
+        &context,
+        &scoped_record,
+        fixture.affiliations.child_team_present.revision.clone(),
+        b"fixture-child-actor/team/fixture-team-1",
+    );
+    assert_eq!(
+        durable_team.semantic_revision_ref,
+        scoped_team.semantic_revision_ref
+    );
+    assert_eq!(
+        durable_team.semantic_revision_ref,
+        fixture
+            .affiliations
+            .child_team_present
+            .semantic_revision_ref
+    );
+
+    let durable_removed = affiliation_example(
+        &context,
+        &durable_record,
+        fixture.affiliations.child_workflow_removed.revision.clone(),
+        b"fixture-child-actor/workflow/fixture-workflow-1",
+    );
+    let scoped_removed = affiliation_example(
+        &context,
+        &scoped_record,
+        fixture.affiliations.child_workflow_removed.revision.clone(),
+        b"fixture-child-actor/workflow/fixture-workflow-1",
+    );
+    assert_eq!(
+        durable_removed.semantic_revision_ref,
+        scoped_removed.semantic_revision_ref
+    );
+    assert_eq!(durable_removed.fact_id, scoped_removed.fact_id);
+    assert_eq!(
+        durable_removed.semantic_revision_ref,
+        fixture
+            .affiliations
+            .child_workflow_removed
+            .semantic_revision_ref
+    );
+    assert_ne!(
+        durable_removed.semantic_revision_ref,
+        durable_team.semantic_revision_ref
+    );
+
+    for revision in [
+        fixture.usage.native_message.revision.clone(),
+        fixture.usage.source_record_fallback.revision.clone(),
+        fixture.usage.response_revisions.a.revision.clone(),
+        fixture.usage.response_revisions.b.revision.clone(),
+    ] {
+        let durable = emit_usage(&context, &durable_record, revision.clone());
+        let scoped = emit_usage(&context, &scoped_record, revision);
+        assert_eq!(durable.semantic_revision_ref, scoped.semantic_revision_ref);
+        assert_eq!(durable.fact_id, scoped.fact_id);
+        assert_eq!(durable.source_record_id, scoped.source_record_id);
+    }
 }
