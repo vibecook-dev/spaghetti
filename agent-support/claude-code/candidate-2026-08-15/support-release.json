@@ -15,8 +15,8 @@
     "ads": { "path": "agent-support/claude-code/candidate-2026-08-15/ads.json", "sha256": "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa" },
     "source_declaration": { "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json", "sha256": "sha256:3d8a5f0d005f97ede696c95c30dfccdb9cbaeeed6f8b0359d8dbfed38445a974" },
     "scope_program": { "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json", "sha256": "sha256:3b65475646b501a93695534ab968f4187a20bbec9a3d0d1228cd42670f447114" },
-    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:c76c2c323cf5d3c0916647cfd9962fbc5b663231753191132bd9025769d6f791" },
-    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:04f4552e85dd385a1e5974e269cdd9b17fa41a8a970fe1e9a98cd073ca3eba03" }
+    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:d9a64ea4b8525d1388ee0e83eef533be786b9b62173e00487e4d0e71801f3464" },
+    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:0f37d3380a8ae19f828a946666cc0264dba4a7b1f14d31d930a168b980e43843" }
   },
   "versions": {
     "adapter_package": "0.7.0",
@@ -33,7 +33,7 @@
   "capabilities": [
     { "capability_id": "project-session-catalog", "topology": "catalog", "level": "unsupported", "notes": "RFC 012B catalog assertions and tier composition are not implemented." },
     { "capability_id": "history-and-secondary-facts", "topology": "durable", "level": "supported", "notes": "Current Rust adapter streams project to the existing database, but this candidate is not runtime-selectable." },
-    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, complete value-derived semantic revision identity, cross-batch and durable exact-current-repeat suppression, ordered non-consecutive semantic reversion with ledger reuse, bootstrap baseline coalescing, explicit reset retraction, durable response/affiliation shadow reducers, workflow and native team correlation, independent frozen sanitized-oracle parity, artifact-bound exact private native corpus parity with final integrity, bounded streaming coverage membership, capability-scoped diagnostic coverage, the versioned public v2 query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, fault-tested atomic readiness/coverage administration, crash-resumable replay recovery, stale-safe public replay authorization, crash-safe source-scoped query selection, a non-mixing composite aggregate query, a read-only compatibility sampler with bounded owner-lifetime telemetry, and an unhealthy-v2 rollback drill are implemented; scoped observer mapping, a representative external compatibility-window report, and remaining runtime lifecycle facts are pending." },
+    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, complete value-derived semantic revision identity, cross-batch and durable exact-current-repeat suppression, ordered non-consecutive semantic reversion with ledger reuse, bootstrap baseline coalescing, explicit reset retraction, durable response/affiliation shadow reducers, workflow and native team correlation, independent frozen sanitized-oracle parity, artifact-bound exact private native corpus parity with final integrity, bounded streaming coverage membership, capability-scoped diagnostic coverage, the versioned public v2 query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, fault-tested atomic readiness/coverage administration, crash-resumable replay recovery, stale-safe public replay authorization, crash-safe source-scoped query selection, a non-mixing composite aggregate query, a read-only compatibility sampler with bounded owner-lifetime telemetry, and an unhealthy-v2 rollback drill are implemented; a representative external compatibility-window report is retained; scoped observer mapping and remaining runtime lifecycle facts are pending." },
     { "capability_id": "root-descendant-observation", "topology": "scoped", "level": "unsupported", "notes": "ScopeProgram is incomplete and common observer delivery is pending." },
     { "capability_id": "interaction-lifecycle", "topology": "scoped", "level": "unsupported", "notes": "AskUserQuestion lifecycle facts and correction delivery are pending." }
   ],
@@ -60,7 +60,7 @@
   "lifecycle": { "candidate_at": "2026-08-15", "promoted_at": null, "retired_at": null, "supersedes": null, "superseded_by": null },
   "known_limitations": [
     "Candidate entries never confer runtime support.",
-    "Catalog readiness, representative usage-v2 compatibility-window evidence, interaction, and scoped observation contracts are not implemented.",
+    "Catalog readiness, interaction, and scoped observation contracts are not implemented.",
     "Source-instance move/clone and identity reuse behavior lack adversarial conformance.",
     "Active-session nameSince remains opaque native metadata and cannot drive common ordering, activity, or lifecycle semantics without transition fixtures.",
     "Settings autoMode remains sensitive native-only policy configuration and cannot establish effective runtime mode without transition fixtures.",
@@ -74,7 +74,7 @@
   "promotion_blockers": [
     "Pin the native distributable/version and required markers with sanitized fixtures.",
     "Implement and pass RFC 012B catalog/tier compositionality gates.",
-    "Collect and review the RFC 012C compatibility-window report; complete remaining runtime lifecycle facts.",
+    "Complete remaining RFC 012C runtime lifecycle facts.",
     "Complete and execute every RFC 012D scope relation with access telemetry.",
     "Pass identity, unknown-retention, cross-topology, performance, and sanitizer review gates.",
     "Assign public durable and observation contract versions."

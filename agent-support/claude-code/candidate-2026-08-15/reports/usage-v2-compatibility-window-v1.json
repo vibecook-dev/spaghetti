@@ -1,0 +1,431 @@
+{
+  "schemaVersion": 1,
+  "status": "ready",
+  "experiment": "rfc012c-usage-v2-compatibility-window",
+  "adapterId": "claude-code",
+  "decoderContractVersion": 22,
+  "sourceCapture": "ephemeral-isolated-clone",
+  "sourceSetDigestBefore": "a5463863ffba153e8574360f6723b626c1eff427f64f84dc1033dabc5393710f",
+  "sourceSetDigestAfter": "a5463863ffba153e8574360f6723b626c1eff427f64f84dc1033dabc5393710f",
+  "sourceStable": true,
+  "nativeArtifact": {
+    "fileName": "spaghetti.darwin-arm64.node",
+    "sha256": "a52415e167fd67611eafd90fe9d98e21431461789a9ed6bfef3b33f3bca9041c",
+    "bytes": 10951136
+  },
+  "candidateDocuments": {
+    "ads.json": "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
+    "source-declarations.json": "sha256:3d8a5f0d005f97ede696c95c30dfccdb9cbaeeed6f8b0359d8dbfed38445a974",
+    "scope-programs.json": "sha256:3b65475646b501a93695534ab968f4187a20bbec9a3d0d1228cd42670f447114",
+    "evidence.json": "sha256:c76c2c323cf5d3c0916647cfd9962fbc5b663231753191132bd9025769d6f791",
+    "conformance.json": "sha256:04f4552e85dd385a1e5974e269cdd9b17fa41a8a970fe1e9a98cd073ca3eba03",
+    "support-release.json": "sha256:b7ac3fb8b0f5d8409376b4e5f8b0e0a7580107b0ce65fbe24294bab550d27539"
+  },
+  "collectorEvidence": {
+    "scripts/usage-v2-compatibility-window.ts": "sha256:6ff762e643ce45733d13078c442db2f725a68ecefa957ffedf0b3473706a1e8d",
+    "scripts/runtime_observation_census/census.py": "sha256:d722e57a920b95d598435847bdc7abbfae726f9d7e73802f76a9dac3dab9a3ab"
+  },
+  "sampler": {
+    "contract": "getRuntimeUsageCompatibility",
+    "contractVersion": 1,
+    "maxScopes": 128,
+    "promotion": false,
+    "querySelection": "unselected-legacy-default",
+    "querySelectionProven": true,
+    "windowSamples": 1,
+    "orderIndependenceProbes": 1
+  },
+  "window": {
+    "engineProjectCount": 101,
+    "snapshotCount": 1,
+    "batchSizes": [
+      101
+    ]
+  },
+  "atCommitSeq": 35698,
+  "independent": {
+    "responseGroups": 153525,
+    "actorFiles": 5141,
+    "sessions": 911,
+    "rootResponseGroups": 65771,
+    "childResponseGroups": 87754,
+    "fallbackResponses": 0,
+    "responsesWithModel": 153525,
+    "totals": {
+      "cache_creation_input_tokens": 1772525064,
+      "cache_read_input_tokens": 33377557290,
+      "input_tokens": 14402036,
+      "output_tokens": 131865914
+    },
+    "unknownResponses": {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "declaredTranscriptObjects": 5289
+  },
+  "durable": {
+    "usage": {
+      "responses": 153525,
+      "actors": 5141,
+      "sessions": 911,
+      "rootResponses": 65771,
+      "childResponses": 87754,
+      "fallbackResponses": 0,
+      "responsesWithModel": 153525,
+      "totals": {
+        "input_tokens": 14402036,
+        "output_tokens": 131865914,
+        "cache_creation_input_tokens": 1772525064,
+        "cache_read_input_tokens": 33377557290
+      },
+      "unknownResponses": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0
+      }
+    },
+    "coverage": {
+      "sets": 1,
+      "completeness": "complete",
+      "readiness": "ready",
+      "completedVersion": 1,
+      "detail": null,
+      "points": 5289,
+      "absences": 0,
+      "errors": 0
+    },
+    "providerDiagnostics": {
+      "records": 6,
+      "codes": {
+        "claude_typed_projection_loss": 6
+      }
+    },
+    "foreignKeyViolationsAfterBootstrap": 0
+  },
+  "ingestChecks": [
+    {
+      "name": "source snapshot stable",
+      "expected": true,
+      "actual": true,
+      "exact": true
+    },
+    {
+      "name": "response groups",
+      "expected": 153525,
+      "actual": 153525,
+      "exact": true
+    },
+    {
+      "name": "actor files",
+      "expected": 5141,
+      "actual": 5141,
+      "exact": true
+    },
+    {
+      "name": "sessions",
+      "expected": 911,
+      "actual": 911,
+      "exact": true
+    },
+    {
+      "name": "root response groups",
+      "expected": 65771,
+      "actual": 65771,
+      "exact": true
+    },
+    {
+      "name": "child response groups",
+      "expected": 87754,
+      "actual": 87754,
+      "exact": true
+    },
+    {
+      "name": "fallback responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "responses with model",
+      "expected": 153525,
+      "actual": 153525,
+      "exact": true
+    },
+    {
+      "name": "input_tokens total",
+      "expected": 14402036,
+      "actual": 14402036,
+      "exact": true
+    },
+    {
+      "name": "input_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "output_tokens total",
+      "expected": 131865914,
+      "actual": 131865914,
+      "exact": true
+    },
+    {
+      "name": "output_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "cache_creation_input_tokens total",
+      "expected": 1772525064,
+      "actual": 1772525064,
+      "exact": true
+    },
+    {
+      "name": "cache_creation_input_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "cache_read_input_tokens total",
+      "expected": 33377557290,
+      "actual": 33377557290,
+      "exact": true
+    },
+    {
+      "name": "cache_read_input_tokens unknown responses",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "coverage sets",
+      "expected": 1,
+      "actual": 1,
+      "exact": true
+    },
+    {
+      "name": "coverage completeness",
+      "expected": "complete",
+      "actual": "complete",
+      "exact": true
+    },
+    {
+      "name": "projection readiness",
+      "expected": "ready",
+      "actual": "ready",
+      "exact": true
+    },
+    {
+      "name": "projection completed version",
+      "expected": 1,
+      "actual": 1,
+      "exact": true
+    },
+    {
+      "name": "projection detail",
+      "expected": null,
+      "actual": null,
+      "exact": true
+    },
+    {
+      "name": "coverage points",
+      "expected": 5289,
+      "actual": 5289,
+      "exact": true
+    },
+    {
+      "name": "coverage absences",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "coverage errors",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    },
+    {
+      "name": "foreign key violations after bootstrap",
+      "expected": 0,
+      "actual": 0,
+      "exact": true
+    }
+  ],
+  "snapshots": [
+    {
+      "batchIndex": 0,
+      "batchSize": 101,
+      "contractVersion": 1,
+      "atCommitSeq": 35698,
+      "comparisonRef": "v1:ijSInxPONZTQNBM0cOncmlFIO81w5E0h4GIX5Dg4foQ",
+      "comparisonRefOrderIndependent": true,
+      "status": "ready",
+      "comparisonStatus": "different",
+      "selection": {
+        "querySelection": "unselected-legacy-default",
+        "contractVersion": 1,
+        "queryPackId": "runtime.usage",
+        "materialized": false,
+        "selected": {
+          "queryId": "legacy.usage",
+          "contractVersion": 1
+        },
+        "rollback": {
+          "queryId": "legacy.usage",
+          "contractVersion": 1
+        },
+        "selectionEpoch": 0,
+        "memberCount": 1,
+        "sessionCount": 998,
+        "v2EligibleCount": 1,
+        "adapters": {
+          "claude-code": {
+            "memberCount": 1,
+            "sessionCount": 998
+          }
+        },
+        "coverageStatus": {
+          "complete": 1
+        },
+        "projection": {
+          "readyCount": 1,
+          "desiredVersion": 1,
+          "completedVersion": 1
+        }
+      },
+      "legacy": {
+        "exact": {
+          "inputTokens": 46279373,
+          "outputTokens": 264729825,
+          "cacheCreationTokens": 4995888137,
+          "cacheReadTokens": 70224098730,
+          "componentTotalTokens": 75530996065
+        },
+        "estimated": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheCreationTokens": 0,
+          "cacheReadTokens": 0,
+          "componentTotalTokens": 0
+        },
+        "combined": {
+          "inputTokens": 46279373,
+          "outputTokens": 264729825,
+          "cacheCreationTokens": 4995888137,
+          "cacheReadTokens": 70224098730,
+          "componentTotalTokens": 75530996065
+        },
+        "quality": "exact",
+        "exactContributionCount": 352406,
+        "estimatedContributionCount": 0,
+        "contributionCount": 352406,
+        "sessionCount": 906
+      },
+      "usageV2": {
+        "responseCount": 153525,
+        "actorCount": 5141,
+        "inputTokens": {
+          "knownTokens": 14402036,
+          "knownResponseCount": 153525,
+          "exactResponseCount": 153525,
+          "nonExactResponseCount": 0,
+          "unknownResponseCount": 0,
+          "completeness": "complete"
+        },
+        "outputTokens": {
+          "knownTokens": 131865914,
+          "knownResponseCount": 153525,
+          "exactResponseCount": 153525,
+          "nonExactResponseCount": 0,
+          "unknownResponseCount": 0,
+          "completeness": "complete"
+        },
+        "cacheCreationInputTokens": {
+          "knownTokens": 1772525064,
+          "knownResponseCount": 153525,
+          "exactResponseCount": 153525,
+          "nonExactResponseCount": 0,
+          "unknownResponseCount": 0,
+          "completeness": "complete"
+        },
+        "cacheReadInputTokens": {
+          "knownTokens": 33377557290,
+          "knownResponseCount": 153525,
+          "exactResponseCount": 153525,
+          "nonExactResponseCount": 0,
+          "unknownResponseCount": 0,
+          "completeness": "complete"
+        }
+      },
+      "buckets": {
+        "inputTokens": {
+          "legacyExactTokens": 46279373,
+          "legacyEstimatedTokens": 0,
+          "legacyCombinedTokens": 46279373,
+          "v2KnownTokens": 14402036,
+          "v2UnknownResponseCount": 0,
+          "v2Completeness": "complete",
+          "relation": "legacy_higher",
+          "absoluteDeltaTokens": 31877337
+        },
+        "outputTokens": {
+          "legacyExactTokens": 264729825,
+          "legacyEstimatedTokens": 0,
+          "legacyCombinedTokens": 264729825,
+          "v2KnownTokens": 131865914,
+          "v2UnknownResponseCount": 0,
+          "v2Completeness": "complete",
+          "relation": "legacy_higher",
+          "absoluteDeltaTokens": 132863911
+        },
+        "cacheCreationInputTokens": {
+          "legacyExactTokens": 4995888137,
+          "legacyEstimatedTokens": 0,
+          "legacyCombinedTokens": 4995888137,
+          "v2KnownTokens": 1772525064,
+          "v2UnknownResponseCount": 0,
+          "v2Completeness": "complete",
+          "relation": "legacy_higher",
+          "absoluteDeltaTokens": 3223363073
+        },
+        "cacheReadInputTokens": {
+          "legacyExactTokens": 70224098730,
+          "legacyEstimatedTokens": 0,
+          "legacyCombinedTokens": 70224098730,
+          "v2KnownTokens": 33377557290,
+          "v2UnknownResponseCount": 0,
+          "v2Completeness": "complete",
+          "relation": "legacy_higher",
+          "absoluteDeltaTokens": 36846541440
+        }
+      }
+    }
+  ],
+  "telemetry": {
+    "engine": {
+      "samples": 2,
+      "readySamples": 2,
+      "notReadySamples": 0,
+      "equalSamples": 0,
+      "differentSamples": 2,
+      "incomparableSamples": 0,
+      "equalBuckets": 0,
+      "legacyHigherBuckets": 8,
+      "v2HigherBuckets": 0,
+      "incomparableBuckets": 0,
+      "sampledAbsoluteDeltaTokens": 80469291522,
+      "maxAbsoluteDeltaTokens": 36846541440,
+      "firstAtCommitSeq": 35698,
+      "lastAtCommitSeq": 35698
+    },
+    "windowSamples": 1,
+    "orderIndependenceProbes": 1
+  },
+  "privacy": "Aggregate counts, token totals, opaque comparison refs, coverage counts, artifact digest, and source metadata digest only. No native paths, identifiers, selection-scope refs, model values, prompts, answers, timestamps, timings, or raw payloads. Engine telemetry includes labeled order-independence probes."
+}
