@@ -2404,6 +2404,18 @@ directory read, child-object admission, watcher, live membership transition,
 public transport, capability upgrade, or promotion is implemented by this
 slice.
 
+Commit `1ccb0dd` adds the matching pre-I/O locator authority. A
+`ChildDirectoryByNativeId` reservation can render its declared template only
+from the exact ordered identity values that minted that reservation's opaque
+object token; substituted values, another primitive, path separators,
+controls, non-UTF-8 bytes, absolute/drive paths, and `.`/`..` components fail
+closed before a native root is joined. The result is only a confined relative
+path. Future attachment root validation also requires the exact access-root set
+for every observation relation, rather than deriving authority from the
+known-object subset. The dynamic-relation promotion guard still executes first,
+so this seam cannot open or enumerate a directory, construct a watcher, or
+authorize the Candidate package.
+
 ### D3. Identity, control, and resync
 
 Implement:
