@@ -2306,6 +2306,19 @@ Current landing status (2026-08-19):
   attachment-local. This closes the executable state-isolation case only: it
   does not ratify p99 latency, global scheduling policy, or calibrated
   starvation bounds; and
+- the native-rescan continuity checkpoint (`d58ea42`) now maps a live
+  `notify` rescan signal to sticky attachment-local `WatcherOverflow`
+  invalidation instead of an ordinary poll request. Bootstrap-time rescan
+  remains a coalesced watcher-before-scan reconciliation hint. The retained
+  watcher owns the live loss across supervision-future recreation and backend
+  recovery, then clears it only after the exact resync control is accepted.
+  If another signal arrives while a replacement-start control is offered but
+  not delivered, the watcher snapshots delivery-capacity generation, retries
+  before waiting, and drives a strictly newer replacement after dequeue
+  without losing the wakeup. Integrated coverage proves unchanged poll demand,
+  the exact overflow reason, fresh-epoch replay, later polling, and orderly
+  close. This adds no public API, dynamic scope, policy value, or performance
+  claim; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2370,7 +2383,7 @@ Gate compares clean-bootstrap and resync replacement digests per RFC 012C family
 at the same RFC 012A coverage vector, including disappeared entities, explicit
 unavailable coverage, and unchanged event IDs.
 
-Current landing status (2026-08-18): D3 is `In progress`. Native-derived
+Current landing status (2026-08-19): D3 is `In progress`. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have
@@ -2477,7 +2490,11 @@ the ordered event drain still requires explicit application acknowledgement,
 and close remains an independent resource barrier. The bounded native owner
 now automatically connects audit, backend replacement, capped retry/backoff,
 routing failure, and retry exhaustion to that control while preserving it for
-delivery before close. The source owner now classifies source and decode
+delivery before close. A live native watcher rescan now enters that same
+sticky continuity path rather than merely requesting an ordinary poll, remains
+retained across backend recovery, and retries against the delivery-capacity
+generation when a replacement-start control has not yet been delivered. The
+source owner now classifies source and decode
 failure independently for every exact relation, publishes a typed
 `source.object_error` control with redacted stable provenance, retains the
 error in same-pass coverage, and schedules only genuinely transient relations
