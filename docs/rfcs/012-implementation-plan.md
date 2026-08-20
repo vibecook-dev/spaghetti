@@ -2385,6 +2385,25 @@ index, namespace, or parameterized-query composition; it prevents a later
 manifest status flip from silently treating those omitted relations as a
 complete scope.
 
+Commit `8253e51` adds the first common representation needed behind that guard
+without opening it. One complete bounded `DirectoryCheckpoint` may now be
+retained as the membership-source observation for one declared dynamic
+relation. It contributes one `Decode` point with `SnapshotRevision` and
+`ExactSnapshot`; discovered children are not fabricated as additional declared
+relations and must retain their own source coordinates when the D2 owner is
+implemented. Admission is limited to a drained bootstrap/correction boundary,
+shares the existing pre-retention coverage-object ceiling, and rejects zero
+pass/generation values, live insertion, source/relation retargeting, and
+known-object collisions. The convenience scope revision remains independent
+of cursor/snapshot positions, while the bootstrap/replacement snapshot digest
+binds the exact `SourceCoverageSet` and therefore changes when the directory
+revision changes. The host now retains the full declared observation-relation
+set for that future assembly, but the `9f9749b` rejection still blocks every
+non-`KnownObject` observation primitive before source access. No Claude
+directory read, child-object admission, watcher, live membership transition,
+public transport, capability upgrade, or promotion is implemented by this
+slice.
+
 ### D3. Identity, control, and resync
 
 Implement:
