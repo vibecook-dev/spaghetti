@@ -23,11 +23,12 @@ and an external-SSD worktree layout.
 The `In progress` labels describe exit gates, not workstreams starting from
 zero:
 
-- **A1-A3:** the base model, support verifier, typed authorization, and three
-  Candidate packages exist. Remaining work includes promotion-minimum family
-  parity, the strict access request/report lifecycle, artifact pins, complete
-  candidate evidence, real compositions, and promotion review. No current
-  adapter release is promoted.
+- **A1-A3:** the base model, first portable/N-API semantic parity slice, support
+  verifier, typed authorization, strict path-free access request/report
+  boundary, and three Candidate packages exist. Remaining work includes
+  promotion-minimum family parity, a production probe/retrieval driver,
+  artifact pins, complete candidate evidence, real compositions, and promotion
+  review. No current adapter release is promoted.
 - **B1-B3:** B1 is open only at its public exposure gate. B3 already includes
   initial publication, retained pages, identity resolution, refresh
   successors, logical retirement, and independently-safe refresh failure.
@@ -35,15 +36,14 @@ zero:
   access/coverage producer. B3 still lacks the remaining readiness variants
   and caller-authorized public policy transport.
 - **C1-C3:** usage-v2, source-scoped selection, rollback, coverage, and durable
-  migration are substantially implemented. C3's immediate remaining exit gate
-  is collection and review of the representative external compatibility
-  report. C1/C2 still have promotion-minimum portable and scoped/durable family
-  parity work.
+  migration are substantially implemented. C3's compatibility-window exit gate
+  is met by the reviewed, digest-bound representative external report; C1/C2
+  still have promotion-minimum portable and scoped/durable family parity work.
 
 The critical dependency is:
 
 ```text
-C3 evidence -------------------+
+C3 evidence (gate met) --------+
 A1/C1 contract parity ---------+--> A3 candidate completion --> promotion
 A2 authority lifecycle --------+              |
                                                +--> B2 real composition

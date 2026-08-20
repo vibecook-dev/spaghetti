@@ -1197,10 +1197,19 @@ Snapshot replacement retracts an edited or deleted sidecar's prior edge while
 leaving actor usage untouched. The aggregate-only native census report is
 [`team-affiliation-census-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/team-affiliation-census-v1.json).
 
-Collection of a representative external compatibility-window report remains
-open. Until that and the remaining runtime-family gates pass, the candidate
-capability is unsupported and `getUsage`/`getUsageActivity` retain legacy
-semantics.
+The representative external compatibility-window report is now retained as
+[`usage-v2-compatibility-window-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-compatibility-window-v1.json)
+with digest
+`sha256:3f4eaa7c8144fe078c9df71ca6cb72a3b0c9a9e5390bcecb7433b455e1087a83`.
+On a stable ephemeral clone, the independent census and durable ingest matched
+153,525 response groups, 5,141 actors, 911 usage sessions, all four token
+totals, 5,289 complete Ready coverage points, and zero final foreign-key
+violations. The proven query selection remained the unselected
+`legacy.usage@1` default, and all four sampled comparisons were
+`legacy_higher`; the report records that expected semantic divergence rather
+than treating it as a parity failure. The compatibility-window gate is met,
+but the remaining runtime-family gates still keep the candidate capability
+unsupported, and `getUsage`/`getUsageActivity` retain legacy semantics.
 
 ## 14. Failure and correction semantics
 

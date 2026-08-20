@@ -129,7 +129,7 @@ prerequisite for early vertical slices.
 | B5. Catalog performance calibration      | 012B                | Not started | reproducible gate-amendment report                             |
 | C1. Runtime semantic contracts           | 012C                | In progress | actor/usage/state/interaction serialization fixtures           |
 | C2. Usage-v2 shadow projection           | 012C                | In progress | frozen/private corpus plus native affiliation parity           |
-| C3. Durable usage migration              | 012C                | In progress | transactional switch and rollback tests                        |
+| C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
 | C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close, no SQLite/global scan             |
 | D2. Claude scope composition             | 012D                | Not started | root/current/future actor and sidecar conformance              |
@@ -264,11 +264,20 @@ Current landing status (2026-08-18):
   oversized reasons/identifiers, non-machine error codes, duplicate errors,
   and object-scoped errors without their stream coordinate. Coverage point,
   absence, and error collections share the existing engine limits and are
-  rejected before unbounded traversal; and
+  rejected before unbounded traversal;
+- added JSON-string N-API consumers for the committed RFC 012A and RFC 012C
+  semantic fixtures. Rust and portable TypeScript now reject the same unknown
+  nested fields, explicit qualified nulls, noncanonical integer lexemes,
+  unpaired UTF-16, oversized leaves/envelopes, and drifted source/revision/
+  provenance identity. The TypeScript runtime fixture consumes caller-held
+  Rust-derived identity coordinates rather than attempting to synthesize
+  BLAKE3 identities, and a differential mutation matrix exercises both native
+  helpers plus the portable parsers; and
 - retained A1 as `In progress`: usage-v2 is the first built-in family on the
-  canonical seam, while bounded public coverage query exposure, the remaining
-  fact-family migrations, full semantic reduction, tier/view compositionality,
-  N-API fixture parity, and full-only versus composed reducer digests remain.
+  canonical seam, while the remaining fact-family migrations, complete
+  retraction/replacement fixtures, full semantic reduction, tier/view
+  compositionality, scoped/durable end-to-end parity, and full-only versus
+  composed reducer digests remain.
 
 The repository-wide native-surface validator also discovered current Claude
 drift that predates this model slice: `bridge-session` records now include
@@ -408,13 +417,24 @@ Current landing status (2026-08-17):
   built-in family adoption, durable preservation, and reducer ownership;
 - integrated contract and tooling checks into `pnpm validate`.
 
+The strict access-request boundary is now also frozen without widening source
+authority. A private, non-serializable request can be minted only from one
+`TypedAccessAuthorization`; it binds the classify-time native probe, exact
+release/declaration/program/selection coordinates, an opaque nonzero host
+policy digest, and the complete path-free KnownObject grant set selected from
+the promoted scope program. A separate private retrieval request binds one
+exact access-report digest. Portable Rust, TypeScript, and Python projections
+are bounded, deny unknown fields, recompute the same SHA-256 digests, and cannot
+mint either authority or reserve native I/O. Candidate and capability-
+restricted packages still cannot authorize the operation.
+
 A2 remains `In progress`: the internal scoped composition now owns the
 authorized plan lifecycle, executes its first common confined primitive, and
 reuses the store-agnostic decode boundary, but no catalog, durable, or public
-scoped-observer host owns the full strict lifecycle; the access-report IPC
-retrieval shape and trusted native-probe/grant request are not yet frozen;
-adapter registrations must move from the explicit legacy path to the strict
-promoted catalog after the first support release is promoted. The promotion-
+scoped-observer host owns the full strict lifecycle; no N-API/IPC retrieval or
+native version-probe driver consumes the new request yet; and adapter
+registrations must move from the explicit legacy path to the strict promoted
+catalog after the first support release is promoted. The promotion-
 safety capability gap is now closed across Rust, Python, and portable
 TypeScript: verified release descriptors retain the digest-bound capability
 topology and level declarations; exact/range classification permits a broad
@@ -1009,6 +1029,14 @@ freezing language-specific layout prematurely. Every family fixture includes
 entity/revision identity, explicit retraction, partial non-retraction, and its
 complete replacement representation.
 
+Current C1 landing status (2026-08-19): the committed actor-run,
+actor-affiliation, and usage-v2 fixture family now has strict Rust, JSON-string
+N-API, and portable TypeScript consumers with a shared differential reject/
+accept matrix and caller-held Rust-derived identity bindings. This closes the
+first value-contract parity slice, not C1: the remaining runtime families,
+complete retraction/replacement fixture matrix, common reducers, and
+scoped-versus-durable end-to-end equality remain open.
+
 ### C2. Usage-v2 shadow projection
 
 Replace Claude row-UUID delta emission in the shadow path with response-keyed
@@ -1281,8 +1309,8 @@ writer tests cover every precommit seam and post-commit acknowledgement loss;
 SDK tests cover the implicit default, promotion, stale rejection, rollback,
 idempotent retry, host forwarding, and the read-only client boundary.
 
-C3 remains `In progress`: private parity, source-scoped selection, its crash
-boundaries, rollback, and the bounded non-mixing aggregate vector are closed.
+C3 is `Gate met`: private parity, source-scoped selection, its crash boundaries,
+rollback, and the bounded non-mixing aggregate vector are closed.
 `getRuntimeUsageTotals` now validates one to 128 non-overlapping canonical
 scopes, negotiates every contributing source under one read snapshot, returns
 a typed non-result for mixed/unready selection, and exposes exactly one labeled
@@ -1299,10 +1327,20 @@ divergence as oracle failure. It retains only fixed counters/delta summaries
 and commit bounds. The two-source drill proves partial rollback is visibly
 mixed, complete rollback restores legacy, and v2 shadow rows survive.
 
-The remaining C3 gate is collection and review of a representative external
-compatibility-window report. `getUsage`/`getUsageActivity` remain explicitly
-legacy; new composite/default consumers migrate to `getRuntimeUsageTotals`,
-and this implementation evidence alone is not a support-promotion claim.
+The representative external compatibility-window gate is now closed by the
+privacy-reduced report
+[`usage-v2-compatibility-window-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-compatibility-window-v1.json)
+(`sha256:3f4eaa7c8144fe078c9df71ca6cb72a3b0c9a9e5390bcecb7433b455e1087a83`).
+On a stable ephemeral clone, an independent census and durable ingest matched
+exactly across 153,525 responses, 5,141 actors, 911 usage sessions, all four
+token totals, 5,289 complete Ready coverage points, and zero final foreign-key
+violations. One 101-project window plus an order-independence probe remained on
+the proven unselected `legacy.usage@1` default; all four comparisons were
+`legacy_higher`, an expected semantic difference rather than an oracle failure.
+`getUsage`/`getUsageActivity` remain explicitly legacy, and this C3 gate does
+not promote the Claude capability. Effective model/effort/mode, interaction
+lifecycle, remaining family/scoped parity, and support-package promotion remain
+owned by C1/C2/A3/D and are still open.
 
 ### C4. Downstream semantic suite
 
