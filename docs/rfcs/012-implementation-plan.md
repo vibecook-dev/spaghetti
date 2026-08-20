@@ -2281,6 +2281,20 @@ Current landing status (2026-08-19):
   no envelope and invokes no consumer reducer. This remains crate-private and
   adds no SDK helper, N-API transport, source access, policy, dynamic scope, or
   resync-application claim; and
+- the consumer-applied resync slice (`62e6a0b`) now adds the corresponding
+  `resync_applied()` boundary without weakening `resync()`'s engine-offered
+  meaning. Both operations issue or join the same exact explicit replacement
+  lineage, but the applied form resolves only after the sole ordered event
+  drain acknowledges the matching `observer.resync_complete` application
+  receipt. A previously applied epoch cannot satisfy a new invalidation, while
+  a re-overflowed later epoch can. Failure and close remain distinct terminal
+  outcomes. If a completion envelope was already delivered before a later
+  observer-failure control, its earlier receipt may still establish that
+  historical applied boundary in total delivery order; an undelivered or
+  foreign barrier cannot. The retained state is attachment-owned, non-Serde,
+  and O(1), and the waiter neither consumes events nor invokes a reducer. This
+  remains crate-private and adds no N-API/SDK method, native source access,
+  policy authority, dynamic scope, or replacement-algorithm change; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
