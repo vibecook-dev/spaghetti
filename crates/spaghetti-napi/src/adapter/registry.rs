@@ -795,9 +795,30 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    async fn automatic_single_object_pair_with_watcher_policy(
+    struct AutomaticSingleObjectFixtureRoot {
+        path: PathBuf,
+        identity_value: Option<Vec<u8>>,
+    }
+
+    impl AutomaticSingleObjectFixtureRoot {
+        fn existing(path: PathBuf) -> Self {
+            Self {
+                path,
+                identity_value: None,
+            }
+        }
+
+        fn distinct(path: PathBuf, identity_value: Vec<u8>) -> Self {
+            Self {
+                path,
+                identity_value: Some(identity_value),
+            }
+        }
+    }
+
+    async fn automatic_single_object_pair_with_root_and_watcher_policy(
         registry: &AdapterRegistry,
-        root: PathBuf,
+        fixture_root: AutomaticSingleObjectFixtureRoot,
         identity_value: Vec<u8>,
         append_config: AppendDelimitedConfig,
         max_bytes: u64,
@@ -811,10 +832,24 @@ pub(crate) mod tests {
         Arc<AtomicUsize>,
         Arc<std::sync::Mutex<Option<ScopedObservationNativeWatchCallback>>>,
     ) {
+        let AutomaticSingleObjectFixtureRoot {
+            path: root,
+            identity_value: root_identity_value,
+        } = fixture_root;
         std::fs::create_dir_all(&root).unwrap();
         let target = root.join("session.jsonl");
-        let host =
-            ScopedObservationAccessHost::authorize(registry, scoped_access_request(root)).unwrap();
+        let mut request = scoped_access_request(root);
+        if let Some(root_identity_value) = root_identity_value {
+            request.root_identity = ScopedRootIdentityRequest::new(
+                1,
+                b"fixture-source-instance".as_slice(),
+                root_identity_value,
+                None,
+                None,
+                None,
+            );
+        }
+        let host = ScopedObservationAccessHost::authorize(registry, request).unwrap();
         let mut runtime = ScopedObservationAsyncRuntime::open(
             host,
             ScopedObservationDeliveryLimits {
@@ -947,6 +982,34 @@ pub(crate) mod tests {
             .bind_live_owner_pair(watcher, source, watcher_policy)
             .unwrap();
         (runtime, handle, pair, target, drops, callback_slot)
+    }
+
+    async fn automatic_single_object_pair_with_watcher_policy(
+        registry: &AdapterRegistry,
+        root: PathBuf,
+        identity_value: Vec<u8>,
+        append_config: AppendDelimitedConfig,
+        max_bytes: u64,
+        source_policy: ScopedObservationSourceOwnerRetryPolicy,
+        watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
+    ) -> (
+        ScopedObservationAsyncRuntime,
+        ScopedObservationAsyncHandle,
+        ScopedObservationAsyncOwnerPair,
+        PathBuf,
+        Arc<AtomicUsize>,
+        Arc<std::sync::Mutex<Option<ScopedObservationNativeWatchCallback>>>,
+    ) {
+        automatic_single_object_pair_with_root_and_watcher_policy(
+            registry,
+            AutomaticSingleObjectFixtureRoot::existing(root),
+            identity_value,
+            append_config,
+            max_bytes,
+            source_policy,
+            watcher_policy,
+        )
+        .await
     }
 
     async fn automatic_single_object_pair(
@@ -3700,6 +3763,190 @@ pub(crate) mod tests {
         drop(pair);
         assert!(close.wait_async().await.complete);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_three_observers_isolate_slow_overflow_from_healthy_progress() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let watcher_policy = || {
+            ScopedObservationNativeWatcherRecoveryPolicy::new(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                1,
+            )
+            .unwrap()
+        };
+        let source_policy = ScopedObservationSourceOwnerRetryPolicy::default();
+
+        let (slow_runtime, slow_handle, slow_pair, slow_target, slow_drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("multi-observer-slow-root"),
+                    b"multi-observer-slow-session".to_vec(),
+                ),
+                b"multi-observer-slow-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                source_policy,
+                watcher_policy(),
+            )
+            .await;
+        let (mut first_runtime, first_handle, first_pair, first_target, first_drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("multi-observer-first-root"),
+                    b"multi-observer-first-session".to_vec(),
+                ),
+                b"multi-observer-first-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                source_policy,
+                watcher_policy(),
+            )
+            .await;
+        let (mut second_runtime, second_handle, second_pair, second_target, second_drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("multi-observer-second-root"),
+                    b"multi-observer-second-session".to_vec(),
+                ),
+                b"multi-observer-second-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                source_policy,
+                watcher_policy(),
+            )
+            .await;
+
+        let roots = [
+            &slow_handle.host().root_identity().session_key,
+            &first_handle.host().root_identity().session_key,
+            &second_handle.host().root_identity().session_key,
+        ];
+        assert_ne!(roots[0], roots[1]);
+        assert_ne!(roots[0], roots[2]);
+        assert_ne!(roots[1], roots[2]);
+
+        let slow_task =
+            tokio::spawn(slow_pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        let first_task =
+            tokio::spawn(first_pair.run_with_factory_and_clocks(|_| Err(()), || 200, || 201));
+        let second_task =
+            tokio::spawn(second_pair.run_with_factory_and_clocks(|_| Err(()), || 300, || 301));
+
+        // Do not drain the slow observer's created-source control. Its exact
+        // attachment becomes continuity-invalid while both sibling runtimes
+        // retain independent queue, poll, source-owner, and watcher state.
+        std::fs::write(&slow_target, b"slow\n").unwrap();
+        let slow_poll = tokio::time::timeout(std::time::Duration::from_secs(2), slow_handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            slow_poll,
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        assert_eq!(
+            slow_handle
+                .with_attachment(|_, drain| drain.delivery_lane().queued_source_control_items()),
+            1
+        );
+        let slow_required = slow_handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 110)
+            .unwrap();
+        let slow_result = tokio::time::timeout(std::time::Duration::from_secs(2), slow_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(slow_handoff) = slow_result else {
+            panic!("only the slow observer must retain a replacement handoff");
+        };
+        assert!(matches!(
+            slow_handoff.source().exit(),
+            ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(invalidation)
+                if Arc::ptr_eq(&invalidation.control().unwrap(), &slow_required)
+        ));
+
+        std::fs::write(&first_target, b"first\n").unwrap();
+        std::fs::write(&second_target, b"second\n").unwrap();
+        let (first_poll, second_poll) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                tokio::join!(first_handle.poll(), second_handle.poll())
+            })
+            .await
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(first_watermark) = first_poll.unwrap() else {
+            panic!("the first healthy observer must complete its own poll");
+        };
+        let ScopedObservationPollResolution::Ready(second_watermark) = second_poll.unwrap() else {
+            panic!("the second healthy observer must complete its own poll");
+        };
+        assert_eq!(first_watermark.scope_epoch, 1);
+        assert_eq!(second_watermark.scope_epoch, 1);
+        assert_eq!(&first_watermark.root, first_handle.host().root_identity());
+        assert_eq!(&second_watermark.root, second_handle.host().root_identity());
+        assert_eq!(
+            first_handle.with_attachment(|_, drain| drain.delivery_lane().state().continuity),
+            ScopedObservationContinuity::Valid
+        );
+        assert_eq!(
+            second_handle.with_attachment(|_, drain| drain.delivery_lane().state().continuity),
+            ScopedObservationContinuity::Valid
+        );
+
+        let (first_event, second_event) =
+            tokio::join!(first_runtime.next_event(), second_runtime.next_event());
+        let first_event = first_event.unwrap().unwrap();
+        let second_event = second_event.unwrap().unwrap();
+        assert!(matches!(
+            first_event.envelope.event,
+            ScopedObservationEvent::SourcePresence {
+                change: ScopedAppendPresenceChange::Created { generation: 1 }
+            }
+        ));
+        assert!(matches!(
+            second_event.envelope.event,
+            ScopedObservationEvent::SourcePresence {
+                change: ScopedAppendPresenceChange::Created { generation: 1 }
+            }
+        ));
+        assert_eq!(first_event.envelope.observer_sequence, 2);
+        assert_eq!(second_event.envelope.observer_sequence, 2);
+        first_runtime
+            .acknowledge_applied(first_event.application_receipt())
+            .unwrap();
+        second_runtime
+            .acknowledge_applied(second_event.application_receipt())
+            .unwrap();
+        assert_eq!(slow_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 0);
+        assert_eq!(second_drops.load(Ordering::SeqCst), 0);
+
+        let first_close = first_runtime.request_close();
+        let second_close = second_runtime.request_close();
+        let (first_stopped, second_stopped) = tokio::join!(first_task, second_task);
+        assert!(matches!(
+            first_stopped.unwrap(),
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(matches!(
+            second_stopped.unwrap(),
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(first_close.wait_async().await.complete);
+        assert!(second_close.wait_async().await.complete);
+
+        let slow_close = slow_runtime.request_close();
+        drop(slow_handoff);
+        assert!(slow_close.wait_async().await.complete);
+        assert_eq!(slow_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(first_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(second_drops.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
