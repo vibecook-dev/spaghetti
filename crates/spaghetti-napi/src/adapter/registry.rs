@@ -228,15 +228,16 @@ pub(crate) mod tests {
         ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
-        ScopedObservationResyncResolution, ScopedObservationSourceOwnerBindingError,
-        ScopedObservationSourceOwnerRetryPolicy, ScopedObservationSourceOwnerRunError,
-        ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
-        ScopedObservationStartupReconcileAction, ScopedObservationUnknownWireNegotiation,
-        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
-        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
-        ScopedResyncReason, ScopedRootIdentityRequest, ScopedScopeRelationState,
-        ScopedSourceFailureClass, ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
+        ScopedObservationResyncResolution, ScopedObservationSharedPassPool,
+        ScopedObservationSourceOwnerBindingError, ScopedObservationSourceOwnerRetryPolicy,
+        ScopedObservationSourceOwnerRunError, ScopedObservationSourceOwnerRunExit,
+        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
+        ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
+        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
+        ScopedQueuedObservationFrame, ScopedReplacementMode, ScopedReplacementRepresentation,
+        ScopedReplacementStageError, ScopedResyncReason, ScopedRootIdentityRequest,
+        ScopedScopeRelationState, ScopedSourceFailureClass, ScopedSourceObjectFailureCode,
+        ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -821,14 +822,37 @@ pub(crate) mod tests {
         }
     }
 
+    struct AutomaticSingleObjectOwnerPolicies {
+        source: ScopedObservationSourceOwnerRetryPolicy,
+        watcher: ScopedObservationNativeWatcherRecoveryPolicy,
+        pass_pool: Option<ScopedObservationSharedPassPool>,
+    }
+
+    impl AutomaticSingleObjectOwnerPolicies {
+        fn new(
+            source: ScopedObservationSourceOwnerRetryPolicy,
+            watcher: ScopedObservationNativeWatcherRecoveryPolicy,
+        ) -> Self {
+            Self {
+                source,
+                watcher,
+                pass_pool: None,
+            }
+        }
+
+        fn with_pass_pool(mut self, pass_pool: ScopedObservationSharedPassPool) -> Self {
+            self.pass_pool = Some(pass_pool);
+            self
+        }
+    }
+
     async fn automatic_single_object_pair_with_root_and_watcher_policy(
         registry: &AdapterRegistry,
         fixture_root: AutomaticSingleObjectFixtureRoot,
         identity_value: Vec<u8>,
         append_config: AppendDelimitedConfig,
         max_bytes: u64,
-        source_policy: ScopedObservationSourceOwnerRetryPolicy,
-        watcher_policy: ScopedObservationNativeWatcherRecoveryPolicy,
+        policies: AutomaticSingleObjectOwnerPolicies,
     ) -> (
         ScopedObservationAsyncRuntime,
         ScopedObservationAsyncHandle,
@@ -841,6 +865,11 @@ pub(crate) mod tests {
             path: root,
             identity_value: root_identity_value,
         } = fixture_root;
+        let AutomaticSingleObjectOwnerPolicies {
+            source: source_policy,
+            watcher: watcher_policy,
+            pass_pool,
+        } = policies;
         std::fs::create_dir_all(&root).unwrap();
         let target = root.join("session.jsonl");
         let mut request = scoped_access_request(root);
@@ -855,14 +884,17 @@ pub(crate) mod tests {
             );
         }
         let host = ScopedObservationAccessHost::authorize(registry, request).unwrap();
-        let mut runtime = ScopedObservationAsyncRuntime::open(
-            host,
-            ScopedObservationDeliveryLimits {
-                max_semantic_events: 4,
-                max_retained_native_bytes: 0,
-                max_source_control_items: 1,
-            },
-        )
+        let limits = ScopedObservationDeliveryLimits {
+            max_semantic_events: 4,
+            max_retained_native_bytes: 0,
+            max_source_control_items: 1,
+        };
+        let mut runtime = match pass_pool {
+            Some(pass_pool) => {
+                ScopedObservationAsyncRuntime::open_with_shared_pass_pool(host, limits, pass_pool)
+            }
+            None => ScopedObservationAsyncRuntime::open(host, limits),
+        }
         .unwrap();
         let handle = runtime.handle();
         let callback_slot = Arc::new(std::sync::Mutex::new(None));
@@ -1011,8 +1043,7 @@ pub(crate) mod tests {
             identity_value,
             append_config,
             max_bytes,
-            source_policy,
-            watcher_policy,
+            AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy),
         )
         .await
     }
@@ -3795,8 +3826,7 @@ pub(crate) mod tests {
                 b"multi-observer-slow-session".to_vec(),
                 AppendDelimitedConfig::json_lines(),
                 128,
-                source_policy,
-                watcher_policy(),
+                AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy()),
             )
             .await;
         let (mut first_runtime, first_handle, first_pair, first_target, first_drops, _) =
@@ -3809,8 +3839,7 @@ pub(crate) mod tests {
                 b"multi-observer-first-session".to_vec(),
                 AppendDelimitedConfig::json_lines(),
                 128,
-                source_policy,
-                watcher_policy(),
+                AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy()),
             )
             .await;
         let (mut second_runtime, second_handle, second_pair, second_target, second_drops, _) =
@@ -3823,8 +3852,7 @@ pub(crate) mod tests {
                 b"multi-observer-second-session".to_vec(),
                 AppendDelimitedConfig::json_lines(),
                 128,
-                source_policy,
-                watcher_policy(),
+                AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy()),
             )
             .await;
 
@@ -3958,6 +3986,8 @@ pub(crate) mod tests {
     async fn scoped_busy_observer_yields_bounded_passes_before_sibling_starvation() {
         const BUSY_PASS_LIMIT: usize = 128;
 
+        assert!(ScopedObservationSharedPassPool::new(0).is_err());
+        assert!(ScopedObservationSharedPassPool::new(usize::MAX).is_err());
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let watcher_policy = || {
@@ -3970,6 +4000,8 @@ pub(crate) mod tests {
             .unwrap()
         };
         let source_policy = ScopedObservationSourceOwnerRetryPolicy::default();
+        let pass_pool = ScopedObservationSharedPassPool::new(1).unwrap();
+        assert_eq!(pass_pool.max_concurrent_passes(), 1);
         let (busy_runtime, busy_handle, busy_pair, _, busy_drops, _) =
             automatic_single_object_pair_with_root_and_watcher_policy(
                 &registry,
@@ -3980,8 +4012,8 @@ pub(crate) mod tests {
                 b"busy-observer-session".to_vec(),
                 AppendDelimitedConfig::json_lines(),
                 128,
-                source_policy,
-                watcher_policy(),
+                AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy())
+                    .with_pass_pool(pass_pool.clone()),
             )
             .await;
         let (healthy_runtime, healthy_handle, healthy_pair, _, healthy_drops, _) =
@@ -3994,8 +4026,8 @@ pub(crate) mod tests {
                 b"healthy-observer-session".to_vec(),
                 AppendDelimitedConfig::json_lines(),
                 128,
-                source_policy,
-                watcher_policy(),
+                AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy())
+                    .with_pass_pool(pass_pool.clone()),
             )
             .await;
 
@@ -4057,6 +4089,62 @@ pub(crate) mod tests {
         assert!(healthy_close.wait_async().await.complete);
         assert_eq!(busy_drops.load(Ordering::SeqCst), 1);
         assert_eq!(healthy_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(pass_pool.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_pass_pool_wait_is_close_cancellable_without_native_access() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let pass_pool = ScopedObservationSharedPassPool::new(1).unwrap();
+        let held_permit = pass_pool.acquire_for_test().await;
+        let (runtime, handle, pair, _, drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("permit-wait-close-root"),
+                    b"permit-wait-close-session".to_vec(),
+                ),
+                b"permit-wait-close-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                AutomaticSingleObjectOwnerPolicies::new(
+                    ScopedObservationSourceOwnerRetryPolicy::default(),
+                    ScopedObservationNativeWatcherRecoveryPolicy::new(
+                        std::time::Duration::from_secs(60),
+                        std::time::Duration::from_millis(1),
+                        std::time::Duration::from_millis(1),
+                        1,
+                    )
+                    .unwrap(),
+                )
+                .with_pass_pool(pass_pool.clone()),
+            )
+            .await;
+        let ticket = handle.host().request_poll().unwrap();
+        let owner = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        tokio::task::yield_now().await;
+        assert_eq!(pass_pool.available_permits(), 0);
+        assert_eq!(
+            handle.host().poll_resolution(&ticket).unwrap(),
+            ScopedObservationPollResolution::Pending
+        );
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert_eq!(ticket.wait(), ScopedObservationPollResolution::Cancelled);
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(pass_pool.available_permits(), 0);
+        drop(held_permit);
+        assert_eq!(pass_pool.available_permits(), 1);
     }
 
     #[tokio::test]
