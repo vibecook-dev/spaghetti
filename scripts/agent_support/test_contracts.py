@@ -9,12 +9,19 @@ from typing import Any
 from scripts.agent_support.contracts import (
     AccessBoundExceeded,
     AccessBudget,
+    AccessReportError,
+    AccessRequestError,
     CompatibilityClass,
     CompatibilityReason,
     ContractSelectionError,
     RuntimeProbe,
     SupportContractError,
+    access_report_retrieval_digest,
     classify_runtime,
+    native_probe_grant_request_digest,
+    parse_access_report_retrieval,
+    _native_probe_grant_request_digest,
+    parse_native_probe_grant_request,
     scope_access_report_digest,
     select_contract_versions,
     verify_scope_access_report_digest,
@@ -406,6 +413,238 @@ class AccessBudgetTests(unittest.TestCase):
         tampered = copy.deepcopy(fixture["report"])
         tampered["relations"][0]["rows_read"] += 1
         self.assertFalse(verify_scope_access_report_digest(tampered))
+
+    def test_shared_access_request_fixture_matches_rust(self) -> None:
+        fixture_path = (
+            REPO_ROOT
+            / "crates/spaghetti-napi/fixtures/contracts/rfc012a-access-request-v1.json"
+        )
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["fixture_contract_version"], 1)
+        probe_grant = parse_native_probe_grant_request(fixture["probe_grant_request"])
+        self.assertEqual(
+            native_probe_grant_request_digest(probe_grant),
+            fixture["expected_probe_grant_digest"],
+        )
+        catalog = parse_native_probe_grant_request(fixture["catalog_probe_grant_request"])
+        self.assertEqual(catalog["grants"], [])
+        self.assertEqual(catalog["program_id"], "")
+        durable = parse_native_probe_grant_request(fixture["durable_probe_grant_request"])
+        self.assertEqual(durable["operation"], "durable_history_runtime")
+        self.assertEqual(durable["grants"], [])
+        self.assertEqual(
+            native_probe_grant_request_digest(durable),
+            fixture["expected_durable_probe_grant_digest"],
+        )
+        retrieval = parse_access_report_retrieval(fixture["retrieval_request"])
+        self.assertEqual(
+            access_report_retrieval_digest(retrieval),
+            fixture["expected_retrieval_digest"],
+        )
+
+        tampered = copy.deepcopy(fixture["probe_grant_request"])
+        tampered["access_policy_digest"][0] ^= 1
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(tampered)
+
+        path_adapter = copy.deepcopy(fixture["probe_grant_request"])
+        path_adapter["adapter_id"] = "/tmp/secret"
+        with self.assertRaises(AccessRequestError) as adapter_error:
+            native_probe_grant_request_digest(path_adapter)
+        self.assertNotIsInstance(adapter_error.exception, AccessReportError)
+        self.assertNotIn("/tmp/secret", str(adapter_error.exception))
+        self.assertNotIn("secret", str(adapter_error.exception))
+
+        extra = copy.deepcopy(fixture["probe_grant_request"])
+        extra["/Users/alice/private/session.jsonl"] = True
+        with self.assertRaises(AccessRequestError) as extra_error:
+            parse_native_probe_grant_request(extra)
+        self.assertNotIn("/Users/alice", str(extra_error.exception))
+        self.assertNotIn("session.jsonl", str(extra_error.exception))
+
+        wrong_typed_path = copy.deepcopy(fixture["probe_grant_request"])
+        wrong_typed_path["probe"]["version"] = ["/tmp/secret"]
+        with self.assertRaises(AccessRequestError) as typed_error:
+            parse_native_probe_grant_request(wrong_typed_path)
+        self.assertNotIn("/tmp/secret", str(typed_error.exception))
+        self.assertNotIn("secret", str(typed_error.exception))
+
+        path_marker = copy.deepcopy(fixture["probe_grant_request"])
+        path_marker["probe"]["markers"] = list(path_marker["probe"]["markers"]) + ["/tmp/secret"]
+        self._recompute_probe_grant_digest(path_marker)
+        with self.assertRaises(AccessRequestError) as path_error:
+            parse_native_probe_grant_request(path_marker)
+        self.assertIn("machine identifier", str(path_error.exception))
+        self.assertNotIn("/tmp/secret", str(path_error.exception))
+
+        nul_marker = copy.deepcopy(fixture["probe_grant_request"])
+        nul_marker["probe"]["markers"] = list(nul_marker["probe"]["markers"]) + ["\x00secret"]
+        self._recompute_probe_grant_digest(nul_marker)
+        with self.assertRaises(AccessRequestError) as nul_error:
+            parse_native_probe_grant_request(nul_marker)
+        self.assertIn("machine identifier", str(nul_error.exception))
+        self.assertNotIn("\x00", str(nul_error.exception))
+        self.assertNotIn("secret", str(nul_error.exception))
+
+        unicode_version = copy.deepcopy(fixture["probe_grant_request"])
+        unicode_version["probe"]["version"] = "é" * 80
+        self._recompute_probe_grant_digest(unicode_version)
+        with self.assertRaises(AccessRequestError) as unicode_error:
+            parse_native_probe_grant_request(unicode_version)
+        self.assertIn("machine identifier", str(unicode_error.exception))
+        self.assertNotIn("é", str(unicode_error.exception))
+
+        oversized_families = copy.deepcopy(fixture["probe_grant_request"])
+        oversized_families["selection"]["fact_family_versions"] = {
+            f"family-{index}": 1 for index in range(5_000)
+        }
+        with self.assertRaises(AccessRequestError):
+            native_probe_grant_request_digest(oversized_families)
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(oversized_families)
+
+        catalog_without_pack = copy.deepcopy(fixture["catalog_probe_grant_request"])
+        catalog_without_pack["selection"]["query_pack_version"] = None
+        self._recompute_probe_grant_digest(catalog_without_pack)
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(catalog_without_pack)
+
+        missing_version = copy.deepcopy(fixture["probe_grant_request"])
+        del missing_version["probe"]["version"]
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(missing_version)
+
+        missing_query_pack = copy.deepcopy(fixture["durable_probe_grant_request"])
+        del missing_query_pack["selection"]["query_pack_version"]
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(missing_query_pack)
+
+        missing_observation = copy.deepcopy(fixture["probe_grant_request"])
+        del missing_observation["selection"]["observation_contract_version"]
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(missing_observation)
+
+        exact_markers = copy.deepcopy(fixture["probe_grant_request"])
+        exact_markers["probe"]["markers"] = ["native.marker"] + [
+            f"marker-{index:02d}" for index in range(1, 64)
+        ]
+        self._recompute_probe_grant_digest(exact_markers)
+        parse_native_probe_grant_request(exact_markers)
+
+        over_markers = copy.deepcopy(fixture["probe_grant_request"])
+        over_markers["probe"]["markers"] = ["native.marker"] + [
+            f"marker-{index:02d}" for index in range(1, 65)
+        ]
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(over_markers)
+
+        exact_families = copy.deepcopy(fixture["probe_grant_request"])
+        exact_families["selection"]["fact_family_versions"] = {
+            f"family-{index:02d}": 1 for index in range(64)
+        }
+        self._recompute_probe_grant_digest(exact_families)
+        parse_native_probe_grant_request(exact_families)
+
+        over_families = copy.deepcopy(fixture["probe_grant_request"])
+        over_families["selection"]["fact_family_versions"] = {
+            f"family-{index:02d}": 1 for index in range(65)
+        }
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(over_families)
+
+        over_identifier = copy.deepcopy(fixture["probe_grant_request"])
+        over_identifier["probe"]["version"] = "a" * 129
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(over_identifier)
+
+        oversized_program = copy.deepcopy(fixture["probe_grant_request"])
+        oversized_program["program_id"] = "a" * 4224
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(oversized_program)
+
+        exact_grants = copy.deepcopy(fixture["probe_grant_request"])
+        exact_grants["grants"] = [
+            {
+                "relation_id": f"g{index:03d}" + "a" * 124,
+                "scope_root": index == 0,
+                "access_root": "r" + "a" * 126,
+                "identity_input_names": ["x"],
+            }
+            for index in range(256)
+        ]
+        self._recompute_probe_grant_digest(exact_grants)
+        parse_native_probe_grant_request(exact_grants)
+
+        over_grants = copy.deepcopy(fixture["probe_grant_request"])
+        over_grants["grants"] = copy.deepcopy(exact_grants["grants"])
+        over_grants["grants"][-1]["identity_input_names"] = ["xx"]
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(over_grants)
+
+        malformed_digest = copy.deepcopy(fixture["probe_grant_request"])
+        malformed_digest["digest"] = "/tmp/secret"
+        with self.assertRaises(AccessRequestError) as digest_error:
+            parse_native_probe_grant_request(malformed_digest)
+        self.assertNotIsInstance(digest_error.exception, AccessReportError)
+        self.assertNotIn("/tmp/secret", str(digest_error.exception))
+        self.assertNotIn("secret", str(digest_error.exception))
+        with self.assertRaises(AccessRequestError) as public_probe_digest_error:
+            native_probe_grant_request_digest(malformed_digest)
+        self.assertNotIsInstance(public_probe_digest_error.exception, AccessReportError)
+        self.assertNotIn("/tmp/secret", str(public_probe_digest_error.exception))
+        self.assertNotIn("secret", str(public_probe_digest_error.exception))
+
+        malformed_retrieval_digest = copy.deepcopy(fixture["retrieval_request"])
+        malformed_retrieval_digest["digest"] = "/tmp/secret"
+        with self.assertRaises(AccessRequestError) as retrieval_digest_error:
+            access_report_retrieval_digest(malformed_retrieval_digest)
+        self.assertNotIsInstance(retrieval_digest_error.exception, AccessReportError)
+        self.assertNotIn("/tmp/secret", str(retrieval_digest_error.exception))
+        self.assertNotIn("secret", str(retrieval_digest_error.exception))
+
+        malformed_policy = copy.deepcopy(fixture["probe_grant_request"])
+        malformed_policy["access_policy_digest"] = "/tmp/secret"
+        with self.assertRaises(AccessRequestError) as policy_error:
+            parse_native_probe_grant_request(malformed_policy)
+        self.assertNotIsInstance(policy_error.exception, AccessReportError)
+        self.assertNotIn("/tmp/secret", str(policy_error.exception))
+        with self.assertRaises(AccessRequestError) as public_digest_error:
+            native_probe_grant_request_digest(malformed_policy)
+        self.assertNotIsInstance(public_digest_error.exception, AccessReportError)
+        self.assertNotIn("/tmp/secret", str(public_digest_error.exception))
+
+        marker_order_a = copy.deepcopy(fixture["probe_grant_request"])
+        marker_order_a["probe"]["markers"] = ["native.marker", "extra.marker"]
+        marker_order_b = copy.deepcopy(fixture["probe_grant_request"])
+        marker_order_b["probe"]["markers"] = ["extra.marker", "native.marker"]
+        self.assertEqual(
+            native_probe_grant_request_digest(marker_order_a),
+            native_probe_grant_request_digest(marker_order_b),
+        )
+        self._recompute_probe_grant_digest(marker_order_a)
+        self.assertEqual(
+            parse_native_probe_grant_request(marker_order_a)["probe"]["markers"],
+            ["extra.marker", "native.marker"],
+        )
+
+        zero_policy = copy.deepcopy(fixture["probe_grant_request"])
+        zero_policy["access_policy_digest"] = [0] * 32
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(zero_policy)
+
+        catalog_grants = copy.deepcopy(fixture["catalog_probe_grant_request"])
+        catalog_grants["grants"] = copy.deepcopy(fixture["probe_grant_request"]["grants"])
+        with self.assertRaises(AccessRequestError):
+            parse_native_probe_grant_request(catalog_grants)
+
+        zero_report = copy.deepcopy(fixture["retrieval_request"])
+        zero_report["expected_report_digest"] = [0] * 32
+        with self.assertRaises(AccessRequestError):
+            parse_access_report_retrieval(zero_report)
+
+    def _recompute_probe_grant_digest(self, request: dict[str, Any]) -> None:
+        digest = _native_probe_grant_request_digest(request)
+        request["digest"] = list(bytes.fromhex(digest.removeprefix("sha256:")))
 
 
 class SchemaAndRepositoryTests(unittest.TestCase):

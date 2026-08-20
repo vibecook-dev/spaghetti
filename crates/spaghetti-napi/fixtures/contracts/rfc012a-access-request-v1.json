@@ -1,0 +1,209 @@
+{
+  "fixture_contract_version": 1,
+  "probe_grant_request": {
+    "access_request_contract_version": 1,
+    "adapter_id": "fixture-agent",
+    "support_release_id": "fixture-support-v1",
+    "support_release_digest": [
+      102, 116, 159, 108, 250, 220, 230, 140, 88, 201, 96, 243, 176, 186, 108, 212, 68, 78, 101, 123, 67, 12, 178, 233,
+      73, 192, 53, 159, 14, 70, 116, 203
+    ],
+    "source_declaration_digest": [
+      45, 200, 21, 169, 207, 123, 107, 243, 140, 123, 195, 45, 151, 254, 236, 30, 191, 187, 166, 116, 95, 186, 54, 63,
+      244, 5, 142, 77, 182, 197, 162, 43
+    ],
+    "scope_program_digest": [
+      71, 198, 112, 196, 197, 196, 123, 67, 85, 111, 152, 58, 185, 211, 91, 80, 17, 125, 4, 30, 168, 3, 235, 144, 141,
+      124, 77, 151, 13, 175, 118, 143
+    ],
+    "declaration_id": "fixture-agent-scope",
+    "program_id": "observe-session",
+    "capability_topology": "scoped",
+    "operation": "scoped_typed_observation",
+    "selection": {
+      "selection_contract_version": 1,
+      "model_major": 1,
+      "external_entity_reference_version": 1,
+      "semantic_revision_reference_version": 1,
+      "coverage_contract_version": 1,
+      "fact_family_versions": {
+        "interaction": 1,
+        "usage": 2
+      },
+      "query_pack_version": 1,
+      "observation_contract_version": 1
+    },
+    "access_policy_digest": [
+      129, 250, 226, 46, 68, 150, 41, 120, 138, 88, 177, 106, 238, 248, 75, 193, 12, 26, 221, 123, 56, 212, 80, 92, 229,
+      25, 62, 87, 131, 0, 87, 129
+    ],
+    "probe": {
+      "family": "fixture-agent",
+      "platform": "darwin",
+      "version": "1.2.3",
+      "markers": ["native.marker"],
+      "contradictory_markers": false
+    },
+    "grants": [
+      {
+        "relation_id": "root-object",
+        "scope_root": true,
+        "access_root": "root",
+        "identity_input_names": ["native-session-id"]
+      }
+    ],
+    "digest": [
+      209, 106, 131, 78, 6, 9, 106, 40, 46, 9, 112, 65, 105, 90, 248, 216, 46, 111, 154, 144, 197, 87, 65, 102, 238, 38,
+      226, 116, 136, 125, 233, 43
+    ]
+  },
+  "catalog_probe_grant_request": {
+    "access_request_contract_version": 1,
+    "adapter_id": "fixture-agent",
+    "support_release_id": "fixture-support-v1",
+    "support_release_digest": [
+      102, 116, 159, 108, 250, 220, 230, 140, 88, 201, 96, 243, 176, 186, 108, 212, 68, 78, 101, 123, 67, 12, 178, 233,
+      73, 192, 53, 159, 14, 70, 116, 203
+    ],
+    "source_declaration_digest": [
+      45, 200, 21, 169, 207, 123, 107, 243, 140, 123, 195, 45, 151, 254, 236, 30, 191, 187, 166, 116, 95, 186, 54, 63,
+      244, 5, 142, 77, 182, 197, 162, 43
+    ],
+    "scope_program_digest": [
+      71, 198, 112, 196, 197, 196, 123, 67, 85, 111, 152, 58, 185, 211, 91, 80, 17, 125, 4, 30, 168, 3, 235, 144, 141,
+      124, 77, 151, 13, 175, 118, 143
+    ],
+    "declaration_id": "fixture-agent-scope",
+    "program_id": "",
+    "capability_topology": "catalog",
+    "operation": "catalog_discovery",
+    "selection": {
+      "selection_contract_version": 1,
+      "model_major": 1,
+      "external_entity_reference_version": 1,
+      "semantic_revision_reference_version": 1,
+      "coverage_contract_version": 1,
+      "fact_family_versions": {
+        "interaction": 1,
+        "usage": 2
+      },
+      "query_pack_version": 1,
+      "observation_contract_version": 1
+    },
+    "access_policy_digest": [
+      129, 250, 226, 46, 68, 150, 41, 120, 138, 88, 177, 106, 238, 248, 75, 193, 12, 26, 221, 123, 56, 212, 80, 92, 229,
+      25, 62, 87, 131, 0, 87, 129
+    ],
+    "probe": {
+      "family": "fixture-agent",
+      "platform": "darwin",
+      "version": "1.2.3",
+      "markers": ["native.marker"],
+      "contradictory_markers": false
+    },
+    "grants": [],
+    "digest": [
+      105, 157, 115, 93, 187, 171, 119, 31, 159, 122, 190, 251, 178, 12, 206, 186, 243, 225, 183, 8, 107, 95, 204, 38,
+      16, 31, 210, 87, 196, 10, 167, 209
+    ]
+  },
+  "durable_probe_grant_request": {
+    "access_request_contract_version": 1,
+    "adapter_id": "fixture-agent",
+    "support_release_id": "fixture-support-v1",
+    "support_release_digest": [
+      102, 116, 159, 108, 250, 220, 230, 140, 88, 201, 96, 243, 176, 186, 108, 212, 68, 78, 101, 123, 67, 12, 178, 233,
+      73, 192, 53, 159, 14, 70, 116, 203
+    ],
+    "source_declaration_digest": [
+      45, 200, 21, 169, 207, 123, 107, 243, 140, 123, 195, 45, 151, 254, 236, 30, 191, 187, 166, 116, 95, 186, 54, 63,
+      244, 5, 142, 77, 182, 197, 162, 43
+    ],
+    "scope_program_digest": [
+      71, 198, 112, 196, 197, 196, 123, 67, 85, 111, 152, 58, 185, 211, 91, 80, 17, 125, 4, 30, 168, 3, 235, 144, 141,
+      124, 77, 151, 13, 175, 118, 143
+    ],
+    "declaration_id": "fixture-agent-scope",
+    "program_id": "",
+    "capability_topology": "durable",
+    "operation": "durable_history_runtime",
+    "selection": {
+      "selection_contract_version": 1,
+      "model_major": 1,
+      "external_entity_reference_version": 1,
+      "semantic_revision_reference_version": 1,
+      "coverage_contract_version": 1,
+      "fact_family_versions": {
+        "interaction": 1,
+        "usage": 2
+      },
+      "query_pack_version": 1,
+      "observation_contract_version": 1
+    },
+    "access_policy_digest": [
+      129, 250, 226, 46, 68, 150, 41, 120, 138, 88, 177, 106, 238, 248, 75, 193, 12, 26, 221, 123, 56, 212, 80, 92, 229,
+      25, 62, 87, 131, 0, 87, 129
+    ],
+    "probe": {
+      "family": "fixture-agent",
+      "platform": "darwin",
+      "version": "1.2.3",
+      "markers": ["native.marker"],
+      "contradictory_markers": false
+    },
+    "grants": [],
+    "digest": [
+      211, 249, 119, 170, 160, 125, 180, 213, 38, 79, 138, 34, 185, 231, 202, 135, 79, 18, 82, 253, 236, 106, 21, 204,
+      125, 160, 70, 11, 172, 176, 65, 125
+    ]
+  },
+  "retrieval_request": {
+    "access_report_retrieval_contract_version": 1,
+    "adapter_id": "fixture-agent",
+    "support_release_id": "fixture-support-v1",
+    "support_release_digest": [
+      102, 116, 159, 108, 250, 220, 230, 140, 88, 201, 96, 243, 176, 186, 108, 212, 68, 78, 101, 123, 67, 12, 178, 233,
+      73, 192, 53, 159, 14, 70, 116, 203
+    ],
+    "source_declaration_digest": [
+      45, 200, 21, 169, 207, 123, 107, 243, 140, 123, 195, 45, 151, 254, 236, 30, 191, 187, 166, 116, 95, 186, 54, 63,
+      244, 5, 142, 77, 182, 197, 162, 43
+    ],
+    "scope_program_digest": [
+      71, 198, 112, 196, 197, 196, 123, 67, 85, 111, 152, 58, 185, 211, 91, 80, 17, 125, 4, 30, 168, 3, 235, 144, 141,
+      124, 77, 151, 13, 175, 118, 143
+    ],
+    "declaration_id": "fixture-agent-scope",
+    "program_id": "observe-session",
+    "capability_topology": "scoped",
+    "operation": "scoped_typed_observation",
+    "selection": {
+      "selection_contract_version": 1,
+      "model_major": 1,
+      "external_entity_reference_version": 1,
+      "semantic_revision_reference_version": 1,
+      "coverage_contract_version": 1,
+      "fact_family_versions": {
+        "interaction": 1,
+        "usage": 2
+      },
+      "query_pack_version": 1,
+      "observation_contract_version": 1
+    },
+    "access_policy_digest": [
+      129, 250, 226, 46, 68, 150, 41, 120, 138, 88, 177, 106, 238, 248, 75, 193, 12, 26, 221, 123, 56, 212, 80, 92, 229,
+      25, 62, 87, 131, 0, 87, 129
+    ],
+    "expected_report_digest": [
+      136, 187, 12, 31, 147, 208, 109, 241, 175, 138, 135, 64, 183, 58, 174, 122, 148, 161, 13, 175, 20, 43, 143, 111,
+      155, 13, 33, 202, 1, 151, 46, 67
+    ],
+    "digest": [
+      21, 26, 214, 244, 92, 179, 96, 161, 30, 149, 210, 251, 159, 32, 109, 201, 14, 24, 151, 30, 203, 193, 29, 105, 63,
+      169, 178, 132, 238, 74, 181, 176
+    ]
+  },
+  "expected_probe_grant_digest": "sha256:d16a834e06096a282e097041695af8d82e6f9a90c5574166ee26e274887de92b",
+  "expected_durable_probe_grant_digest": "sha256:d3f977aaa07db4d5264f8a22b9e7ca874f1252fdec6a15cc7da0460bacb0417d",
+  "expected_retrieval_digest": "sha256:151ad6f45cb360a11e95d2fb9f206dc90e18971ecbc11d693fa9b284ee4ab5b0"
+}

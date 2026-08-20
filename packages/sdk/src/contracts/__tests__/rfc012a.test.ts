@@ -7,17 +7,21 @@ import {
   classifyRuntimeSupport,
   compareCoverage,
   ContractValidationError,
+  parseAccessReportRetrieval,
   parseContractVersionOffer,
   parseContractVersionRequest,
   parseContractVersionSelection,
   parseExternalEntityRef,
   parseNativeIdentityClaim,
+  parseNativeProbeGrantRequest,
   parseQualifiedValue,
   parseRfc012aV1Fixture,
   parseRfc012aV1Json,
   parseSemanticRevisionRef,
   parseSourceCoverageSet,
   selectContractVersions,
+  type AccessReportRetrievalRequest,
+  type NativeProbeGrantRequest,
   type SourceCoverageSet,
 } from '../rfc012a.js';
 import {
@@ -48,6 +52,28 @@ interface ContractFixture {
 }
 
 type MutableRecord = Record<string, unknown>;
+
+function mutableJson(value: unknown): MutableRecord {
+  const cloned: unknown = structuredClone(value);
+  if (cloned === null || typeof cloned !== 'object' || Array.isArray(cloned)) {
+    throw new Error('test fixture must be a JSON object');
+  }
+  return cloned as unknown as MutableRecord;
+}
+
+function mutableField(value: unknown): MutableRecord {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('test field must be a JSON object');
+  }
+  return value as MutableRecord;
+}
+
+function mutableList(value: unknown): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error('test field must be a JSON array');
+  }
+  return value;
+}
 
 interface MutableCoverageWire extends MutableRecord {
   coverage_domain: MutableRecord;
@@ -753,4 +779,332 @@ test('semantic fixture envelope accepts exact bounds and rejects one over', () =
     () => preflightSemanticFixtureJson(JSON.stringify(new Array(MAX_SEMANTIC_FIXTURE_NODES).fill(0))),
     ContractValidationError,
   );
+});
+
+interface AccessRequestFixture {
+  fixture_contract_version: number;
+  probe_grant_request: NativeProbeGrantRequest;
+  catalog_probe_grant_request: NativeProbeGrantRequest;
+  durable_probe_grant_request: NativeProbeGrantRequest;
+  retrieval_request: AccessReportRetrievalRequest;
+  expected_probe_grant_digest: string;
+  expected_durable_probe_grant_digest: string;
+  expected_retrieval_digest: string;
+}
+
+const accessRequestFixture = JSON.parse(
+  readFileSync(
+    new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-access-request-v1.json', import.meta.url),
+    'utf8',
+  ),
+) as AccessRequestFixture;
+
+function recomputeProbeGrantDigest(request: NativeProbeGrantRequest): void {
+  const hex = nodeNativeProbeGrantRequestDigest(request).slice('sha256:'.length);
+  request.digest = [...Buffer.from(hex, 'hex')];
+}
+
+function nodeNativeProbeGrantRequestDigest(request: NativeProbeGrantRequest): string {
+  const requestTopologyCodes = { catalog: 1, durable: 2, scoped: 3 } as const;
+  const requestOperationCodes = {
+    catalog_discovery: 1,
+    durable_history_runtime: 2,
+    scoped_typed_observation: 3,
+  } as const;
+  const chunks = [Buffer.from('spaghetti/rfc012a/native-probe-grant-request/v1\0', 'utf8')];
+  pushU32(chunks, request.access_request_contract_version);
+  pushText(chunks, request.adapter_id);
+  pushText(chunks, request.support_release_id);
+  pushToken(chunks, request.support_release_digest);
+  pushToken(chunks, request.source_declaration_digest);
+  pushToken(chunks, request.scope_program_digest);
+  pushText(chunks, request.declaration_id);
+  pushText(chunks, request.program_id);
+  pushU8(chunks, requestTopologyCodes[request.capability_topology]);
+  pushU8(chunks, requestOperationCodes[request.operation]);
+  pushU32(chunks, request.selection.selection_contract_version);
+  pushU32(chunks, request.selection.model_major);
+  pushU32(chunks, request.selection.external_entity_reference_version);
+  pushU32(chunks, request.selection.semantic_revision_reference_version);
+  pushU32(chunks, request.selection.coverage_contract_version);
+  const families = Object.keys(request.selection.fact_family_versions).sort();
+  pushU64(chunks, families.length);
+  for (const family of families) {
+    pushText(chunks, family);
+    pushU32(chunks, request.selection.fact_family_versions[family]!);
+  }
+  for (const version of [request.selection.query_pack_version, request.selection.observation_contract_version]) {
+    if (version === null) {
+      pushU8(chunks, 0);
+    } else {
+      pushU8(chunks, 1);
+      pushU32(chunks, version);
+    }
+  }
+  pushToken(chunks, request.access_policy_digest);
+  pushText(chunks, request.probe.family);
+  pushText(chunks, request.probe.platform);
+  if (request.probe.version === null) {
+    pushU8(chunks, 0);
+  } else {
+    pushU8(chunks, 1);
+    pushText(chunks, request.probe.version);
+  }
+  const markers = [...new Set(request.probe.markers)].sort();
+  pushU64(chunks, markers.length);
+  for (const marker of markers) pushText(chunks, marker);
+  pushU8(chunks, request.probe.contradictory_markers ? 1 : 0);
+  pushU64(chunks, request.grants.length);
+  for (const grant of request.grants) {
+    pushText(chunks, grant.relation_id);
+    pushU8(chunks, grant.scope_root ? 1 : 0);
+    pushText(chunks, grant.access_root);
+    pushU64(chunks, grant.identity_input_names.length);
+    for (const name of grant.identity_input_names) pushText(chunks, name);
+  }
+  return `sha256:${createHash('sha256').update(Buffer.concat(chunks)).digest('hex')}`;
+}
+
+test('Rust, Python, and TypeScript access-request digests agree', () => {
+  assert.equal(accessRequestFixture.fixture_contract_version, 1);
+  const probeGrant = parseNativeProbeGrantRequest(accessRequestFixture.probe_grant_request);
+  assert.equal(nodeNativeProbeGrantRequestDigest(probeGrant), accessRequestFixture.expected_probe_grant_digest);
+  assert.equal(
+    `sha256:${Buffer.from(probeGrant.digest).toString('hex')}`,
+    accessRequestFixture.expected_probe_grant_digest,
+  );
+  const catalog = parseNativeProbeGrantRequest(accessRequestFixture.catalog_probe_grant_request);
+  assert.equal(catalog.grants.length, 0);
+  assert.equal(catalog.program_id, '');
+  assert.equal(nodeNativeProbeGrantRequestDigest(catalog), `sha256:${Buffer.from(catalog.digest).toString('hex')}`);
+  const durable = parseNativeProbeGrantRequest(accessRequestFixture.durable_probe_grant_request);
+  assert.equal(durable.operation, 'durable_history_runtime');
+  assert.equal(durable.grants.length, 0);
+  assert.equal(nodeNativeProbeGrantRequestDigest(durable), accessRequestFixture.expected_durable_probe_grant_digest);
+  const retrieval = parseAccessReportRetrieval(accessRequestFixture.retrieval_request);
+  assert.equal(
+    `sha256:${Buffer.from(retrieval.digest).toString('hex')}`,
+    accessRequestFixture.expected_retrieval_digest,
+  );
+  assert.deepEqual(retrieval.expected_report_digest, accessReportFixture.report.digest);
+});
+
+function exactBoundMarkers(): string[] {
+  return ['native.marker', ...Array.from({ length: 63 }, (_, index) => `marker-${String(index + 1).padStart(2, '0')}`)];
+}
+
+function oneOverMarkers(): string[] {
+  return [...exactBoundMarkers(), 'marker-64'];
+}
+
+function exactBoundFamilies(): Record<string, number> {
+  return Object.fromEntries(Array.from({ length: 64 }, (_, index) => [`family-${String(index).padStart(2, '0')}`, 1]));
+}
+
+function oneOverFamilies(): Record<string, number> {
+  return Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`family-${String(index).padStart(2, '0')}`, 1]));
+}
+
+function paddedMachineId(prefix: string, length: number): string {
+  return prefix + 'a'.repeat(length - prefix.length);
+}
+
+function exactBoundGrants(): Array<{
+  relation_id: string;
+  scope_root: boolean;
+  access_root: string;
+  identity_input_names: string[];
+}> {
+  return Array.from({ length: 256 }, (_, index) => ({
+    relation_id: paddedMachineId(`g${String(index).padStart(3, '0')}`, 128),
+    scope_root: index === 0,
+    access_root: paddedMachineId('r', 127),
+    identity_input_names: ['x'],
+  }));
+}
+
+function oneOverGrants(): Array<{
+  relation_id: string;
+  scope_root: boolean;
+  access_root: string;
+  identity_input_names: string[];
+}> {
+  const grants = exactBoundGrants();
+  grants[255]!.identity_input_names = ['xx'];
+  return grants;
+}
+
+function assertPrivateError(run: () => unknown, leaked: RegExp): void {
+  assert.throws(run, (error: unknown) => {
+    assert.ok(error instanceof ContractValidationError);
+    assert.doesNotMatch(error.message, leaked);
+    return true;
+  });
+}
+
+test('access-request portable values reject authority-shaped drift', () => {
+  const probeGrant = mutableJson(accessRequestFixture.probe_grant_request);
+  probeGrant['/Users/alice/private/session.jsonl'] = true;
+  assertPrivateError(() => parseNativeProbeGrantRequest(probeGrant), /\/Users\/alice|session\.jsonl/);
+
+  const wrongTypedPath = structuredClone(accessRequestFixture.probe_grant_request);
+  wrongTypedPath.probe.version = ['/tmp/secret'] as unknown as string;
+  assertPrivateError(() => parseNativeProbeGrantRequest(wrongTypedPath), /\/tmp\/secret|secret/);
+
+  const zeroPolicy = structuredClone(accessRequestFixture.probe_grant_request) as {
+    access_policy_digest: number[];
+  };
+  zeroPolicy.access_policy_digest = new Array(32).fill(0);
+  assert.throws(() => parseNativeProbeGrantRequest(zeroPolicy), ContractValidationError);
+
+  const pathMarker = structuredClone(accessRequestFixture.probe_grant_request);
+  pathMarker.probe.markers = [...pathMarker.probe.markers, '/tmp/secret'];
+  recomputeProbeGrantDigest(pathMarker);
+  assert.throws(
+    () => parseNativeProbeGrantRequest(pathMarker),
+    (error: unknown) => {
+      assert.ok(error instanceof ContractValidationError);
+      assert.match(error.message, /machine identifier/);
+      assert.doesNotMatch(error.message, /\/tmp\/secret/);
+      return true;
+    },
+  );
+
+  const nulMarker = structuredClone(accessRequestFixture.probe_grant_request);
+  nulMarker.probe.markers = [...nulMarker.probe.markers, '\u0000secret'];
+  recomputeProbeGrantDigest(nulMarker);
+  assert.throws(
+    () => parseNativeProbeGrantRequest(nulMarker),
+    (error: unknown) => {
+      assert.ok(error instanceof ContractValidationError);
+      assert.match(error.message, /machine identifier/);
+      assert.doesNotMatch(error.message, /\u0000|secret/);
+      return true;
+    },
+  );
+
+  const unicodeVersion = structuredClone(accessRequestFixture.probe_grant_request);
+  unicodeVersion.probe.version = 'é'.repeat(80);
+  recomputeProbeGrantDigest(unicodeVersion);
+  assert.throws(
+    () => parseNativeProbeGrantRequest(unicodeVersion),
+    (error: unknown) => {
+      assert.ok(error instanceof ContractValidationError);
+      assert.match(error.message, /machine identifier/);
+      assert.doesNotMatch(error.message, /é/);
+      return true;
+    },
+  );
+
+  const oversizedFamilies = structuredClone(accessRequestFixture.probe_grant_request);
+  oversizedFamilies.selection.fact_family_versions = Object.fromEntries(
+    Array.from({ length: 5_000 }, (_, index) => [`family-${index}`, 1]),
+  );
+  assert.throws(() => parseNativeProbeGrantRequest(oversizedFamilies), ContractValidationError);
+
+  const catalogWithoutPack = structuredClone(accessRequestFixture.catalog_probe_grant_request);
+  catalogWithoutPack.selection.query_pack_version = null;
+  recomputeProbeGrantDigest(catalogWithoutPack);
+  assert.throws(() => parseNativeProbeGrantRequest(catalogWithoutPack), ContractValidationError);
+
+  const missingVersion = mutableJson(accessRequestFixture.probe_grant_request);
+  delete mutableField(missingVersion.probe).version;
+  assert.throws(() => parseNativeProbeGrantRequest(missingVersion), ContractValidationError);
+
+  const missingQueryPack = mutableJson(accessRequestFixture.durable_probe_grant_request);
+  delete mutableField(missingQueryPack.selection).query_pack_version;
+  assert.throws(() => parseNativeProbeGrantRequest(missingQueryPack), ContractValidationError);
+
+  const missingObservation = mutableJson(accessRequestFixture.probe_grant_request);
+  delete mutableField(missingObservation.selection).observation_contract_version;
+  assert.throws(() => parseNativeProbeGrantRequest(missingObservation), ContractValidationError);
+
+  const exactMarkers = structuredClone(accessRequestFixture.probe_grant_request);
+  exactMarkers.probe.markers = exactBoundMarkers();
+  recomputeProbeGrantDigest(exactMarkers);
+  parseNativeProbeGrantRequest(exactMarkers);
+
+  const overMarkers = structuredClone(accessRequestFixture.probe_grant_request);
+  overMarkers.probe.markers = oneOverMarkers();
+  assert.throws(() => parseNativeProbeGrantRequest(overMarkers), ContractValidationError);
+
+  const exactFamilies = structuredClone(accessRequestFixture.probe_grant_request);
+  exactFamilies.selection.fact_family_versions = exactBoundFamilies();
+  recomputeProbeGrantDigest(exactFamilies);
+  parseNativeProbeGrantRequest(exactFamilies);
+
+  const overFamilies = structuredClone(accessRequestFixture.probe_grant_request);
+  overFamilies.selection.fact_family_versions = oneOverFamilies();
+  assert.throws(() => parseNativeProbeGrantRequest(overFamilies), ContractValidationError);
+
+  const overIdentifier = structuredClone(accessRequestFixture.probe_grant_request);
+  overIdentifier.probe.version = 'a'.repeat(129);
+  assert.throws(() => parseNativeProbeGrantRequest(overIdentifier), ContractValidationError);
+
+  const oversizedProgram = structuredClone(accessRequestFixture.probe_grant_request);
+  oversizedProgram.program_id = 'a'.repeat(4224);
+  assert.throws(() => parseNativeProbeGrantRequest(oversizedProgram), ContractValidationError);
+
+  const exactGrants = structuredClone(accessRequestFixture.probe_grant_request);
+  exactGrants.grants = exactBoundGrants();
+  recomputeProbeGrantDigest(exactGrants);
+  parseNativeProbeGrantRequest(exactGrants);
+
+  const overGrants = structuredClone(accessRequestFixture.probe_grant_request);
+  overGrants.grants = oneOverGrants();
+  assert.throws(() => parseNativeProbeGrantRequest(overGrants), ContractValidationError);
+
+  const malformedDigest = mutableJson(accessRequestFixture.probe_grant_request);
+  malformedDigest.digest = '/tmp/secret';
+  assertPrivateError(() => parseNativeProbeGrantRequest(malformedDigest), /\/tmp\/secret|secret/);
+
+  const malformedPolicy = mutableJson(accessRequestFixture.probe_grant_request);
+  malformedPolicy.access_policy_digest = '/tmp/secret';
+  assertPrivateError(() => parseNativeProbeGrantRequest(malformedPolicy), /\/tmp\/secret|secret/);
+
+  const sparsePolicy = structuredClone(accessRequestFixture.probe_grant_request);
+  delete (sparsePolicy.access_policy_digest as number[])[29];
+  assert.throws(() => parseNativeProbeGrantRequest(sparsePolicy), ContractValidationError);
+
+  const markerOrderA = structuredClone(accessRequestFixture.probe_grant_request);
+  markerOrderA.probe.markers = ['native.marker', 'extra.marker'];
+  const markerOrderB = structuredClone(accessRequestFixture.probe_grant_request);
+  markerOrderB.probe.markers = ['extra.marker', 'native.marker'];
+  assert.equal(nodeNativeProbeGrantRequestDigest(markerOrderA), nodeNativeProbeGrantRequestDigest(markerOrderB));
+  recomputeProbeGrantDigest(markerOrderA);
+  assert.deepEqual(parseNativeProbeGrantRequest(markerOrderA).probe.markers, ['extra.marker', 'native.marker']);
+
+  const extraGrant = mutableJson(accessRequestFixture.probe_grant_request);
+  mutableList(extraGrant.grants).push({
+    relation_id: 'sibling-object',
+    scope_root: true,
+    access_root: 'root',
+    identity_input_names: ['native-session-id'],
+  });
+  assert.throws(() => parseNativeProbeGrantRequest(extraGrant), ContractValidationError);
+
+  const digestDrift = structuredClone(accessRequestFixture.probe_grant_request);
+  digestDrift.access_policy_digest = digestDrift.access_policy_digest.map((byte, index) =>
+    index === 0 ? byte ^ 1 : byte,
+  );
+  assert.throws(() => parseNativeProbeGrantRequest(digestDrift), ContractValidationError);
+
+  const catalogGrants = mutableJson(accessRequestFixture.catalog_probe_grant_request);
+  mutableList(catalogGrants.grants).push(structuredClone(accessRequestFixture.probe_grant_request.grants[0]));
+  assert.throws(() => parseNativeProbeGrantRequest(catalogGrants), ContractValidationError);
+
+  const selectionDrift = structuredClone(accessRequestFixture.probe_grant_request);
+  selectionDrift.selection.model_major = 2;
+  assert.throws(() => parseNativeProbeGrantRequest(selectionDrift), ContractValidationError);
+
+  const retrieval = mutableJson(accessRequestFixture.retrieval_request);
+  retrieval.operation = 'catalog_discovery';
+  retrieval.capability_topology = 'catalog';
+  assert.throws(() => parseAccessReportRetrieval(retrieval), ContractValidationError);
+
+  const zeroReport = structuredClone(accessRequestFixture.retrieval_request) as {
+    expected_report_digest: number[];
+  };
+  zeroReport.expected_report_digest = new Array(32).fill(0);
+  assert.throws(() => parseAccessReportRetrieval(zeroReport), ContractValidationError);
 });

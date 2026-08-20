@@ -10,6 +10,8 @@ export const SOURCE_COVERAGE_CONTRACT_VERSION = 1 as const;
 export const SOURCE_COVERAGE_SET_CONTRACT_VERSION = 1 as const;
 export const SUPPORT_SELECTION_CONTRACT_VERSION = 1 as const;
 export const CONTRACT_VERSION_SELECTION_VERSION = 1 as const;
+export const ACCESS_REQUEST_CONTRACT_VERSION = 1 as const;
+export const ACCESS_REPORT_RETRIEVAL_CONTRACT_VERSION = 1 as const;
 
 import {
   assertNoUnpairedUtf16Surrogates,
@@ -300,10 +302,22 @@ function record(value: unknown, label: string): UnknownRecord {
   return value as UnknownRecord;
 }
 
+function hasOwn(input: UnknownRecord, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(input, field);
+}
+
 function assertKnownFields(input: UnknownRecord, fields: readonly string[], label: string): void {
   const known = new Set(fields);
   for (const key of Object.keys(input)) {
-    if (!known.has(key)) throw new ContractValidationError(`${label} contains unknown field ${key}`);
+    if (!known.has(key)) throw new ContractValidationError(`${label} contains an unknown field`);
+  }
+}
+
+function assertRequiredFields(input: UnknownRecord, fields: readonly string[], label: string): void {
+  for (const field of fields) {
+    if (!hasOwn(input, field)) {
+      throw new ContractValidationError(`${label} is missing a required field`);
+    }
   }
 }
 
@@ -1574,4 +1588,802 @@ export function parseRfc012aV1Fixture(value: unknown): Rfc012aV1Fixture {
     qualified_unknown: qualifiedUnknown,
     coverage: { baseline, dominant, reset, expected },
   };
+}
+
+export type TypedAccessRequestOperation = 'catalog_discovery' | 'durable_history_runtime' | 'scoped_typed_observation';
+
+export interface DeclaredKnownObjectGrant {
+  relation_id: string;
+  scope_root: boolean;
+  access_root: string;
+  identity_input_names: string[];
+}
+
+export interface NativeProbeGrantRequest {
+  access_request_contract_version: typeof ACCESS_REQUEST_CONTRACT_VERSION;
+  adapter_id: string;
+  support_release_id: string;
+  support_release_digest: number[];
+  source_declaration_digest: number[];
+  scope_program_digest: number[];
+  declaration_id: string;
+  program_id: string;
+  capability_topology: SupportCapabilityTopology;
+  operation: TypedAccessRequestOperation;
+  selection: ContractVersionSelection;
+  access_policy_digest: number[];
+  probe: NativeArtifactProbe;
+  grants: DeclaredKnownObjectGrant[];
+  digest: number[];
+}
+
+export interface AccessReportRetrievalRequest {
+  access_report_retrieval_contract_version: typeof ACCESS_REPORT_RETRIEVAL_CONTRACT_VERSION;
+  adapter_id: string;
+  support_release_id: string;
+  support_release_digest: number[];
+  source_declaration_digest: number[];
+  scope_program_digest: number[];
+  declaration_id: string;
+  program_id: string;
+  capability_topology: SupportCapabilityTopology;
+  operation: TypedAccessRequestOperation;
+  selection: ContractVersionSelection;
+  access_policy_digest: number[];
+  expected_report_digest: number[];
+  digest: number[];
+}
+
+const ACCESS_REQUEST_IDENTIFIER_BYTES = 128;
+const MAX_ACCESS_REQUEST_GRANTS = 256;
+const MAX_ACCESS_REQUEST_IDENTITY_INPUTS = 32;
+const MAX_ACCESS_REQUEST_MARKERS = 64;
+const MAX_ACCESS_REQUEST_FACT_FAMILIES = 64;
+const MAX_ACCESS_REQUEST_ENCODED_BYTES = 64 * 1024;
+const REQUEST_MACHINE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const ACCESS_REQUEST_OPERATION_TOPOLOGY: Record<TypedAccessRequestOperation, SupportCapabilityTopology> = {
+  catalog_discovery: 'catalog',
+  durable_history_runtime: 'durable',
+  scoped_typed_observation: 'scoped',
+};
+const ACCESS_REQUEST_TOPOLOGY_CODES: Record<SupportCapabilityTopology, number> = {
+  catalog: 1,
+  durable: 2,
+  scoped: 3,
+};
+const ACCESS_REQUEST_OPERATION_CODES: Record<TypedAccessRequestOperation, number> = {
+  catalog_discovery: 1,
+  durable_history_runtime: 2,
+  scoped_typed_observation: 3,
+};
+
+function rightRotate(value: number, bits: number): number {
+  return ((value >>> bits) | (value << (32 - bits))) >>> 0;
+}
+
+function sha256(message: Uint8Array): Uint8Array {
+  const k = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98,
+    0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8,
+    0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
+    0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+    0xc67178f2,
+  ]);
+  const bitLength = message.byteLength * 8;
+  const zeroPad = (64 - ((message.byteLength + 9) % 64)) % 64;
+  const padded = new Uint8Array(message.byteLength + 1 + zeroPad + 8);
+  padded.set(message);
+  padded[message.byteLength] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(padded.byteLength - 8, Math.floor(bitLength / 0x1_0000_0000), false);
+  view.setUint32(padded.byteLength - 4, bitLength >>> 0, false);
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+  const words = new Uint32Array(64);
+  for (let offset = 0; offset < padded.byteLength; offset += 64) {
+    for (let index = 0; index < 16; index += 1) {
+      words[index] = view.getUint32(offset + index * 4, false);
+    }
+    for (let index = 16; index < 64; index += 1) {
+      const source15 = words[index - 15]!;
+      const source2 = words[index - 2]!;
+      const sigma0 = rightRotate(source15, 7) ^ rightRotate(source15, 18) ^ (source15 >>> 3);
+      const sigma1 = rightRotate(source2, 17) ^ rightRotate(source2, 19) ^ (source2 >>> 10);
+      words[index] = (words[index - 16]! + sigma0 + words[index - 7]! + sigma1) >>> 0;
+    }
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+    for (let index = 0; index < 64; index += 1) {
+      const sum1 = rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25);
+      const choose = (e & f) ^ (~e & g);
+      const temp1 = (h + sum1 + choose + k[index]! + words[index]!) >>> 0;
+      const sum0 = rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22);
+      const majority = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (sum0 + majority) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+  const digest = new Uint8Array(32);
+  const digestView = new DataView(digest.buffer);
+  digestView.setUint32(0, h0, false);
+  digestView.setUint32(4, h1, false);
+  digestView.setUint32(8, h2, false);
+  digestView.setUint32(12, h3, false);
+  digestView.setUint32(16, h4, false);
+  digestView.setUint32(20, h5, false);
+  digestView.setUint32(24, h6, false);
+  digestView.setUint32(28, h7, false);
+  return digest;
+}
+
+function sha256Hex(message: Uint8Array): string {
+  return [...sha256(message)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function digestFieldHex(bytes: number[]): string {
+  return bytes.map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+class ContractByteSink {
+  private readonly parts: Uint8Array[] = [];
+
+  u8(value: number): void {
+    this.parts.push(Uint8Array.of(value));
+  }
+
+  u32(value: number): void {
+    const encoded = new Uint8Array(4);
+    new DataView(encoded.buffer).setUint32(0, value, false);
+    this.parts.push(encoded);
+  }
+
+  u64(value: number): void {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new ContractValidationError('request digest length is not a safe non-negative integer');
+    }
+    const encoded = new Uint8Array(8);
+    const view = new DataView(encoded.buffer);
+    view.setUint32(0, Math.floor(value / 0x1_0000_0000), false);
+    view.setUint32(4, value >>> 0, false);
+    this.parts.push(encoded);
+  }
+
+  bytes(value: Uint8Array): void {
+    this.u64(value.byteLength);
+    this.parts.push(value);
+  }
+
+  text(value: string): void {
+    this.bytes(UTF8_ENCODER.encode(value));
+  }
+
+  digest(value: number[]): void {
+    this.bytes(Uint8Array.from(value));
+  }
+
+  finish(): Uint8Array {
+    const total = this.parts.reduce((sum, part) => sum + part.byteLength, 0);
+    const encoded = new Uint8Array(total);
+    let offset = 0;
+    for (const part of this.parts) {
+      encoded.set(part, offset);
+      offset += part.byteLength;
+    }
+    return encoded;
+  }
+}
+
+function encodeAccessRequestCoordinates(
+  sink: ContractByteSink,
+  contractVersion: number,
+  request: {
+    adapter_id: string;
+    support_release_id: string;
+    support_release_digest: number[];
+    source_declaration_digest: number[];
+    scope_program_digest: number[];
+    declaration_id: string;
+    program_id: string;
+    capability_topology: SupportCapabilityTopology;
+    operation: TypedAccessRequestOperation;
+    selection: ContractVersionSelection;
+    access_policy_digest: number[];
+  },
+): void {
+  sink.u32(contractVersion);
+  sink.text(request.adapter_id);
+  sink.text(request.support_release_id);
+  sink.digest(request.support_release_digest);
+  sink.digest(request.source_declaration_digest);
+  sink.digest(request.scope_program_digest);
+  sink.text(request.declaration_id);
+  sink.text(request.program_id);
+  sink.u8(ACCESS_REQUEST_TOPOLOGY_CODES[request.capability_topology]);
+  sink.u8(ACCESS_REQUEST_OPERATION_CODES[request.operation]);
+  sink.u32(request.selection.selection_contract_version);
+  sink.u32(request.selection.model_major);
+  sink.u32(request.selection.external_entity_reference_version);
+  sink.u32(request.selection.semantic_revision_reference_version);
+  sink.u32(request.selection.coverage_contract_version);
+  const families = Object.keys(request.selection.fact_family_versions).sort();
+  sink.u64(families.length);
+  for (const family of families) {
+    sink.text(family);
+    sink.u32(request.selection.fact_family_versions[family]!);
+  }
+  for (const version of [request.selection.query_pack_version, request.selection.observation_contract_version]) {
+    if (version === null) {
+      sink.u8(0);
+    } else {
+      sink.u8(1);
+      sink.u32(version);
+    }
+  }
+  sink.digest(request.access_policy_digest);
+}
+
+function nativeProbeGrantRequestDigest(request: NativeProbeGrantRequest): string {
+  return `sha256:${sha256Hex(encodeNativeProbeGrantRequest(request))}`;
+}
+
+function encodeNativeProbeGrantRequest(request: NativeProbeGrantRequest): Uint8Array {
+  const sink = new ContractByteSink();
+  const domain = UTF8_ENCODER.encode('spaghetti/rfc012a/native-probe-grant-request/v1\0');
+  const body = new ContractByteSink();
+  encodeAccessRequestCoordinates(body, request.access_request_contract_version, request);
+  body.text(request.probe.family);
+  body.text(request.probe.platform);
+  if (request.probe.version === null) {
+    body.u8(0);
+  } else {
+    body.u8(1);
+    body.text(request.probe.version);
+  }
+  const markers = [...new Set(request.probe.markers)].sort();
+  body.u64(markers.length);
+  for (const marker of markers) body.text(marker);
+  body.u8(request.probe.contradictory_markers ? 1 : 0);
+  body.u64(request.grants.length);
+  for (const grant of request.grants) {
+    body.text(grant.relation_id);
+    body.u8(grant.scope_root ? 1 : 0);
+    body.text(grant.access_root);
+    body.u64(grant.identity_input_names.length);
+    for (const name of grant.identity_input_names) body.text(name);
+  }
+  const bodyBytes = body.finish();
+  const encoded = new Uint8Array(domain.byteLength + bodyBytes.byteLength);
+  encoded.set(domain);
+  encoded.set(bodyBytes, domain.byteLength);
+  return encoded;
+}
+
+function accessReportRetrievalDigest(request: AccessReportRetrievalRequest): string {
+  const domain = UTF8_ENCODER.encode('spaghetti/rfc012a/access-report-retrieval/v1\0');
+  const body = new ContractByteSink();
+  encodeAccessRequestCoordinates(body, request.access_report_retrieval_contract_version, request);
+  body.digest(request.expected_report_digest);
+  const bodyBytes = body.finish();
+  const encoded = new Uint8Array(domain.byteLength + bodyBytes.byteLength);
+  encoded.set(domain);
+  encoded.set(bodyBytes, domain.byteLength);
+  return `sha256:${sha256Hex(encoded)}`;
+}
+
+function requireMatchingDigest(actual: number[], expectedHex: string, label: string): void {
+  if (`sha256:${digestFieldHex(actual)}` !== expectedHex) {
+    throw new ContractValidationError(`${label} digest does not match its canonical encoding`);
+  }
+}
+
+function requestMachineId(value: unknown, label: string): string {
+  if (typeof value !== 'string') {
+    throw new ContractValidationError(`${label} must be a machine identifier`);
+  }
+  if (value.length === 0 || value.length > ACCESS_REQUEST_IDENTIFIER_BYTES || !REQUEST_MACHINE_ID.test(value)) {
+    throw new ContractValidationError(`${label} must be a machine identifier`);
+  }
+  if (UTF8_ENCODER.encode(value).length > ACCESS_REQUEST_IDENTIFIER_BYTES) {
+    throw new ContractValidationError(`${label} must be a machine identifier`);
+  }
+  return value;
+}
+
+function chargeEncodedBytes(budget: { used: number }, value: string): void {
+  budget.used += value.length;
+  if (budget.used > MAX_ACCESS_REQUEST_ENCODED_BYTES) {
+    throw new ContractValidationError('access request exceeds the encoded-byte limit');
+  }
+}
+
+function preflightGrantEncodedBytes(grants: unknown[]): void {
+  let used = 0;
+  for (const grant of grants) {
+    const input = record(grant, 'declared known-object grant');
+    for (const [field, label] of [
+      ['relation_id', 'grant relation id'],
+      ['access_root', 'grant access root'],
+    ] as const) {
+      const value = input[field];
+      if (typeof value === 'string') {
+        if (value.length > ACCESS_REQUEST_IDENTIFIER_BYTES) {
+          throw new ContractValidationError(`${label} must be a machine identifier`);
+        }
+        used += value.length;
+        if (used > MAX_ACCESS_REQUEST_ENCODED_BYTES) {
+          throw new ContractValidationError('access request exceeds the encoded-byte limit');
+        }
+      }
+    }
+    const names = input.identity_input_names;
+    if (!Array.isArray(names)) continue;
+    if (names.length > MAX_ACCESS_REQUEST_IDENTITY_INPUTS) {
+      throw new ContractValidationError('grant identity inputs exceed the collection limit');
+    }
+    for (const name of names) {
+      if (typeof name === 'string') {
+        if (name.length > ACCESS_REQUEST_IDENTIFIER_BYTES) {
+          throw new ContractValidationError('grant identity input must be a machine identifier');
+        }
+        used += name.length;
+        if (used > MAX_ACCESS_REQUEST_ENCODED_BYTES) {
+          throw new ContractValidationError('access request exceeds the encoded-byte limit');
+        }
+      }
+    }
+  }
+}
+
+function requiredNullableString(input: UnknownRecord, field: string, label: string): string | null {
+  if (!hasOwn(input, field) || input[field] === undefined) {
+    throw new ContractValidationError(`${label} is missing a required field`);
+  }
+  if (input[field] === null) return null;
+  return requestMachineId(input[field], label);
+}
+
+function requiredNullableVersion(input: UnknownRecord, field: string, label: string): number | null {
+  if (!hasOwn(input, field) || input[field] === undefined) {
+    throw new ContractValidationError(`${label} is missing a required field`);
+  }
+  if (input[field] === null) return null;
+  return contractVersion(input[field], label);
+}
+
+function digest32(value: unknown, label: string): number[] {
+  if (!Array.isArray(value) || value.length !== 32) {
+    throw new ContractValidationError(`${label} must contain 32 bytes`);
+  }
+  const bytes: number[] = [];
+  for (let index = 0; index < 32; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) {
+      throw new ContractValidationError(`${label} must contain 32 bytes`);
+    }
+    const item = value[index];
+    if (!Number.isInteger(item) || Number(item) < 0 || Number(item) > 255) {
+      throw new ContractValidationError(`${label} must contain 32 bytes`);
+    }
+    bytes.push(Number(item));
+  }
+  return bytes;
+}
+
+function nonzeroDigest32(value: unknown, label: string): number[] {
+  const bytes = digest32(value, label);
+  if (bytes.every((item) => item === 0)) {
+    throw new ContractValidationError(`${label} must be a nonzero 32-byte digest`);
+  }
+  return bytes;
+}
+
+function parseRequestOperation(value: unknown): TypedAccessRequestOperation {
+  if (value !== 'catalog_discovery' && value !== 'durable_history_runtime' && value !== 'scoped_typed_observation') {
+    throw new ContractValidationError('unsupported request operation');
+  }
+  return value;
+}
+
+function parseRequestTopology(value: unknown): SupportCapabilityTopology {
+  if (value !== 'catalog' && value !== 'durable' && value !== 'scoped') {
+    throw new ContractValidationError('unsupported request capability topology');
+  }
+  return value;
+}
+
+function parseDeclaredGrant(value: unknown, encoded: { used: number }): DeclaredKnownObjectGrant {
+  const input = record(value, 'declared known-object grant');
+  assertKnownFields(
+    input,
+    ['relation_id', 'scope_root', 'access_root', 'identity_input_names'],
+    'declared known-object grant',
+  );
+  assertRequiredFields(
+    input,
+    ['relation_id', 'scope_root', 'access_root', 'identity_input_names'],
+    'declared known-object grant',
+  );
+  if (typeof input.scope_root !== 'boolean') {
+    throw new ContractValidationError('grant scope_root must be boolean');
+  }
+  if (!Array.isArray(input.identity_input_names)) {
+    throw new ContractValidationError('grant identity input list must not be empty');
+  }
+  if (input.identity_input_names.length === 0) {
+    throw new ContractValidationError('grant identity input list must not be empty');
+  }
+  if (input.identity_input_names.length > MAX_ACCESS_REQUEST_IDENTITY_INPUTS) {
+    throw new ContractValidationError('grant identity inputs exceed the collection limit');
+  }
+  const relationId = requestMachineId(input.relation_id, 'grant relation id');
+  const accessRoot = requestMachineId(input.access_root, 'grant access root');
+  chargeEncodedBytes(encoded, relationId);
+  chargeEncodedBytes(encoded, accessRoot);
+  const identityInputNames: string[] = [];
+  for (const name of input.identity_input_names) {
+    const parsed = requestMachineId(name, 'grant identity input');
+    chargeEncodedBytes(encoded, parsed);
+    identityInputNames.push(parsed);
+  }
+  if (new Set(identityInputNames).size !== identityInputNames.length) {
+    throw new ContractValidationError('grant identity input contains duplicate value');
+  }
+  return {
+    relation_id: relationId,
+    scope_root: input.scope_root,
+    access_root: accessRoot,
+    identity_input_names: identityInputNames,
+  };
+}
+
+function parseRequestProbe(value: unknown): NativeArtifactProbe {
+  const input = record(value, 'native artifact probe');
+  assertKnownFields(
+    input,
+    ['family', 'platform', 'version', 'markers', 'contradictory_markers'],
+    'native artifact probe',
+  );
+  assertRequiredFields(
+    input,
+    ['family', 'platform', 'version', 'markers', 'contradictory_markers'],
+    'native artifact probe',
+  );
+  if (!Array.isArray(input.markers)) {
+    throw new ContractValidationError('probed native markers must be an array');
+  }
+  if (input.markers.length > MAX_ACCESS_REQUEST_MARKERS) {
+    throw new ContractValidationError('native probe exceeds the marker collection limit');
+  }
+  if (typeof input.contradictory_markers !== 'boolean') {
+    throw new ContractValidationError('contradictory_markers must be boolean');
+  }
+  const encoded = { used: 0 };
+  const family = requestMachineId(input.family, 'probed artifact family');
+  const platform = requestMachineId(input.platform, 'probed artifact platform');
+  chargeEncodedBytes(encoded, family);
+  chargeEncodedBytes(encoded, platform);
+  const version = requiredNullableString(input, 'version', 'probed artifact version');
+  if (version !== null) {
+    chargeEncodedBytes(encoded, version);
+  }
+  const markers: string[] = [];
+  for (const marker of input.markers) {
+    const parsed = requestMachineId(marker, 'probed native marker');
+    chargeEncodedBytes(encoded, parsed);
+    markers.push(parsed);
+  }
+  markers.sort();
+  const unique = [...new Set(markers)];
+  return {
+    family,
+    platform,
+    version,
+    markers: unique,
+    contradictory_markers: input.contradictory_markers,
+  };
+}
+
+function parseRequestSelection(value: unknown, operation: TypedAccessRequestOperation): ContractVersionSelection {
+  const input = record(value, 'contract version selection');
+  assertKnownFields(
+    input,
+    [
+      'selection_contract_version',
+      'model_major',
+      'external_entity_reference_version',
+      'semantic_revision_reference_version',
+      'coverage_contract_version',
+      'fact_family_versions',
+      'query_pack_version',
+      'observation_contract_version',
+    ],
+    'contract version selection',
+  );
+  assertRequiredFields(
+    input,
+    [
+      'selection_contract_version',
+      'model_major',
+      'external_entity_reference_version',
+      'semantic_revision_reference_version',
+      'coverage_contract_version',
+      'fact_family_versions',
+      'query_pack_version',
+      'observation_contract_version',
+    ],
+    'contract version selection',
+  );
+  const familiesInput = record(input.fact_family_versions, 'selected fact families');
+  let familyCount = 0;
+  for (const family in familiesInput) {
+    if (!hasOwn(familiesInput, family)) continue;
+    familyCount += 1;
+    if (familyCount > MAX_ACCESS_REQUEST_FACT_FAMILIES) {
+      throw new ContractValidationError('selected fact families exceed the collection limit');
+    }
+  }
+  const encoded = { used: 0 };
+  const factFamilyVersions: Record<string, number> = {};
+  for (const family in familiesInput) {
+    if (!hasOwn(familiesInput, family)) continue;
+    const parsedFamily = requestMachineId(family, 'selected fact family');
+    chargeEncodedBytes(encoded, parsedFamily);
+    factFamilyVersions[parsedFamily] = contractVersion(familiesInput[family], 'selected fact-family version');
+  }
+  const selection: ContractVersionSelection = {
+    selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+    model_major: contractVersion(input.model_major, 'selected model major'),
+    external_entity_reference_version: contractVersion(
+      input.external_entity_reference_version,
+      'selected external entity reference version',
+    ),
+    semantic_revision_reference_version: contractVersion(
+      input.semantic_revision_reference_version,
+      'selected semantic revision reference version',
+    ),
+    coverage_contract_version: contractVersion(input.coverage_contract_version, 'selected coverage contract version'),
+    fact_family_versions: factFamilyVersions,
+    query_pack_version: requiredNullableVersion(input, 'query_pack_version', 'selected query pack version'),
+    observation_contract_version: requiredNullableVersion(
+      input,
+      'observation_contract_version',
+      'selected observation contract version',
+    ),
+  };
+  if (input.selection_contract_version !== CONTRACT_VERSION_SELECTION_VERSION) {
+    throw new ContractValidationError('unsupported contract-version selection version');
+  }
+  if (operation === 'catalog_discovery' && selection.query_pack_version === null) {
+    throw new ContractValidationError('catalog discovery requires a negotiated query-pack contract');
+  }
+  if (operation === 'scoped_typed_observation' && selection.observation_contract_version === null) {
+    throw new ContractValidationError('scoped probe/grant request requires a negotiated observation contract');
+  }
+  return selection;
+}
+
+function parseRequestCoordinates(
+  input: UnknownRecord,
+  requireProgram: boolean,
+): {
+  adapter_id: string;
+  support_release_id: string;
+  support_release_digest: number[];
+  source_declaration_digest: number[];
+  scope_program_digest: number[];
+  declaration_id: string;
+  program_id: string;
+  capability_topology: SupportCapabilityTopology;
+  operation: TypedAccessRequestOperation;
+  selection: ContractVersionSelection;
+  access_policy_digest: number[];
+} {
+  const operation = parseRequestOperation(input.operation);
+  const capabilityTopology = parseRequestTopology(input.capability_topology);
+  if (ACCESS_REQUEST_OPERATION_TOPOLOGY[operation] !== capabilityTopology) {
+    throw new ContractValidationError('probe/grant request topology does not match its operation');
+  }
+  const programId = input.program_id;
+  if (typeof programId !== 'string') {
+    throw new ContractValidationError('request program id must be a string');
+  }
+  if (requireProgram || operation === 'scoped_typed_observation') {
+    requestMachineId(programId, 'request program id');
+  } else if (programId !== '') {
+    throw new ContractValidationError('catalog and durable probe/grant requests cannot carry grants or a program id');
+  }
+  return {
+    adapter_id: requestMachineId(input.adapter_id, 'request adapter id'),
+    support_release_id: requestMachineId(input.support_release_id, 'request support release id'),
+    support_release_digest: nonzeroDigest32(input.support_release_digest, 'support release digest'),
+    source_declaration_digest: nonzeroDigest32(input.source_declaration_digest, 'source declaration digest'),
+    scope_program_digest: nonzeroDigest32(input.scope_program_digest, 'scope program digest'),
+    declaration_id: requestMachineId(input.declaration_id, 'request declaration id'),
+    program_id: programId,
+    capability_topology: capabilityTopology,
+    operation,
+    selection: parseRequestSelection(input.selection, operation),
+    access_policy_digest: nonzeroDigest32(input.access_policy_digest, 'access policy digest'),
+  };
+}
+
+export function parseNativeProbeGrantRequest(value: unknown): NativeProbeGrantRequest {
+  const input = record(value, 'native-probe/grant request');
+  assertKnownFields(
+    input,
+    [
+      'access_request_contract_version',
+      'adapter_id',
+      'support_release_id',
+      'support_release_digest',
+      'source_declaration_digest',
+      'scope_program_digest',
+      'declaration_id',
+      'program_id',
+      'capability_topology',
+      'operation',
+      'selection',
+      'access_policy_digest',
+      'probe',
+      'grants',
+      'digest',
+    ],
+    'native-probe/grant request',
+  );
+  assertRequiredFields(
+    input,
+    [
+      'access_request_contract_version',
+      'adapter_id',
+      'support_release_id',
+      'support_release_digest',
+      'source_declaration_digest',
+      'scope_program_digest',
+      'declaration_id',
+      'program_id',
+      'capability_topology',
+      'operation',
+      'selection',
+      'access_policy_digest',
+      'probe',
+      'grants',
+      'digest',
+    ],
+    'native-probe/grant request',
+  );
+  if (input.access_request_contract_version !== ACCESS_REQUEST_CONTRACT_VERSION) {
+    throw new ContractValidationError('unsupported native-probe/grant request contract version');
+  }
+  const coordinates = parseRequestCoordinates(input, false);
+  if (!Array.isArray(input.grants)) {
+    throw new ContractValidationError('probe/grant request grants must be an array');
+  }
+  if (input.grants.length > MAX_ACCESS_REQUEST_GRANTS) {
+    throw new ContractValidationError('probe/grant request exceeds the grant collection limit');
+  }
+  preflightGrantEncodedBytes(input.grants);
+  if (coordinates.operation === 'scoped_typed_observation') {
+    if (input.grants.length === 0) {
+      throw new ContractValidationError('scoped probe/grant request requires a bounded nonempty grant set');
+    }
+    if (coordinates.selection.observation_contract_version === null) {
+      throw new ContractValidationError('scoped probe/grant request requires a negotiated observation contract');
+    }
+  } else if (input.grants.length !== 0) {
+    throw new ContractValidationError('catalog and durable probe/grant requests cannot carry grants or a program id');
+  }
+  const encoded = { used: 0 };
+  const grants = input.grants.map((grant) => parseDeclaredGrant(grant, encoded));
+  let previous: string | undefined;
+  let rootCount = 0;
+  for (const grant of grants) {
+    if (previous !== undefined && previous >= grant.relation_id) {
+      throw new ContractValidationError('probe/grant relation ids must be strictly increasing');
+    }
+    previous = grant.relation_id;
+    if (grant.scope_root) rootCount += 1;
+  }
+  if (coordinates.operation === 'scoped_typed_observation' && rootCount !== 1) {
+    throw new ContractValidationError('scoped probe/grant request requires exactly one scope-root grant');
+  }
+  const parsed: NativeProbeGrantRequest = {
+    access_request_contract_version: ACCESS_REQUEST_CONTRACT_VERSION,
+    ...coordinates,
+    probe: parseRequestProbe(input.probe),
+    grants,
+    digest: digest32(input.digest, 'request digest'),
+  };
+  requireMatchingDigest(parsed.digest, nativeProbeGrantRequestDigest(parsed), 'native-probe/grant request');
+  return parsed;
+}
+
+export function parseAccessReportRetrieval(value: unknown): AccessReportRetrievalRequest {
+  const input = record(value, 'access-report retrieval request');
+  assertKnownFields(
+    input,
+    [
+      'access_report_retrieval_contract_version',
+      'adapter_id',
+      'support_release_id',
+      'support_release_digest',
+      'source_declaration_digest',
+      'scope_program_digest',
+      'declaration_id',
+      'program_id',
+      'capability_topology',
+      'operation',
+      'selection',
+      'access_policy_digest',
+      'expected_report_digest',
+      'digest',
+    ],
+    'access-report retrieval request',
+  );
+  assertRequiredFields(
+    input,
+    [
+      'access_report_retrieval_contract_version',
+      'adapter_id',
+      'support_release_id',
+      'support_release_digest',
+      'source_declaration_digest',
+      'scope_program_digest',
+      'declaration_id',
+      'program_id',
+      'capability_topology',
+      'operation',
+      'selection',
+      'access_policy_digest',
+      'expected_report_digest',
+      'digest',
+    ],
+    'access-report retrieval request',
+  );
+  if (input.access_report_retrieval_contract_version !== ACCESS_REPORT_RETRIEVAL_CONTRACT_VERSION) {
+    throw new ContractValidationError('unsupported access-report retrieval contract version');
+  }
+  const coordinates = parseRequestCoordinates(input, true);
+  if (coordinates.capability_topology !== 'scoped' || coordinates.operation !== 'scoped_typed_observation') {
+    throw new ContractValidationError('access-report retrieval is scoped observation only');
+  }
+  if (coordinates.selection.observation_contract_version === null) {
+    throw new ContractValidationError('access-report retrieval requires a negotiated observation contract');
+  }
+  const parsed: AccessReportRetrievalRequest = {
+    access_report_retrieval_contract_version: ACCESS_REPORT_RETRIEVAL_CONTRACT_VERSION,
+    ...coordinates,
+    expected_report_digest: nonzeroDigest32(input.expected_report_digest, 'expected report digest'),
+    digest: digest32(input.digest, 'request digest'),
+  };
+  requireMatchingDigest(parsed.digest, accessReportRetrievalDigest(parsed), 'access-report retrieval');
+  return parsed;
 }
