@@ -51,9 +51,9 @@ use crate::source::{
     AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint,
     AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan,
     DirtyHint, DirtyReason, DirtyScope, DriverQuarantine, HintEnqueue, RecordHash, RecordOrigin,
-    Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SourceCursor,
-    SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState, StableRead, StartupAction,
-    StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
+    Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool,
+    SourceCursor, SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState, StableRead,
+    StartupAction, StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
 };
 
 mod actor_wire;
@@ -3712,7 +3712,7 @@ struct ScopedObservationAsyncRuntimeShared {
     host: ScopedObservationAccessHost,
     close_command: close_wire::ScopedCloseCommand,
     drain: Mutex<ScopedObservationConsumerDrain>,
-    pass_pool: ScopedObservationSharedPassPool,
+    pass_pool: SharedSourcePassPool,
 }
 
 impl ScopedObservationAsyncRuntimeShared {
@@ -4937,67 +4937,6 @@ pub struct ScopedObservationAsyncRuntime {
     shared: Arc<ScopedObservationAsyncRuntimeShared>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum ScopedObservationSharedPassPoolError {
-    #[error("scoped observation shared pass capacity is outside the supported bound")]
-    InvalidCapacity,
-}
-
-/// Caller-owned fair permit domain for bounded scoped source passes. A future
-/// portable host may share one pool across attachments; keeping construction
-/// outside the attachment prevents one scope from resizing or replacing the
-/// common capacity policy. Durable/catalog participation and numeric policy
-/// calibration remain separate integration gates.
-#[derive(Clone)]
-pub struct ScopedObservationSharedPassPool {
-    permits: Arc<tokio::sync::Semaphore>,
-    max_concurrent_passes: usize,
-}
-
-impl ScopedObservationSharedPassPool {
-    pub fn new(max_concurrent_passes: usize) -> Result<Self, ScopedObservationSharedPassPoolError> {
-        if max_concurrent_passes == 0 || max_concurrent_passes > tokio::sync::Semaphore::MAX_PERMITS
-        {
-            return Err(ScopedObservationSharedPassPoolError::InvalidCapacity);
-        }
-        Ok(Self {
-            permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_passes)),
-            max_concurrent_passes,
-        })
-    }
-
-    pub fn max_concurrent_passes(&self) -> usize {
-        self.max_concurrent_passes
-    }
-
-    #[cfg(test)]
-    pub(crate) fn available_permits(&self) -> usize {
-        self.permits.available_permits()
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn acquire_for_test(&self) -> tokio::sync::OwnedSemaphorePermit {
-        self.acquire().await
-    }
-
-    async fn acquire(&self) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .expect("the scoped pass pool never closes its semaphore")
-    }
-}
-
-impl std::fmt::Debug for ScopedObservationSharedPassPool {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ScopedObservationSharedPassPool")
-            .field("max_concurrent_passes", &self.max_concurrent_passes)
-            .field("available_permits", &self.permits.available_permits())
-            .finish_non_exhaustive()
-    }
-}
-
 impl ScopedObservationAsyncRuntime {
     pub fn open(
         host: ScopedObservationAccessHost,
@@ -5006,15 +4945,14 @@ impl ScopedObservationAsyncRuntime {
         Self::open_with_shared_pass_pool(
             host,
             limits,
-            ScopedObservationSharedPassPool::new(1)
-                .expect("one attachment-local pass permit is valid"),
+            SharedSourcePassPool::new(1).expect("one attachment-local pass permit is valid"),
         )
     }
 
     pub fn open_with_shared_pass_pool(
         host: ScopedObservationAccessHost,
         limits: ScopedObservationDeliveryLimits,
-        pass_pool: ScopedObservationSharedPassPool,
+        pass_pool: SharedSourcePassPool,
     ) -> Result<Self, ScopedObservationOpenDrainError> {
         let close_command = host
             .prepare_portable_close()

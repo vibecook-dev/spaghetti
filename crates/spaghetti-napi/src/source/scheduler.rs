@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
 use super::{DirtyReason, SourceDriverError};
 
@@ -12,6 +13,65 @@ const FAIR_SEQUENCE: [IngestPriority; 8] = [
     IngestPriority::Backfill,
     IngestPriority::Maintenance,
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum SharedSourcePassPoolError {
+    #[error("shared source pass capacity is outside the supported bound")]
+    InvalidCapacity,
+}
+
+/// Caller-owned fair permit domain for bounded source access/decode passes.
+/// Durable, catalog, and scoped runtimes may share this authority without any
+/// one workload being able to resize or replace it after construction.
+#[derive(Clone)]
+pub(crate) struct SharedSourcePassPool {
+    permits: Arc<tokio::sync::Semaphore>,
+    max_concurrent_passes: usize,
+}
+
+impl SharedSourcePassPool {
+    pub(crate) fn new(max_concurrent_passes: usize) -> Result<Self, SharedSourcePassPoolError> {
+        if max_concurrent_passes == 0 || max_concurrent_passes > tokio::sync::Semaphore::MAX_PERMITS
+        {
+            return Err(SharedSourcePassPoolError::InvalidCapacity);
+        }
+        Ok(Self {
+            permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_passes)),
+            max_concurrent_passes,
+        })
+    }
+
+    pub(crate) fn max_concurrent_passes(&self) -> usize {
+        self.max_concurrent_passes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_permits(&self) -> usize {
+        self.permits.available_permits()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn acquire_for_test(&self) -> tokio::sync::OwnedSemaphorePermit {
+        self.acquire().await
+    }
+
+    pub(crate) async fn acquire(&self) -> tokio::sync::OwnedSemaphorePermit {
+        Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .expect("the shared source pass pool never closes its semaphore")
+    }
+}
+
+impl std::fmt::Debug for SharedSourcePassPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SharedSourcePassPool")
+            .field("max_concurrent_passes", &self.max_concurrent_passes)
+            .field("available_permits", &self.permits.available_permits())
+            .finish_non_exhaustive()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IngestPriority {

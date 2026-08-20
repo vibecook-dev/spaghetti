@@ -228,22 +228,22 @@ pub(crate) mod tests {
         ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
-        ScopedObservationResyncResolution, ScopedObservationSharedPassPool,
-        ScopedObservationSourceOwnerBindingError, ScopedObservationSourceOwnerRetryPolicy,
-        ScopedObservationSourceOwnerRunError, ScopedObservationSourceOwnerRunExit,
-        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
-        ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
-        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
-        ScopedQueuedObservationFrame, ScopedReplacementMode, ScopedReplacementRepresentation,
-        ScopedReplacementStageError, ScopedResyncReason, ScopedRootIdentityRequest,
-        ScopedScopeRelationState, ScopedSourceFailureClass, ScopedSourceObjectFailureCode,
-        ScopedSourceObjectRetryState,
+        ScopedObservationResyncResolution, ScopedObservationSourceOwnerBindingError,
+        ScopedObservationSourceOwnerRetryPolicy, ScopedObservationSourceOwnerRunError,
+        ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
+        ScopedObservationStartupReconcileAction, ScopedObservationUnknownWireNegotiation,
+        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
+        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
+        ScopedResyncReason, ScopedRootIdentityRequest, ScopedScopeRelationState,
+        ScopedSourceFailureClass, ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
         AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint,
         DirtyReason, DirtyScope, HintEnqueue, RecordOrigin, Revision, ScopeAccessReport,
-        ScopeAccessRequest, ScopeIdentityInput, SourceMediaType, SourceRecord,
+        ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool, SourceMediaType,
+        SourceRecord,
     };
 
     use super::*;
@@ -825,7 +825,7 @@ pub(crate) mod tests {
     struct AutomaticSingleObjectOwnerPolicies {
         source: ScopedObservationSourceOwnerRetryPolicy,
         watcher: ScopedObservationNativeWatcherRecoveryPolicy,
-        pass_pool: Option<ScopedObservationSharedPassPool>,
+        pass_pool: Option<SharedSourcePassPool>,
     }
 
     impl AutomaticSingleObjectOwnerPolicies {
@@ -840,7 +840,7 @@ pub(crate) mod tests {
             }
         }
 
-        fn with_pass_pool(mut self, pass_pool: ScopedObservationSharedPassPool) -> Self {
+        fn with_pass_pool(mut self, pass_pool: SharedSourcePassPool) -> Self {
             self.pass_pool = Some(pass_pool);
             self
         }
@@ -3986,8 +3986,8 @@ pub(crate) mod tests {
     async fn scoped_busy_observer_yields_bounded_passes_before_sibling_starvation() {
         const BUSY_PASS_LIMIT: usize = 128;
 
-        assert!(ScopedObservationSharedPassPool::new(0).is_err());
-        assert!(ScopedObservationSharedPassPool::new(usize::MAX).is_err());
+        assert!(SharedSourcePassPool::new(0).is_err());
+        assert!(SharedSourcePassPool::new(usize::MAX).is_err());
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let watcher_policy = || {
@@ -4000,7 +4000,7 @@ pub(crate) mod tests {
             .unwrap()
         };
         let source_policy = ScopedObservationSourceOwnerRetryPolicy::default();
-        let pass_pool = ScopedObservationSharedPassPool::new(1).unwrap();
+        let pass_pool = SharedSourcePassPool::new(1).unwrap();
         assert_eq!(pass_pool.max_concurrent_passes(), 1);
         let (busy_runtime, busy_handle, busy_pair, _, busy_drops, _) =
             automatic_single_object_pair_with_root_and_watcher_policy(
@@ -4096,7 +4096,7 @@ pub(crate) mod tests {
     async fn scoped_pass_pool_wait_is_close_cancellable_without_native_access() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
-        let pass_pool = ScopedObservationSharedPassPool::new(1).unwrap();
+        let pass_pool = SharedSourcePassPool::new(1).unwrap();
         let held_permit = pass_pool.acquire_for_test().await;
         let (runtime, handle, pair, _, drops, _) =
             automatic_single_object_pair_with_root_and_watcher_policy(
