@@ -3964,6 +3964,141 @@ impl ScopedObservationAsyncHandle {
         Ok(waiter.wait_async().await)
     }
 
+    /// Explicitly invalidate the current epoch and await the replacement
+    /// barrier offered by the existing watcher/source supervisor. Concurrent
+    /// callers join an already-required or already-started replacement rather
+    /// than invalidating its new epoch. This is engine readiness only: the
+    /// completion envelope remains owned by `next_event` and must still be
+    /// applied and acknowledged there.
+    pub async fn resync(&self) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        self.resync_at_inner(scoped_observation_now_unix_ms()).await
+    }
+
+    #[cfg(test)]
+    pub async fn resync_at(
+        &self,
+        observed_at: i64,
+    ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        self.resync_at_inner(observed_at).await
+    }
+
+    async fn resync_at_inner(
+        &self,
+        observed_at: i64,
+    ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        let target = self.request_explicit_resync_target(observed_at)?;
+        self.wait_for_resync_target(target).await
+    }
+
+    fn request_explicit_resync_target(
+        &self,
+        observed_at: i64,
+    ) -> Result<ScopedObservationResyncTarget, ScopedContinuityError> {
+        let mut drain = self.shared.lock_drain();
+        if drain.is_closed()
+            || self.shared.host.state.closed.load(Ordering::Acquire)
+            || self.shared.host.lifecycle.is_closing()
+        {
+            return Err(ScopedContinuityError::Closed);
+        }
+        let delivery = drain.delivery_lane_mut();
+        if delivery.observer_failure().is_some() {
+            return Err(ScopedContinuityError::ObserverFailed);
+        }
+        if let Some(started) = delivery.resync_started() {
+            let required = delivery
+                .resync_required()
+                .ok_or(ScopedContinuityError::InvalidControlIdentity)?;
+            if started.root != self.shared.host.root_identity
+                || required.root != self.shared.host.root_identity
+                || started.old_scope_epoch != required.invalid_scope_epoch
+                || started.required_control_sequence != required.control_sequence
+                || started.new_scope_epoch <= started.old_scope_epoch
+            {
+                return Err(ScopedContinuityError::InvalidControlIdentity);
+            }
+            return Ok(ScopedObservationResyncTarget {
+                invalid_scope_epoch: required.invalid_scope_epoch,
+                required_control_sequence: required.control_sequence,
+            });
+        }
+        if let Some(required) = delivery.resync_required() {
+            if required.root != self.shared.host.root_identity {
+                return Err(ScopedContinuityError::RootMismatch);
+            }
+            return Ok(ScopedObservationResyncTarget {
+                invalid_scope_epoch: required.invalid_scope_epoch,
+                required_control_sequence: required.control_sequence,
+            });
+        }
+        let _operation = self
+            .shared
+            .host
+            .lifecycle
+            .start_operation(ScopedObservationOperationKind::Runtime)
+            .map_err(|error| match error {
+                ScopedObservationOperationStartError::Closing => ScopedContinuityError::Closed,
+                ScopedObservationOperationStartError::CapacityExhausted => {
+                    ScopedContinuityError::OperationCapacityExhausted
+                }
+            })?;
+        let required = self.shared.host.require_resync(
+            delivery,
+            ScopedResyncReason::ExplicitConsumerRequest,
+            observed_at,
+        )?;
+        Ok(ScopedObservationResyncTarget {
+            invalid_scope_epoch: required.invalid_scope_epoch,
+            required_control_sequence: required.control_sequence,
+        })
+    }
+
+    async fn wait_for_resync_target(
+        &self,
+        target: ScopedObservationResyncTarget,
+    ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        loop {
+            let (waiter, offered_through_sequence) = {
+                let drain = self.shared.lock_drain();
+                if let Some(barrier) = drain.engine_resync_barrier() {
+                    if barrier.scope_epoch > target.invalid_scope_epoch {
+                        if barrier.root != self.shared.host.root_identity
+                            || barrier.started_control_sequence <= target.required_control_sequence
+                        {
+                            return Err(ScopedContinuityError::InvalidControlIdentity);
+                        }
+                        return Ok(ScopedObservationResyncResolution::Ready(barrier));
+                    }
+                }
+                if let Some(failure) = drain.delivery_lane().observer_failure() {
+                    return Ok(ScopedObservationResyncResolution::Failed(failure));
+                }
+                if drain.is_closed()
+                    || self.shared.host.state.closed.load(Ordering::Acquire)
+                    || self.shared.host.lifecycle.is_closing()
+                {
+                    return Ok(ScopedObservationResyncResolution::Cancelled);
+                }
+                let state = drain.delivery_lane().state();
+                if state.scope_epoch < target.invalid_scope_epoch
+                    || matches!(
+                        state.continuity,
+                        ScopedObservationContinuity::Bootstrap | ScopedObservationContinuity::Valid
+                    )
+                {
+                    return Err(ScopedContinuityError::InvalidControlIdentity);
+                }
+                let waiter = drain.event_waiter();
+                let wake = waiter.snapshot();
+                if wake.closed {
+                    return Ok(ScopedObservationResyncResolution::Cancelled);
+                }
+                (waiter, wake.offered_through_sequence)
+            };
+            let _ = waiter.wait_after_async(offered_through_sequence).await;
+        }
+    }
+
     /// Request one logical exact-scope poll and await its request-local offered
     /// watermark. The watcher/runtime pass driver remains responsible for
     /// reserving and completing the corresponding bounded pass.
@@ -12815,6 +12950,22 @@ pub enum ScopedObservationReadyResolution {
     Ready(Arc<ScopedBootstrapBarrier>),
     Failed(Arc<ScopedObserverFailure>),
     Cancelled,
+}
+
+/// Engine-level completion of one explicit resync request. `Ready` means the
+/// replacement completion barrier was offered; consumer application remains
+/// separately owned by the event drain and its exact receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopedObservationResyncResolution {
+    Ready(Arc<ScopedResyncBarrier>),
+    Failed(Arc<ScopedObserverFailure>),
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopedObservationResyncTarget {
+    invalid_scope_epoch: u64,
+    required_control_sequence: u64,
 }
 
 #[derive(Debug, Clone)]

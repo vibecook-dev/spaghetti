@@ -228,15 +228,15 @@ pub(crate) mod tests {
         ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
-        ScopedObservationSourceOwnerBindingError, ScopedObservationSourceOwnerRetryPolicy,
-        ScopedObservationSourceOwnerRunError, ScopedObservationSourceOwnerRunExit,
-        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
-        ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
-        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
-        ScopedQueuedObservationFrame, ScopedReplacementMode, ScopedReplacementRepresentation,
-        ScopedReplacementStageError, ScopedResyncReason, ScopedRootIdentityRequest,
-        ScopedScopeRelationState, ScopedSourceFailureClass, ScopedSourceObjectFailureCode,
-        ScopedSourceObjectRetryState,
+        ScopedObservationResyncResolution, ScopedObservationSourceOwnerBindingError,
+        ScopedObservationSourceOwnerRetryPolicy, ScopedObservationSourceOwnerRunError,
+        ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
+        ScopedObservationStartupReconcileAction, ScopedObservationUnknownWireNegotiation,
+        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
+        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
+        ScopedResyncReason, ScopedRootIdentityRequest, ScopedScopeRelationState,
+        ScopedSourceFailureClass, ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
@@ -3278,6 +3278,263 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_explicit_resync_rejects_bootstrap_and_distinguishes_terminal_outcomes() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+
+        let bootstrap_host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("explicit-resync-bootstrap-root")),
+        )
+        .unwrap();
+        let bootstrap_runtime = ScopedObservationAsyncRuntime::open(
+            bootstrap_host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let bootstrap_handle = bootstrap_runtime.handle();
+        assert_eq!(
+            bootstrap_handle.resync_at(1).await.unwrap_err(),
+            ScopedContinuityError::BootstrapIncomplete
+        );
+        let bootstrap_state =
+            bootstrap_handle.with_attachment(|_, drain| drain.delivery_lane().state());
+        assert_eq!(
+            bootstrap_state.continuity,
+            ScopedObservationContinuity::Bootstrap
+        );
+        assert_eq!(bootstrap_state.offered_through_sequence, 0);
+        assert!(bootstrap_runtime.close().await.complete);
+
+        let (failed_runtime, failed_handle, failed_pair, _target, failed_drops) =
+            automatic_single_object_pair(
+                &registry,
+                temp.path().join("explicit-resync-failed-root"),
+                b"explicit-resync-failed-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .await;
+        let waiting_handle = failed_handle.clone();
+        let failed_wait = tokio::spawn(async move { waiting_handle.resync_at(10).await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if failed_handle
+                    .with_attachment(|_, drain| drain.delivery_lane().state().continuity)
+                    == ScopedObservationContinuity::ResyncRequired
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let failure = failed_handle
+            .fail_observer(ScopedObserverFailureReason::InternalControlFailure, 11)
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), failed_wait)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationResyncResolution::Failed(resolved)
+                if Arc::ptr_eq(&resolved, &failure)
+        ));
+        drop(failed_pair);
+        assert!(failed_runtime.close().await.complete);
+        assert_eq!(failed_drops.load(Ordering::SeqCst), 1);
+
+        let (closed_runtime, closed_handle, closed_pair, _target, closed_drops) =
+            automatic_single_object_pair(
+                &registry,
+                temp.path().join("explicit-resync-closed-root"),
+                b"explicit-resync-closed-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .await;
+        let waiting_handle = closed_handle.clone();
+        let cancelled_wait =
+            tokio::spawn(async move { waiting_handle.resync_at(20).await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if closed_handle
+                    .with_attachment(|_, drain| drain.delivery_lane().state().continuity)
+                    == ScopedObservationContinuity::ResyncRequired
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let close = closed_runtime.request_close();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_wait)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationResyncResolution::Cancelled
+        ));
+        drop(closed_pair);
+        assert!(close.wait_async().await.complete);
+        assert_eq!(closed_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn scoped_explicit_resync_coalesces_at_engine_barrier_before_application() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("explicit-resync-coalescing-root");
+        let (mut runtime, handle, pair, _target, drops) = automatic_single_object_pair(
+            &registry,
+            root,
+            b"explicit-resync-coalescing-session".to_vec(),
+            AppendDelimitedConfig::json_lines(),
+            128,
+            ScopedObservationSourceOwnerRetryPolicy::default(),
+        )
+        .await;
+
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
+        let first_handle = handle.clone();
+        let first = tokio::spawn(async move { first_handle.resync_at(70).await.unwrap() });
+        let second_handle = handle.clone();
+        let second = tokio::spawn(async move { second_handle.resync_at(71).await.unwrap() });
+
+        let first_result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = first_result else {
+            panic!("the explicit invalidation must retain the owner pair for replacement");
+        };
+        assert!(matches!(
+            handoff.source().exit(),
+            ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(invalidation)
+                if invalidation.control().unwrap().reason
+                    == ScopedResyncReason::ExplicitConsumerRequest
+        ));
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            || 80,
+            || 90,
+        ));
+        let required_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncRequired { control: required } =
+            &required_event.envelope.event
+        else {
+            panic!("explicit resync must first deliver its required control");
+        };
+        assert_eq!(required.reason, ScopedResyncReason::ExplicitConsumerRequest);
+        assert_eq!(required.invalid_scope_epoch, 1);
+        runtime
+            .acknowledge_applied(required_event.application_receipt())
+            .unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let state = handle.with_attachment(|_, drain| drain.delivery_lane().state());
+                if state.continuity == ScopedObservationContinuity::Resyncing {
+                    assert_eq!(state.scope_epoch, 2);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // This caller begins only after the replacement has started. Holding
+        // the started envelope in the drain prevents completion until the
+        // task has observed and joined that exact lineage.
+        let third_handle = handle.clone();
+        let third = tokio::spawn(async move { third_handle.resync_at(72).await.unwrap() });
+        tokio::task::yield_now().await;
+        assert!(!third.is_finished());
+        assert_eq!(
+            handle.with_attachment(|_, drain| drain.delivery_lane().state().continuity),
+            ScopedObservationContinuity::Resyncing
+        );
+
+        let started_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncStarted { control: started } =
+            &started_event.envelope.event
+        else {
+            panic!("the joined replacement must deliver one started control");
+        };
+        assert_eq!(started.old_scope_epoch, 1);
+        assert_eq!(started.new_scope_epoch, 2);
+        assert_eq!(started.required_control_sequence, required.control_sequence);
+        runtime
+            .acknowledge_applied(started_event.application_receipt())
+            .unwrap();
+
+        let completed_event = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } =
+            &completed_event.envelope.event
+        else {
+            panic!("the explicit replacement must offer one completion barrier");
+        };
+        assert_eq!(barrier.scope_epoch, 2);
+        assert_eq!(runtime.applied_state().resync_barrier_sequence, None);
+        assert!(handle
+            .with_attachment(|_, drain| drain.consumer_resync_barrier())
+            .is_none());
+        assert!(Arc::ptr_eq(
+            &handle
+                .with_attachment(|_, drain| drain.engine_resync_barrier())
+                .unwrap(),
+            barrier
+        ));
+
+        for resolution in [first, second, third] {
+            let resolution = tokio::time::timeout(std::time::Duration::from_secs(2), resolution)
+                .await
+                .unwrap()
+                .unwrap();
+            let ScopedObservationResyncResolution::Ready(resolved) = resolution else {
+                panic!("every coalesced caller must resolve from the offered barrier");
+            };
+            assert!(Arc::ptr_eq(&resolved, barrier));
+        }
+        assert_eq!(runtime.applied_state().resync_barrier_sequence, None);
+
+        runtime
+            .acknowledge_applied(completed_event.application_receipt())
+            .unwrap();
+        assert_eq!(
+            runtime.applied_state().resync_barrier_sequence,
+            Some(barrier.barrier_sequence)
+        );
+        assert!(Arc::ptr_eq(
+            &handle
+                .with_attachment(|_, drain| drain.consumer_resync_barrier())
+                .unwrap(),
+            barrier
+        ));
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        drop(pair);
+        assert!(runtime.close().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn scoped_async_owner_pair_retains_watcher_across_resync_and_rebinds_epoch() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
@@ -4096,6 +4353,9 @@ pub(crate) mod tests {
         handle
             .require_resync(ScopedResyncReason::WatcherOverflow, 70)
             .unwrap();
+        let joined_handle = handle.clone();
+        let joined_resync = tokio::spawn(async move { joined_handle.resync_at(71).await.unwrap() });
+        tokio::task::yield_now().await;
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
             .await
             .unwrap()
@@ -4145,6 +4405,7 @@ pub(crate) mod tests {
             .last_successful_position
             .as_ref()
             .is_some_and(|position| position.monotonic_order == Some(7)));
+        assert!(!joined_resync.is_finished());
 
         let reoverflow = handle
             .require_resync(ScopedResyncReason::TransportContinuityLoss, 95)
@@ -4196,6 +4457,16 @@ pub(crate) mod tests {
                     })
                 })
         }));
+        let ScopedObservationResyncResolution::Ready(joined_barrier) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), joined_resync)
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("the original waiter must survive re-overflow to the later epoch");
+        };
+        assert!(Arc::ptr_eq(&joined_barrier, barrier));
+        assert_eq!(joined_barrier.scope_epoch, 3);
         runtime
             .acknowledge_applied(completed.application_receipt())
             .unwrap();
