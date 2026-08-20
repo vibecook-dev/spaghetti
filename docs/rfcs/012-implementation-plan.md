@@ -2254,6 +2254,21 @@ Current landing status (2026-08-19):
   Parameterized database queries and object listings remain denied, and this
   adds no public N-API/SDK surface, concrete adapter dependency, dynamic scope,
   or reinterpretation of RFC 012D unknown-wire events; and
+- the explicit-resync future slice (`cf0bfa4`) now gives the existing
+  crate-private async attachment handle one clock-owned `resync()` operation.
+  A consumer can mint only `ExplicitConsumerRequest`; concurrent calls join
+  the exact sticky required or already-started lineage instead of advancing
+  another epoch. Resolution observes the engine-offered replacement barrier,
+  while the sole ordered event drain still owns delivery and application of
+  `observer.resync_required`, `observer.resync_started`, and
+  `observer.resync_complete`. A later re-overflow may satisfy the original
+  waiter only through its strictly newer completed epoch. Bootstrap-incomplete
+  requests do not mutate continuity, and terminal observer failure remains
+  distinct from close cancellation. Integrated owner-pair tests exercise all
+  of those boundaries without consuming the application receipt. This adds no
+  N-API/SDK method, caller clock or reason input, dynamic scope, source policy,
+  decoder-defined query/listing authority, or replacement-algorithm change;
+  and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
