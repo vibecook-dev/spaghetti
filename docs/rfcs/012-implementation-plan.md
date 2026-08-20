@@ -2952,6 +2952,24 @@ the contextual portable completion-barrier wire, dynamic discovered scope,
 non-append participants, executable task-artifact declaration, promoted
 support, public observer facade, and D4 transport remain open.
 
+The next bounded D3 scheduling slice (`76ca2ff`) closes duplicate live-watcher
+demand and cooperative executor starvation without claiming calibrated global
+pool policy. An attachment now retains its latest watcher poll ticket and
+atomically coalesces repeated callbacks only while that generation remains
+pending outside the reserved pass. A callback that arrives after pass
+reservation always receives a strictly later generation, so a read already in
+flight cannot falsely acknowledge the raced native change. After every
+successful bounded exact-scope pass, the source owner yields once before it may
+reserve another continuously pending generation. A current-thread two-observer
+test keeps one scope runnable by requesting a follow-up from every active pass
+and proves a sibling poll completes before the busy chain exhausts; the
+watcher-before-scan test separately proves duplicate pre-reservation callbacks
+share one completion while an in-flight callback is deferred to the next pass.
+This establishes the attachment-local scheduling quantum only. Shared
+access/decode worker permits, durable/catalog workload fairness, numeric
+latency ceilings, and a calibrated multi-observer performance report remain
+open D3/D5 gates.
+
 ### D4. SDK and Chopsticks migration
 
 Add a feature-flagged Chopsticks path beside `watchSessionTranscript`:
