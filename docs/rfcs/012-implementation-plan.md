@@ -2225,6 +2225,18 @@ Current landing status (2026-08-19):
   `ScopedKnownObjectGrant` diagnostics. No concrete adapter produces this
   event yet, and no N-API/SDK iterator, public attachment authority, native
   source read, or semantic reinterpretation is added; and
+- the runtime-bound contextual-close slice (`5f494a6`) now prepares one exact
+  attachment/root/selection-bound close command before the async runtime opens
+  its sole consumer drain and retains that command with the shared runtime
+  owner. Raw barrier close, contextual close, cloneable-handle close, and
+  drop-triggered cancellation all close that same drain through the retained
+  binding. Repeated and concurrent callers share one lifecycle barrier and
+  stable request identity; a strict receipt is available only after watcher
+  and native operations have acknowledged cancellation and the drain has
+  closed. The existing public shape is unchanged: the receipt remains
+  crate-private, `close()` has no N-API/SDK transport yet, and this adds no
+  source access, dynamic scope, unknown-event producer, or portable attachment
+  authority; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
