@@ -2937,6 +2937,11 @@ struct ScopedObservationWatcherStartupState {
     ordering: WatchBeforeScan,
     backend_installed: bool,
     reconcile_pass_active: bool,
+    /// The latest live watcher poll remains request-local to this attachment.
+    /// Repeated callbacks may share it only while it is still outside the
+    /// currently reserved pass; a callback racing an active pass must mint a
+    /// later generation so that source change cannot be falsely acknowledged.
+    live_poll: Option<ScopedObservationPollTicket>,
 }
 
 /// Attachment-owned synchronous orchestration for the watcher/bootstrap race.
@@ -4585,7 +4590,14 @@ impl ScopedObservationAsyncSourceOwner {
                 return exit;
             }
             match result {
-                Ok(_) => {}
+                Ok(_) => {
+                    // One exact-scope pass is the cooperative scheduling
+                    // quantum. A callback storm can keep another generation
+                    // permanently pending, so explicitly yield before trying
+                    // to reserve it. Numeric latency/worker-pool policy remains
+                    // a separate calibration gate.
+                    tokio::task::yield_now().await;
+                }
                 Err(error) if scoped_source_owner_error_is_cancelled(&error) => {
                     return ScopedObservationSourceOwnerRunExit::Cancelled;
                 }
@@ -14170,6 +14182,44 @@ impl ScopedObservationPollRuntime {
         if state.failure.is_some() {
             return Err(ScopedObservationPollError::ObserverFailed);
         }
+        self.issue_request_locked(&mut state)
+    }
+
+    /// Coalesce native watcher/audit demand only when the retained request is
+    /// still waiting outside the currently reserved pass. If the active pass
+    /// already covers that generation, a later generation is mandatory: the
+    /// callback may describe a change that raced the pass's native reads.
+    fn request_watcher_poll(
+        self: &Arc<Self>,
+        retained: Option<&ScopedObservationPollTicket>,
+    ) -> Result<ScopedObservationPollTicket, ScopedObservationPollError> {
+        let mut state = self.lock_state();
+        if state.closed {
+            return Err(ScopedObservationPollError::Closed);
+        }
+        if state.failure.is_some() {
+            return Err(ScopedObservationPollError::ObserverFailed);
+        }
+        if let Some(retained) = retained {
+            if !Arc::ptr_eq(&retained.runtime, self) {
+                return Err(ScopedObservationPollError::ForeignTicket);
+            }
+            let generation_is_pending =
+                retained.request_generation > state.completed_through_generation;
+            let generation_is_outside_active = state
+                .active
+                .is_none_or(|active| retained.request_generation > active.target_generation);
+            if generation_is_pending && generation_is_outside_active {
+                return Ok(retained.clone());
+            }
+        }
+        self.issue_request_locked(&mut state)
+    }
+
+    fn issue_request_locked(
+        self: &Arc<Self>,
+        state: &mut ScopedObservationPollRuntimeState,
+    ) -> Result<ScopedObservationPollTicket, ScopedObservationPollError> {
         state.requested_through_generation = state
             .requested_through_generation
             .checked_add(1)
@@ -14188,7 +14238,7 @@ impl ScopedObservationPollRuntime {
         state
             .pending_completions
             .insert(request_generation, Arc::downgrade(&completion));
-        self.publish_driver_resolution(&state);
+        self.publish_driver_resolution(state);
         Ok(ScopedObservationPollTicket {
             runtime: Arc::clone(self),
             completion,
@@ -14808,6 +14858,7 @@ impl ScopedObservationAccessHost {
                 ordering,
                 backend_installed: false,
                 reconcile_pass_active: false,
+                live_poll: None,
             })),
             registration,
         })
@@ -16640,8 +16691,11 @@ impl ScopedObservationWatcherOrchestrator {
                 Ok(ScopedObservationWatcherHintAction::Buffered(enqueue))
             }
             StartupAction::DeliverNow(hint) => {
-                drop(startup);
-                let ticket = host.request_poll()?;
+                let ticket = host
+                    .state
+                    .poll
+                    .request_watcher_poll(startup.live_poll.as_ref())?;
+                startup.live_poll = Some(ticket.clone());
                 Ok(ScopedObservationWatcherHintAction::PollRequested { hint, ticket })
             }
             StartupAction::Reconcile(_)

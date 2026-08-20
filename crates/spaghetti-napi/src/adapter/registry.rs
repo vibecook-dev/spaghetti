@@ -180,7 +180,7 @@ pub(crate) mod tests {
     use std::fs::OpenOptions;
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use tempfile::TempDir;
@@ -3954,6 +3954,111 @@ pub(crate) mod tests {
         assert_eq!(second_drops.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_busy_observer_yields_bounded_passes_before_sibling_starvation() {
+        const BUSY_PASS_LIMIT: usize = 128;
+
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let watcher_policy = || {
+            ScopedObservationNativeWatcherRecoveryPolicy::new(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                1,
+            )
+            .unwrap()
+        };
+        let source_policy = ScopedObservationSourceOwnerRetryPolicy::default();
+        let (busy_runtime, busy_handle, busy_pair, _, busy_drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("busy-observer-root"),
+                    b"busy-observer-session".to_vec(),
+                ),
+                b"busy-observer-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                source_policy,
+                watcher_policy(),
+            )
+            .await;
+        let (healthy_runtime, healthy_handle, healthy_pair, _, healthy_drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("healthy-observer-root"),
+                    b"healthy-observer-session".to_vec(),
+                ),
+                b"healthy-observer-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                source_policy,
+                watcher_policy(),
+            )
+            .await;
+
+        let busy_seed = busy_handle.host().request_poll().unwrap();
+        let healthy_poll = healthy_handle.host().request_poll().unwrap();
+        let busy_passes = Arc::new(AtomicUsize::new(0));
+        let keep_busy = Arc::new(AtomicBool::new(true));
+        let busy_clock_handle = busy_handle.clone();
+        let busy_clock_passes = Arc::clone(&busy_passes);
+        let busy_clock_enabled = Arc::clone(&keep_busy);
+        let busy_task = tokio::spawn(busy_pair.run_with_factory_and_clocks(
+            |_| Err(()),
+            || 100,
+            move || {
+                let pass = busy_clock_passes.fetch_add(1, Ordering::SeqCst) + 1;
+                if busy_clock_enabled.load(Ordering::SeqCst) && pass < BUSY_PASS_LIMIT {
+                    // This request is admitted while the current lease is
+                    // active, keeping a follow-up pass continuously runnable.
+                    let _ = busy_clock_handle.host().request_poll().unwrap();
+                }
+                100 + i64::try_from(pass).unwrap()
+            },
+        ));
+        let healthy_task =
+            tokio::spawn(healthy_pair.run_with_factory_and_clocks(|_| Err(()), || 200, || 201));
+
+        let healthy_watermark =
+            tokio::time::timeout(std::time::Duration::from_secs(2), healthy_poll.wait_async())
+                .await
+                .unwrap();
+        assert!(matches!(
+            healthy_watermark,
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        assert!(
+            busy_passes.load(Ordering::SeqCst) < BUSY_PASS_LIMIT,
+            "the healthy observer must run before one busy scope exhausts its continuously runnable pass chain"
+        );
+        keep_busy.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), busy_seed.wait_async())
+                .await
+                .unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+
+        let busy_close = busy_runtime.request_close();
+        let healthy_close = healthy_runtime.request_close();
+        let (busy_stopped, healthy_stopped) = tokio::join!(busy_task, healthy_task);
+        assert!(matches!(
+            busy_stopped.unwrap(),
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(matches!(
+            healthy_stopped.unwrap(),
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(busy_close.wait_async().await.complete);
+        assert!(healthy_close.wait_async().await.complete);
+        assert_eq!(busy_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(healthy_drops.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn scoped_async_owner_pair_retains_watcher_across_resync_and_rebinds_epoch() {
         let registry = stateful_supported_fixture_registry();
@@ -6976,7 +7081,47 @@ pub(crate) mod tests {
                 panic!("a post-barrier callback must schedule a live poll")
             }
         };
+        let duplicate_ticket = match startup
+            .record_hint(
+                &host,
+                DirtyHint {
+                    scope: DirtyScope::Object(b"root-object".to_vec()),
+                    reason: DirtyReason::NativeEvent,
+                },
+            )
+            .unwrap()
+        {
+            ScopedObservationWatcherHintAction::PollRequested { ticket, .. } => ticket,
+            ScopedObservationWatcherHintAction::Buffered(_) => {
+                panic!("a duplicate live callback must remain in live poll scheduling")
+            }
+        };
+        assert_eq!(
+            duplicate_ticket.request_generation(),
+            live_ticket.request_generation(),
+            "callbacks before pass reservation must share one exact-scope demand"
+        );
         let lease = host.begin_poll().unwrap().unwrap();
+        let during_pass_ticket = match startup
+            .record_hint(
+                &host,
+                DirtyHint {
+                    scope: DirtyScope::Object(b"root-object".to_vec()),
+                    reason: DirtyReason::NativeEvent,
+                },
+            )
+            .unwrap()
+        {
+            ScopedObservationWatcherHintAction::PollRequested { ticket, .. } => ticket,
+            ScopedObservationWatcherHintAction::Buffered(_) => {
+                panic!("a callback racing a live pass must schedule its follow-up")
+            }
+        };
+        assert_eq!(
+            during_pass_ticket.request_generation(),
+            live_ticket.request_generation() + 1,
+            "an active pass cannot acknowledge a callback that raced its reads"
+        );
         assert!(matches!(
             host.execute_epoch_poll_pass(lease, &mut active, &mut drain, &[]),
             Err(ScopedObservationPassExecutionError::InvalidRelationSet)
@@ -7050,6 +7195,13 @@ pub(crate) mod tests {
             ScopedObservationPollResolution::Ready(watermark)
                 if Arc::ptr_eq(&watermark, &live_watermark)
         ));
+        for coalesced in [&duplicate_ticket, &during_pass_ticket] {
+            assert!(matches!(
+                host.poll_resolution(coalesced).unwrap(),
+                ScopedObservationPollResolution::Ready(watermark)
+                    if Arc::ptr_eq(&watermark, &live_watermark)
+            ));
+        }
 
         // The created-source and bootstrap controls still fill the bounded
         // delivery lane. Admission may commit the later deletion cursor, but
