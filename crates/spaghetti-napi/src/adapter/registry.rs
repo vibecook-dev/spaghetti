@@ -3278,6 +3278,107 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_applied_ready_tracks_consumer_ack_failure_and_close() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+
+        let (applied_runtime, applied_handle, applied_pair, _target, applied_drops) =
+            automatic_single_object_pair(
+                &registry,
+                temp.path().join("applied-ready-complete-root"),
+                b"applied-ready-complete-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .await;
+        let expected = applied_handle
+            .with_attachment(|_, drain| drain.consumer_bootstrap_barrier())
+            .unwrap();
+        assert!(matches!(
+            applied_handle.ready_applied().await.unwrap(),
+            ScopedObservationReadyResolution::Ready(barrier)
+                if Arc::ptr_eq(&barrier, &expected)
+        ));
+        applied_handle
+            .fail_observer(ScopedObserverFailureReason::InternalControlFailure, 9)
+            .unwrap();
+        assert!(matches!(
+            applied_handle.ready_applied().await.unwrap(),
+            ScopedObservationReadyResolution::Ready(barrier)
+                if Arc::ptr_eq(&barrier, &expected)
+        ));
+        drop(applied_pair);
+        assert!(applied_runtime.close().await.complete);
+        assert_eq!(applied_drops.load(Ordering::SeqCst), 1);
+
+        let failed_host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("applied-ready-failed-root")),
+        )
+        .unwrap();
+        let failed_runtime = ScopedObservationAsyncRuntime::open(
+            failed_host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let failed_handle = failed_runtime.handle();
+        let failed_wait = failed_handle.ready_applied();
+        tokio::pin!(failed_wait);
+        tokio::select! {
+            biased;
+            resolution = &mut failed_wait => {
+                panic!("consumer readiness resolved before application or failure: {resolution:?}");
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+        let failure = failed_handle
+            .fail_observer(ScopedObserverFailureReason::InternalControlFailure, 10)
+            .unwrap();
+        assert!(matches!(
+            failed_wait.await.unwrap(),
+            ScopedObservationReadyResolution::Failed(resolved)
+                if Arc::ptr_eq(&resolved, &failure)
+        ));
+        assert!(failed_runtime.close().await.complete);
+
+        let closed_host = ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(temp.path().join("applied-ready-closed-root")),
+        )
+        .unwrap();
+        let closed_runtime = ScopedObservationAsyncRuntime::open(
+            closed_host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            },
+        )
+        .unwrap();
+        let closed_handle = closed_runtime.handle();
+        let cancelled_wait = closed_handle.ready_applied();
+        tokio::pin!(cancelled_wait);
+        tokio::select! {
+            biased;
+            resolution = &mut cancelled_wait => {
+                panic!("consumer readiness resolved before application or close: {resolution:?}");
+            }
+            _ = tokio::task::yield_now() => {}
+        }
+        let close = closed_runtime.request_close();
+        assert!(matches!(
+            cancelled_wait.await.unwrap(),
+            ScopedObservationReadyResolution::Cancelled
+        ));
+        assert!(close.wait_async().await.complete);
+    }
+
+    #[tokio::test]
     async fn scoped_explicit_resync_rejects_bootstrap_and_distinguishes_terminal_outcomes() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();

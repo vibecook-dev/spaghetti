@@ -3254,6 +3254,7 @@ pub struct ScopedObservationConsumerDrain {
     last_applied: Option<ScopedObservationApplicationReceipt>,
     bootstrap_barrier: Option<Arc<ScopedBootstrapBarrier>>,
     resync_barrier: Option<Arc<ScopedResyncBarrier>>,
+    applied_ready: Arc<ScopedObservationReadyCompletion>,
     lifecycle_registered: bool,
     closed: bool,
 }
@@ -3304,6 +3305,7 @@ impl ScopedObservationConsumerDrain {
             last_applied: None,
             bootstrap_barrier: None,
             resync_barrier: None,
+            applied_ready: Arc::new(ScopedObservationReadyCompletion::default()),
             lifecycle_registered: false,
             closed: false,
         })
@@ -3578,16 +3580,17 @@ impl ScopedObservationConsumerDrain {
             .expect("validated scoped application remains pending");
         self.applied_through_sequence = pending.receipt.observer_sequence;
         self.applied_scope_epoch = Some(pending.receipt.scope_epoch);
+        self.last_applied = Some(pending.receipt);
         match pending.boundary {
             ScopedObservationAppliedBoundary::None => {}
             ScopedObservationAppliedBoundary::Bootstrap(barrier) => {
-                self.bootstrap_barrier = Some(barrier);
+                self.bootstrap_barrier = Some(Arc::clone(&barrier));
+                self.applied_ready.complete(barrier);
             }
             ScopedObservationAppliedBoundary::Resync(barrier) => {
                 self.resync_barrier = Some(barrier);
             }
         }
-        self.last_applied = Some(pending.receipt);
         Ok(self.state())
     }
 
@@ -3613,6 +3616,12 @@ impl ScopedObservationConsumerDrain {
 
     pub fn consumer_bootstrap_barrier(&self) -> Option<Arc<ScopedBootstrapBarrier>> {
         self.bootstrap_barrier.as_ref().map(Arc::clone)
+    }
+
+    fn applied_ready_waiter(&self) -> ScopedObservationReadyWaiter {
+        ScopedObservationReadyWaiter {
+            completion: Arc::clone(&self.applied_ready),
+        }
     }
 
     pub fn consumer_resync_barrier(&self) -> Option<Arc<ScopedResyncBarrier>> {
@@ -3661,6 +3670,7 @@ impl ScopedObservationConsumerDrain {
         if !self.closed {
             self.closed = true;
             self.pending = None;
+            self.applied_ready.cancel();
             self.delivery.discard_for_close();
             if self.lifecycle_registered {
                 self.lifecycle_registered = false;
@@ -3805,6 +3815,7 @@ impl ScopedObservationAsyncHandle {
         )?;
         self.shared.host.state.poll.fail(Arc::clone(&failure));
         self.shared.host.state.ready.fail(Arc::clone(&failure));
+        drain.applied_ready.fail(Arc::clone(&failure));
         Ok(failure)
     }
 
@@ -3961,6 +3972,26 @@ impl ScopedObservationAsyncHandle {
         &self,
     ) -> Result<ScopedObservationReadyResolution, ScopedObservationPollError> {
         let waiter = self.shared.host.ready_waiter()?;
+        Ok(waiter.wait_async().await)
+    }
+
+    /// Await the bootstrap barrier only after the sole event drain has
+    /// delivered it and acknowledged successful consumer application. This
+    /// observes the application boundary; it does not consume an envelope or
+    /// apply consumer state on the caller's behalf.
+    pub async fn ready_applied(
+        &self,
+    ) -> Result<ScopedObservationReadyResolution, ScopedObservationPollError> {
+        let waiter = {
+            let drain = self.shared.lock_drain();
+            if drain.is_closed()
+                || self.shared.host.state.closed.load(Ordering::Acquire)
+                || self.shared.host.lifecycle.is_closing()
+            {
+                return Err(ScopedObservationPollError::Closed);
+            }
+            drain.applied_ready_waiter()
+        };
         Ok(waiter.wait_async().await)
     }
 
@@ -21655,6 +21686,11 @@ mod projection_tests {
             change: creation,
         };
         let mut drain = consumer_drain(root.clone(), 1, 2);
+        let applied_ready = drain.applied_ready_waiter();
+        assert_eq!(
+            applied_ready.resolution(),
+            ScopedObservationReadyResolution::Pending
+        );
         drain
             .delivery_lane_mut()
             .offer(vec![bootstrap_presence.clone()])
@@ -21684,6 +21720,10 @@ mod projection_tests {
             )
             .unwrap();
         assert_eq!(engine_barrier.barrier_sequence, 2);
+        assert_eq!(
+            applied_ready.resolution(),
+            ScopedObservationReadyResolution::Pending
+        );
         assert!(Arc::ptr_eq(
             &drain.engine_bootstrap_barrier().unwrap(),
             &engine_barrier
@@ -21742,6 +21782,10 @@ mod projection_tests {
         assert_eq!(applied_first.applied_through_sequence, 1);
         assert_eq!(applied_first.pending_sequence, None);
         assert_eq!(
+            applied_ready.resolution(),
+            ScopedObservationReadyResolution::Pending
+        );
+        assert_eq!(
             drain.acknowledge_applied(&first_receipt).unwrap(),
             applied_first
         );
@@ -21763,6 +21807,10 @@ mod projection_tests {
         );
         let complete_receipt = complete.application_receipt().clone();
         assert!(drain.consumer_bootstrap_barrier().is_none());
+        assert_eq!(
+            applied_ready.resolution(),
+            ScopedObservationReadyResolution::Pending
+        );
         // A retry of the previous acknowledgement is harmless and cannot skip
         // the currently pending completion barrier.
         assert_eq!(
@@ -21777,7 +21825,18 @@ mod projection_tests {
             &drain.consumer_bootstrap_barrier().unwrap(),
             &engine_barrier
         ));
+        assert!(matches!(
+            applied_ready.resolution(),
+            ScopedObservationReadyResolution::Ready(barrier)
+                if Arc::ptr_eq(&barrier, &engine_barrier)
+        ));
         assert!(drain.next().unwrap().is_none());
+        drain.close();
+        assert!(matches!(
+            applied_ready.resolution(),
+            ScopedObservationReadyResolution::Ready(barrier)
+                if Arc::ptr_eq(&barrier, &engine_barrier)
+        ));
     }
 
     #[test]
