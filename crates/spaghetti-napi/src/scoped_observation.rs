@@ -18715,8 +18715,10 @@ mod projection_tests {
         QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
         UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
     };
+    use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
     use crate::source::RecordOrigin;
 
+    use super::actor_wire::ScopedActorEnvelopeWire;
     use super::usage_wire::ScopedUsageEnvelopeWire;
     use super::*;
 
@@ -20942,6 +20944,514 @@ mod projection_tests {
         }
         assert_ne!(affiliation_event_ids[0], affiliation_event_ids[1]);
         assert_ne!(actor_event_ids[0], actor_event_ids[1]);
+    }
+
+    const RFC012C_RUNTIME_V1: &str = include_str!("../fixtures/contracts/rfc012c-runtime-v1.json");
+
+    fn rfc012c_fixture() -> RuntimeContractFixtureWire {
+        serde_json::from_str(&parse_rfc012c_runtime_v1_json(RFC012C_RUNTIME_V1).unwrap()).unwrap()
+    }
+
+    fn rfc012c_semantic_context() -> FactSemanticContext {
+        FactSemanticContext::new(
+            &AdapterId::new("fixture-adapter").unwrap(),
+            1,
+            b"fixture-source-instance",
+            b"transcript",
+            b"session.jsonl",
+            1,
+        )
+        .unwrap()
+    }
+
+    fn rfc012c_record(start: u64, end: u64, observed_at: i64) -> SourceRecord {
+        SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 1,
+                stream_id: 2,
+                object_id: 3,
+                observed_at,
+                source_timestamp_hint: None,
+                media_type: SourceMediaType::new("application/json").unwrap(),
+            },
+            1,
+            SourceCursor::append_offset(start),
+            SourceCursor::append_offset(end),
+            0,
+            b"{}".to_vec(),
+        )
+    }
+
+    fn rfc012c_source_identity() -> ScopedSourceObjectIdentity {
+        ScopedSourceObjectIdentity::from_semantic_context(&rfc012c_semantic_context()).unwrap()
+    }
+
+    fn rfc012c_root_identity(
+        fixture: &RuntimeContractFixtureWire,
+    ) -> ScopedObservationRootIdentity {
+        let context = rfc012c_semantic_context();
+        let session_key = fixture.source.session.entity_key;
+        let session_ref = fixture.source.session.external_ref;
+        let identity: QualifiedValue<NativeIdentity> = QualifiedValue::from_parts(
+            Some(NativeIdentity {
+                native_namespace: "fixture.session".to_string(),
+                native_id: fixture.source.session.native_session_id.clone(),
+            }),
+            QualifiedValueQuality::NativeClaimed,
+            "fixture".to_string(),
+            ContractCompleteness::Complete,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let root = ScopedRootIdentityRequest::new(
+            1,
+            b"fixture-source-instance".as_slice(),
+            fixture.source.session.native_session_id.as_bytes(),
+            Some(Arc::<[u8]>::from(b"fixture-root-actor".as_slice())),
+            Some(session_key),
+            Some(session_ref),
+        )
+        .with_native_session_claim(NativeIdentityClaim::new(session_ref, identity).unwrap())
+        .resolve(context.adapter_id(), EXTERNAL_ENTITY_REFERENCE_VERSION)
+        .unwrap();
+        assert_eq!(root.session_key, fixture.source.session.entity_key);
+        assert_eq!(
+            root.root_actor_run_key,
+            fixture.actors.root.revision.actor_run
+        );
+        root
+    }
+
+    fn rfc012c_decoded_frame(
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        record: &SourceRecord,
+        batch: FactBatch,
+    ) -> ScopedQueuedObservationFrame {
+        ScopedQueuedObservationFrame::Decoded {
+            object_token: OBJECT_TOKEN,
+            source: rfc012c_source_identity(),
+            lane_ordinal,
+            phase,
+            item: Box::new(ScopedDecodedAppendItem::Record {
+                evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
+                disposition: DecodeDisposition::Applied,
+                batch,
+                quarantined: false,
+            }),
+        }
+    }
+
+    fn rfc012c_initial_batch(
+        fixture: &RuntimeContractFixtureWire,
+        record: &SourceRecord,
+    ) -> FactBatch {
+        let mut batch =
+            FactBatch::new_with_semantic_context(8, 2, rfc012c_semantic_context()).unwrap();
+        batch
+            .push_native(
+                record,
+                b"fixture-root-actor",
+                Fact::ActorRunRevision(fixture.actors.root.revision.clone()),
+            )
+            .unwrap();
+        batch
+            .push_native(
+                record,
+                b"fixture-child-actor",
+                Fact::ActorRunRevision(fixture.actors.child.revision.clone()),
+            )
+            .unwrap();
+        batch
+            .push_native(
+                record,
+                b"fixture-child-actor/team/fixture-team-1",
+                Fact::ActorAffiliationRevision(
+                    fixture.affiliations.child_team_present.revision.clone(),
+                ),
+            )
+            .unwrap();
+        batch
+            .push_native(
+                record,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(
+                    fixture.affiliations.child_workflow_present.revision.clone(),
+                ),
+            )
+            .unwrap();
+        let usage = &fixture.usage.response_revisions.a;
+        let usage_key = usage.revision.semantic_revision_key().unwrap();
+        batch
+            .push_native_object_scoped_with_revision(
+                record,
+                &usage.revision.response_key,
+                &usage_key,
+                Fact::UsageRevisionV2(usage.revision.clone()),
+            )
+            .unwrap();
+        batch
+    }
+
+    #[test]
+    fn rfc012c_fixture_identities_survive_selected_scoped_envelopes() {
+        let fixture = rfc012c_fixture();
+        let root = rfc012c_root_identity(&fixture);
+        let mut projection = multi_family_sink(8);
+        let first = rfc012c_record(0, 3, 4);
+        let projected = projection
+            .project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &first,
+                rfc012c_initial_batch(&fixture, &first),
+            ))
+            .unwrap();
+        assert_eq!(projected.len(), 5);
+
+        let mut actor_refs = BTreeMap::new();
+        let mut affiliation_refs = BTreeMap::new();
+        let mut usage_refs = Vec::new();
+        for item in &projected {
+            match item {
+                ScopedProjectedObservation::ActorRun { event, .. } => {
+                    actor_refs.insert(event.revision.actor_run, event.semantic_revision_ref);
+                    assert_eq!(event.operation, ScopedRevisionedEntityOperation::Upsert);
+                    assert_eq!(
+                        event.fact_id,
+                        if event.revision.role == ActorRunRole::Root {
+                            fixture.actors.root.fact_id
+                        } else {
+                            fixture.actors.child.fact_id
+                        }
+                    );
+                }
+                ScopedProjectedObservation::ActorAffiliation { event, .. } => {
+                    affiliation_refs
+                        .insert(event.revision.affiliation, event.semantic_revision_ref);
+                    assert_eq!(event.operation, ScopedRevisionedEntityOperation::Upsert);
+                }
+                ScopedProjectedObservation::UsageV2 { event, .. } => {
+                    usage_refs.push(event.semantic_revision_ref);
+                    assert_eq!(event.fact_id, fixture.usage.response_revisions.a.fact_id);
+                    assert_eq!(event.operation, ScopedUsageV2Operation::Upsert);
+                }
+                other => panic!("unexpected projected event {other:?}"),
+            }
+        }
+        assert_eq!(
+            actor_refs.get(&fixture.actors.root.revision.actor_run),
+            Some(&fixture.actors.root.semantic_revision_ref)
+        );
+        assert_eq!(
+            actor_refs.get(&fixture.actors.child.revision.actor_run),
+            Some(&fixture.actors.child.semantic_revision_ref)
+        );
+        assert_eq!(
+            affiliation_refs.get(&fixture.affiliations.child_team_present.revision.affiliation),
+            Some(
+                &fixture
+                    .affiliations
+                    .child_team_present
+                    .semantic_revision_ref
+            )
+        );
+        assert_eq!(
+            affiliation_refs.get(
+                &fixture
+                    .affiliations
+                    .child_workflow_present
+                    .revision
+                    .affiliation
+            ),
+            Some(
+                &fixture
+                    .affiliations
+                    .child_workflow_present
+                    .semantic_revision_ref
+            )
+        );
+        assert_eq!(
+            usage_refs.as_slice(),
+            [fixture.usage.response_revisions.a.semantic_revision_ref]
+        );
+
+        let mapper = ScopedObservationEnvelopeMapper::new(
+            root.clone(),
+            multi_family_observation_contract_selection(),
+        );
+        let mut delivery = delivery_lane(5, 1);
+        delivery.offer(projected.clone()).unwrap();
+        let mut mapped_privacy = String::new();
+        for _ in 0..5 {
+            let envelope = mapper.map(delivery.pop_next().unwrap()).unwrap();
+            assert_eq!(envelope.root.session_key, fixture.source.session.entity_key);
+            mapped_privacy.push_str(&format!("{envelope:?}"));
+            match &envelope.event {
+                ScopedObservationEvent::ActorRun { revision, .. }
+                    if revision.actor_run == fixture.actors.child.revision.actor_run =>
+                {
+                    assert_eq!(
+                        envelope.semantic_revision_ref,
+                        Some(fixture.actors.child.semantic_revision_ref)
+                    );
+                    let wire = ScopedActorEnvelopeWire::from_scoped(&envelope).unwrap();
+                    let encoded = serde_json::to_string(&wire).unwrap();
+                    assert!(!encoded.contains("/Users/"));
+                    assert!(!encoded.contains("/Volumes/"));
+                    assert!(!encoded.contains("~/.claude"));
+                }
+                ScopedObservationEvent::UsageV2 { .. } => {
+                    assert_eq!(
+                        envelope.semantic_revision_ref,
+                        Some(fixture.usage.response_revisions.a.semantic_revision_ref)
+                    );
+                    assert!(ScopedUsageEnvelopeWire::from_scoped(&envelope).is_ok());
+                }
+                _ => {}
+            }
+        }
+        assert!(!mapped_privacy.contains("/Users/"));
+        assert!(!mapped_privacy.contains("/Volumes/"));
+
+        let correction = rfc012c_record(3, 6, 5);
+        let mut correction_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let usage_b = &fixture.usage.response_revisions.b;
+        let usage_b_key = usage_b.revision.semantic_revision_key().unwrap();
+        correction_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_b.revision.response_key,
+                &usage_b_key,
+                Fact::UsageRevisionV2(usage_b.revision.clone()),
+            )
+            .unwrap();
+        let corrected = projection
+            .project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &correction,
+                correction_batch,
+            ))
+            .unwrap();
+        assert_eq!(corrected.len(), 1);
+        match &corrected[0] {
+            ScopedProjectedObservation::UsageV2 { event, .. } => {
+                assert_eq!(event.fact_id, fixture.usage.response_revisions.a.fact_id);
+                assert_eq!(
+                    event.semantic_revision_ref,
+                    fixture.usage.response_revisions.b.semantic_revision_ref
+                );
+                assert_ne!(
+                    event.semantic_revision_ref,
+                    fixture.usage.response_revisions.a.semantic_revision_ref
+                );
+            }
+            other => panic!("expected usage correction, got {other:?}"),
+        }
+
+        let removed_record = rfc012c_record(6, 9, 6);
+        let mut removed_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        removed_batch
+            .push_native(
+                &removed_record,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(
+                    fixture.affiliations.child_workflow_removed.revision.clone(),
+                ),
+            )
+            .unwrap();
+        let removed = projection
+            .project(&rfc012c_decoded_frame(
+                3,
+                ScopedAppendDeliveryPhase::Live,
+                &removed_record,
+                removed_batch,
+            ))
+            .unwrap();
+        assert_eq!(removed.len(), 1);
+        match &removed[0] {
+            ScopedProjectedObservation::ActorAffiliation { event, .. } => {
+                assert_eq!(
+                    event.fact_id,
+                    fixture.affiliations.child_workflow_present.fact_id
+                );
+                assert_eq!(
+                    event.semantic_revision_ref,
+                    fixture
+                        .affiliations
+                        .child_workflow_removed
+                        .semantic_revision_ref
+                );
+                assert_eq!(event.operation, ScopedRevisionedEntityOperation::Upsert);
+            }
+            other => panic!("expected affiliation state correction, got {other:?}"),
+        }
+
+        let actors = projection
+            .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let affiliations = projection
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let usage = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(actors.entity_count, 2);
+        assert_eq!(affiliations.entity_count, 2);
+        assert_eq!(usage.entity_count, 1);
+        assert_eq!(
+            usage.events[0].semantic_revision_ref,
+            fixture.usage.response_revisions.b.semantic_revision_ref
+        );
+
+        let complete_coverage = vec![
+            empty_family_coverage_for_root(
+                &root,
+                "runtime.actor-affiliation",
+                RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
+                CoverageSetCompleteness::Complete,
+            ),
+            empty_family_coverage_for_root(
+                &root,
+                "runtime.actor-run",
+                RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+                CoverageSetCompleteness::Complete,
+            ),
+            empty_family_coverage_for_root(
+                &root,
+                "runtime.usage-v2",
+                RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+                CoverageSetCompleteness::Complete,
+            ),
+        ];
+        let complete_manifest = selected_replacement_family_manifest(
+            &multi_family_observation_contract_selection().contract_versions,
+            &usage,
+            Some(&actors),
+            Some(&affiliations),
+            &complete_coverage,
+        )
+        .unwrap();
+        assert_eq!(
+            complete_manifest
+                .iter()
+                .map(|family| (family.fact_family.as_str(), family.entity_or_event_count))
+                .collect::<Vec<_>>(),
+            vec![
+                ("runtime.actor-affiliation", 2),
+                ("runtime.actor-run", 2),
+                ("runtime.usage-v2", 1),
+            ]
+        );
+
+        let mut partial_coverage = complete_coverage.clone();
+        partial_coverage[1] = empty_family_coverage_for_root(
+            &root,
+            "runtime.actor-run",
+            RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+            CoverageSetCompleteness::Partial,
+        );
+        let partial_manifest = selected_replacement_family_manifest(
+            &multi_family_observation_contract_selection().contract_versions,
+            &usage,
+            Some(&actors),
+            Some(&affiliations),
+            &partial_coverage,
+        )
+        .unwrap();
+        assert_eq!(
+            partial_manifest[1].completeness,
+            CoverageSetCompleteness::Partial
+        );
+        assert_eq!(partial_manifest[1].entity_or_event_count, 2);
+
+        assert!(
+            projection.supports_coverage_domain(&CoverageDomain::FactFamily {
+                family: "runtime.actor-run".to_string(),
+                version: RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+            })
+        );
+        assert!(
+            projection.supports_coverage_domain(&CoverageDomain::FactFamily {
+                family: "runtime.actor-affiliation".to_string(),
+                version: RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
+            })
+        );
+        assert!(
+            projection.supports_coverage_domain(&CoverageDomain::FactFamily {
+                family: "runtime.usage-v2".to_string(),
+                version: RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+            })
+        );
+
+        let retracted = projection
+            .project(&ScopedQueuedObservationFrame::Reset {
+                object_token: OBJECT_TOKEN,
+                source: rfc012c_source_identity(),
+                lane_ordinal: 4,
+                observed_at: 88,
+                phase: ScopedAppendDeliveryPhase::Correction,
+                reset: ScopedAppendReset {
+                    old_generation: 1,
+                    new_generation: 2,
+                    reason: AppendTransition::Truncated,
+                },
+            })
+            .unwrap();
+        let mut retracted_usage = None;
+        let mut retracted_actor = None;
+        for item in &retracted {
+            match item {
+                ScopedProjectedObservation::UsageV2 { event, .. }
+                    if event.operation == ScopedUsageV2Operation::Retract =>
+                {
+                    retracted_usage = Some(event.semantic_revision_ref);
+                    assert_eq!(
+                        event.semantic_revision_ref,
+                        fixture.usage.response_revisions.b.semantic_revision_ref
+                    );
+                }
+                ScopedProjectedObservation::ActorRun { event, .. }
+                    if event.revision.actor_run == fixture.actors.child.revision.actor_run =>
+                {
+                    retracted_actor = Some(event.semantic_revision_ref);
+                    assert_eq!(event.operation, ScopedRevisionedEntityOperation::Retract);
+                    assert_eq!(
+                        event.semantic_revision_ref,
+                        fixture.actors.child.semantic_revision_ref
+                    );
+                }
+                _ => {}
+            }
+        }
+        assert!(retracted_usage.is_some());
+        assert!(retracted_actor.is_some());
+        assert_eq!(
+            projection
+                .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap()
+                .entity_count,
+            0
+        );
+        assert_eq!(
+            projection
+                .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap()
+                .entity_count,
+            0
+        );
+        assert_eq!(
+            projection
+                .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap()
+                .entity_count,
+            0
+        );
     }
 
     #[test]
