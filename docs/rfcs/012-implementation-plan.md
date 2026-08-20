@@ -2965,10 +2965,27 @@ test keeps one scope runnable by requesting a follow-up from every active pass
 and proves a sibling poll completes before the busy chain exhausts; the
 watcher-before-scan test separately proves duplicate pre-reservation callbacks
 share one completion while an in-flight callback is deferred to the next pass.
-This establishes the attachment-local scheduling quantum only. Shared
-access/decode worker permits, durable/catalog workload fairness, numeric
-latency ceilings, and a calibrated multi-observer performance report remain
-open D3/D5 gates.
+This establishes the attachment-local scheduling quantum only. Cross-workload
+shared access/decode worker integration, durable/catalog workload fairness,
+numeric latency ceilings, and a calibrated multi-observer performance report
+remain open D3/D5 gates.
+
+The follow-on D3 permit slice (`9402172`) adds a real caller-owned shared
+capacity domain around bounded observer source passes. Multiple async runtimes
+may now receive the same fair semaphore pool, while the compatibility `open`
+path retains one attachment-local permit. A source owner reserves its logical
+poll first, then must acquire shared capacity before observation time, native
+access, or decode; attachment close cancels that wait, and continuity is
+revalidated after acquisition before any read. Permit capacity rejects zero
+and values above the runtime semaphore bound, cannot be resized by an attached
+scope, and is released before delivery backpressure or the cooperative
+post-pass yield. A one-permit two-observer matrix keeps one scope continuously
+runnable while the sibling completes, and a separately held-permit case proves
+that close cancels the queued owner with its poll unresolved, performs no
+native pass, and leaks no permit. This closes shared capacity across current
+scoped observers only. Durable live tails and catalog work do not yet enter
+this pool, and numeric permit counts, latency/starvation ceilings, the retained
+performance report, public host wiring, and D5 ratification remain open.
 
 ### D4. SDK and Chopsticks migration
 
