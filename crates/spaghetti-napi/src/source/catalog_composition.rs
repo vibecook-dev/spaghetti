@@ -14,7 +14,7 @@ use serde::{Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 
 use crate::adapter::{
-    AuthorizedCatalogAccess, CanonicalSourceInstanceKey, CompatibilityClass,
+    AuthorizedCatalogAccess, CanonicalEntityKey, CanonicalSourceInstanceKey, CompatibilityClass,
     ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
     CoverageDomain, CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
     CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, SourceCoveragePoint,
@@ -49,11 +49,11 @@ const MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WINDOW_RECORDS: u32 = 4_096;
 const MAX_CONFORMANCE_RECORDS: usize = 1_000_000;
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_MEMBERSHIP_MEMBERS: usize = 1_000_000;
+pub(crate) const MAX_MEMBERSHIP_MEMBERS: usize = 1_000_000;
 const MAX_SEMANTIC_IDENTITY_BYTES: usize = 64 * 1024;
 // These are the RFC 012A portable set caps, not source-performance targets.
-const MAX_CATALOG_COVERAGE_POINTS: usize = 250_000;
-const MAX_CATALOG_COVERAGE_ABSENCES: usize = 250_000;
+pub(crate) const MAX_CATALOG_COVERAGE_POINTS: usize = 250_000;
+pub(crate) const MAX_CATALOG_COVERAGE_ABSENCES: usize = 250_000;
 const MAX_PORTABLE_GENERATION: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -63,7 +63,7 @@ pub(crate) struct CatalogCompositionError {
 }
 
 impl CatalogCompositionError {
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -153,7 +153,6 @@ fn canonicalize_unique_strings(
     Ok(())
 }
 
-#[cfg(test)]
 fn digest_contract(domain: &[u8], components: &[&[u8]]) -> [u8; DIGEST_BYTES] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"spaghetti/rfc012b/catalog-source-contract\0");
@@ -195,7 +194,7 @@ macro_rules! opaque_digest_type {
                 Self(bytes)
             }
 
-            fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
+            pub(crate) fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
                 &self.0
             }
         }
@@ -252,7 +251,7 @@ impl CatalogComponentCompletionRevision {
         Self(bytes)
     }
 
-    fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
+    pub(crate) fn as_bytes(&self) -> &[u8; DIGEST_BYTES] {
         &self.0
     }
 }
@@ -392,8 +391,31 @@ impl CatalogCompositionBinding {
 }
 
 impl CatalogMemberRef {
-    /// Derives an opaque member reference from an already-canonical semantic
-    /// identity. Native locators must not be supplied as the semantic identity.
+    /// Derives an opaque catalog member from a typed canonical session
+    /// identity: adapter, canonical source instance, and native session ID.
+    /// Project reassociation cannot retarget this reference.
+    pub(crate) fn from_canonical_session(
+        member_identity_contract_id: &str,
+        adapter_id: &str,
+        source_instance_key: CanonicalSourceInstanceKey,
+        native_session_id: &[u8],
+    ) -> Result<Self, CatalogCompositionError> {
+        validate_identifier("member_identity_contract_id", member_identity_contract_id)?;
+        let session = CanonicalEntityKey::derive(
+            adapter_id,
+            &source_instance_key,
+            "session",
+            native_session_id,
+        )
+        .map_err(|_| CatalogCompositionError::invalid("canonical session identity is invalid"))?;
+        Ok(Self::from_digest(digest_contract(
+            b"member-ref-v1",
+            &[member_identity_contract_id.as_bytes(), session.as_bytes()],
+        )))
+    }
+
+    /// Test-only construction from an already-canonical opaque identity.
+    /// Production membership must use [`Self::from_canonical_session`].
     #[cfg(test)]
     fn fixture_from_semantic_identity(
         member_identity_contract_id: &str,
@@ -457,8 +479,8 @@ impl CatalogOverlapStrategy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct CatalogDiscoveryBounds {
-    max_entries: u32,
-    max_depth: u32,
+    pub(crate) max_entries: u32,
+    pub(crate) max_depth: u32,
 }
 
 impl CatalogDiscoveryBounds {
@@ -699,20 +721,20 @@ impl CatalogContribution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CatalogSourceComponent {
-    component_id: String,
-    stream_id: String,
-    root_id: String,
-    relative_selectors: Vec<String>,
-    discovery_bounds: CatalogDiscoveryBounds,
-    primitive: CatalogSourcePrimitive,
-    contribution: CatalogContribution,
-    overlap_strategy: CatalogOverlapStrategy,
-    safe_decoder_state_boundary: CatalogDecoderStateBoundary,
-    source_record_contract_version: u32,
-    framing_contract_version: u32,
-    decoder_contract_id: String,
-    decoder_contract_version: u32,
-    disposition_ownership: Vec<String>,
+    pub(crate) component_id: String,
+    pub(crate) stream_id: String,
+    pub(crate) root_id: String,
+    pub(crate) relative_selectors: Vec<String>,
+    pub(crate) discovery_bounds: CatalogDiscoveryBounds,
+    pub(crate) primitive: CatalogSourcePrimitive,
+    pub(crate) contribution: CatalogContribution,
+    pub(crate) overlap_strategy: CatalogOverlapStrategy,
+    pub(crate) safe_decoder_state_boundary: CatalogDecoderStateBoundary,
+    pub(crate) source_record_contract_version: u32,
+    pub(crate) framing_contract_version: u32,
+    pub(crate) decoder_contract_id: String,
+    pub(crate) decoder_contract_version: u32,
+    pub(crate) disposition_ownership: Vec<String>,
 }
 
 impl CatalogSourceComponent {
@@ -1011,6 +1033,30 @@ impl CatalogSourceComposition {
         CatalogCompositionId::from_digest(*hasher.finalize().as_bytes())
     }
 
+    pub(crate) fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
+
+    pub(crate) fn support_release_id(&self) -> &str {
+        &self.support_release_id
+    }
+
+    pub(crate) fn source_declaration_id(&self) -> &str {
+        &self.source_declaration_id
+    }
+
+    pub(crate) fn member_identity_contract_id(&self) -> &str {
+        &self.member_identity_contract_id
+    }
+
+    pub(crate) fn components(&self) -> &[CatalogSourceComponent] {
+        &self.components
+    }
+
+    pub(crate) fn composition_id(&self) -> CatalogCompositionId {
+        self.composition_id
+    }
+
     fn component(&self, component_id: &str) -> Option<&CatalogSourceComponent> {
         self.components
             .binary_search_by(|component| component.component_id.as_str().cmp(component_id))
@@ -1057,12 +1103,41 @@ pub(crate) struct CatalogExecutableComposition<'composition, 'authorization> {
 }
 
 impl CatalogExecutableComposition<'_, '_> {
+    pub(crate) fn composition(&self) -> &CatalogSourceComposition {
+        self.composition
+    }
+
     pub(crate) fn composition_id(&self) -> CatalogCompositionId {
         self.composition.composition_id
     }
 
     pub(crate) fn contract_selection(&self) -> &ContractVersionSelection {
         self.authorization.contracts()
+    }
+
+    /// Bind produced membership and complete component enumerations into one
+    /// library coverage assembly. Coverage proofs are derived from the supplied
+    /// completions; callers cannot inject an unrelated proof digest.
+    pub(crate) fn assemble_produced_library_coverage(
+        &self,
+        source_instance_key: CanonicalSourceInstanceKey,
+        access_policy_digest: CatalogAccessPolicyDigest,
+        authorities: Vec<CatalogMembershipAuthorityEvidence>,
+        members: Vec<CatalogMembershipEntry>,
+        completions: Vec<CatalogComponentCoverageCompletion>,
+    ) -> Result<CatalogLibraryCoverageAssembly, CatalogCompositionError> {
+        let membership = membership_snapshot_bound_to_coverage(
+            self.composition,
+            authorities,
+            members,
+            &completions,
+        )?;
+        self.assemble_library_coverage(
+            source_instance_key,
+            access_policy_digest,
+            &membership,
+            completions,
+        )
     }
 
     fn library_plan_source(
@@ -1570,6 +1645,10 @@ impl CatalogComponentCoverageCompletion {
         Ok(())
     }
 
+    pub(crate) fn component_id(&self) -> &str {
+        &self.component_id
+    }
+
     fn point_count(&self) -> usize {
         self.objects
             .iter()
@@ -1743,6 +1822,40 @@ fn validate_membership_object_lineage(
     Ok(())
 }
 
+fn unbound_coverage_seed(
+    component_id: &str,
+    generation: u64,
+    authority_revision: &[u8; DIGEST_BYTES],
+) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-authority-unbound-v1\0");
+    hash_string(&mut hasher, component_id);
+    hasher.update(&generation.to_be_bytes());
+    hasher.update(authority_revision);
+    *hasher.finalize().as_bytes()
+}
+
+pub(crate) fn membership_snapshot_bound_to_coverage(
+    composition: &CatalogSourceComposition,
+    mut authorities: Vec<CatalogMembershipAuthorityEvidence>,
+    members: Vec<CatalogMembershipEntry>,
+    completions: &[CatalogComponentCoverageCompletion],
+) -> Result<CatalogMembershipSnapshot, CatalogCompositionError> {
+    for authority in &mut authorities {
+        let completion = completions
+            .iter()
+            .find(|completion| completion.component_id() == authority.component_id)
+            .ok_or_else(|| {
+                CatalogCompositionError::invalid(
+                    "membership authority has no matching component completion",
+                )
+            })?;
+        let proof = calculate_component_coverage_proof(composition, &members, completion);
+        authority.bind_coverage_proof(proof)?;
+    }
+    CatalogMembershipSnapshot::new(composition, authorities, members)
+}
+
 fn calculate_component_coverage_proof(
     composition: &CatalogSourceComposition,
     members: &[CatalogMembershipEntry],
@@ -1902,6 +2015,7 @@ pub(crate) enum CatalogMembershipAuthorityCompleteness {
     Complete,
     Partial,
     Unavailable,
+    Unbound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -1914,6 +2028,55 @@ pub(crate) struct CatalogMembershipAuthorityEvidence {
 }
 
 impl CatalogMembershipAuthorityEvidence {
+    pub(crate) fn unbound(
+        component_id: impl Into<String>,
+        generation: u64,
+        authority_revision: [u8; DIGEST_BYTES],
+    ) -> Result<Self, CatalogCompositionError> {
+        let component_id = component_id.into();
+        validate_identifier("membership authority component ID", &component_id)?;
+        if generation == 0 {
+            return Err(CatalogCompositionError::invalid(
+                "membership authority generation must be greater than zero",
+            ));
+        }
+        if authority_revision == [0; DIGEST_BYTES] {
+            return Err(CatalogCompositionError::invalid(
+                "membership authority requires a nonzero revision digest",
+            ));
+        }
+        Ok(Self {
+            coverage_proof: CatalogCoverageProof::from_digest(unbound_coverage_seed(
+                &component_id,
+                generation,
+                &authority_revision,
+            )),
+            completeness: CatalogMembershipAuthorityCompleteness::Unbound,
+            authority_revision: CatalogAuthorityRevision::from_digest(authority_revision),
+            component_id,
+            generation,
+        })
+    }
+
+    fn bind_coverage_proof(
+        &mut self,
+        proof: CatalogCoverageProof,
+    ) -> Result<(), CatalogCompositionError> {
+        if self.completeness != CatalogMembershipAuthorityCompleteness::Unbound {
+            return Err(CatalogCompositionError::invalid(
+                "membership authority must remain unbound until component coverage is proved",
+            ));
+        }
+        if proof.as_bytes() == &[0; DIGEST_BYTES] {
+            return Err(CatalogCompositionError::invalid(
+                "membership authority requires a nonzero coverage proof",
+            ));
+        }
+        self.coverage_proof = proof;
+        self.completeness = CatalogMembershipAuthorityCompleteness::Complete;
+        Ok(())
+    }
+
     #[cfg(test)]
     fn fixture(
         component_id: &str,
@@ -1979,6 +2142,7 @@ impl CatalogMembershipAuthorityEvidence {
                 CatalogMembershipAuthorityCompleteness::Complete => "complete",
                 CatalogMembershipAuthorityCompleteness::Partial => "partial",
                 CatalogMembershipAuthorityCompleteness::Unavailable => "unavailable",
+                CatalogMembershipAuthorityCompleteness::Unbound => "unbound",
             },
         );
     }

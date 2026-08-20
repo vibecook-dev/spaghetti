@@ -1,13 +1,27 @@
 use std::fs;
+use std::path::Path;
 
 use tempfile::TempDir;
 
 use super::*;
 use crate::adapter::{
-    verify_support_release_bundle, AdapterSupportRegistration, CompatibilityClass,
-    ContractVersionOffer, ContractVersionRequest, NativeArtifactProbe, Sha256Digest,
-    SupportBundleDocument, SupportCatalog, SupportContractError, SupportOperation,
-    VerifiedSupportRelease,
+    verify_support_release_bundle, AdapterSupportRegistration, AuthorizedCatalogAccess,
+    CompatibilityClass, ContractVersionOffer, ContractVersionRequest, ContractVersionSelection,
+    NativeArtifactProbe, Sha256Digest, SupportBundleDocument, SupportCatalog, SupportContractError,
+    SupportOperation, VerifiedSupportRelease, CONTRACT_VERSION_SELECTION_VERSION,
+};
+use crate::catalog_contract::CatalogAccessPolicyDigest;
+use crate::claude::catalog_runtime::{
+    claude_catalog_components, claude_conformance_promoted_composition,
+    claude_conformance_source_declaration_bytes, claude_conformance_source_declaration_id,
+    claude_conformance_support_release_bytes, claude_conformance_support_release_id,
+    claude_planned_catalog_composition, produce_claude_library_coverage,
+    produce_claude_library_coverage_with_post_head_mutation,
+};
+use crate::source::catalog_composition::{
+    CatalogContribution, CatalogDecoderStateBoundary, CatalogDiscoveryBounds,
+    CatalogOverlapStrategy, CatalogPromotedBinding, CatalogSourceComposition,
+    CatalogSourcePrimitive,
 };
 
 const INDEX_ONLY: &str = "11111111-1111-1111-1111-111111111111";
@@ -666,6 +680,504 @@ fn candidate_probe() -> NativeArtifactProbe {
         ],
         contradictory_markers: false,
     }
+}
+
+fn catalog_contract_selection() -> ContractVersionSelection {
+    ContractVersionSelection {
+        selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+        model_major: 1,
+        external_entity_reference_version: 1,
+        semantic_revision_reference_version: 1,
+        coverage_contract_version: 1,
+        fact_family_versions: std::collections::BTreeMap::from([
+            ("catalog.project".to_owned(), 1),
+            ("catalog.session".to_owned(), 1),
+        ]),
+        query_pack_version: Some(1),
+        observation_contract_version: None,
+    }
+}
+
+fn synthetic_claude_catalog_access(
+    selection: &ContractVersionSelection,
+    compatibility: CompatibilityClass,
+) -> AuthorizedCatalogAccess<'_> {
+    AuthorizedCatalogAccess::fixture_with_compatibility(
+        ADAPTER_ID,
+        claude_conformance_support_release_id(),
+        Sha256Digest::of(claude_conformance_support_release_bytes()),
+        Sha256Digest::of(claude_conformance_source_declaration_bytes()),
+        selection,
+        compatibility,
+    )
+}
+
+fn produce_fixture_with(
+    compatibility: CompatibilityClass,
+    policy: &[u8],
+) -> crate::claude::catalog_runtime::ClaudeCatalogProduction {
+    let composition = claude_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let access = synthetic_claude_catalog_access(&selection, compatibility);
+    let executable = composition.authorize_execution(access).unwrap();
+    produce_claude_library_coverage(
+        &executable,
+        &fixture_root(),
+        FIXTURE_SOURCE_INSTANCE,
+        CatalogAccessPolicyDigest::derive(1, policy).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn authorized_producer_matches_frozen_identity_without_authorizing_candidate() {
+    let projection = candidate_projection(&fixture_root(), 7).unwrap().report();
+    let durable = durable_decoder_identities(&fixture_root(), 7).unwrap();
+    let produced = produce_fixture_with(
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    );
+
+    assert_eq!(
+        produced.identity.project_count,
+        projection.independent_oracle.project_count
+    );
+    assert_eq!(
+        produced.identity.session_count,
+        projection.independent_oracle.session_count
+    );
+    assert_eq!(
+        produced.identity.project_identity_digest,
+        projection.independent_oracle.project_identity_digest
+    );
+    assert_eq!(
+        produced.identity.session_identity_digest,
+        projection.independent_oracle.session_identity_digest
+    );
+    assert_eq!(
+        produced.identity.project_count,
+        durable.projects.len() as u64
+    );
+    assert_eq!(
+        produced.identity.session_count,
+        durable.sessions.len() as u64
+    );
+    assert!(!projection.catalog_execution_authorized);
+    assert_eq!(projection.planned_composition_status, "planned_unbound");
+    assert_eq!(
+        produced.assembly.source_coverage().completeness,
+        crate::adapter::CoverageSetCompleteness::Complete
+    );
+    assert_ne!(
+        produced.assembly.catalog_membership_revision().as_bytes(),
+        produced
+            .assembly
+            .source_coverage()
+            .membership_revision
+            .as_bytes()
+    );
+    assert_ne!(
+        produced.assembly.catalog_membership_revision().as_bytes(),
+        produced.assembly.component_completion_revision().as_bytes()
+    );
+
+    let replayed = produce_fixture_with(
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    );
+    assert_eq!(produced.assembly, replayed.assembly);
+    let range = produce_fixture_with(
+        CompatibilityClass::RangeSupported,
+        b"fixture-local-catalog-policy",
+    );
+    assert_eq!(produced.identity, range.identity);
+    assert_eq!(
+        produced.assembly.catalog_membership_revision(),
+        range.assembly.catalog_membership_revision()
+    );
+
+    let drifted_policy = produce_fixture_with(
+        CompatibilityClass::ExactSupported,
+        b"fixture-other-catalog-policy",
+    );
+    assert_eq!(produced.identity, drifted_policy.identity);
+    assert_ne!(
+        produced.assembly.component_completion_revision(),
+        drifted_policy.assembly.component_completion_revision()
+    );
+
+    let debug = format!("{produced:?}");
+    assert!(!debug.contains("/Users/"));
+    assert!(!debug.contains("/home/"));
+    assert!(!debug.contains("03ddf851"));
+}
+
+#[test]
+fn planned_and_builtin_candidate_cannot_authorize_producer_execution() {
+    let selection = catalog_contract_selection();
+    let planned = claude_planned_catalog_composition().unwrap();
+    assert!(planned
+        .authorize_execution(synthetic_claude_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .is_err());
+
+    let promoted = claude_conformance_promoted_composition().unwrap();
+    assert_ne!(planned.composition_id(), promoted.composition_id());
+    assert_ne!(planned.support_release_id(), promoted.support_release_id());
+    assert_ne!(
+        planned.source_declaration_id(),
+        promoted.source_declaration_id()
+    );
+    assert_eq!(
+        promoted.support_release_id(),
+        claude_conformance_support_release_id()
+    );
+    assert_ne!(
+        promoted.support_release_id(),
+        "claude-code-support-2026-08-15-candidate"
+    );
+    assert_ne!(
+        promoted.source_declaration_id(),
+        "claude-code-sources-2026-08-15-candidate"
+    );
+
+    let release = verified_candidate_release();
+    let adapter = ClaudeCodeAdapter::new();
+    let manifest = adapter.manifest();
+    let catalog = SupportCatalog::new([release]).unwrap();
+    let error = catalog
+        .authorize_typed_access(
+            AdapterSupportRegistration::new(
+                manifest.id.as_str(),
+                manifest.support_binding.as_ref().unwrap(),
+                manifest.scope_programs.as_ref().unwrap(),
+            ),
+            &candidate_probe(),
+            SupportOperation::CatalogDiscovery,
+            &compatible_contracts().0,
+            &compatible_contracts().1,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("forbidden"));
+}
+
+const ABSENT_CATALOG_ROOT: &str = "/spaghetti-rfc012-b2-absent-catalog";
+const HEAD_PHASE_MEMBER: &str = "55555555-5555-5555-5555-555555555555";
+
+fn conformance_promoted_binding() -> CatalogPromotedBinding {
+    CatalogPromotedBinding::from_digests(
+        *Sha256Digest::of(claude_conformance_source_declaration_bytes()).as_bytes(),
+        *Sha256Digest::of(claude_conformance_support_release_bytes()).as_bytes(),
+    )
+    .unwrap()
+}
+
+fn reviewed_promoted_composition(
+    support_release_id: &str,
+    source_declaration_id: &str,
+    components: Vec<crate::source::catalog_composition::CatalogSourceComponent>,
+) -> CatalogSourceComposition {
+    CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        support_release_id,
+        source_declaration_id,
+        conformance_promoted_binding(),
+        components,
+    )
+    .unwrap()
+}
+
+fn produce_error_for_composition(
+    composition: &CatalogSourceComposition,
+    catalog_root: &Path,
+) -> String {
+    let selection = catalog_contract_selection();
+    let executable = composition
+        .authorize_execution(synthetic_claude_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    produce_claude_library_coverage(
+        &executable,
+        catalog_root,
+        FIXTURE_SOURCE_INSTANCE,
+        CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap(),
+    )
+    .unwrap_err()
+    .to_string()
+}
+
+fn assert_rejected_before_source_access(composition: CatalogSourceComposition) {
+    let message = produce_error_for_composition(&composition, Path::new(ABSENT_CATALOG_ROOT));
+    assert!(
+        message.contains("exact synthetic Claude catalog conformance composition"),
+        "composition drift must fail closed before source access, got {message}"
+    );
+    assert!(!message.contains("failed to read"));
+    assert!(!message.contains("not completely available"));
+    assert!(!message.contains("/Users/"));
+    assert!(!message.contains("projects/"));
+    assert!(!message.contains(ABSENT_CATALOG_ROOT));
+}
+
+fn mutate_component(
+    component_id: &str,
+    mutate: impl FnOnce(&mut crate::source::catalog_composition::CatalogSourceComponent),
+) -> CatalogSourceComposition {
+    let mut components = claude_catalog_components();
+    let component = components
+        .iter_mut()
+        .find(|component| component.component_id == component_id)
+        .expect("reviewed Claude composition contains the drifted component");
+    mutate(component);
+    reviewed_promoted_composition(
+        claude_conformance_support_release_id(),
+        claude_conformance_source_declaration_id(),
+        components,
+    )
+}
+
+#[test]
+fn producer_rejects_reviewed_composition_drift_before_source_access() {
+    assert_rejected_before_source_access(mutate_component(
+        "session-index-membership",
+        |component| {
+            component.contribution = CatalogContribution::Membership {
+                member_identity_contract_id: "catalog-session-identity-v1".to_owned(),
+                admission_contract_id: "session-index-entry-admission-v1".to_owned(),
+                provides_metadata: false,
+            };
+        },
+    ));
+    assert_rejected_before_source_access(mutate_component(
+        "transcript-head-fallback",
+        |component| {
+            component.overlap_strategy = CatalogOverlapStrategy::CommitCatalogFacts;
+        },
+    ));
+    assert_rejected_before_source_access(mutate_component(
+        "transcript-head-fallback",
+        |component| {
+            component.safe_decoder_state_boundary = CatalogDecoderStateBoundary::StatelessRecord;
+        },
+    ));
+    assert_rejected_before_source_access(mutate_component(
+        "top-level-transcript-membership",
+        |component| {
+            component.discovery_bounds = CatalogDiscoveryBounds::new(249_999, 64).unwrap();
+        },
+    ));
+    assert_rejected_before_source_access(mutate_component(
+        "transcript-head-fallback",
+        |component| {
+            let CatalogSourcePrimitive::DelimitedPrefix { max_records, .. } =
+                &mut component.primitive
+            else {
+                panic!("reviewed head component is a delimited prefix");
+            };
+            *max_records = 127;
+        },
+    ));
+    assert_rejected_before_source_access(mutate_component(
+        "session-index-membership",
+        |component| {
+            component.disposition_ownership =
+                vec!["native-family:session-index-drifted".to_owned()];
+        },
+    ));
+    assert_rejected_before_source_access(reviewed_promoted_composition(
+        claude_conformance_support_release_id(),
+        "claude-code.catalog-conformance-sources-v1-x",
+        claude_catalog_components(),
+    ));
+
+    let drifted_release = reviewed_promoted_composition(
+        "claude-code.catalog-conformance-support-v1-x",
+        claude_conformance_source_declaration_id(),
+        claude_catalog_components(),
+    );
+    let selection = catalog_contract_selection();
+    assert!(drifted_release
+        .authorize_execution(synthetic_claude_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .is_err());
+}
+
+fn produce_with_post_head_mutation(
+    root: &Path,
+    mutate: impl FnOnce(&Path),
+) -> Result<crate::claude::catalog_runtime::ClaudeCatalogProduction, String> {
+    let composition = claude_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let access = synthetic_claude_catalog_access(&selection, CompatibilityClass::ExactSupported);
+    let executable = composition.authorize_execution(access).unwrap();
+    let policy = CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap();
+    produce_claude_library_coverage_with_post_head_mutation(
+        &executable,
+        root,
+        FIXTURE_SOURCE_INSTANCE,
+        policy,
+        mutate,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn privacy_safe_mutation_error(message: &str) {
+    assert!(!message.contains("/Users/"));
+    assert!(!message.contains("projects/"));
+    assert!(!message.contains(HEAD_PHASE_MEMBER));
+}
+
+#[test]
+fn membership_created_during_transcript_head_reads_cannot_publish_complete_coverage() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join(".claude");
+    let project = root.join("projects/-tmp-project");
+    fs::create_dir_all(&project).unwrap();
+    write_index(&project, &[(TOP_ONLY, "/tmp/project")]);
+    write_parent(
+        &project,
+        TOP_ONLY,
+        &user_record(TOP_ONLY, "/tmp/project", "top"),
+    );
+
+    let composition = claude_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let access = synthetic_claude_catalog_access(&selection, CompatibilityClass::ExactSupported);
+    let executable = composition.authorize_execution(access).unwrap();
+    let policy = CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap();
+    let stable =
+        produce_claude_library_coverage(&executable, &root, FIXTURE_SOURCE_INSTANCE, policy)
+            .expect("synthetic catalog must produce complete coverage before the mutation seam");
+    assert_eq!(
+        stable.assembly.source_coverage().completeness,
+        crate::adapter::CoverageSetCompleteness::Complete
+    );
+    assert_eq!(stable.identity.session_count, 1);
+
+    let new_member = produce_with_post_head_mutation(&root, |catalog_root| {
+        write_parent(
+            &catalog_root.join("projects/-tmp-project"),
+            HEAD_PHASE_MEMBER,
+            &user_record(HEAD_PHASE_MEMBER, "/tmp/project", "head-phase"),
+        );
+    })
+    .expect_err("a member created during revalidation must not publish complete coverage");
+    assert!(new_member.contains("membership authority changed during complete production"));
+    privacy_safe_mutation_error(&new_member);
+
+    let index_root = TempDir::new().unwrap();
+    let index_catalog = index_root.path().join(".claude");
+    let index_project = index_catalog.join("projects/-tmp-project");
+    fs::create_dir_all(&index_project).unwrap();
+    write_index(&index_project, &[(INDEX_ONLY, "/tmp/project")]);
+    let index_mutation = produce_with_post_head_mutation(&index_catalog, |catalog_root| {
+        rewrite_index_first_prompt(
+            &catalog_root.join("projects/-tmp-project"),
+            "mutated index prompt",
+        );
+    })
+    .expect_err("same-path index mutation must fail closed as an index revision rejection");
+    assert!(index_mutation.contains("index driver revision changed during production"));
+    privacy_safe_mutation_error(&index_mutation);
+
+    let head_root = TempDir::new().unwrap();
+    let head_catalog = head_root.path().join(".claude");
+    let head_project = head_catalog.join("projects/-tmp-project");
+    fs::create_dir_all(&head_project).unwrap();
+    write_parent(
+        &head_project,
+        TOP_ONLY,
+        &user_record(TOP_ONLY, "/tmp/project", "original-head"),
+    );
+    let head_mutation = produce_with_post_head_mutation(&head_catalog, |catalog_root| {
+        write_parent(
+            &catalog_root.join("projects/-tmp-project"),
+            TOP_ONLY,
+            &user_record(TOP_ONLY, "/tmp/project", "mutated-head"),
+        );
+    })
+    .expect_err("same-path transcript-head mutation must fail closed as a head revision rejection");
+    assert!(head_mutation.contains("transcript-head driver revision changed during production"));
+    privacy_safe_mutation_error(&head_mutation);
+}
+
+#[test]
+fn producer_rejects_oversized_and_quarantined_heads_instead_of_complete_coverage() {
+    let composition = claude_conformance_promoted_composition().unwrap();
+    let oversized = TempDir::new().unwrap();
+    let oversized_root = oversized.path().join(".claude");
+    let oversized_project = oversized_root.join("projects/-tmp-project");
+    fs::create_dir_all(&oversized_project).unwrap();
+    fs::write(
+        oversized_project.join(format!("{TOP_ONLY}.jsonl")),
+        vec![b'x'; HEAD_FRAMING_READ_AHEAD_BYTES * 3],
+    )
+    .unwrap();
+    let oversized_error = produce_error_for_composition(&composition, &oversized_root);
+    assert!(
+        oversized_error.contains("exceeded its declared bound"),
+        "oversized heads must fail closed, got {oversized_error}"
+    );
+    assert!(!oversized_error.contains("/Users/"));
+    assert!(!oversized_error.contains("projects/"));
+
+    let quarantined = TempDir::new().unwrap();
+    let quarantined_root = quarantined.path().join(".claude");
+    let quarantined_project = quarantined_root.join("projects/-tmp-project");
+    fs::create_dir_all(&quarantined_project).unwrap();
+    let mut record =
+        sized_user_record(TOP_ONLY, "/tmp/project", HEAD_RECORD_PAYLOAD_BYTES + 1).into_bytes();
+    record.push(b'\n');
+    fs::write(
+        quarantined_project.join(format!("{TOP_ONLY}.jsonl")),
+        record,
+    )
+    .unwrap();
+    let quarantined_error = produce_error_for_composition(&composition, &quarantined_root);
+    assert!(
+        quarantined_error.contains("quarantined"),
+        "quarantined heads must fail closed, got {quarantined_error}"
+    );
+    assert!(!quarantined_error.contains("/Users/"));
+    assert!(!quarantined_error.contains("projects/"));
+}
+
+#[test]
+fn producer_member_identity_separates_source_instances() {
+    let first = produce_fixture_with(
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    );
+    let composition = claude_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let executable = composition
+        .authorize_execution(synthetic_claude_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    let second = produce_claude_library_coverage(
+        &executable,
+        &fixture_root(),
+        b"claude-other-source-instance-v1",
+        CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first.identity, second.identity);
+    assert_ne!(
+        first.assembly.catalog_membership_revision(),
+        second.assembly.catalog_membership_revision()
+    );
+    assert_ne!(
+        first.assembly.plan_source().source_instance_key,
+        second.assembly.plan_source().source_instance_key
+    );
 }
 
 fn verified_candidate_release() -> VerifiedSupportRelease {

@@ -136,75 +136,7 @@ fn metadata(metadata_contract_id: &str) -> CatalogContribution {
 }
 
 fn claude_components() -> Vec<CatalogSourceComponent> {
-    vec![
-        component(
-            (
-                "transcript-head-fallback",
-                "session-transcripts",
-                "projects",
-            ),
-            &["*/*.jsonl"],
-            CatalogSourcePrimitive::DelimitedPrefix {
-                max_record_bytes: CANDIDATE_HEAD_BYTES,
-                max_window_bytes: CANDIDATE_HEAD_BYTES,
-                max_records: 128,
-            },
-            metadata("transcript-head-metadata-v1"),
-            CatalogOverlapStrategy::IdempotentOverlap,
-            CatalogDecoderStateBoundary::ObjectGenerationCursor,
-            (
-                "claude-session-record",
-                &["native-family:session-transcript"],
-            ),
-        ),
-        component(
-            (
-                "nested-parent-membership",
-                "nested-transcript-membership",
-                "projects",
-            ),
-            &["*/*/subagents/**/agent-*.jsonl"],
-            CatalogSourcePrimitive::DirectoryMembership,
-            membership("nested-parent-session-admission-v1", false),
-            CatalogOverlapStrategy::DisjointCatalogFamily {
-                ownership_contract_id: "nested-parent-membership-v1".to_owned(),
-            },
-            CatalogDecoderStateBoundary::FullSnapshot,
-            (
-                "claude-nested-parent-membership-v1",
-                &["native-family:nested-parent-membership"],
-            ),
-        ),
-        component(
-            ("session-index-membership", "session-indexes", "projects"),
-            &["*/sessions-index.json"],
-            CatalogSourcePrimitive::ReplaceDocument {
-                max_object_bytes: 1024 * 1024,
-            },
-            membership("session-index-entry-admission-v1", true),
-            CatalogOverlapStrategy::CommitCatalogFacts,
-            CatalogDecoderStateBoundary::ObjectGenerationRevision,
-            ("claude-session-index", &["native-family:session-index"]),
-        ),
-        component(
-            (
-                "top-level-transcript-membership",
-                "top-level-transcript-membership",
-                "projects",
-            ),
-            &["*/*.jsonl"],
-            CatalogSourcePrimitive::DirectoryMembership,
-            membership("top-level-transcript-admission-v1", false),
-            CatalogOverlapStrategy::DisjointCatalogFamily {
-                ownership_contract_id: "top-level-transcript-membership-v1".to_owned(),
-            },
-            CatalogDecoderStateBoundary::FullSnapshot,
-            (
-                "claude-top-level-transcript-membership-v1",
-                &["native-family:top-level-transcript-membership"],
-            ),
-        ),
-    ]
+    crate::claude::catalog_runtime::claude_catalog_components()
 }
 
 fn claude_composition() -> CatalogSourceComposition {
@@ -425,21 +357,37 @@ fn complete_component_coverage(
         .collect()
 }
 
+fn unbound_authorities(
+    composition: &CatalogSourceComposition,
+) -> Vec<CatalogMembershipAuthorityEvidence> {
+    composition
+        .components
+        .iter()
+        .filter(|component| component.contribution.can_admit_member())
+        .map(|component| {
+            CatalogMembershipAuthorityEvidence::unbound(
+                &component.component_id,
+                1,
+                *blake3::hash(format!("{}/membership-revision", component.component_id).as_bytes())
+                    .as_bytes(),
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
 fn coverage_bound_membership(
     composition: &CatalogSourceComposition,
     members: Vec<CatalogMembershipEntry>,
     completions: &[CatalogComponentCoverageCompletion],
 ) -> CatalogMembershipSnapshot {
-    let mut authorities = complete_authorities(composition);
-    for authority in &mut authorities {
-        let completion = completions
-            .iter()
-            .find(|completion| completion.component_id == authority.component_id)
-            .unwrap();
-        authority.coverage_proof =
-            calculate_component_coverage_proof(composition, &members, completion);
-    }
-    CatalogMembershipSnapshot::new(composition, authorities, members).unwrap()
+    membership_snapshot_bound_to_coverage(
+        composition,
+        unbound_authorities(composition),
+        members,
+        completions,
+    )
+    .unwrap()
 }
 
 fn digest(label: &str) -> [u8; DIGEST_BYTES] {
@@ -580,6 +528,74 @@ pub(super) fn frozen_fixture() -> FrozenCatalogCompositionFixture {
         membership_snapshots: memberships,
         overlap_conformance: conformance,
     }
+}
+
+#[test]
+fn catalog_member_ref_uses_canonical_session_identity() {
+    let first_instance = CanonicalSourceInstanceKey::derive(1, b"source-instance-alpha").unwrap();
+    let second_instance = CanonicalSourceInstanceKey::derive(1, b"source-instance-bravo").unwrap();
+    let moved = CatalogMemberRef::from_canonical_session(
+        MEMBER_IDENTITY_CONTRACT,
+        "claude-code",
+        first_instance,
+        b"session-stable",
+    )
+    .unwrap();
+    let reassociated = CatalogMemberRef::from_canonical_session(
+        MEMBER_IDENTITY_CONTRACT,
+        "claude-code",
+        first_instance,
+        b"session-stable",
+    )
+    .unwrap();
+    assert_eq!(
+        moved, reassociated,
+        "project reassociation cannot retarget a canonical session member"
+    );
+    let other_source = CatalogMemberRef::from_canonical_session(
+        MEMBER_IDENTITY_CONTRACT,
+        "claude-code",
+        second_instance,
+        b"session-stable",
+    )
+    .unwrap();
+    assert_ne!(
+        moved, other_source,
+        "the same native session ID must not collide across source instances"
+    );
+    let fixture_bytes = CatalogMemberRef::fixture_from_semantic_identity(
+        MEMBER_IDENTITY_CONTRACT,
+        b"session-stable",
+    )
+    .unwrap();
+    assert_ne!(
+        moved, fixture_bytes,
+        "arbitrary-byte construction must stay fixture-only and not equal a typed session identity"
+    );
+}
+
+#[test]
+fn unbound_authority_cannot_publish_a_snapshot_or_bind_twice() {
+    let composition = claude_composition();
+    let unbound = unbound_authorities(&composition);
+    let error = CatalogMembershipSnapshot::new(&composition, unbound.clone(), claude_members())
+        .expect_err("unbound authority cannot construct a membership snapshot");
+    assert!(error
+        .to_string()
+        .contains("only complete membership-authority evidence can publish a membership snapshot"));
+
+    let mut authority = unbound
+        .into_iter()
+        .next()
+        .expect("claude composition admits members");
+    let proof = CatalogCoverageProof::from_digest(digest("bound-coverage-proof"));
+    authority.bind_coverage_proof(proof).unwrap();
+    let rebound = authority
+        .bind_coverage_proof(proof)
+        .expect_err("authority cannot be bound twice");
+    assert!(rebound
+        .to_string()
+        .contains("membership authority must remain unbound until component coverage is proved"));
 }
 
 #[test]
@@ -1815,4 +1831,58 @@ fn invalid_bounds_paths_overlap_and_state_boundaries_fail_closed() {
         wrong_boundary,
     )
     .is_err());
+}
+
+#[test]
+fn produced_library_coverage_binds_membership_proofs_before_assembly() {
+    const ADAPTER_ID: &str = "fixture-agent";
+    const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";
+    const SOURCE_DECLARATION_ID: &str = "fixture-catalog-sources-v1";
+    const SOURCE_DECLARATION: &[u8] = b"fixture/catalog-source-declaration/v1";
+    const SUPPORT_RELEASE: &[u8] = b"fixture/catalog-support-release/v1";
+
+    let selection = catalog_contract_selection();
+    let composition = CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
+        CatalogPromotedBinding::fixture(SOURCE_DECLARATION, SUPPORT_RELEASE),
+        claude_components(),
+    )
+    .unwrap();
+    let executable = composition
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .unwrap();
+    let source_instance_key = catalog_coverage_source_key(b"fixture-device/catalog-root");
+    let policy = catalog_coverage_policy(b"fixture-local-catalog-policy");
+    let completions = complete_component_coverage(&executable, source_instance_key, policy);
+    let members = claude_members();
+    let expected = executable
+        .assemble_library_coverage(
+            source_instance_key,
+            policy,
+            &coverage_bound_membership(&composition, members.clone(), &completions),
+            completions.clone(),
+        )
+        .unwrap();
+    let produced = executable
+        .assemble_produced_library_coverage(
+            source_instance_key,
+            policy,
+            unbound_authorities(&composition),
+            members,
+            completions,
+        )
+        .unwrap();
+    assert_eq!(produced, expected);
+    assert_ne!(
+        produced.catalog_membership_revision().as_bytes(),
+        produced.source_coverage().membership_revision.as_bytes()
+    );
 }
