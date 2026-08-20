@@ -1,0 +1,26 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-source-record-sequence",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 2
+  },
+  "data": {
+    "family": "workflow-journal",
+    "type": "workflow",
+    "id": "fixture-id-004",
+    "sessionId": "fixture-id-001",
+    "status": "running",
+    "records": [
+      { "type": "step", "id": "fixture-id-030", "status": "started" },
+      { "type": "step", "id": "fixture-id-030", "status": "completed" }
+    ],
+    "child": {
+      "family": "subagent-transcript",
+      "agentId": "fixture-id-005",
+      "parentSessionId": "fixture-id-001",
+      "workflowId": "fixture-id-004",
+      "role": "child"
+    }
+  }
+}

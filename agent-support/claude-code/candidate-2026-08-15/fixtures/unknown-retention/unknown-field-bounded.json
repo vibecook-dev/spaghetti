@@ -1,0 +1,20 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-native-shape",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 2
+  },
+  "data": {
+    "type": "assistant",
+    "uuid": "fixture-id-011",
+    "sessionId": "fixture-id-001",
+    "futureVendorField": "[fixture-text-001]",
+    "message": {
+      "role": "assistant",
+      "id": "fixture-id-020",
+      "content": [],
+      "usage": { "input_tokens": 4, "output_tokens": 1 }
+    }
+  }
+}

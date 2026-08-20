@@ -154,8 +154,8 @@ impl ClaudeCodeAdapter {
                         env!("CARGO_PKG_VERSION"),
                         22,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
-                        "sha256:3d8a5f0d005f97ede696c95c30dfccdb9cbaeeed6f8b0359d8dbfed38445a974",
-                        "sha256:3b65475646b501a93695534ab968f4187a20bbec9a3d0d1228cd42670f447114",
+                        "sha256:78a79df03f1a71fe6bb8e7b21d62719eaaff30b45e6fda7818096a73b3609496",
+                        "sha256:b7b6d84f08dc13fd1b13821473630d88a4609a9b7903cd449398f6ebeb81aaa1",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -4841,7 +4841,7 @@ mod tests {
     use super::*;
     use crate::adapter::{
         FactEnvelope, FactRevisionId, FactSemanticContext, ScopeProgramStatus,
-        ScopeRelationSourcePrimitive, Sha256Digest, SourceInstance,
+        ScopeRelationPrimitive, ScopeRelationSourcePrimitive, Sha256Digest, SourceInstance,
     };
     use crate::source::{
         validate_evidence_locator_template, AccessOperation, AccessPhase, AppendDelimitedFile,
@@ -5702,6 +5702,266 @@ mod tests {
                     native_file_hash: "abc123".to_string(),
                     version: 1,
                 }
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_declared_relations_bind_runtime_coordinates() {
+        struct Binding {
+            relation_id: &'static str,
+            access_root: &'static str,
+            locator: &'static str,
+            identity_inputs: &'static [&'static str],
+            stream_id: &'static str,
+            stream_root: &'static str,
+            include: &'static [&'static str],
+            decoder: &'static str,
+        }
+
+        const BINDINGS: &[Binding] = &[
+            Binding {
+                relation_id: "descendant-transcripts",
+                access_root: "projects",
+                locator: "{project}/{session}/subagents",
+                identity_inputs: &["project-key", "native-session-id"],
+                stream_id: SUBAGENT_STREAM,
+                stream_root: "projects",
+                include: &["*/*/subagents/**/agent-*.jsonl"],
+                decoder: SUBAGENT_DECODER,
+            },
+            Binding {
+                relation_id: "descendant-metadata",
+                access_root: "projects",
+                locator: "{actor-transcript}.meta.json",
+                identity_inputs: &["actor-transcript-object"],
+                stream_id: SUBAGENT_META_STREAM,
+                stream_root: "projects",
+                include: &["*/*/subagents/**/agent-*.meta.json"],
+                decoder: SUBAGENT_META_DECODER,
+            },
+            Binding {
+                relation_id: "workflow-child-transcripts",
+                access_root: "projects",
+                locator: "{project}/{session}/subagents/workflows/{observed-workflow-id}",
+                identity_inputs: &["project-key", "native-session-id", "observed-workflow-id"],
+                stream_id: SUBAGENT_STREAM,
+                stream_root: "projects",
+                include: &["*/*/subagents/**/agent-*.jsonl"],
+                decoder: SUBAGENT_DECODER,
+            },
+            Binding {
+                relation_id: "team-config-from-evidence",
+                access_root: "teams",
+                locator: "{team}/config.json",
+                identity_inputs: &["observed-team-name"],
+                stream_id: TEAM_CONFIG_STREAM,
+                stream_root: "teams",
+                include: &["*/config.json"],
+                decoder: TEAM_CONFIG_DECODER,
+            },
+            Binding {
+                relation_id: "team-inbox-from-evidence",
+                access_root: "teams",
+                locator: "{team}/inboxes/{recipient}.json",
+                identity_inputs: &["observed-team-name", "observed-recipient"],
+                stream_id: TEAM_INBOX_STREAM,
+                stream_root: "teams",
+                include: &["*/inboxes/*.json"],
+                decoder: TEAM_INBOX_DECODER,
+            },
+            Binding {
+                relation_id: "active-session-from-process-evidence",
+                access_root: "sessions",
+                locator: "{pid}.json",
+                identity_inputs: &["observed-pid", "native-session-id"],
+                stream_id: ACTIVE_SESSION_STREAM,
+                stream_root: "sessions",
+                include: &["*.json"],
+                decoder: ACTIVE_SESSION_DECODER,
+            },
+            Binding {
+                relation_id: "todo-snapshot-from-evidence",
+                access_root: "home",
+                locator: "todos/{native-session-id}-agent-{native-actor-id}.json",
+                identity_inputs: &["native-session-id", "native-actor-id"],
+                stream_id: TODO_STREAM,
+                stream_root: "home",
+                include: &["todos/*-agent-*.json"],
+                decoder: TODO_DECODER,
+            },
+            Binding {
+                relation_id: "plan-document-from-evidence",
+                access_root: "home",
+                locator: "plans/{plan-slug}.md",
+                identity_inputs: &["plan-slug"],
+                stream_id: PLAN_STREAM,
+                stream_root: "home",
+                include: &["plans/*.md"],
+                decoder: PLAN_DECODER,
+            },
+            Binding {
+                relation_id: "task-item-from-evidence",
+                access_root: "home",
+                locator: "tasks/{collection}/{task-id}.json",
+                identity_inputs: &["collection", "task-id"],
+                stream_id: TASK_ITEM_STREAM,
+                stream_root: "home",
+                include: &["tasks/*/*.json"],
+                decoder: TASK_ITEM_DECODER,
+            },
+            Binding {
+                relation_id: "workflow-records",
+                access_root: "projects",
+                locator: "{project}/{session}/workflows",
+                identity_inputs: &["project-key", "native-session-id", "observed-workflow-id"],
+                stream_id: WORKFLOW_RUN_STREAM,
+                stream_root: "projects",
+                include: &["*/*/workflows/wf_*.json"],
+                decoder: WORKFLOW_RUN_DECODER,
+            },
+            Binding {
+                relation_id: "workflow-journals",
+                access_root: "projects",
+                locator:
+                    "{project}/{session}/subagents/workflows/{observed-workflow-id}/journal.jsonl",
+                identity_inputs: &["project-key", "native-session-id", "observed-workflow-id"],
+                stream_id: WORKFLOW_JOURNAL_STREAM,
+                stream_root: "projects",
+                include: &["*/*/subagents/workflows/*/journal.jsonl"],
+                decoder: WORKFLOW_JOURNAL_DECODER,
+            },
+        ];
+
+        let adapter = ClaudeCodeAdapter::new();
+        let manifest = adapter.manifest();
+        let scope = manifest.scope_programs.as_ref().unwrap();
+        let program = scope
+            .program("observe-root-session-and-descendants")
+            .unwrap();
+        assert_eq!(program.root_relation_id.as_deref(), Some("root-transcript"));
+        assert_eq!(
+            program
+                .relations
+                .iter()
+                .filter(|relation| {
+                    relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                        && relation.locator == "{project}/{session}/subagents"
+                })
+                .count(),
+            1
+        );
+        let task_artifact = program
+            .relations
+            .iter()
+            .find(|relation| relation.relation_id == "task-artifacts-from-evidence")
+            .unwrap();
+        assert!(task_artifact.source_binding.is_none());
+        assert!(validate_evidence_locator_template(task_artifact).is_err());
+
+        let source_declaration: Value = serde_json::from_slice(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+        )))
+        .unwrap();
+        let persisted = source_declaration["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["stream_id"] == PERSISTED_TOOL_RESULT_STREAM)
+            .unwrap();
+        assert_eq!(persisted["topologies"], serde_json::json!(["durable"]));
+        assert_eq!(persisted["root_id"], "projects");
+
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("projects")).unwrap();
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![root.path().to_path_buf()],
+                observed_at: 1,
+            })
+            .unwrap()
+            .pop()
+            .unwrap();
+        let discovered = SourceInstance { id: 7, spec };
+        let streams = adapter.streams(&discovered).unwrap();
+        for binding in BINDINGS {
+            let relation = program
+                .relations
+                .iter()
+                .find(|relation| relation.relation_id == binding.relation_id)
+                .unwrap();
+            assert_eq!(relation.access_root, binding.access_root);
+            assert_eq!(relation.locator, binding.locator);
+            assert_eq!(relation.identity_inputs, binding.identity_inputs);
+            let declared = source_declaration["streams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|stream| stream["stream_id"] == binding.stream_id)
+                .unwrap();
+            assert_eq!(declared["root_id"], binding.stream_root);
+            assert_eq!(
+                declared["relative_patterns"],
+                serde_json::json!(binding.include)
+            );
+            assert_eq!(declared["decoder_id"], binding.decoder);
+            assert_eq!(
+                declared["topologies"],
+                serde_json::json!(["durable", "scoped"])
+            );
+            let runtime = streams
+                .iter()
+                .find(|stream| stream.id.as_str() == binding.stream_id)
+                .unwrap();
+            assert_eq!(runtime.selector.root_name, binding.stream_root);
+            assert_eq!(runtime.selector.include, binding.include);
+            assert_eq!(runtime.decoder.as_str(), binding.decoder);
+        }
+
+        let descendant = format!("project/{SESSION}/subagents/agent-worker.jsonl");
+        let descendant_meta = format!("project/{SESSION}/subagents/agent-worker.meta.json");
+        let workflow_child =
+            format!("project/{SESSION}/subagents/workflows/wf_main/agents/agent-child.jsonl");
+        let todo = format!("todos/{SESSION}-agent-worker.json");
+        let workflow_run = format!("project/{SESSION}/workflows/wf_main.json");
+        let workflow_journal =
+            format!("project/{SESSION}/subagents/workflows/wf_main/journal.jsonl");
+        let passing = [
+            (SUBAGENT_STREAM, descendant.as_str()),
+            (SUBAGENT_META_STREAM, descendant_meta.as_str()),
+            (SUBAGENT_STREAM, workflow_child.as_str()),
+            (TEAM_CONFIG_STREAM, "alpha/config.json"),
+            (TEAM_INBOX_STREAM, "alpha/inboxes/team-lead.json"),
+            (ACTIVE_SESSION_STREAM, "4242.json"),
+            (TODO_STREAM, todo.as_str()),
+            (PLAN_STREAM, "plans/ship-it.md"),
+            (TASK_ITEM_STREAM, "tasks/rewrite/12.json"),
+            (WORKFLOW_RUN_STREAM, workflow_run.as_str()),
+            (WORKFLOW_JOURNAL_STREAM, workflow_journal.as_str()),
+        ];
+        for (stream, relative) in passing {
+            assert!(
+                adapter
+                    .bootstrap_object(&instance(root.path()), &object(stream, relative))
+                    .is_ok(),
+                "expected {stream} {relative} to bootstrap"
+            );
+        }
+        let invalid_journal = format!("project/{SESSION}/subagents/workflows/wf_/journal.jsonl");
+        let invalid_run_empty = format!("project/{SESSION}/workflows/wf_.json");
+        let invalid_run_missing = format!("project/{SESSION}/workflows/main.json");
+        for (stream, relative) in [
+            (TASK_ITEM_STREAM, "tasks/rewrite/0.json"),
+            (WORKFLOW_RUN_STREAM, invalid_run_empty.as_str()),
+            (WORKFLOW_RUN_STREAM, invalid_run_missing.as_str()),
+            (WORKFLOW_JOURNAL_STREAM, invalid_journal.as_str()),
+        ] {
+            assert!(
+                adapter
+                    .bootstrap_object(&instance(root.path()), &object(stream, relative))
+                    .is_err(),
+                "expected {stream} {relative} to fail"
             );
         }
     }

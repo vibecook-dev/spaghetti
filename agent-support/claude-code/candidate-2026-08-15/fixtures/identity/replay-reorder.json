@@ -1,0 +1,24 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-native-shape",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 2
+  },
+  "data": {
+    "source": "configured_canonical_root",
+    "records": [
+      {
+        "family": "session-transcript",
+        "sessionId": "fixture-id-001",
+        "uuid": "fixture-id-010"
+      },
+      {
+        "family": "subagent-transcript",
+        "sessionId": "fixture-id-002",
+        "parentSessionId": "fixture-id-001",
+        "uuid": "fixture-id-011"
+      }
+    ]
+  }
+}

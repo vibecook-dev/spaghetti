@@ -1,0 +1,32 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-source-record-sequence",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 2
+  },
+  "data": {
+    "family": "session-transcript",
+    "phase": "append",
+    "records": [
+      {
+        "type": "user",
+        "uuid": "fixture-id-010",
+        "sessionId": "fixture-id-001",
+        "message": { "role": "user", "content": [] }
+      },
+      {
+        "type": "assistant",
+        "uuid": "fixture-id-011",
+        "sessionId": "fixture-id-001",
+        "message": { "role": "assistant", "id": "fixture-id-020", "content": [] }
+      }
+    ],
+    "replacement": {
+      "type": "user",
+      "uuid": "fixture-id-012",
+      "sessionId": "fixture-id-001",
+      "message": { "role": "user", "content": [] }
+    }
+  }
+}

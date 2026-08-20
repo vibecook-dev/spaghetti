@@ -5,78 +5,245 @@
   "status": "candidate",
   "artifact_compatibility": {
     "family": "claude-code",
-    "platforms": ["darwin"],
+    "platforms": [
+      "darwin"
+    ],
     "exact_versions": [],
     "ranges": [],
-    "required_markers": ["active-session.version", "settings.schema-shape", "transcript.type"],
+    "required_markers": [
+      "active-session.version",
+      "settings.schema-shape",
+      "transcript.type"
+    ],
     "forward_catalog_only": false
   },
   "references": {
-    "ads": { "path": "agent-support/claude-code/candidate-2026-08-15/ads.json", "sha256": "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa" },
-    "source_declaration": { "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json", "sha256": "sha256:3d8a5f0d005f97ede696c95c30dfccdb9cbaeeed6f8b0359d8dbfed38445a974" },
-    "scope_program": { "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json", "sha256": "sha256:3b65475646b501a93695534ab968f4187a20bbec9a3d0d1228cd42670f447114" },
-    "evidence": { "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json", "sha256": "sha256:254942cecfeb1cec4b94335a9f3de93497e2f3872422ed14c512ad94f2005130" },
-    "conformance": { "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json", "sha256": "sha256:2f59c7d191cce7073be178e9478d212c93dac43e45fe2b9ee0da8287ee6b35ab" }
+    "ads": {
+      "path": "agent-support/claude-code/candidate-2026-08-15/ads.json",
+      "sha256": "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa"
+    },
+    "source_declaration": {
+      "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json",
+      "sha256": "sha256:78a79df03f1a71fe6bb8e7b21d62719eaaff30b45e6fda7818096a73b3609496"
+    },
+    "scope_program": {
+      "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",
+      "sha256": "sha256:b7b6d84f08dc13fd1b13821473630d88a4609a9b7903cd449398f6ebeb81aaa1"
+    },
+    "evidence": {
+      "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json",
+      "sha256": "sha256:3dc4b9aaf323c0f642279fd28b59f25c998b529c935095759b74fe0177424c42"
+    },
+    "conformance": {
+      "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json",
+      "sha256": "sha256:2f59c7d191cce7073be178e9478d212c93dac43e45fe2b9ee0da8287ee6b35ab"
+    }
   },
   "versions": {
     "adapter_package": "0.7.0",
     "decoder_contract": 22,
-    "decoder_state": [1],
+    "decoder_state": [
+      1
+    ],
     "source_record_identity": 1,
     "fact_identity": 1,
     "external_entity_reference": 1,
     "semantic_revision_reference": 1,
-    "coverage": [1],
+    "coverage": [
+      1
+    ],
     "durable_contracts": {},
     "observation_contracts": {}
   },
   "capabilities": [
-    { "capability_id": "project-session-catalog", "topology": "catalog", "level": "unsupported", "notes": "RFC 012B catalog assertions and tier composition are not implemented." },
-    { "capability_id": "history-and-secondary-facts", "topology": "durable", "level": "supported", "notes": "Current Rust adapter streams project to the existing database, but this candidate is not runtime-selectable." },
-    { "capability_id": "usage-v2-runtime-semantics", "topology": "durable", "level": "unsupported", "notes": "Canonical response and actor revisions, complete value-derived semantic revision identity, cross-batch and durable exact-current-repeat suppression, ordered non-consecutive semantic reversion with ledger reuse, bootstrap baseline coalescing, explicit reset retraction, durable response/affiliation shadow reducers, workflow and native team correlation, independent frozen sanitized-oracle parity, artifact-bound exact private native corpus parity with final integrity, bounded streaming coverage membership, capability-scoped diagnostic coverage, the versioned public v2 query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, fault-tested atomic readiness/coverage administration, crash-resumable replay recovery, stale-safe public replay authorization, crash-safe source-scoped query selection, a non-mixing composite aggregate query, a read-only compatibility sampler with bounded owner-lifetime telemetry, and an unhealthy-v2 rollback drill are implemented; a representative external compatibility-window report is retained; selected actor-run, actor-affiliation, and usage-v2 scoped envelope mapping is retained; remaining runtime lifecycle facts are pending." },
-    { "capability_id": "root-descendant-observation", "topology": "scoped", "level": "unsupported", "notes": "ScopeProgram is incomplete and common observer delivery is pending." },
-    { "capability_id": "interaction-lifecycle", "topology": "scoped", "level": "unsupported", "notes": "AskUserQuestion lifecycle facts and correction delivery are pending." }
+    {
+      "capability_id": "project-session-catalog",
+      "topology": "catalog",
+      "level": "unsupported",
+      "notes": "RFC 012B catalog assertions and tier composition are not implemented."
+    },
+    {
+      "capability_id": "history-and-secondary-facts",
+      "topology": "durable",
+      "level": "supported",
+      "notes": "Current Rust adapter streams project to the existing database, but this candidate is not runtime-selectable."
+    },
+    {
+      "capability_id": "usage-v2-runtime-semantics",
+      "topology": "durable",
+      "level": "unsupported",
+      "notes": "Canonical response and actor revisions, complete value-derived semantic revision identity, cross-batch and durable exact-current-repeat suppression, ordered non-consecutive semantic reversion with ledger reuse, bootstrap baseline coalescing, explicit reset retraction, durable response/affiliation shadow reducers, workflow and native team correlation, independent frozen sanitized-oracle parity, artifact-bound exact private native corpus parity with final integrity, bounded streaming coverage membership, capability-scoped diagnostic coverage, the versioned public v2 query, writer-owned pack readiness, normalized durable source/family coverage with a generic bounded public query, fault-tested atomic readiness/coverage administration, crash-resumable replay recovery, stale-safe public replay authorization, crash-safe source-scoped query selection, a non-mixing composite aggregate query, a read-only compatibility sampler with bounded owner-lifetime telemetry, and an unhealthy-v2 rollback drill are implemented; a representative external compatibility-window report is retained; selected actor-run, actor-affiliation, and usage-v2 scoped envelope mapping is retained; remaining runtime lifecycle facts are pending."
+    },
+    {
+      "capability_id": "root-descendant-observation",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "ScopeProgram is incomplete and common observer delivery is pending."
+    },
+    {
+      "capability_id": "interaction-lifecycle",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "AskUserQuestion lifecycle facts and correction delivery are pending."
+    }
   ],
   "stream_contracts": [
-    { "stream_id": "session-transcripts", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_cursor" },
-    { "stream_id": "subagent-transcripts", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_cursor" },
-    { "stream_id": "subagent-metadata", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "team-configs", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "team-inboxes", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "active-sessions", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "todo-snapshots", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "task-items", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "plan-documents", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "file-history-blobs", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "workflow-runs", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "workflow-journals", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_cursor" },
-    { "stream_id": "session-indexes", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "project-memory-documents", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "persisted-tool-results", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" },
-    { "stream_id": "interpretation-settings", "overlap_strategy": "full_only", "safe_decoder_state_boundary": "object_generation_revision" }
+    {
+      "stream_id": "session-transcripts",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "subagent-transcripts",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "subagent-metadata",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "team-configs",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "team-inboxes",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "active-sessions",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "todo-snapshots",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "task-items",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "plan-documents",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "file-history-blobs",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "workflow-runs",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "workflow-journals",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "session-indexes",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "project-memory-documents",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "persisted-tool-results",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "interpretation-settings",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    }
   ],
-  "reports": { "conformance_sha256": null, "performance_sha256": null },
-  "sanitizer_review": { "status": "pending", "reviewed_at": null, "reviewer": null },
-  "lifecycle": { "candidate_at": "2026-08-15", "promoted_at": null, "retired_at": null, "supersedes": null, "superseded_by": null },
+  "reports": {
+    "conformance_sha256": null,
+    "performance_sha256": null
+  },
+  "sanitizer_review": {
+    "status": "pending",
+    "reviewed_at": null,
+    "reviewer": null
+  },
+  "lifecycle": {
+    "candidate_at": "2026-08-15",
+    "promoted_at": null,
+    "retired_at": null,
+    "supersedes": null,
+    "superseded_by": null
+  },
   "known_limitations": [
     "Candidate entries never confer runtime support.",
     "Catalog readiness, interaction, and scoped observation contracts are not implemented.",
+    "The native distributable/version remains unpinned; synthetic fixture versions are not a pin.",
+    "The task-artifact locator remains conceptual and cannot be executed.",
+    "RFC 012D relation coverage is incomplete while the task-artifact locator is conceptual and observer execution is absent.",
+    "Declared RFC 012D relations are not wired to the common scoped observer or access telemetry.",
+    "No RFC 012A performance/benchmark report is retained; the declared-bounds worksheet is not that contract.",
     "Source-instance move/clone and identity reuse behavior lack adversarial conformance.",
-    "Active-session nameSince remains opaque native metadata and cannot drive common ordering, activity, or lifecycle semantics without transition fixtures.",
-    "Settings autoMode remains sensitive native-only policy configuration and cannot establish effective runtime mode without transition fixtures.",
+    "Active-session nameSince remains opaque native metadata and cannot drive common ordering, activity, or lifecycle semantics.",
+    "Settings autoMode remains sensitive native-only policy configuration and cannot establish effective runtime mode.",
     "Durable and observation public contract version maps are not yet assigned."
   ],
   "drift_signatures": [
-    { "signature_id": "bridge-session-owner-fields", "family_id": "session-transcript", "fields": ["ownerAccountUuid", "ownerOrganizationUuid"], "state": "classified", "claim_refs": ["claude-drift-bridge-accounts"] },
-    { "signature_id": "active-session-name-since", "family_id": "active-session", "fields": ["nameSince"], "state": "classified", "claim_refs": ["claude-drift-active-name-since"] },
-    { "signature_id": "settings-auto-mode", "family_id": "interpretation-settings", "fields": ["autoMode.environment", "autoMode.allow", "autoMode.soft_deny"], "state": "classified", "claim_refs": ["claude-drift-auto-mode"] }
+    {
+      "signature_id": "bridge-session-owner-fields",
+      "family_id": "session-transcript",
+      "fields": [
+        "ownerAccountUuid",
+        "ownerOrganizationUuid"
+      ],
+      "state": "classified",
+      "claim_refs": [
+        "claude-drift-bridge-accounts"
+      ]
+    },
+    {
+      "signature_id": "active-session-name-since",
+      "family_id": "active-session",
+      "fields": [
+        "nameSince"
+      ],
+      "state": "classified",
+      "claim_refs": [
+        "claude-drift-active-name-since"
+      ]
+    },
+    {
+      "signature_id": "settings-auto-mode",
+      "family_id": "interpretation-settings",
+      "fields": [
+        "autoMode.environment",
+        "autoMode.allow",
+        "autoMode.soft_deny"
+      ],
+      "state": "classified",
+      "claim_refs": [
+        "claude-drift-auto-mode"
+      ]
+    }
   ],
   "promotion_blockers": [
     "Pin the native distributable/version and required markers with sanitized fixtures.",
     "Implement and pass RFC 012B catalog/tier compositionality gates.",
     "Complete remaining RFC 012C runtime lifecycle facts.",
-    "Complete and execute every RFC 012D scope relation with access telemetry.",
-    "Pass identity, unknown-retention, cross-topology, performance, and sanitizer review gates.",
+    "Execute every RFC 012D scope relation through the common observer with access telemetry.",
+    "Replace the conceptual task artifact locator with executable common-engine declaration parameters.",
+    "Produce an RFC 012A performance/benchmark report; declared-bounds worksheets are not that contract.",
+    "Pass identity-determinism, unknown-retention, cross-topology parity, and human sanitizer review.",
     "Assign public durable and observation contract versions."
   ]
 }

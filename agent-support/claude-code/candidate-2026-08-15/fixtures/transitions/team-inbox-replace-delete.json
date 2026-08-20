@@ -1,0 +1,18 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-native-shape",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 2
+  },
+  "data": {
+    "family": "team-inbox",
+    "type": "inbox",
+    "teamName": "[fixture-text-001]",
+    "recipientId": "fixture-id-002",
+    "messages": [
+      { "id": "fixture-id-010", "status": "unread" },
+      { "id": "fixture-id-010", "status": "read" }
+    ]
+  }
+}

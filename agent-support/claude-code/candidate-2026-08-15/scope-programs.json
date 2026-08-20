@@ -9,6 +9,7 @@
     {
       "program_id": "observe-root-session-and-descendants",
       "root_entity_kind": "session",
+      "root_relation_id": "root-transcript",
       "relations": [
         {
           "relation_id": "root-transcript",
@@ -51,12 +52,42 @@
           "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
         },
         {
+          "relation_id": "workflow-journals",
+          "primitive": "ReferencedObjectFromField",
+          "access_root": "projects",
+          "locator": "{project}/{session}/subagents/workflows/{observed-workflow-id}/journal.jsonl",
+          "identity_inputs": ["project-key", "native-session-id", "observed-workflow-id"],
+          "bounds": { "max_fan_out": 64, "max_depth": 3, "max_objects": 64, "max_bytes": 134217728, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
+        },
+        {
+          "relation_id": "workflow-child-transcripts",
+          "primitive": "ChildDirectoryByNativeId",
+          "access_root": "projects",
+          "locator": "{project}/{session}/subagents/workflows/{observed-workflow-id}",
+          "identity_inputs": ["project-key", "native-session-id", "observed-workflow-id"],
+          "bounds": { "max_fan_out": 256, "max_depth": 5, "max_objects": 256, "max_bytes": 2147483648, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-identity-rules"]
+        },
+        {
           "relation_id": "team-config-from-evidence",
           "primitive": "ReferencedObjectFromField",
           "access_root": "teams",
           "locator": "{team}/config.json",
           "identity_inputs": ["observed-team-name"],
           "bounds": { "max_fan_out": 8, "max_depth": 2, "max_objects": 8, "max_bytes": 8388608, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
+        },
+        {
+          "relation_id": "team-inbox-from-evidence",
+          "primitive": "ReferencedObjectFromField",
+          "access_root": "teams",
+          "locator": "{team}/inboxes/{recipient}.json",
+          "identity_inputs": ["observed-team-name", "observed-recipient"],
+          "bounds": { "max_fan_out": 16, "max_depth": 2, "max_objects": 16, "max_bytes": 67108864, "max_rows": 0 },
           "unavailable_behavior": "skip_optional",
           "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
         },
@@ -69,6 +100,36 @@
           "bounds": { "max_fan_out": 8, "max_depth": 1, "max_objects": 8, "max_bytes": 524288, "max_rows": 0 },
           "unavailable_behavior": "skip_optional",
           "claim_refs": ["claude-scope-relations-open", "claude-drift-active-name-since"]
+        },
+        {
+          "relation_id": "todo-snapshot-from-evidence",
+          "primitive": "ReferencedObjectFromField",
+          "access_root": "home",
+          "locator": "todos/{native-session-id}-agent-{native-actor-id}.json",
+          "identity_inputs": ["native-session-id", "native-actor-id"],
+          "bounds": { "max_fan_out": 8, "max_depth": 1, "max_objects": 8, "max_bytes": 8388608, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
+        },
+        {
+          "relation_id": "plan-document-from-evidence",
+          "primitive": "ReferencedObjectFromField",
+          "access_root": "home",
+          "locator": "plans/{plan-slug}.md",
+          "identity_inputs": ["plan-slug"],
+          "bounds": { "max_fan_out": 8, "max_depth": 1, "max_objects": 8, "max_bytes": 33554432, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
+        },
+        {
+          "relation_id": "task-item-from-evidence",
+          "primitive": "ReferencedObjectFromField",
+          "access_root": "home",
+          "locator": "tasks/{collection}/{task-id}.json",
+          "identity_inputs": ["collection", "task-id"],
+          "bounds": { "max_fan_out": 256, "max_depth": 2, "max_objects": 512, "max_bytes": 134217728, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["claude-scope-relations-open", "claude-runtime-semantics-open"]
         },
         {
           "relation_id": "task-artifacts-from-evidence",
@@ -96,10 +157,10 @@
     }
   ],
   "blockers": [
-    "Prove every RFC 012D Claude relation against sanitized lifecycle fixtures.",
     "Replace the conceptual task artifact locator with executable common-engine declaration parameters.",
-    "Add future descendant and team inbox membership relations with measured bounds.",
-    "Wire the declarations to the common scoped observer and its access telemetry."
+    "Wire the declarations to the common scoped observer and its access telemetry.",
+    "RFC 012D relation coverage remains incomplete while the task-artifact locator is conceptual and observer execution is absent.",
+    "The new sanitizer-review and native-shape fixture files are review/native-shape inputs, not executed lifecycle or adversarial conformance. They do not yet prove replay order, truncation, deletion/recreation, identity determinism, or bounded unknown retention."
   ],
   "claim_refs": ["claude-scope-relations-open"]
 }
