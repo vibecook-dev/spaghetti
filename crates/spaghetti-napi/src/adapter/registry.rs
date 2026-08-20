@@ -5108,6 +5108,148 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_automatic_resync_replaces_present_root_with_complete_absence() {
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("automatic-resync-disappeared-root");
+        let (mut runtime, handle, pair, target, drops, callback_slot) =
+            automatic_single_object_pair_with_watcher_policy(
+                &registry,
+                root,
+                b"automatic-resync-disappeared-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+                ScopedObservationNativeWatcherRecoveryPolicy::new(
+                    std::time::Duration::from_secs(60),
+                    std::time::Duration::from_millis(1),
+                    std::time::Duration::from_millis(1),
+                    1,
+                )
+                .unwrap(),
+            )
+            .await;
+
+        std::fs::write(&target, b"rec-01\n").unwrap();
+        let pair_task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 60, || 61));
+        let live = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(live) = live else {
+            panic!("the present root must produce one complete live watermark");
+        };
+        assert_eq!(live.scope_epoch, 1);
+        assert_eq!(live.scope_coverage.root_present(), Some(true));
+        assert!(live.explicit_object_errors.is_empty());
+
+        let mut saw_created = false;
+        while runtime.applied_state().applied_through_sequence < live.offered_through_sequence {
+            let event = runtime.next_event().await.unwrap().unwrap();
+            assert_eq!(event.envelope.scope_epoch, 1);
+            match &event.envelope.event {
+                ScopedObservationEvent::SourcePresence {
+                    change: ScopedAppendPresenceChange::Created { generation: 1 },
+                } => saw_created = true,
+                ScopedObservationEvent::ObserverFailed { .. } => {
+                    panic!("present-root delivery must not fail the observer");
+                }
+                _ => {}
+            }
+            runtime
+                .acknowledge_applied(event.application_receipt())
+                .unwrap();
+        }
+        assert!(saw_created);
+
+        std::fs::remove_file(&target).unwrap();
+        callback_slot.lock().unwrap().as_mut().unwrap()(Ok(notify::Event::new(
+            notify::EventKind::Other,
+        )
+        .set_flag(notify::event::Flag::Rescan)));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = result else {
+            panic!("lost continuity must retain the present-root owner for replacement");
+        };
+        assert!(matches!(
+            handoff.source().exit(),
+            ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(invalidation)
+                if invalidation.control().unwrap().reason == ScopedResyncReason::WatcherOverflow
+        ));
+
+        let recovery_task = tokio::spawn(handoff.replay_and_rebind_with_factory_and_clocks(
+            |_| Err(()),
+            || 80,
+            || 90,
+        ));
+        acknowledge_automatic_resync_start(&mut runtime, 1, 2, ScopedResyncReason::WatcherOverflow)
+            .await;
+        let completed = runtime.next_event().await.unwrap().unwrap();
+        let ScopedObservationEvent::ObserverResyncComplete { barrier } = &completed.envelope.event
+        else {
+            panic!("disappearance must finish through one replacement barrier");
+        };
+        assert_eq!(barrier.scope_epoch, 2);
+        assert!(!barrier.root_present);
+        assert_eq!(barrier.scope_coverage.root_present(), Some(false));
+        assert!(matches!(
+            &barrier.scope_coverage.relations()[0].state,
+            ScopedScopeRelationState::Absent {
+                kind: CoverageAbsenceKind::Absent
+            }
+        ));
+        assert!(barrier.family_manifest.iter().all(|family| {
+            family.completeness == CoverageSetCompleteness::Complete
+                && family.entity_or_event_count == 0
+        }));
+        assert!(barrier.source_coverage.iter().all(|coverage| {
+            coverage.completeness == CoverageSetCompleteness::Complete
+                && coverage.points.is_empty()
+                && coverage.explicit_absence_or_deletion.len() == 1
+                && coverage.explicit_absence_or_deletion[0].kind == CoverageAbsenceKind::Absent
+                && coverage.explicit_errors.is_empty()
+        }));
+        assert!(barrier.explicit_object_errors.is_empty());
+        runtime
+            .acknowledge_applied(completed.application_receipt())
+            .unwrap();
+
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let resumed_task =
+            tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        let current = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let ScopedObservationPollResolution::Ready(current) = current else {
+            panic!("the absent-root epoch must remain a valid pollable snapshot");
+        };
+        assert_eq!(current.scope_epoch, 2);
+        assert_eq!(current.scope_coverage.root_present(), Some(false));
+        assert!(current.explicit_object_errors.is_empty());
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), resumed_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn scoped_automatic_resync_recovers_source_and_pair_binding_reoverflows() {
         let registry = stateful_supported_fixture_registry();
         let temp = TempDir::new().unwrap();
