@@ -2295,6 +2295,17 @@ Current landing status (2026-08-19):
   and O(1), and the waiter neither consumes events nor invokes a reducer. This
   remains crate-private and adds no N-API/SDK method, native source access,
   policy authority, dynamic scope, or replacement-algorithm change; and
+- the three-observer isolation checkpoint (`cb339a8`) now runs three
+  simultaneous async owner pairs for distinct canonical root sessions on one
+  executor. One observer deliberately leaves its source-control delivery
+  undrained and enters a watcher-overflow replacement handoff; both healthy
+  siblings still complete exact-scope polls, retain `Valid` continuity,
+  deliver and acknowledge their own sequence-2 controls, and close only their
+  own watcher owners. Root identity, queue state, poll completion, application
+  receipts, resync state, close barriers, and backend lifetimes remain
+  attachment-local. This closes the executable state-isolation case only: it
+  does not ratify p99 latency, global scheduling policy, or calibrated
+  starvation bounds; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
@@ -2390,8 +2401,8 @@ This is not yet proof of relationships or descendants that the future scope
 orchestrator has not discovered and granted, nor is it the portable poll/
 bootstrap/resync contract. The public N-API/SDK iterator transport, whole-scope
 dynamic discovered-scope source/family sets, complete multi-family and D-owned
-manifests, non-append source participants, and multi-observer scheduling/
-starvation isolation remain unimplemented. Internally,
+manifests, non-append source participants, and calibrated multi-observer
+scheduling/starvation bounds remain unimplemented. Internally,
 reducer mutation, admitted-frame release, bounded delivery admission, and
 eligible coverage promotion now share one retry-safe offered transaction:
 exact projected capacity is checked before mutation, queue pressure changes no
