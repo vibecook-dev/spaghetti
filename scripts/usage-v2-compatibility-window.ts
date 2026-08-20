@@ -328,7 +328,6 @@ try {
     experiment: 'rfc012c-usage-v2-compatibility-window',
     adapterId: 'claude-code',
     decoderContractVersion: readDecoderContractVersion(),
-    source: claudeRoot === path.join(homedir(), '.claude') ? '~/.claude' : '<provided-root>',
     sourceCapture: values['live-source'] ? 'live-checked-before-after' : 'ephemeral-isolated-clone',
     sourceSetDigestBefore: before.input.sourceSetDigest,
     sourceSetDigestAfter: after.input.sourceSetDigest,
@@ -448,6 +447,19 @@ try {
   }
 }
 
+function expectPrivacyRejected(report: Record<string, unknown>, label: string): void {
+  let rejected = false;
+  try {
+    assertReportPrivacy(report, []);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.startsWith(PRIVACY_SCAN_PREFIX)) throw error;
+    rejected = true;
+  }
+  if (!rejected) {
+    throw new Error(`expected scan to reject ${label}`);
+  }
+}
+
 function expectSelectionRejected(vector: SpaghettiEngineRuntimeUsageTotalsSelectionScope[], label: string): void {
   let rejected = false;
   try {
@@ -480,22 +492,18 @@ function runSelfCheck(): void {
     throw new Error('chunkScopes of an empty window must stay empty');
   }
 
-  const leaky: Record<string, unknown> = {
+  const leakyIdentity: Record<string, unknown> = {
+    schemaVersion: 1,
+    experiment: 'rfc012c-usage-v2-compatibility-window',
+    scopes: [{ projectId: 'project_v1_abc' }],
+  };
+  expectPrivacyRejected(leakyIdentity, 'an engine project id');
+  const leakyHome: Record<string, unknown> = {
     schemaVersion: 1,
     experiment: 'rfc012c-usage-v2-compatibility-window',
     source: '~/.claude',
-    scopes: [{ projectId: 'project_v1_abc' }],
   };
-  let rejectedIdentity = false;
-  try {
-    assertReportPrivacy(leaky, []);
-  } catch (error) {
-    if (!(error instanceof Error) || !error.message.startsWith(PRIVACY_SCAN_PREFIX)) throw error;
-    rejectedIdentity = true;
-  }
-  if (!rejectedIdentity) {
-    throw new Error('expected scan to reject an engine project id');
-  }
+  expectPrivacyRejected(leakyHome, 'a ~/.claude path');
 
   const comparison = fakeCompatibility();
   assertUnselectedLegacyDefault(comparison.selectionVector);
@@ -596,7 +604,7 @@ function runSelfCheck(): void {
     {
       schemaVersion: 1,
       experiment: 'rfc012c-usage-v2-compatibility-window',
-      source: '~/.claude',
+      adapterId: 'claude-code',
       snapshots: [reduced],
     },
     ['/Users/example', '/Volumes/SamsungRed/spaghetti-rfc012'],
@@ -1020,6 +1028,7 @@ function assertReportPrivacy(report: Record<string, unknown>, forbiddenSubstring
     '/Volumes/',
     '/home/',
     '.claude/',
+    '~/.claude',
     'originalPath',
     'nativeProjectKey',
     'fullPath',
