@@ -2269,6 +2269,18 @@ Current landing status (2026-08-19):
   N-API/SDK method, caller clock or reason input, dynamic scope, source policy,
   decoder-defined query/listing authority, or replacement-algorithm change;
   and
+- the consumer-applied readiness slice (`eb68a6a`) now gives that same async
+  attachment a retained `ready_applied()` boundary distinct from engine
+  `ready()`. Its completion is constructed with the sole event drain and
+  resolves only after the exact `observer.bootstrap_complete` application
+  receipt advances consumer state. Merely offering or delivering the barrier,
+  applying an earlier envelope, or presenting a foreign, stale, or mismatched
+  receipt leaves it pending. Failure and close wake unresolved callers with
+  distinct outcomes, while neither can revoke an already-applied historical
+  bootstrap boundary. The waiter observes application state only: it consumes
+  no envelope and invokes no consumer reducer. This remains crate-private and
+  adds no SDK helper, N-API transport, source access, policy, dynamic scope, or
+  resync-application claim; and
 - the architecture checker forbids store/query/N-API/concrete-adapter imports
   and premature native public export from the provisional composition and
   negotiation roots, while keeping the portable negotiation graph contract-only.
