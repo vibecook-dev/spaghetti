@@ -3436,11 +3436,25 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
+        let applied_waiting_handle = failed_handle.clone();
+        let failed_applied =
+            tokio::spawn(
+                async move { applied_waiting_handle.resync_applied_at(10).await.unwrap() },
+            );
+        tokio::task::yield_now().await;
         let failure = failed_handle
             .fail_observer(ScopedObserverFailureReason::InternalControlFailure, 11)
             .unwrap();
         assert!(matches!(
             tokio::time::timeout(std::time::Duration::from_secs(2), failed_wait)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationResyncResolution::Failed(resolved)
+                if Arc::ptr_eq(&resolved, &failure)
+        ));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), failed_applied)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -3477,9 +3491,22 @@ pub(crate) mod tests {
         })
         .await
         .unwrap();
+        let applied_waiting_handle = closed_handle.clone();
+        let cancelled_applied =
+            tokio::spawn(
+                async move { applied_waiting_handle.resync_applied_at(20).await.unwrap() },
+            );
+        tokio::task::yield_now().await;
         let close = closed_runtime.request_close();
         assert!(matches!(
             tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_wait)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationResyncResolution::Cancelled
+        ));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), cancelled_applied)
                 .await
                 .unwrap()
                 .unwrap(),
@@ -3510,6 +3537,9 @@ pub(crate) mod tests {
         let first = tokio::spawn(async move { first_handle.resync_at(70).await.unwrap() });
         let second_handle = handle.clone();
         let second = tokio::spawn(async move { second_handle.resync_at(71).await.unwrap() });
+        let applied_handle = handle.clone();
+        let applied =
+            tokio::spawn(async move { applied_handle.resync_applied_at(73).await.unwrap() });
 
         let first_result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
             .await
@@ -3610,6 +3640,7 @@ pub(crate) mod tests {
             assert!(Arc::ptr_eq(&resolved, barrier));
         }
         assert_eq!(runtime.applied_state().resync_barrier_sequence, None);
+        assert!(!applied.is_finished());
 
         runtime
             .acknowledge_applied(completed_event.application_receipt())
@@ -3624,14 +3655,50 @@ pub(crate) mod tests {
                 .unwrap(),
             barrier
         ));
+        let ScopedObservationResyncResolution::Ready(applied_barrier) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), applied)
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("applied resync must resolve after the completion receipt");
+        };
+        assert!(Arc::ptr_eq(&applied_barrier, barrier));
 
         let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+
+        // The retained epoch-2 barrier cannot satisfy a new request whose
+        // invalid epoch is already 2.
+        let next_handle = handle.clone();
+        let next_applied =
+            tokio::spawn(async move { next_handle.resync_applied_at(100).await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if handle.with_attachment(|_, drain| drain.delivery_lane().state().continuity)
+                    == ScopedObservationContinuity::ResyncRequired
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!next_applied.is_finished());
+        let close = runtime.request_close();
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), next_applied)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationResyncResolution::Cancelled
+        ));
         drop(pair);
-        assert!(runtime.close().await.complete);
+        assert!(close.wait_async().await.complete);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
@@ -4456,6 +4523,9 @@ pub(crate) mod tests {
             .unwrap();
         let joined_handle = handle.clone();
         let joined_resync = tokio::spawn(async move { joined_handle.resync_at(71).await.unwrap() });
+        let joined_applied_handle = handle.clone();
+        let joined_applied =
+            tokio::spawn(async move { joined_applied_handle.resync_applied_at(72).await.unwrap() });
         tokio::task::yield_now().await;
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), pair_task)
             .await
@@ -4507,6 +4577,7 @@ pub(crate) mod tests {
             .as_ref()
             .is_some_and(|position| position.monotonic_order == Some(7)));
         assert!(!joined_resync.is_finished());
+        assert!(!joined_applied.is_finished());
 
         let reoverflow = handle
             .require_resync(ScopedResyncReason::TransportContinuityLoss, 95)
@@ -4568,9 +4639,19 @@ pub(crate) mod tests {
         };
         assert!(Arc::ptr_eq(&joined_barrier, barrier));
         assert_eq!(joined_barrier.scope_epoch, 3);
+        assert!(!joined_applied.is_finished());
         runtime
             .acknowledge_applied(completed.application_receipt())
             .unwrap();
+        let ScopedObservationResyncResolution::Ready(joined_applied_barrier) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), joined_applied)
+                .await
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("the applied waiter must survive re-overflow to the later epoch");
+        };
+        assert!(Arc::ptr_eq(&joined_applied_barrier, barrier));
 
         let pair = tokio::time::timeout(std::time::Duration::from_secs(2), recovery_task)
             .await

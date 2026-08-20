@@ -3255,6 +3255,7 @@ pub struct ScopedObservationConsumerDrain {
     bootstrap_barrier: Option<Arc<ScopedBootstrapBarrier>>,
     resync_barrier: Option<Arc<ScopedResyncBarrier>>,
     applied_ready: Arc<ScopedObservationReadyCompletion>,
+    applied_resync: Arc<ScopedObservationAppliedResyncCompletion>,
     lifecycle_registered: bool,
     closed: bool,
 }
@@ -3306,6 +3307,7 @@ impl ScopedObservationConsumerDrain {
             bootstrap_barrier: None,
             resync_barrier: None,
             applied_ready: Arc::new(ScopedObservationReadyCompletion::default()),
+            applied_resync: Arc::new(ScopedObservationAppliedResyncCompletion::default()),
             lifecycle_registered: false,
             closed: false,
         })
@@ -3513,6 +3515,11 @@ impl ScopedObservationConsumerDrain {
                 ScopedObservationAppliedBoundary::None
             }
         };
+        let pending_resync_barrier = match &boundary {
+            ScopedObservationAppliedBoundary::Resync(barrier) => Some(Arc::clone(barrier)),
+            ScopedObservationAppliedBoundary::None
+            | ScopedObservationAppliedBoundary::Bootstrap(_) => None,
+        };
         let receipt = ScopedObservationApplicationReceipt {
             authority: Arc::clone(&self.authority),
             observer_sequence: envelope.observer_sequence,
@@ -3524,6 +3531,9 @@ impl ScopedObservationConsumerDrain {
             receipt: receipt.clone(),
             boundary,
         });
+        if let Some(barrier) = pending_resync_barrier {
+            self.applied_resync.delivered(barrier);
+        }
         Ok(Some(ScopedObservationYieldedEnvelope {
             envelope,
             application_receipt: receipt,
@@ -3588,7 +3598,8 @@ impl ScopedObservationConsumerDrain {
                 self.applied_ready.complete(barrier);
             }
             ScopedObservationAppliedBoundary::Resync(barrier) => {
-                self.resync_barrier = Some(barrier);
+                self.resync_barrier = Some(Arc::clone(&barrier));
+                self.applied_resync.complete(barrier);
             }
         }
         Ok(self.state())
@@ -3671,6 +3682,7 @@ impl ScopedObservationConsumerDrain {
             self.closed = true;
             self.pending = None;
             self.applied_ready.cancel();
+            self.applied_resync.cancel();
             self.delivery.discard_for_close();
             if self.lifecycle_registered {
                 self.lifecycle_registered = false;
@@ -3816,6 +3828,7 @@ impl ScopedObservationAsyncHandle {
         self.shared.host.state.poll.fail(Arc::clone(&failure));
         self.shared.host.state.ready.fail(Arc::clone(&failure));
         drain.applied_ready.fail(Arc::clone(&failure));
+        drain.applied_resync.fail(Arc::clone(&failure));
         Ok(failure)
     }
 
@@ -4013,12 +4026,44 @@ impl ScopedObservationAsyncHandle {
         self.resync_at_inner(observed_at).await
     }
 
+    /// Request the same explicit replacement as `resync`, but resolve only
+    /// after the sole event drain has acknowledged application of the matching
+    /// completion barrier. This does not drive or consume that drain.
+    pub async fn resync_applied(
+        &self,
+    ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        self.resync_applied_at_inner(scoped_observation_now_unix_ms())
+            .await
+    }
+
+    #[cfg(test)]
+    pub async fn resync_applied_at(
+        &self,
+        observed_at: i64,
+    ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        self.resync_applied_at_inner(observed_at).await
+    }
+
     async fn resync_at_inner(
         &self,
         observed_at: i64,
     ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
         let target = self.request_explicit_resync_target(observed_at)?;
         self.wait_for_resync_target(target).await
+    }
+
+    async fn resync_applied_at_inner(
+        &self,
+        observed_at: i64,
+    ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        let target = self.request_explicit_resync_target(observed_at)?;
+        let completion = {
+            let drain = self.shared.lock_drain();
+            Arc::clone(&drain.applied_resync)
+        };
+        completion
+            .wait_for(target, &self.shared.host.root_identity)
+            .await
     }
 
     fn request_explicit_resync_target(
@@ -12999,6 +13044,187 @@ struct ScopedObservationResyncTarget {
     required_control_sequence: u64,
 }
 
+#[derive(Clone, Default)]
+struct ScopedObservationAppliedResyncState {
+    latest_barrier: Option<Arc<ScopedResyncBarrier>>,
+    pending_barrier: Option<Arc<ScopedResyncBarrier>>,
+    failure: Option<Arc<ScopedObserverFailure>>,
+    cancelled: bool,
+}
+
+/// Retained O(1) application boundary for repeated replacement epochs. The
+/// state is private and non-Serde; waiters receive only a validated barrier or
+/// terminal outcome for their exact attachment-bound request lineage.
+struct ScopedObservationAppliedResyncCompletion {
+    state: Mutex<ScopedObservationAppliedResyncState>,
+    async_changed: tokio::sync::watch::Sender<ScopedObservationAppliedResyncState>,
+}
+
+impl Default for ScopedObservationAppliedResyncCompletion {
+    fn default() -> Self {
+        let state = ScopedObservationAppliedResyncState::default();
+        let (async_changed, _) = tokio::sync::watch::channel(state.clone());
+        Self {
+            state: Mutex::new(state),
+            async_changed,
+        }
+    }
+}
+
+impl ScopedObservationAppliedResyncCompletion {
+    fn delivered(&self, barrier: Arc<ScopedResyncBarrier>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let accepts_delivery = state.failure.is_none() && !state.cancelled;
+        debug_assert!(
+            accepts_delivery,
+            "terminal application state cannot accept a delivered resync barrier"
+        );
+        debug_assert!(state.pending_barrier.is_none());
+        if state.pending_barrier.is_some() || !accepts_delivery {
+            return;
+        }
+        state.pending_barrier = Some(barrier);
+        self.async_changed.send_replace(state.clone());
+    }
+
+    fn complete(&self, barrier: Arc<ScopedResyncBarrier>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Failure supersedes only undelivered controls. A completion envelope
+        // already yielded before the later terminal control retains its exact
+        // application receipt and may still establish that historical
+        // boundary in total delivery order.
+        let precedes_failure = state.failure.as_ref().is_none_or(|failure| {
+            barrier.root == failure.root
+                && barrier.scope_epoch <= failure.failed_scope_epoch
+                && barrier.barrier_sequence < failure.control_sequence
+        });
+        let accepts_barrier = precedes_failure && !state.cancelled;
+        debug_assert!(
+            accepts_barrier,
+            "terminal application state cannot accept a resync barrier"
+        );
+        if !accepts_barrier {
+            return;
+        }
+        if let Some(existing) = &state.latest_barrier {
+            if Arc::ptr_eq(existing, &barrier) {
+                return;
+            }
+            let advances = barrier.scope_epoch > existing.scope_epoch
+                && barrier.barrier_sequence > existing.barrier_sequence;
+            debug_assert!(
+                advances,
+                "applied resync barriers must advance monotonically"
+            );
+            if !advances {
+                return;
+            }
+        }
+        let was_pending = state
+            .pending_barrier
+            .as_ref()
+            .is_some_and(|pending| Arc::ptr_eq(pending, &barrier));
+        debug_assert!(
+            was_pending,
+            "an applied resync barrier must have been delivered"
+        );
+        if was_pending {
+            state.pending_barrier = None;
+        } else {
+            return;
+        }
+        state.latest_barrier = Some(barrier);
+        self.async_changed.send_replace(state.clone());
+    }
+
+    fn fail(&self, failure: Arc<ScopedObserverFailure>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.failure.is_none() && !state.cancelled {
+            state.failure = Some(failure);
+            self.async_changed.send_replace(state.clone());
+        }
+    }
+
+    fn cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.cancelled {
+            state.cancelled = true;
+            state.pending_barrier = None;
+            self.async_changed.send_replace(state.clone());
+        }
+    }
+
+    fn barrier_satisfies(
+        barrier: &ScopedResyncBarrier,
+        target: ScopedObservationResyncTarget,
+        root: &ScopedObservationRootIdentity,
+    ) -> Result<bool, ScopedContinuityError> {
+        if barrier.root != *root {
+            return Err(ScopedContinuityError::InvalidControlIdentity);
+        }
+        if barrier.scope_epoch <= target.invalid_scope_epoch {
+            return Ok(false);
+        }
+        if barrier.started_control_sequence <= target.required_control_sequence {
+            return Err(ScopedContinuityError::InvalidControlIdentity);
+        }
+        Ok(true)
+    }
+
+    async fn wait_for(
+        &self,
+        target: ScopedObservationResyncTarget,
+        root: &ScopedObservationRootIdentity,
+    ) -> Result<ScopedObservationResyncResolution, ScopedContinuityError> {
+        let mut changed = self.async_changed.subscribe();
+        loop {
+            let state = changed.borrow_and_update().clone();
+            if let Some(barrier) = state.latest_barrier {
+                if Self::barrier_satisfies(&barrier, target, root)? {
+                    return Ok(ScopedObservationResyncResolution::Ready(barrier));
+                }
+            }
+            let pending_satisfies = if let Some(barrier) = &state.pending_barrier {
+                Self::barrier_satisfies(barrier, target, root)?
+            } else {
+                false
+            };
+            if let Some(failure) = state.failure {
+                if failure.root != *root {
+                    return Err(ScopedContinuityError::InvalidControlIdentity);
+                }
+                let pending_precedes_failure = pending_satisfies
+                    && state
+                        .pending_barrier
+                        .as_ref()
+                        .is_some_and(|barrier| barrier.barrier_sequence < failure.control_sequence);
+                if !pending_precedes_failure || state.cancelled {
+                    return Ok(ScopedObservationResyncResolution::Failed(failure));
+                }
+            }
+            if state.cancelled {
+                return Ok(ScopedObservationResyncResolution::Cancelled);
+            }
+            changed
+                .changed()
+                .await
+                .expect("scoped applied-resync completion retains its notification sender");
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ScopedObservationReadyWaiter {
     completion: Arc<ScopedObservationReadyCompletion>,
@@ -21976,8 +22202,8 @@ mod projection_tests {
         );
     }
 
-    #[test]
-    fn scoped_consumer_drain_applies_explicit_sequence_gap_after_invalidation() {
+    #[tokio::test]
+    async fn scoped_consumer_drain_applies_explicit_sequence_gap_after_invalidation() {
         let root = root_identity();
         let source = source_identity();
         let mut drain = consumer_drain(root.clone(), 1, 3);
@@ -22135,6 +22361,21 @@ mod projection_tests {
             .acknowledge_applied(started_delivery.application_receipt())
             .unwrap();
         assert_eq!(drain.state().applied_scope_epoch, Some(2));
+        let applied_completion = Arc::clone(&drain.applied_resync);
+        let applied_root = root.clone();
+        let applied_wait = tokio::spawn(async move {
+            applied_completion
+                .wait_for(
+                    ScopedObservationResyncTarget {
+                        invalid_scope_epoch: 1,
+                        required_control_sequence: required.control_sequence,
+                    },
+                    &applied_root,
+                )
+                .await
+                .unwrap()
+        });
+        tokio::task::yield_now().await;
 
         let completion_watermark = ScopedObservationWatermarkCore {
             attachment_authority: next_scoped_attachment_authority().unwrap(),
@@ -22194,6 +22435,17 @@ mod projection_tests {
             completed.known_envelope().unwrap().context_value(),
             &serde_json::to_value(completed.completion_context().unwrap().wire()).unwrap()
         );
+        let later_failure = drain
+            .delivery_lane_mut()
+            .fail_observer(
+                &root,
+                ScopedObserverFailureReason::InternalControlFailure,
+                55,
+            )
+            .unwrap();
+        drain.applied_resync.fail(Arc::clone(&later_failure));
+        tokio::task::yield_now().await;
+        assert!(!applied_wait.is_finished());
         let state = drain
             .acknowledge_applied(completed.application_receipt())
             .unwrap();
@@ -22203,6 +22455,26 @@ mod projection_tests {
         assert!(Arc::ptr_eq(
             &drain.consumer_resync_barrier().unwrap(),
             &resync_barrier
+        ));
+        let applied = drain
+            .applied_resync
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(applied
+            .latest_barrier
+            .is_some_and(|barrier| Arc::ptr_eq(&barrier, &resync_barrier)));
+        assert!(applied
+            .failure
+            .is_some_and(|failure| Arc::ptr_eq(&failure, &later_failure)));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), applied_wait)
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationResyncResolution::Ready(barrier)
+                if Arc::ptr_eq(&barrier, &resync_barrier)
         ));
     }
 
