@@ -10,6 +10,11 @@ const CHECKPOINT_MAGIC: &[u8] = b"SPDS";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectorySnapshotConfig {
     pub max_entries: usize,
+    /// Maximum native entries yielded by any one enumerated directory. This
+    /// counts entries before selector filtering or full metadata reads, so an
+    /// ignored population cannot turn a narrow retained snapshot into an
+    /// unbounded native listing.
+    pub max_entries_per_directory: usize,
     pub max_depth: usize,
 }
 
@@ -17,6 +22,7 @@ impl Default for DirectorySnapshotConfig {
     fn default() -> Self {
         Self {
             max_entries: 100_000,
+            max_entries_per_directory: 100_000,
             max_depth: 32,
         }
     }
@@ -27,6 +33,12 @@ impl DirectorySnapshotConfig {
         if self.max_entries == 0 {
             return Err(SourceDriverError::InvalidConfig(
                 "directory max_entries must be greater than zero".to_string(),
+            ));
+        }
+        if self.max_entries_per_directory == 0 || self.max_entries_per_directory > self.max_entries
+        {
+            return Err(SourceDriverError::InvalidConfig(
+                "directory max_entries_per_directory must be within max_entries".to_string(),
             ));
         }
         Ok(())
@@ -137,9 +149,20 @@ impl DirectoryCheckpoint {
             )));
         }
         let mut entries = BTreeMap::new();
+        let mut entries_per_directory = BTreeMap::<Vec<u8>, usize>::new();
         for _ in 0..entry_count {
             let path_key = decode_bytes(&mut reader)?;
-            validate_checkpoint_path_key(&path_key, config.max_depth)?;
+            let parent_end = validate_checkpoint_path_key(&path_key, config.max_depth)?;
+            let parent_count = entries_per_directory
+                .entry(path_key[..parent_end].to_vec())
+                .or_default();
+            if *parent_count == config.max_entries_per_directory {
+                return Err(SourceDriverError::InvalidCursor(format!(
+                    "directory checkpoint exceeds configured per-directory limit {}",
+                    config.max_entries_per_directory
+                )));
+            }
+            *parent_count += 1;
             let display_path = String::from_utf8(decode_bytes(&mut reader)?).map_err(|_| {
                 SourceDriverError::InvalidCursor(
                     "directory checkpoint display path is not UTF-8".to_string(),
@@ -327,9 +350,15 @@ impl DirectorySnapshot {
                 }
                 Err(error) => return Err(io_error("enumerating", &directory, error)),
             };
-            for entry_result in read_dir {
+            for (enumerated_entries, entry_result) in read_dir.enumerate() {
                 let entry =
                     entry_result.map_err(|error| io_error("enumerating", &directory, error))?;
+                if enumerated_entries == self.config.max_entries_per_directory {
+                    return Err(SourceDriverError::LimitExceeded(format!(
+                        "directory snapshot exceeded {} entries in one directory",
+                        self.config.max_entries_per_directory
+                    )));
+                }
                 let entry_path = entry.path();
                 let file_type = entry
                     .file_type()
@@ -520,7 +549,7 @@ fn decode_bytes(reader: &mut CursorReader<'_>) -> Result<Vec<u8>, SourceDriverEr
 fn validate_checkpoint_path_key(
     path_key: &[u8],
     max_depth: usize,
-) -> Result<(), SourceDriverError> {
+) -> Result<usize, SourceDriverError> {
     if path_key.first() != Some(&1) {
         return Err(SourceDriverError::InvalidCursor(
             "directory checkpoint path key has an invalid version".to_string(),
@@ -529,7 +558,9 @@ fn validate_checkpoint_path_key(
 
     let mut offset = 1_usize;
     let mut component_count = 0_usize;
+    let mut final_component_start = 1_usize;
     while offset < path_key.len() {
+        final_component_start = offset;
         let length_end = offset.checked_add(8).ok_or_else(|| {
             SourceDriverError::InvalidCursor(
                 "directory checkpoint path key length overflowed".to_string(),
@@ -580,7 +611,7 @@ fn validate_checkpoint_path_key(
             "directory checkpoint path key contains no components".to_string(),
         ));
     }
-    Ok(())
+    Ok(final_component_start)
 }
 
 fn next_generation(current: u64) -> Result<u64, SourceDriverError> {
@@ -774,6 +805,7 @@ mod tests {
 
         let legacy_bound = DirectorySnapshotConfig {
             max_entries: 100_000,
+            max_entries_per_directory: 100_000,
             max_depth: 64,
         };
         let error = DirectoryCheckpoint::decode_for_config(&encoded, &legacy_bound).unwrap_err();
@@ -782,6 +814,7 @@ mod tests {
 
         let candidate_bound = DirectorySnapshotConfig {
             max_entries: 250_000,
+            max_entries_per_directory: 250_000,
             max_depth: 64,
         };
         let restored = DirectoryCheckpoint::decode_for_config(&encoded, &candidate_bound).unwrap();
@@ -799,6 +832,7 @@ mod tests {
         std::fs::write(root.path().join("nested/session.json"), b"{}").unwrap();
         let scan_config = DirectorySnapshotConfig {
             max_entries: 10,
+            max_entries_per_directory: 10,
             max_depth: 1,
         };
         let (_, checkpoint, _) = snapshot(
@@ -815,6 +849,7 @@ mod tests {
 
         let lowered_config = DirectorySnapshotConfig {
             max_entries: 10,
+            max_entries_per_directory: 10,
             max_depth: 0,
         };
         let error = DirectoryCheckpoint::decode_for_config(&encoded, &lowered_config).unwrap_err();
@@ -842,11 +877,99 @@ mod tests {
         std::fs::write(root.path().join("two.json"), b"2").unwrap();
         let error = DirectorySnapshot::new(DirectorySnapshotConfig {
             max_entries: 1,
+            max_entries_per_directory: 1,
             max_depth: 1,
         })
         .unwrap()
         .scan(root.path(), None, &files)
         .unwrap_err();
         assert!(matches!(error, SourceDriverError::LimitExceeded(_)));
+    }
+
+    #[test]
+    fn per_directory_bound_counts_ignored_entries_before_selection() {
+        use std::cell::Cell;
+
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("one.json"), b"1").unwrap();
+        std::fs::write(root.path().join("two.json"), b"2").unwrap();
+        let config = DirectorySnapshotConfig {
+            max_entries: 10,
+            max_entries_per_directory: 2,
+            max_depth: 1,
+        };
+        snapshot(
+            DirectorySnapshot::new(config.clone())
+                .unwrap()
+                .scan(root.path(), None, &files)
+                .unwrap(),
+        );
+
+        std::fs::write(root.path().join("ignored.txt"), b"ignored").unwrap();
+        let selections = Cell::new(0_usize);
+        let selector = |relative: &Path, kind| {
+            selections.set(selections.get() + 1);
+            files(relative, kind)
+        };
+        let error = DirectorySnapshot::new(config)
+            .unwrap()
+            .scan(root.path(), None, &selector)
+            .unwrap_err();
+        assert!(matches!(error, SourceDriverError::LimitExceeded(_)));
+        assert!(error.to_string().contains("entries in one directory"));
+        assert_eq!(selections.get(), 2);
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_a_parent_above_the_active_fan_out_bound() {
+        let root = TempDir::new().unwrap();
+        for name in ["one.json", "two.json", "three.json"] {
+            std::fs::write(root.path().join(name), b"{}").unwrap();
+        }
+        let scan_config = DirectorySnapshotConfig {
+            max_entries: 10,
+            max_entries_per_directory: 3,
+            max_depth: 1,
+        };
+        let (_, checkpoint, _) = snapshot(
+            DirectorySnapshot::new(scan_config.clone())
+                .unwrap()
+                .scan(root.path(), None, &files)
+                .unwrap(),
+        );
+        let encoded = checkpoint.encode();
+        assert_eq!(
+            DirectoryCheckpoint::decode_for_config(&encoded, &scan_config).unwrap(),
+            checkpoint
+        );
+
+        let lowered_config = DirectorySnapshotConfig {
+            max_entries: 10,
+            max_entries_per_directory: 2,
+            max_depth: 1,
+        };
+        let error = DirectoryCheckpoint::decode_for_config(&encoded, &lowered_config).unwrap_err();
+        assert!(matches!(error, SourceDriverError::InvalidCursor(_)));
+        assert!(error.to_string().contains("per-directory limit 2"));
+    }
+
+    #[test]
+    fn per_directory_bound_must_fit_inside_the_aggregate_bound() {
+        for config in [
+            DirectorySnapshotConfig {
+                max_entries: 10,
+                max_entries_per_directory: 0,
+                max_depth: 1,
+            },
+            DirectorySnapshotConfig {
+                max_entries: 10,
+                max_entries_per_directory: 11,
+                max_depth: 1,
+            },
+        ] {
+            let error = DirectorySnapshot::new(config).err().unwrap();
+            assert!(matches!(error, SourceDriverError::InvalidConfig(_)));
+            assert!(error.to_string().contains("max_entries_per_directory"));
+        }
     }
 }

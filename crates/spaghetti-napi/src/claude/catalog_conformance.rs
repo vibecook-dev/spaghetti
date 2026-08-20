@@ -475,6 +475,7 @@ where
 {
     let scan = DirectorySnapshot::new(DirectorySnapshotConfig {
         max_entries: MEMBERSHIP_MAX_ENTRIES,
+        max_entries_per_directory: MEMBERSHIP_MAX_ENTRIES,
         max_depth: MEMBERSHIP_MAX_DEPTH,
     })?
     .scan(projects_root, None, selector)?;

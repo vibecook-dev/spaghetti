@@ -178,6 +178,7 @@ fn candidate_files(root: &Path) -> ConformanceResult<Vec<(Vec<u8>, PathBuf)>> {
     let sessions = root.join("sessions");
     let scan = DirectorySnapshot::new(DirectorySnapshotConfig {
         max_entries: CANDIDATE_MAX_ENTRIES,
+        max_entries_per_directory: CANDIDATE_MAX_ENTRIES,
         max_depth: CANDIDATE_MAX_DEPTH,
     })?
     .scan(&sessions, None, &|relative: &Path, kind| match kind {

@@ -167,6 +167,7 @@ impl AgentAdapter for GrokAdapter {
                 id: StreamId::new(MEMBERSHIP_STREAM)?,
                 driver: DriverSpec::DirectorySnapshot(DirectorySnapshotConfig {
                     max_entries: 100_000,
+                    max_entries_per_directory: 100_000,
                     max_depth: 8,
                 }),
                 selector: selector(vec![

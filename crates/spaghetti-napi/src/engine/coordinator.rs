@@ -6814,6 +6814,7 @@ mod tests {
             first.driver_checkpoint.as_deref().unwrap(),
             &DirectorySnapshotConfig {
                 max_entries: 100,
+                max_entries_per_directory: 100,
                 max_depth: 4,
             },
         )
@@ -6835,6 +6836,7 @@ mod tests {
             second.driver_checkpoint.as_deref().unwrap(),
             &DirectorySnapshotConfig {
                 max_entries: 100,
+                max_entries_per_directory: 100,
                 max_depth: 4,
             },
         )
@@ -7268,6 +7270,7 @@ mod tests {
                 id: StreamId::new("membership")?,
                 driver: DriverSpec::DirectorySnapshot(DirectorySnapshotConfig {
                     max_entries: self.max_entries,
+                    max_entries_per_directory: self.max_entries,
                     max_depth: 4,
                 }),
                 selector: ObjectSelector {

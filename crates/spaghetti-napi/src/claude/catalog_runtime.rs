@@ -976,12 +976,14 @@ fn scan_membership(
     component: &CatalogSourceComponent,
     selector: impl Fn(&Path, DirectoryEntryKind) -> DirectorySelection,
 ) -> Result<DirectoryCheckpoint, CatalogCompositionError> {
+    let max_entries = usize::try_from(component.discovery_bounds.max_entries).map_err(|_| {
+        CatalogCompositionError::invalid(
+            "Claude catalog discovery entry bound does not fit this platform",
+        )
+    })?;
     let scan = DirectorySnapshot::new(DirectorySnapshotConfig {
-        max_entries: usize::try_from(component.discovery_bounds.max_entries).map_err(|_| {
-            CatalogCompositionError::invalid(
-                "Claude catalog discovery entry bound does not fit this platform",
-            )
-        })?,
+        max_entries,
+        max_entries_per_directory: max_entries,
         max_depth: usize::try_from(component.discovery_bounds.max_depth).map_err(|_| {
             CatalogCompositionError::invalid(
                 "Claude catalog discovery depth bound does not fit this platform",
