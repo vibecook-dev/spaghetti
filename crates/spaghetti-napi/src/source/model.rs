@@ -94,6 +94,24 @@ impl Revision {
         Self(*blake3::hash(bytes).as_bytes())
     }
 
+    /// Canonical revision for an observed missing decoder dependency. Durable
+    /// and scoped source-access paths must use the same domain so topology
+    /// changes cannot alter fact identity for otherwise identical evidence.
+    pub(crate) fn missing_dependency() -> Self {
+        Self(*blake3::hash(b"spaghetti/source-dependency/missing/v1").as_bytes())
+    }
+
+    /// Canonical revision for an observed dependency that exceeded its
+    /// declared read ceiling. The metadata stamp is all the common stable-read
+    /// primitive exposes when it deliberately withholds the payload.
+    pub(crate) fn oversized_dependency(len: u64, modified_ns: i128) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"spaghetti/source-dependency/oversized/v1");
+        hasher.update(&len.to_be_bytes());
+        hasher.update(&modified_ns.to_be_bytes());
+        Self(*hasher.finalize().as_bytes())
+    }
+
     pub fn from_bytes(bytes: [u8; HASH_BYTES]) -> Self {
         Self(bytes)
     }
@@ -541,5 +559,16 @@ mod tests {
         assert_eq!(absent.state, SourceRecordState::Absent);
         assert_eq!(present.state, SourceRecordState::Present);
         assert_eq!(absent.payload_hash, present.payload_hash);
+    }
+
+    #[test]
+    fn dependency_revision_domains_are_stable_and_state_distinct() {
+        let missing = Revision::missing_dependency();
+        let oversized = Revision::oversized_dependency(17, 23);
+        assert_ne!(missing, oversized);
+        assert_eq!(missing, Revision::missing_dependency());
+        assert_eq!(oversized, Revision::oversized_dependency(17, 23));
+        assert_ne!(oversized, Revision::oversized_dependency(18, 23));
+        assert_ne!(oversized, Revision::oversized_dependency(17, 24));
     }
 }

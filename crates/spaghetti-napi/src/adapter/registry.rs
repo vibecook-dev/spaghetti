@@ -241,8 +241,8 @@ pub(crate) mod tests {
     use crate::source::{
         AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
         AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint,
-        DirtyReason, DirtyScope, HintEnqueue, RecordOrigin, ScopeAccessReport, ScopeAccessRequest,
-        ScopeIdentityInput, SourceMediaType, SourceRecord,
+        DirtyReason, DirtyScope, HintEnqueue, RecordOrigin, Revision, ScopeAccessReport,
+        ScopeAccessRequest, ScopeIdentityInput, SourceMediaType, SourceRecord,
     };
 
     use super::*;
@@ -311,6 +311,7 @@ pub(crate) mod tests {
         manifest: AdapterManifest,
         decode_statefully: bool,
         request_dependency_access: bool,
+        dependency_mutation: Option<(PathBuf, Vec<u8>)>,
     }
 
     impl EmptyAdapter {
@@ -328,6 +329,7 @@ pub(crate) mod tests {
                 },
                 decode_statefully: false,
                 request_dependency_access: false,
+                dependency_mutation: None,
             }
         }
 
@@ -338,6 +340,11 @@ pub(crate) mod tests {
 
         fn with_dependency_access(mut self) -> Self {
             self.request_dependency_access = true;
+            self
+        }
+
+        fn with_dependency_mutation(mut self, path: PathBuf, payload: Vec<u8>) -> Self {
+            self.dependency_mutation = Some((path, payload));
             self
         }
 
@@ -355,6 +362,8 @@ pub(crate) mod tests {
     const SINGLE_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     const TWO_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
+    const DEPENDENCY_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"decoder-sidecar","primitive":"KnownObject","access_root":"root","locator":"decoder-sidecar","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     fn promoted_fixture_catalog_with_scope(
         scope_document: &[u8],
@@ -509,6 +518,24 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    fn declared_dependency_fixture_registry(
+        mutation: Option<(PathBuf, Vec<u8>)>,
+    ) -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(DEPENDENCY_SCOPE_DOCUMENT);
+        let mut adapter = EmptyAdapter::new("fixture")
+            .with_support(binding, scope_programs)
+            .with_stateful_decode()
+            .with_dependency_access();
+        if let Some((path, payload)) = mutation {
+            adapter = adapter.with_dependency_mutation(path, payload);
+        }
+        AdapterRegistryBuilder::new()
+            .register(adapter)
+            .build_supported(catalog)
+            .unwrap()
+    }
+
     pub(crate) fn scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
         ScopedObservationAccessRequest {
             adapter_id: "fixture".to_string(),
@@ -647,6 +674,19 @@ pub(crate) mod tests {
             locator_id: "sibling-object".to_string(),
             root,
             relative_path: "sibling.jsonl".into(),
+        });
+        request
+    }
+
+    fn declared_dependency_scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
+        let mut request = scoped_access_request(root.clone());
+        request.known_objects.push(ScopedKnownObjectGrant {
+            relation_id: "decoder-sidecar".to_string(),
+            scope_root: false,
+            access_root: "root".to_string(),
+            locator_id: "decoder-sidecar".to_string(),
+            root,
+            relative_path: "sidecar.json".into(),
         });
         request
     }
@@ -1190,10 +1230,27 @@ pub(crate) mod tests {
             output: &mut FactBatch,
             source_access: &dyn SourceAccess,
         ) -> Result<DecodeDisposition, AdapterError> {
-            if self.request_dependency_access {
-                source_access.read_object("root", std::path::Path::new("sidecar.json"), 16)?;
+            let dependency = if self.request_dependency_access {
+                Some(source_access.read_object("root", std::path::Path::new("sidecar.json"), 16)?)
+            } else {
+                None
+            };
+            if let Some((path, payload)) = &self.dependency_mutation {
+                std::fs::write(path, payload).map_err(|_| {
+                    AdapterError::new(
+                        AdapterErrorClass::AdapterFatal,
+                        "fixture_dependency_mutation",
+                        "fixture dependency mutation failed",
+                    )
+                })?;
             }
-            self.decode(context, record, output)
+            let disposition = self.decode(context, record, output)?;
+            if let Some(dependency) = dependency {
+                let mut state = output.next_decoder_state().unwrap_or_default().to_vec();
+                state.extend_from_slice(&dependency.revision.revision);
+                output.set_next_decoder_state(state)?;
+            }
+            Ok(disposition)
         }
     }
 
@@ -7656,6 +7713,423 @@ pub(crate) mod tests {
         assert!(object.checkpoint().is_none());
         assert!(object.decoder_state().is_none());
         object.discard(&observation).unwrap();
+    }
+
+    #[test]
+    fn scoped_decode_uses_one_declared_dependency_pass_and_common_revision() {
+        let registry = declared_dependency_fixture_registry(None);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("declared-dependency-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        std::fs::write(root.join("sidecar.json"), b"sidecar").unwrap();
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            declared_dependency_scoped_access_request(root),
+        )
+        .unwrap();
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"declared-dependency-session",
+        }];
+        let root_origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let dependency_origin = RecordOrigin {
+            object_id: 5,
+            ..root_origin.clone()
+        };
+        let requests = [
+            ScopedObservationAppendPassRequest {
+                relation_id: "root-object",
+                identity_inputs: &identity,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 64,
+                origin: &root_origin,
+                force_contract_replay: false,
+            },
+            ScopedObservationAppendPassRequest {
+                relation_id: "decoder-sidecar",
+                identity_inputs: &identity,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 64,
+                origin: &dependency_origin,
+                force_contract_replay: false,
+            },
+        ];
+        let pass = host.begin_pass().unwrap();
+        let observation = object
+            .reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &root_origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+
+        assert!(matches!(
+            host.decode_append_with_dependencies_for_test(
+                &mut object,
+                &observation,
+                &pass,
+                &requests[..1],
+                AccessPhase::Initial,
+            ),
+            Err(ScopedObservationAccessError::InvalidGrant(_))
+        ));
+        let ScopedAppendDecodeOutcome::Ready(decoded) = host
+            .decode_append_with_dependencies_for_test(
+                &mut object,
+                &observation,
+                &pass,
+                &requests,
+                AccessPhase::Initial,
+            )
+            .unwrap()
+        else {
+            panic!("the exact declared dependency must decode");
+        };
+        let report = pass.report();
+        let dependency_report = report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "decoder-sidecar")
+            .unwrap();
+        assert_eq!(dependency_report.attempts, 2);
+        assert_eq!(dependency_report.bytes_read, 14);
+        assert_eq!(dependency_report.trace[0].phase, AccessPhase::Initial);
+        assert_eq!(dependency_report.trace[1].phase, AccessPhase::Revalidation);
+
+        let mut admission = admission_lane(16, 64, 4);
+        if let Err(failure) = admission.admit(&mut object, &observation, decoded) {
+            panic!("declared dependency admission failed: {}", failure.error);
+        }
+        let mut expected_state = b"one".to_vec();
+        expected_state.extend_from_slice(Revision::digest(b"sidecar").as_bytes());
+        assert_eq!(object.decoder_state(), Some(expected_state.as_slice()));
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
+        let diagnostic = format!("{report:?}");
+        assert!(!diagnostic.contains("sidecar.json"));
+        assert!(!diagnostic.contains("declared-dependency-root"));
+    }
+
+    #[test]
+    fn scoped_dependency_change_before_state_staging_retries_without_advancing() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("changing-dependency-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        let sidecar = root.join("sidecar.json");
+        std::fs::write(&sidecar, b"before").unwrap();
+        let registry = declared_dependency_fixture_registry(Some((sidecar, b"after".to_vec())));
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            declared_dependency_scoped_access_request(root),
+        )
+        .unwrap();
+        let mut object = scoped_append_object(
+            AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap(),
+            RawRetentionPolicy::None,
+        );
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"changing-dependency-session",
+        }];
+        let root_origin = RecordOrigin {
+            source_instance_id: 1,
+            stream_id: 2,
+            object_id: 3,
+            observed_at: 4,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let dependency_origin = RecordOrigin {
+            object_id: 5,
+            ..root_origin.clone()
+        };
+        let requests = [
+            ScopedObservationAppendPassRequest {
+                relation_id: "root-object",
+                identity_inputs: &identity,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 64,
+                origin: &root_origin,
+                force_contract_replay: false,
+            },
+            ScopedObservationAppendPassRequest {
+                relation_id: "decoder-sidecar",
+                identity_inputs: &identity,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 64,
+                origin: &dependency_origin,
+                force_contract_replay: false,
+            },
+        ];
+
+        let pass = host.begin_pass().unwrap();
+        let observation = object
+            .reconcile(
+                &pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Initial,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &root_origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            host.decode_append_with_dependencies_for_test(
+                &mut object,
+                &observation,
+                &pass,
+                &requests,
+                AccessPhase::Initial,
+            ),
+            Err(ScopedObservationAccessError::Decode(
+                ScopedDecodeFailureClass::Transient
+            ))
+        ));
+        assert!(object.checkpoint().is_none());
+        assert!(object.decoder_state().is_none());
+        object.discard(&observation).unwrap();
+        drop(pass);
+
+        let retry = host.begin_pass().unwrap();
+        let retry_observation = object
+            .reconcile(
+                &retry,
+                ScopedAppendReconcileRequest {
+                    relation_id: "root-object",
+                    identity_inputs: &identity,
+                    access_phase: AccessPhase::Revalidation,
+                    parent_token: None,
+                    depth: 1,
+                    max_bytes: 64,
+                    origin: &root_origin,
+                    force_contract_replay: false,
+                },
+            )
+            .unwrap();
+        let ScopedAppendDecodeOutcome::Ready(decoded) = host
+            .decode_append_with_dependencies_for_test(
+                &mut object,
+                &retry_observation,
+                &retry,
+                &requests,
+                AccessPhase::Revalidation,
+            )
+            .unwrap()
+        else {
+            panic!("the stable dependency retry must decode");
+        };
+        let mut admission = admission_lane(16, 64, 4);
+        if let Err(failure) = admission.admit(&mut object, &retry_observation, decoded) {
+            panic!(
+                "stable dependency retry admission failed: {}",
+                failure.error
+            );
+        }
+        let mut expected_state = b"one".to_vec();
+        expected_state.extend_from_slice(Revision::digest(b"after").as_bytes());
+        assert_eq!(object.decoder_state(), Some(expected_state.as_slice()));
+        assert_eq!(object.checkpoint().unwrap().committed_offset, 4);
+    }
+
+    #[test]
+    fn scoped_live_poll_composes_declared_dependencies_without_a_bypass() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("live-dependency-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let sidecar = root.join("sidecar.json");
+        let registry =
+            declared_dependency_fixture_registry(Some((sidecar.clone(), b"after\n".to_vec())));
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            declared_dependency_scoped_access_request(root.clone()),
+        )
+        .unwrap();
+        let mut drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 32,
+                max_retained_native_bytes: 128,
+                max_source_control_items: 16,
+            })
+            .unwrap();
+        let mut objects = vec![
+            scoped_append_object_for_native_object(b"session.jsonl"),
+            scoped_append_object_for_native_object(b"sidecar.json"),
+        ];
+        let mut admission = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 32,
+            max_retained_native_bytes: 128,
+            max_control_items: 16,
+            max_coverage_objects: 2,
+        })
+        .unwrap();
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 16,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"live-dependency-session",
+        }];
+        let root_origin = RecordOrigin {
+            source_instance_id: 13,
+            stream_id: 14,
+            object_id: 15,
+            observed_at: 16,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let dependency_origin = RecordOrigin {
+            object_id: 17,
+            ..root_origin.clone()
+        };
+
+        let bootstrap_ticket = host.request_poll().unwrap();
+        let bootstrap = host.begin_poll().unwrap().unwrap();
+        reconcile_missing_relation_poll(
+            &host,
+            &bootstrap,
+            "root-object",
+            &mut objects[0],
+            &mut admission,
+            &identity,
+            &root_origin,
+        );
+        reconcile_missing_relation_poll(
+            &host,
+            &bootstrap,
+            "decoder-sidecar",
+            &mut objects[1],
+            &mut admission,
+            &identity,
+            &dependency_origin,
+        );
+        host.complete_bootstrap_poll(bootstrap, &admission, &projection, &drain)
+            .unwrap();
+        assert!(matches!(
+            host.poll_resolution(&bootstrap_ticket).unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        for object in &mut objects {
+            object.complete_bootstrap().unwrap();
+        }
+        host.offer_consumer_bootstrap_complete(&objects, &admission, &projection, &mut drain, 18)
+            .unwrap();
+        let mut active = host
+            .bind_consumer_bootstrap_epoch_state(objects, admission, projection, &drain)
+            .unwrap();
+
+        std::fs::write(root.join("session.jsonl"), b"one\n").unwrap();
+        std::fs::write(&sidecar, b"before\n").unwrap();
+        let requests = [
+            ScopedObservationAppendPassRequest {
+                relation_id: "root-object",
+                identity_inputs: &identity,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 64,
+                origin: &root_origin,
+                force_contract_replay: false,
+            },
+            ScopedObservationAppendPassRequest {
+                relation_id: "decoder-sidecar",
+                identity_inputs: &identity,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 64,
+                origin: &dependency_origin,
+                force_contract_replay: false,
+            },
+        ];
+        let ticket = host.request_poll().unwrap();
+        let forged_dependency_origin = RecordOrigin {
+            source_instance_id: 99,
+            ..dependency_origin.clone()
+        };
+        let forged_requests = [
+            requests[0],
+            ScopedObservationAppendPassRequest {
+                origin: &forged_dependency_origin,
+                ..requests[1]
+            },
+        ];
+        let lease = host.begin_poll().unwrap().unwrap();
+        assert!(matches!(
+            host.execute_epoch_poll_pass(lease, &mut active, &mut drain, &forged_requests),
+            Err(ScopedObservationPassExecutionError::InvalidRelationSet)
+        ));
+        assert_eq!(std::fs::read(&sidecar).unwrap(), b"before\n");
+        assert!(matches!(
+            host.poll_resolution(&ticket).unwrap(),
+            ScopedObservationPollResolution::Pending
+        ));
+
+        let lease = host.begin_poll().unwrap().unwrap();
+        assert!(matches!(
+            host.execute_epoch_poll_pass(lease, &mut active, &mut drain, &requests),
+            Err(ScopedObservationPassExecutionError::Access(
+                ScopedObservationAccessError::Decode(ScopedDecodeFailureClass::Transient)
+            ))
+        ));
+        assert!(matches!(
+            host.poll_resolution(&ticket).unwrap(),
+            ScopedObservationPollResolution::Pending
+        ));
+        for relation_id in ["root-object", "decoder-sidecar"] {
+            let object = active.append_object(relation_id).unwrap();
+            assert!(object.checkpoint().is_none());
+            assert!(object.decoder_state().is_none());
+        }
+
+        let retry = host.begin_poll().unwrap().unwrap();
+        host.execute_epoch_poll_pass(retry, &mut active, &mut drain, &requests)
+            .unwrap();
+        assert!(matches!(
+            host.poll_resolution(&ticket).unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        let dependency_revision = Revision::digest(b"after\n");
+        for (relation_id, payload, committed_offset) in [
+            ("root-object", b"one".as_slice(), 4),
+            ("decoder-sidecar", b"after".as_slice(), 6),
+        ] {
+            let object = active.append_object(relation_id).unwrap();
+            let mut expected_state = payload.to_vec();
+            expected_state.extend_from_slice(dependency_revision.as_bytes());
+            assert_eq!(object.decoder_state(), Some(expected_state.as_slice()));
+            assert_eq!(
+                object.checkpoint().unwrap().committed_offset,
+                committed_offset
+            );
+        }
     }
 
     #[test]

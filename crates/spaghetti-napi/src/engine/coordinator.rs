@@ -5130,22 +5130,17 @@ fn dependency_snapshot(
     let object_key = confined_relative_path_key(relative_path)?;
     let (payload, revision, oversized) =
         match crate::source::read_stable_file_confined(root, relative_path, max_bytes)? {
-            crate::source::StableRead::Missing => (
-                None,
-                *blake3::hash(b"spaghetti/source-dependency/missing/v1").as_bytes(),
-                false,
-            ),
+            crate::source::StableRead::Missing => {
+                (None, *Revision::missing_dependency().as_bytes(), false)
+            }
             crate::source::StableRead::Unstable => {
                 return Err(SourceDriverError::Unstable(
                     relative_path.to_string_lossy().into_owned(),
                 ))
             }
             crate::source::StableRead::Oversized(stamp) => {
-                let mut hasher = blake3::Hasher::new();
-                hasher.update(b"spaghetti/source-dependency/oversized/v1");
-                hasher.update(&stamp.len.to_be_bytes());
-                hasher.update(&stamp.modified_ns.to_be_bytes());
-                (None, *hasher.finalize().as_bytes(), true)
+                let revision = Revision::oversized_dependency(stamp.len, stamp.modified_ns);
+                (None, *revision.as_bytes(), true)
             }
             crate::source::StableRead::Stable {
                 bytes, revision, ..

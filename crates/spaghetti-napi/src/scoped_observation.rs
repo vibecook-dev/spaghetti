@@ -67,6 +67,7 @@ mod capability_snapshot_wire;
 mod close_wire;
 mod completion_wire;
 mod continuity_wire;
+mod dependency_access;
 mod event_wire;
 mod replacement_manifest_wire;
 mod scope_coverage_wire;
@@ -4049,7 +4050,7 @@ impl ScopedObservationAsyncHandle {
                 .expect("the exact relation set was prevalidated");
             self.shared
                 .host
-                .reconcile_epoch_poll_relation(&lease, active, request)?;
+                .reconcile_epoch_poll_relation(&lease, active, request, requests)?;
             let mut drain = self.shared.lock_drain();
             self.shared
                 .host
@@ -4542,7 +4543,7 @@ impl ScopedObservationAsyncSourceOwner {
             match handle
                 .shared
                 .host
-                .reconcile_epoch_poll_relation(&lease, active, request)
+                .reconcile_epoch_poll_relation(&lease, active, request, requests)
             {
                 Ok(ScopedObservationRelationPollOutcome::Ready) => {
                     active.object_errors.remove(&relation_id);
@@ -6357,6 +6358,34 @@ where
         .host()
         .begin_pass()
         .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+    let dependency_identity_inputs = bindings
+        .iter()
+        .map(|binding| {
+            binding
+                .identity_inputs
+                .iter()
+                .map(|input| ScopeIdentityInput {
+                    name: &input.name,
+                    value: &input.value,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let dependency_requests = bindings
+        .iter()
+        .zip(&dependency_identity_inputs)
+        .map(
+            |(binding, identity_inputs)| ScopedObservationAppendPassRequest {
+                relation_id: &binding.relation_id,
+                identity_inputs,
+                parent_token: binding.parent_token,
+                depth: binding.depth,
+                max_bytes: binding.max_bytes,
+                origin: &binding.origin,
+                force_contract_replay: binding.force_contract_replay,
+            },
+        )
+        .collect::<Vec<_>>();
     let mut ordered_bindings = bindings.iter().collect::<Vec<_>>();
     ordered_bindings.sort_by(|left, right| left.relation_id.cmp(&right.relation_id));
 
@@ -6463,7 +6492,13 @@ where
                     .append_objects
                     .get_mut(&binding.relation_id)
                     .expect("the validated replacement relation remains present");
-                match handle.host().decode_append(object, &observation) {
+                match handle.host().decode_append_with_dependencies(
+                    object,
+                    &observation,
+                    &pass,
+                    &dependency_requests,
+                    AccessPhase::Initial,
+                ) {
                     Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => Ok(decoded),
                     Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
                         object
@@ -12607,9 +12642,15 @@ fn append_transition_tag(transition: AppendTransition) -> u8 {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopedObjectRead {
-    Available { bytes: Vec<u8>, revision: Revision },
+    Available {
+        bytes: Vec<u8>,
+        revision: Revision,
+    },
     Unavailable,
-    Oversized { observed_bytes: u64 },
+    Oversized {
+        observed_bytes: u64,
+        revision: Revision,
+    },
     Unstable,
 }
 
@@ -14700,6 +14741,39 @@ impl ScopedObservationAccessHost {
             {
                 return Err(ScopedObservationPassExecutionError::InvalidRelationSet);
             }
+            let object = active
+                .append_objects
+                .get(request.relation_id)
+                .expect("the checked active relation remains present");
+            let token_component_capacity = request
+                .identity_inputs
+                .len()
+                .checked_mul(2)
+                .ok_or(ScopedObservationPassExecutionError::InvalidRelationSet)?;
+            let mut token_components = Vec::new();
+            token_components
+                .try_reserve_exact(token_component_capacity)
+                .map_err(|_| ScopedObservationPassExecutionError::InvalidRelationSet)?;
+            for input in request.identity_inputs {
+                token_components.push(input.name.as_bytes());
+                token_components.push(input.value);
+            }
+            let object_token = AccessObjectToken::derive(request.relation_id, &token_components)
+                .map_err(|_| ScopedObservationPassExecutionError::InvalidRelationSet)?;
+            let expected_access_identity = ScopedAppendAccessIdentity {
+                object_token,
+                parent_token: request.parent_token,
+                depth: request.depth,
+                source_instance_id: request.origin.source_instance_id,
+                stream_id: request.origin.stream_id,
+                object_id: request.origin.object_id,
+                media_type: request.origin.media_type.clone(),
+            };
+            if object.relation_id.as_deref() != Some(request.relation_id)
+                || object.access_identity.as_ref() != Some(&expected_access_identity)
+            {
+                return Err(ScopedObservationPassExecutionError::InvalidRelationSet);
+            }
         }
         if active
             .append_objects
@@ -14838,6 +14912,7 @@ impl ScopedObservationAccessHost {
         lease: &ScopedObservationPollLease,
         active: &mut ScopedObservationEpochState,
         request: &ScopedObservationAppendPassRequest<'_>,
+        requests: &[ScopedObservationAppendPassRequest<'_>],
     ) -> Result<ScopedObservationRelationPollOutcome, ScopedObservationPassExecutionError> {
         let relation_id = request.relation_id;
         let observation = {
@@ -14865,7 +14940,13 @@ impl ScopedObservationAccessHost {
                 .append_objects
                 .get_mut(relation_id)
                 .expect("the exact relation set was prevalidated");
-            match self.decode_append(object, &observation) {
+            match self.decode_append_with_dependencies(
+                object,
+                &observation,
+                lease.access_pass(),
+                requests,
+                AccessPhase::Revalidation,
+            ) {
                 Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
                 Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
                     object.discard(&observation)?;
@@ -14937,7 +15018,7 @@ impl ScopedObservationAccessHost {
             let request = requests_by_relation
                 .get(relation_id.as_str())
                 .expect("the exact relation set was prevalidated");
-            self.reconcile_epoch_poll_relation(&lease, active, request)?;
+            self.reconcile_epoch_poll_relation(&lease, active, request, requests)?;
             self.offer_epoch_poll_pending(active, drain)?;
         }
 
@@ -15592,8 +15673,9 @@ impl ScopedObservationAccessHost {
     }
 
     /// Decode one already-read append observation through the exact adapter
-    /// selected during authorization. Dependency access is fail-closed until
-    /// scoped relation-backed `SourceAccess` composition lands.
+    /// selected during authorization. This direct/manual lane deliberately
+    /// keeps dependency access denied; product live and replacement lanes use
+    /// the private relation-backed composition below.
     pub fn decode_append(
         &self,
         object: &mut ScopedKnownAppendObject,
@@ -15610,7 +15692,54 @@ impl ScopedObservationAccessHost {
             self.adapter.as_ref(),
             observation,
             &ScopedDependencyAccessDenied,
+            || Ok(()),
         )
+    }
+
+    /// Decode through the exact declared `KnownObject` relation set owned by
+    /// this pass. The adapter cannot name a relation directly: its requested
+    /// root/path must resolve to one unambiguous host grant, and every used
+    /// dependency is re-read before decoder state is staged.
+    fn decode_append_with_dependencies<'a>(
+        &self,
+        object: &mut ScopedKnownAppendObject,
+        observation: &ScopedAppendObservation,
+        pass: &'a ScopedObservationAccessPass,
+        requests: &'a [ScopedObservationAppendPassRequest<'a>],
+        phase: AccessPhase,
+    ) -> Result<ScopedAppendDecodeOutcome, ScopedObservationAccessError> {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationAccessError::Closed);
+        }
+        let _operation = self.start_attachment_operation()?;
+        if !Arc::ptr_eq(&self.state, &pass.state) || observation.access_pass_id != pass.pass_id() {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "scoped decoder dependency pass does not own the observation".to_string(),
+            ));
+        }
+        if !source_belongs_to_root(&object.source, &self.root_identity) {
+            return Err(ScopedObservationAccessError::InvalidRootIdentity);
+        }
+        let dependency_access =
+            dependency_access::ScopedDecoderDependencyAccess::from_requests(pass, requests, phase)?;
+        object.decode(
+            self.adapter.as_ref(),
+            observation,
+            &dependency_access,
+            || dependency_access.revalidate(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decode_append_with_dependencies_for_test<'a>(
+        &self,
+        object: &mut ScopedKnownAppendObject,
+        observation: &ScopedAppendObservation,
+        pass: &'a ScopedObservationAccessPass,
+        requests: &'a [ScopedObservationAppendPassRequest<'a>],
+        phase: AccessPhase,
+    ) -> Result<ScopedAppendDecodeOutcome, ScopedObservationAccessError> {
+        self.decode_append_with_dependencies(object, observation, pass, requests, phase)
     }
 
     pub fn begin_pass(&self) -> Result<ScopedObservationAccessPass, ScopedObservationAccessError> {
@@ -15817,6 +15946,7 @@ impl ScopedObservationAccessPass {
                 reservation.complete(0, 0, AccessOutcome::Oversized)?;
                 Ok(ScopedObjectRead::Oversized {
                     observed_bytes: stamp.len,
+                    revision: Revision::oversized_dependency(stamp.len, stamp.modified_ns),
                 })
             }
             StableRead::Unstable => {
@@ -16529,12 +16659,16 @@ impl ScopedKnownAppendObject {
         })
     }
 
-    fn decode(
+    fn decode<F>(
         &mut self,
         adapter: &dyn AgentAdapter,
         observation: &ScopedAppendObservation,
         source_access: &dyn SourceAccess,
-    ) -> Result<ScopedAppendDecodeOutcome, ScopedObservationAccessError> {
+        revalidate_dependencies: F,
+    ) -> Result<ScopedAppendDecodeOutcome, ScopedObservationAccessError>
+    where
+        F: FnOnce() -> Result<(), AdapterError>,
+    {
         let pending = self
             .pending
             .as_ref()
@@ -16598,6 +16732,9 @@ impl ScopedKnownAppendObject {
                 }
             }
         }
+
+        revalidate_dependencies()
+            .map_err(|error| ScopedObservationAccessError::Decode(decode_failure_class(&error)))?;
 
         let pending = self
             .pending
