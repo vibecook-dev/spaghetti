@@ -2372,6 +2372,19 @@ primitives.
 Hooks remain in Chopsticks as root lifecycle and immediate-poll signals during
 this package.
 
+Current landing status (2026-08-20): D2 remains `Not started` as an executable
+Claude composition. The promotion guard in `9f9749b` closes one unsafe interim
+state: after typed support authorization selects a Promoted scope program, the
+scoped host now rejects attachment if that program contains any observation
+relation primitive whose membership is not represented by the current exact
+`KnownObject` coverage vector. Evidence-derived artifact relations remain on
+their separately bound availability contract. The rejection occurs before
+construction of a native access pass and exposes neither the relation ID nor
+its locator. This does not implement child-directory, sibling, referenced,
+index, namespace, or parameterized-query composition; it prevents a later
+manifest status flip from silently treating those omitted relations as a
+complete scope.
+
 ### D3. Identity, control, and resync
 
 Implement:
