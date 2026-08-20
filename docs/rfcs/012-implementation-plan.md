@@ -2416,6 +2416,19 @@ known-object subset. The dynamic-relation promotion guard still executes first,
 so this seam cannot open or enumerate a directory, construct a watcher, or
 authorize the Candidate package.
 
+Commit `a2bb82d` closes the common-driver fan-out prerequisite without opening
+that locator. `DirectorySnapshotConfig` now carries a per-directory entry
+ceiling in addition to its aggregate retained-entry ceiling. Each native entry
+yielded by `read_dir` consumes that per-directory bound before selector logic,
+full metadata, recursion, or checkpoint retention, including entries the
+selector would ignore. The first excess entry aborts the scan instead of
+returning a partial snapshot. Checkpoint restore also rejects a retained parent
+whose children exceed the active per-directory bound, and every existing
+catalog/coordinator declaration preserves its prior behavior by selecting an
+explicit bound no broader than its aggregate ceiling. This is a driver safety
+precondition only: no scoped relation invokes the driver, no entry receives a
+child access token, and the dynamic-relation promotion guard remains closed.
+
 ### D3. Identity, control, and resync
 
 Implement:
