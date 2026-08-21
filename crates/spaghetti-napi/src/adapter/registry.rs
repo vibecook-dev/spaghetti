@@ -182,6 +182,7 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::Instant;
 
     use tempfile::TempDir;
 
@@ -395,6 +396,8 @@ pub(crate) mod tests {
     const TWO_OBJECT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     const DEPENDENCY_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"decoder-sidecar","primitive":"KnownObject","access_root":"root","locator":"decoder-sidecar","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
+    const CLAUDE_COMPOSED_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-transcript","relations":[{"relation_id":"root-transcript","primitive":"KnownObject","access_root":"root","locator":"root-transcript","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"current-child","primitive":"KnownObject","access_root":"root","locator":"current-child","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"future-child","primitive":"KnownObject","access_root":"root","locator":"future-child","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"team-inbox-sidecar","primitive":"KnownObject","access_root":"root","locator":"team-inbox-sidecar","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     const UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{native-session-id}/children","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"observation_binding":{"stream_id":"descendant-stream","source_pattern":"sessions/*/children/**","relative_selector":"**"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
@@ -745,6 +748,58 @@ pub(crate) mod tests {
             root,
             relative_path: "sibling.jsonl".into(),
         });
+        request
+    }
+
+    fn claude_composed_fixture_registry() -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(CLAUDE_COMPOSED_SCOPE_DOCUMENT);
+        AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_stateful_decode(),
+            )
+            .build_supported(catalog)
+            .unwrap()
+    }
+
+    fn claude_composed_scoped_access_request(root: PathBuf) -> ScopedObservationAccessRequest {
+        let mut request = scoped_access_request(root.clone());
+        request.known_objects = vec![
+            ScopedKnownObjectGrant {
+                relation_id: "root-transcript".to_string(),
+                scope_root: true,
+                access_root: "root".to_string(),
+                locator_id: "root-transcript".to_string(),
+                root: root.clone(),
+                relative_path: "session.jsonl".into(),
+            },
+            ScopedKnownObjectGrant {
+                relation_id: "current-child".to_string(),
+                scope_root: false,
+                access_root: "root".to_string(),
+                locator_id: "current-child".to_string(),
+                root: root.clone(),
+                relative_path: "agent-current.jsonl".into(),
+            },
+            ScopedKnownObjectGrant {
+                relation_id: "future-child".to_string(),
+                scope_root: false,
+                access_root: "root".to_string(),
+                locator_id: "future-child".to_string(),
+                root: root.clone(),
+                relative_path: "agent-future.jsonl".into(),
+            },
+            ScopedKnownObjectGrant {
+                relation_id: "team-inbox-sidecar".to_string(),
+                scope_root: false,
+                access_root: "root".to_string(),
+                locator_id: "team-inbox-sidecar".to_string(),
+                root,
+                relative_path: "team-inbox.json".into(),
+            },
+        ];
         request
     }
 
@@ -1216,13 +1271,36 @@ pub(crate) mod tests {
         identity_inputs: &[ScopeIdentityInput<'_>],
         origin: &RecordOrigin,
     ) {
+        let observation = reconcile_named_relation(
+            host,
+            lease.access_pass(),
+            relation_id,
+            object,
+            admission,
+            identity_inputs,
+            origin,
+            AccessPhase::Initial,
+        );
+        assert!(!observation.object_present);
+    }
+
+    fn reconcile_named_relation(
+        host: &ScopedObservationAccessHost,
+        pass: &ScopedObservationAccessPass,
+        relation_id: &str,
+        object: &mut ScopedKnownAppendObject,
+        admission: &mut ScopedObservationAdmissionLane,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+        origin: &RecordOrigin,
+        access_phase: AccessPhase,
+    ) -> ScopedAppendObservation {
         let observation = object
             .reconcile(
-                lease.access_pass(),
+                pass,
                 ScopedAppendReconcileRequest {
                     relation_id,
                     identity_inputs,
-                    access_phase: AccessPhase::Initial,
+                    access_phase,
                     parent_token: None,
                     depth: 1,
                     max_bytes: 64,
@@ -1231,17 +1309,14 @@ pub(crate) mod tests {
                 },
             )
             .unwrap();
-        assert!(!observation.object_present);
         let ScopedAppendDecodeOutcome::Ready(decoded) = decode_scoped(host, object, &observation)
         else {
-            panic!("stable missing source must produce a complete poll observation");
+            panic!("{relation_id} must produce a complete decoded observation");
         };
         if let Err(failure) = admission.admit(object, &observation, decoded) {
-            panic!(
-                "missing-source relation admission failed: {}",
-                failure.error
-            );
+            panic!("{relation_id} admission failed: {}", failure.error);
         }
+        observation
     }
 
     fn decode_and_admit_ignored(
@@ -12412,6 +12487,349 @@ pub(crate) mod tests {
         ));
         assert!(delivery.bootstrap_barrier().is_none());
         assert!(delivery.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rfc012_d2_observer_composes_claude_root_current_future_and_sidecar() {
+        let registry = claude_composed_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("claude-composed-root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let host = ScopedObservationAccessHost::authorize(
+            &registry,
+            claude_composed_scoped_access_request(root.clone()),
+        )
+        .unwrap();
+        let mut runtime = ScopedObservationAsyncRuntime::open(
+            host,
+            ScopedObservationDeliveryLimits {
+                max_semantic_events: 16,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 16,
+            },
+        )
+        .unwrap();
+        let handle = runtime.handle();
+        let mut objects = vec![
+            scoped_append_object_for_native_object(b"session.jsonl"),
+            scoped_append_object_for_native_object(b"agent-current.jsonl"),
+            scoped_append_object_for_native_object(b"agent-future.jsonl"),
+            scoped_append_object_for_native_object(b"team-inbox.json"),
+        ];
+        let identities: Vec<_> = objects
+            .iter()
+            .map(|object| object.source_identity().clone())
+            .collect();
+        assert_eq!(identities.len(), 4);
+        assert_ne!(identities[0], identities[1]);
+        assert_ne!(identities[0], identities[2]);
+        assert_ne!(identities[0], identities[3]);
+        assert_ne!(identities[1], identities[2]);
+        assert_ne!(identities[1], identities[3]);
+        assert_ne!(identities[2], identities[3]);
+
+        let mut admission = admission_lane_for_objects(4);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 16,
+        })
+        .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"claude-composed-session",
+        }];
+        let root_origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let current_origin = RecordOrigin {
+            object_id: 31,
+            ..root_origin.clone()
+        };
+        let future_origin = RecordOrigin {
+            object_id: 32,
+            ..root_origin.clone()
+        };
+        let sidecar_origin = RecordOrigin {
+            object_id: 33,
+            ..root_origin.clone()
+        };
+
+        let bootstrap_ticket = handle.host().request_poll().unwrap();
+        let bootstrap_lease = handle.host().begin_poll().unwrap().unwrap();
+        let root_obs = reconcile_named_relation(
+            handle.host(),
+            bootstrap_lease.access_pass(),
+            "root-transcript",
+            &mut objects[0],
+            &mut admission,
+            &identity,
+            &root_origin,
+            AccessPhase::Initial,
+        );
+        let current_obs = reconcile_named_relation(
+            handle.host(),
+            bootstrap_lease.access_pass(),
+            "current-child",
+            &mut objects[1],
+            &mut admission,
+            &identity,
+            &current_origin,
+            AccessPhase::Initial,
+        );
+        let future_obs = reconcile_named_relation(
+            handle.host(),
+            bootstrap_lease.access_pass(),
+            "future-child",
+            &mut objects[2],
+            &mut admission,
+            &identity,
+            &future_origin,
+            AccessPhase::Initial,
+        );
+        let sidecar_obs = reconcile_named_relation(
+            handle.host(),
+            bootstrap_lease.access_pass(),
+            "team-inbox-sidecar",
+            &mut objects[3],
+            &mut admission,
+            &identity,
+            &sidecar_origin,
+            AccessPhase::Initial,
+        );
+        assert!(!root_obs.object_present);
+        assert!(!current_obs.object_present);
+        assert!(
+            !future_obs.object_present,
+            "future child must attach before the native object exists"
+        );
+        assert!(!sidecar_obs.object_present);
+        assert_eq!(objects[0].relation_id(), Some("root-transcript"));
+        assert_eq!(objects[1].relation_id(), Some("current-child"));
+        assert_eq!(objects[2].relation_id(), Some("future-child"));
+        assert_eq!(objects[3].relation_id(), Some("team-inbox-sidecar"));
+
+        let bootstrap_watermark = handle.with_attachment(|host, drain| {
+            host.complete_bootstrap_poll(bootstrap_lease, &admission, &projection, drain)
+                .unwrap()
+        });
+        assert!(matches!(
+            bootstrap_ticket.wait_async().await,
+            ScopedObservationPollResolution::Ready(watermark)
+                if Arc::ptr_eq(&watermark, &bootstrap_watermark)
+        ));
+        for object in &mut objects {
+            object.complete_bootstrap().unwrap();
+        }
+        let barrier = handle.with_attachment(|host, drain| {
+            host.offer_consumer_bootstrap_complete(&objects, &admission, &projection, drain, 50)
+                .unwrap()
+        });
+        let bootstrap = runtime.next_event().await.unwrap().unwrap();
+        assert!(matches!(
+            &bootstrap.envelope.event,
+            ScopedObservationEvent::ObserverBootstrapComplete { barrier: delivered }
+                if Arc::ptr_eq(delivered, &barrier)
+        ));
+        runtime
+            .acknowledge_applied(bootstrap.application_receipt())
+            .unwrap();
+
+        let active = handle
+            .with_attachment(|host, drain| {
+                host.bind_consumer_bootstrap_epoch_state(objects, admission, projection, drain)
+            })
+            .unwrap();
+        let bindings = vec![
+            ScopedObservationAppendPassBinding::new(
+                "root-transcript",
+                vec![ScopedObservationOwnedIdentityInput::new(
+                    "native-session-id",
+                    b"claude-composed-session".to_vec(),
+                )
+                .unwrap()],
+                None,
+                1,
+                64,
+                root_origin,
+                false,
+            )
+            .unwrap(),
+            ScopedObservationAppendPassBinding::new(
+                "current-child",
+                vec![ScopedObservationOwnedIdentityInput::new(
+                    "native-session-id",
+                    b"claude-composed-session".to_vec(),
+                )
+                .unwrap()],
+                None,
+                1,
+                64,
+                current_origin,
+                false,
+            )
+            .unwrap(),
+            ScopedObservationAppendPassBinding::new(
+                "future-child",
+                vec![ScopedObservationOwnedIdentityInput::new(
+                    "native-session-id",
+                    b"claude-composed-session".to_vec(),
+                )
+                .unwrap()],
+                None,
+                1,
+                64,
+                future_origin,
+                false,
+            )
+            .unwrap(),
+            ScopedObservationAppendPassBinding::new(
+                "team-inbox-sidecar",
+                vec![ScopedObservationOwnedIdentityInput::new(
+                    "native-session-id",
+                    b"claude-composed-session".to_vec(),
+                )
+                .unwrap()],
+                None,
+                1,
+                64,
+                sidecar_origin,
+                false,
+            )
+            .unwrap(),
+        ];
+        let owner = handle
+            .bind_epoch_source_owner(
+                active,
+                bindings,
+                ScopedObservationSourceOwnerRetryPolicy::default(),
+            )
+            .unwrap();
+        let source_task = tokio::spawn(owner.run_until_stopped_with_clock(|| 100));
+        std::fs::write(root.join("session.jsonl"), b"root\n").unwrap();
+        std::fs::write(root.join("agent-current.jsonl"), b"current-child\n").unwrap();
+        std::fs::write(root.join("team-inbox.json"), b"sidecar\n").unwrap();
+        let current = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(current, ScopedObservationPollResolution::Ready(_)));
+        std::fs::write(root.join("agent-future.jsonl"), b"future-child\n").unwrap();
+        let created = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(created, ScopedObservationPollResolution::Ready(_)));
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), source_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped.exit(),
+            ScopedObservationSourceOwnerRunExit::Cancelled
+        ));
+        assert!(close.wait_async().await.complete);
+    }
+
+    #[tokio::test]
+    async fn rfc012_d3_shared_pass_pool_serializes_catalog_like_work_and_observer_pass() {
+        let pool = SharedSourcePassPool::new(1).unwrap();
+        assert_eq!(pool.max_concurrent_passes(), 1);
+        assert_eq!(pool.available_permits(), 1);
+
+        let catalog_held = Arc::new(tokio::sync::Notify::new());
+        let release_catalog = Arc::new(tokio::sync::Notify::new());
+        let catalog_task = {
+            let pool = pool.clone();
+            let catalog_held = Arc::clone(&catalog_held);
+            let release_catalog = Arc::clone(&release_catalog);
+            tokio::spawn(async move {
+                let permit = pool.acquire_for_test().await;
+                catalog_held.notify_one();
+                release_catalog.notified().await;
+                drop(permit);
+                "catalog-retained-page"
+            })
+        };
+        catalog_held.notified().await;
+        assert_eq!(pool.available_permits(), 0);
+
+        let durable_started = Instant::now();
+        let durable_wait = tokio::time::timeout(
+            std::time::Duration::from_millis(40),
+            pool.acquire_for_test(),
+        )
+        .await;
+        assert!(
+            durable_wait.is_err(),
+            "durable/catalog work must occupy the shared permit until it releases"
+        );
+        assert!(durable_started.elapsed() >= std::time::Duration::from_millis(30));
+
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let watcher_policy = ScopedObservationNativeWatcherRecoveryPolicy::new(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_millis(1),
+            std::time::Duration::from_millis(1),
+            1,
+        )
+        .unwrap();
+        let (runtime, handle, pair, target, drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("d3-fair-root"),
+                    b"d3-fair-session".to_vec(),
+                ),
+                b"d3-fair-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                AutomaticSingleObjectOwnerPolicies::new(
+                    ScopedObservationSourceOwnerRetryPolicy::default(),
+                    watcher_policy,
+                )
+                .with_pass_pool(pool.clone()),
+            )
+            .await;
+        let owner = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 200, || 201));
+        std::fs::write(&target, b"observer\n").unwrap();
+        let blocked =
+            tokio::time::timeout(std::time::Duration::from_millis(50), handle.poll()).await;
+        assert!(
+            blocked.is_err(),
+            "observer source passes must wait on the same catalog/durable permit"
+        );
+
+        release_catalog.notify_one();
+        let catalog = tokio::time::timeout(std::time::Duration::from_secs(2), catalog_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(catalog, "catalog-retained-page");
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(ready, ScopedObservationPollResolution::Ready(_)));
+
+        let close = runtime.request_close();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ScopedObservationAsyncOwnerRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

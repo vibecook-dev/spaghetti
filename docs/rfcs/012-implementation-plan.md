@@ -2402,12 +2402,19 @@ primitives.
 Hooks remain in Chopsticks as root lifecycle and immediate-poll signals during
 this package.
 
-Current landing status (2026-08-21): D2 remains `In progress` for observer-
-composed Claude current/future actor and sidecar scope. Decoder-executed
+Current landing status (2026-08-21): D2 remains `In progress` for Claude
+Candidate dynamic-directory composition. Decoder-executed
 `claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records`
 now also decodes the team-inbox sidecar to `Fact::TeamInboxSnapshot` rather
 than `UnknownRecord`, and still proves typed root/child/workflow/team facts.
-Observer attachment of those composed relations is not this decoder slice. Promoted support is durable-only with a KnownObject
+`rfc012_d2_observer_composes_claude_root_current_future_and_sidecar` attaches a
+Promoted KnownObject program with Claude-shaped root-transcript, current-child,
+future-child, and team-inbox-sidecar grants. Future-child is missing at
+bootstrap (attach-before-create), then root/current/sidecar appear, then the
+future child is created later; each object keeps a distinct source identity.
+The `9f9749b` promotion guard still rejects uncomposed `ChildDirectoryByNativeId`
+relations. This is not Candidate-program authorization or a Claude support
+status flip. Promoted support is durable-only with a KnownObject
 root-transcript program; candidate still holds the full RFC 012D relation
 set. The promotion guard in `9f9749b` closes one unsafe interim
 state: after typed support authorization selects a Promoted scope program, the
@@ -2820,10 +2827,14 @@ unavailable coverage, and unchanged event IDs.
 Current landing status (2026-08-21): D3 is `In progress`.
 `rfc012_d3_durable_queries_progress_while_search_bootstrap_is_incomplete`
 proves durable overview queries run while search is still
-`BootstrapInProgress`. Task complete-snapshot replacement already retracts
-missing items; interaction fixtures distinguish complete retract from partial
-non-retraction. Shared durable/catalog scheduler membership and per-family
-replacement manifests remain open. Native-derived
+`BootstrapInProgress`.
+`rfc012_d3_shared_pass_pool_serializes_catalog_like_work_and_observer_pass`
+proves one `SharedSourcePassPool` permit serializes a catalog-labelled hold
+with an observer source pass: the observer poll waits until that permit is
+released. Engine catalog/query workers still do not acquire this pool.
+Task complete-snapshot replacement already retracts missing items; interaction
+fixtures distinguish complete retract from partial non-retraction. Per-family
+replacement manifests for message/question/task remain open. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have
@@ -3605,10 +3616,13 @@ search stays `BootstrapInProgress` until `completeQueryBootstrap`. C1 now
 serializes actor/usage/state/interaction fixtures across Rust, N-API, and
 TypeScript. X1 compares deferred, eager, and crash-recovery FTS on identical
 Claude input and keeps search complete-only. D5 emits attach/poll/overflow/
-three-scope Instant samples from the observer kernel. D2 (observer-composed
-Claude current/future/sidecar attach) and D3 (durable/catalog scheduler
-fairness plus message/question/task replacement manifests) stay `In progress`.
-D4's public scoped-observer facade remains a later product decision.
+three-scope Instant samples from the observer kernel. D2 now attaches
+Claude-shaped KnownObject root/current/future/sidecar grants, including
+attach-before-create for the future child; Candidate dynamic-directory
+composition stays `In progress`. D3 serializes catalog-labelled work against
+observer passes on one shared permit; engine catalog workers and
+message/question/task replacement manifests stay `In progress`. D4's public
+scoped-observer facade remains a later product decision.
 
 Later product decisions, not implementation gates:
 
