@@ -2609,6 +2609,28 @@ completing the listing from an exact checkpoint, child content-read authority,
 membership admission, and watcher installation remain open. The dynamic-
 relation guard stays closed and Candidate support is unchanged.
 
+Commit `51c766b` connects that accounting contract to the common confined
+directory driver's enumeration boundary. An entry-audit reservation is now
+created immediately after the descriptor-backed directory stream yields a
+name and before per-directory or aggregate bound checks, `statat`, selection,
+or any no-follow child open. The reservation itself owns selection for the
+verified kind; ignored files are therefore accounted rather than disappearing
+behind the selector. Selected entries complete only after the no-follow child
+descriptor and its metadata confirm the same kind, and no checkpoint state or
+recursive work is retained until audit completion succeeds. Limit rejection,
+disappearance, symlink/unsupported kind, open or metadata failure, and explicit
+audit failure abandon the live reservation and take its conservative failure
+path. A selector-only adapter preserves existing durable confined-scan
+behavior, while the scoped directory-membership contract implements the same
+borrowed interface with its exact root authority, opaque child tokens, parent
+edges, and precompiled declaration selector. Tests exercise ignored names,
+reserve-before-stat mutation, the first excess yielded name, symlink escape,
+and the existing scoped parent/fan-out/depth/aggregate/abandonment invariants.
+This still does not turn the enumerated checkpoint into admitted membership,
+read discovered child contents, complete a whole listing, install a watcher,
+or open the dynamic-relation guard. Candidate support and promotion state are
+unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
