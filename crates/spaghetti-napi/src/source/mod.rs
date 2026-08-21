@@ -14,6 +14,7 @@ mod presence_object;
 mod recovery;
 mod replace_document;
 mod scheduler;
+mod selector;
 mod sqlite_snapshot;
 
 #[cfg(test)]
@@ -63,6 +64,7 @@ pub use replace_document::{
 };
 pub(crate) use scheduler::SharedSourcePassPool;
 pub use scheduler::{BoundedScheduler, IngestPriority, ScheduleOutcome, ScheduledWork, WorkKey};
+pub(crate) use selector::GlobPattern;
 pub use sqlite_snapshot::{
     SqliteCheckpoint, SqliteColumn, SqliteQuerySpec, SqliteRead, SqliteRowRecord, SqliteSnapshot,
     SqliteSnapshotConfig, SqliteValue,

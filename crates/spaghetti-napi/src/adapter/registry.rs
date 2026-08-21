@@ -206,23 +206,25 @@ pub(crate) mod tests {
         ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
     };
     use crate::scoped_observation::{
-        bind_observation_runtime_source_for_test, ScopedAccessRootGrant, ScopedActorAttribution,
-        ScopedActorFallbackReason, ScopedAdmissionError, ScopedAppendDecodeOutcome,
-        ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase, ScopedAppendObservation,
-        ScopedAppendPresenceChange, ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy,
-        ScopedArtifactContentPolicy, ScopedBootstrapBarrierError, ScopedContinuityError,
-        ScopedCoverageAssemblyError, ScopedDecodeFailureClass, ScopedDecodedAppendItem,
-        ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject,
-        ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
-        ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessPass,
-        ScopedObservationAccessRequest, ScopedObservationAdmissionLane,
-        ScopedObservationAppendPassBinding, ScopedObservationAppendPassRequest,
-        ScopedObservationAsyncHandle, ScopedObservationAsyncOwnerFirstExit,
-        ScopedObservationAsyncOwnerPair, ScopedObservationAsyncOwnerRunResult,
-        ScopedObservationAsyncRuntime, ScopedObservationAutomaticResyncError,
-        ScopedObservationCloseError, ScopedObservationConsumerOfferError,
-        ScopedObservationContextualPollResolution, ScopedObservationContinuity,
-        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        bind_observation_runtime_source_for_test,
+        prepare_observation_directory_membership_for_test, ScopedAccessRootGrant,
+        ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
+        ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
+        ScopedAppendObservation, ScopedAppendPresenceChange, ScopedAppendReconcileRequest,
+        ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy, ScopedBootstrapBarrierError,
+        ScopedContinuityError, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
+        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority,
+        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
+        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
+        ScopedObservationAccessPass, ScopedObservationAccessRequest,
+        ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
+        ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
+        ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
+        ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncRuntime,
+        ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
+        ScopedObservationConsumerOfferError, ScopedObservationContextualPollResolution,
+        ScopedObservationContinuity, ScopedObservationDeliveryLane,
+        ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -243,9 +245,10 @@ pub(crate) mod tests {
     use crate::source::{
         AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig,
         AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan,
-        DirtyHint, DirtyReason, DirtyScope, HintEnqueue, IngestPriority, RecordOrigin,
-        ReplaceDocumentConfig, Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput,
-        SharedSourcePassPool, SourceMediaType, SourceRecord,
+        DirectoryEntryKind, DirectorySelection, DirtyHint, DirtyReason, DirtyScope, HintEnqueue,
+        IngestPriority, RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport,
+        ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool, SourceMediaType,
+        SourceRecord,
     };
 
     use super::*;
@@ -2168,6 +2171,47 @@ pub(crate) mod tests {
             .unwrap()
         );
         let rendered = format!("{rooted:?}");
+        for private in [
+            "secret-session-id",
+            "fixture-descendant",
+            "descendant-stream",
+            "/Users/",
+            "alice",
+            "private",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        let directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
+        assert_eq!(directory.config().max_entries, 8);
+        assert_eq!(directory.config().max_entries_per_directory, 8);
+        assert_eq!(directory.config().max_depth, 2);
+        assert_eq!(
+            directory.select(
+                PathBuf::from("nested").as_path(),
+                DirectoryEntryKind::Directory
+            ),
+            DirectorySelection::Recurse
+        );
+        assert_eq!(
+            directory.select(
+                PathBuf::from("nested/agent-child.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            ),
+            DirectorySelection::Include
+        );
+        assert_eq!(
+            directory.select(
+                PathBuf::from("../private/agent-child.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            ),
+            DirectorySelection::Ignore
+        );
+        assert_eq!(directory.source().adapter_id.as_str(), "fixture");
+        assert_eq!(
+            directory.source().source_instance_key,
+            expected_source_instance_key
+        );
+        let rendered = format!("{directory:?}");
         for private in [
             "secret-session-id",
             "fixture-descendant",

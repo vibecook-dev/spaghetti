@@ -19091,7 +19091,9 @@ fn scoped_dependency_access_error() -> AdapterError {
 }
 
 #[cfg(test)]
-pub(crate) use observation_source_access::bind_observation_runtime_source_for_test;
+pub(crate) use observation_source_access::{
+    bind_observation_runtime_source_for_test, prepare_observation_directory_membership_for_test,
+};
 
 #[cfg(test)]
 fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecutionError) -> bool {

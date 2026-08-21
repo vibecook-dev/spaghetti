@@ -16,8 +16,8 @@ use crate::adapter::{
     AgentAdapter, AuthorizedObservationSourceAuthority, AuthorizedObservationSourceContract,
     AuthorizedObservationSourceDriver, AuthorizedScopeProgram, ConsistencyPolicy, DeletionPolicy,
     DriverSpec, ScopeObservationSourceBinding, ScopeProgramManifest, ScopeProgramStatus,
-    ScopeRelationDeclaration, ScopeRelationPrimitive, ScopeUnavailableBehavior, SourceInstance,
-    SourceInstanceKey, StreamAuthority, StreamSpec,
+    ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
+    ScopeUnavailableBehavior, SourceInstance, SourceInstanceKey, StreamAuthority, StreamSpec,
 };
 
 pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
@@ -421,6 +421,7 @@ impl AuthorizedScopeAccessPlan {
         Ok(AuthorizedObservationSourceReservation {
             reservation,
             adapter_id: self.adapter_id().to_string(),
+            program_id: self.program_id().to_string(),
             support_release_id: self.support_release_id.clone(),
             binding,
             source_contract,
@@ -893,6 +894,7 @@ pub struct ScopeAccessReservation {
 pub(crate) struct AuthorizedObservationSourceReservation {
     reservation: ScopeAccessReservation,
     adapter_id: String,
+    program_id: String,
     support_release_id: String,
     binding: ScopeObservationSourceBinding,
     source_contract: AuthorizedObservationSourceContract,
@@ -946,8 +948,24 @@ impl AuthorizedObservationSourceReservation {
         self.reservation.relation_id()
     }
 
+    pub(crate) fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
+
+    pub(crate) fn program_id(&self) -> &str {
+        &self.program_id
+    }
+
     pub(crate) fn primitive(&self) -> ScopeRelationPrimitive {
         self.reservation.primitive()
+    }
+
+    pub(crate) fn operation(&self) -> AccessOperation {
+        self.reservation.operation()
+    }
+
+    pub(crate) fn bounds(&self) -> ScopeRelationBounds {
+        self.reservation.bounds()
     }
 
     pub(crate) fn access_root(&self) -> &str {
@@ -1136,6 +1154,26 @@ impl AuthorizedObservationRuntimeStreamReservation {
         self.reservation.relation_id()
     }
 
+    pub(crate) fn adapter_id(&self) -> &str {
+        self.reservation.adapter_id()
+    }
+
+    pub(crate) fn program_id(&self) -> &str {
+        self.reservation.program_id()
+    }
+
+    pub(crate) fn primitive(&self) -> ScopeRelationPrimitive {
+        self.reservation.primitive()
+    }
+
+    pub(crate) fn operation(&self) -> AccessOperation {
+        self.reservation.operation()
+    }
+
+    pub(crate) fn bounds(&self) -> ScopeRelationBounds {
+        self.reservation.bounds()
+    }
+
     pub(crate) fn access_root(&self) -> &str {
         self.reservation.access_root()
     }
@@ -1200,6 +1238,18 @@ impl ScopeAccessReservation {
 
     pub fn primitive(&self) -> ScopeRelationPrimitive {
         self.declaration.primitive
+    }
+
+    pub(crate) fn operation(&self) -> AccessOperation {
+        self.reservation
+            .as_ref()
+            .expect("scope reservation is consumed only once")
+            .request
+            .operation
+    }
+
+    pub(crate) fn bounds(&self) -> ScopeRelationBounds {
+        self.declaration.bounds
     }
 
     pub fn access_root(&self) -> &str {
