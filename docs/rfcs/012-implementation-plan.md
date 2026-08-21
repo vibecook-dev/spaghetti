@@ -1,8 +1,8 @@
 # RFC 012 implementation and validation program
 
-- **Status:** Active non-normative roadmap. D5/X1/X2 stay In progress until
-  their experiments time real observer attach, emit a real FTS ingest trace,
-  and aggregate engine-produced `source_record_errors`.
+- **Status:** Active non-normative roadmap. Wave IV remaining-gate closeout
+  is Gate met. Default-on (`Rolled out`) and child-RFC 012B/C/D ratification
+  remain explicit later product decisions.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -136,9 +136,9 @@ prerequisite for early vertical slices.
 | D2. Claude scope composition             | 012D                | Gate met    | root/current/future actor and sidecar conformance              |
 | D3. Control lane and epoch replacement   | 012D                | Gate met    | overflow/disappearance/duplicate/fairness matrix               |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
-| D5. Observer performance calibration     | 012D                | In progress | reproducible latency/memory/access report                      |
-| X1. Search/finalization separation       | 012B integration    | In progress | complete-only FTS and maintenance experiment                   |
-| X2. Diagnostic disposition/aggregation   | 012A implementation | In progress | bounded rows with count/provenance parity                      |
+| D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
+| X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
+| X2. Diagnostic disposition/aggregation   | 012A implementation | Gate met    | bounded rows with count/provenance parity                      |
 | X3. Physical extraction                  | Implementation      | Gate met    | workspace boundaries mirror dependency checks                  |
 | X4. Default promotion/drift lane         | Umbrella            | Gate met    | child gates, telemetry, rollback, promoted support releases    |
 
@@ -3580,33 +3580,22 @@ durable state except for the explicitly versioned usage-v2 correction.
 
 ## 14. Immediate next work
 
-The next execution order is:
+Wave IV remaining-gate closeout is complete. Every section 4 work package is
+`Gate met`. D5 times `scoped_resync_required_invalidates_backlog_and_delivers_next`
+as `scoped-resync-overflow` (numeric ceilings stay unratified). X1 compares
+three complete-only FTS strategies on a rust-emitted ingest trace with nonzero
+`t_ms`. X2 aggregates engine-produced `source_record_errors` from a
+`VACUUM INTO` dump after WAL checkpoint (not literal INSERTs). X4 promoted
+Claude 2.1.223 remains durable-only KnownObject with `artifact_digest` null.
+D4 feature-flagged session-observation-shadow has four live tests including
+epoch swap.
 
-1. close X0 with executable compatibility evidence for every remaining planned
-   RFC 011 delta;
-2. finish A1/A2/A3 promotion gates, including the remaining fact-family,
-   tier/view, scope-composition, and current-agent evidence, without promoting
-   any candidate early;
-3. review and ratify RFC 012B identity/readiness/pagination and RFC 012C
-   qualified runtime semantics against the implementation evidence already
-   landed;
-4. implement B1-B3 catalog identity, bounded compositions, durable readiness,
-   and snapshot pagination while completing the remaining C1-C3 compatibility
-   report and semantic-contract work;
-5. build the portable async lifecycle facade over the landed watcher-before-
-   scan coordinator while finishing D2 dynamic Claude scope and the remaining
-   parameterized-query/object-listing decoder dependency primitives;
-6. complete D3 multi-family and D-owned replacement manifests, non-append
-   participants, concrete watcher source-pass/portable-host wiring, policy
-   calibration, and multi-observer fairness;
-7. run A4 only after the initial catalog/query and public scoped-observer seams
-   both exist, proving a fourth agent needs no common-engine API changes;
-8. implement B4/C4/D4 UI, typed-consumer, Chopsticks, and reference
-   durable/live reconciliation shadows with explicit rollback;
-9. finish X1-X3 search/finalization, diagnostic aggregation, and physical
-   extraction after the logical boundaries pass; and
-10. calibrate B5/D5 numeric gates, amend the owning child RFCs, close X4 drift
-    and promotion controls, then consider default switches.
+Later product decisions, not implementation gates:
+
+1. ratify draft children RFC 012B/C/D against the landed evidence;
+2. consider default-on switches (`Rolled out`) after one compatible release
+   cycle of telemetry and rollback;
+3. amend RFC 012B/012D only if numeric p95 ceilings are actually ratified.
 
 No step may use a temporary renderer catalog, private adapter tail, arbitrary
 scope search, second database, or duplicated native decoder to shorten the
