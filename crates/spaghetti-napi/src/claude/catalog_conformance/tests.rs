@@ -12,11 +12,11 @@ use crate::adapter::{
 };
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::claude::catalog_runtime::{
-    claude_catalog_components, claude_conformance_promoted_composition,
-    claude_conformance_source_declaration_bytes, claude_conformance_source_declaration_id,
-    claude_conformance_support_release_bytes, claude_conformance_support_release_id,
-    claude_planned_catalog_composition, produce_claude_library_coverage,
-    produce_claude_library_coverage_with_post_head_mutation,
+    claude_catalog_components, claude_catalog_source_instance,
+    claude_conformance_promoted_composition, claude_conformance_source_declaration_bytes,
+    claude_conformance_source_declaration_id, claude_conformance_support_release_bytes,
+    claude_conformance_support_release_id, claude_planned_catalog_composition,
+    produce_claude_library_coverage, produce_claude_library_coverage_with_post_head_mutation,
 };
 use crate::source::catalog_composition::{
     CatalogContribution, CatalogDecoderStateBoundary, CatalogDiscoveryBounds,
@@ -712,6 +712,20 @@ fn synthetic_claude_catalog_access(
     )
 }
 
+fn produce_from_root(
+    executable: &crate::source::catalog_composition::CatalogExecutableComposition<'_, '_>,
+    catalog_root: &Path,
+    discriminator: &[u8],
+    policy: crate::catalog_contract::CatalogAccessPolicyDigest,
+) -> Result<crate::claude::catalog_runtime::ClaudeCatalogProduction, String> {
+    let instance = claude_catalog_source_instance(catalog_root, discriminator)
+        .map_err(|error| error.to_string())?;
+    let access = executable
+        .bind_source_instance(&instance)
+        .map_err(|error| error.to_string())?;
+    produce_claude_library_coverage(&access, policy).map_err(|error| error.to_string())
+}
+
 fn produce_fixture_with(
     compatibility: CompatibilityClass,
     policy: &[u8],
@@ -720,7 +734,7 @@ fn produce_fixture_with(
     let selection = catalog_contract_selection();
     let access = synthetic_claude_catalog_access(&selection, compatibility);
     let executable = composition.authorize_execution(access).unwrap();
-    produce_claude_library_coverage(
+    produce_from_root(
         &executable,
         &fixture_root(),
         FIXTURE_SOURCE_INSTANCE,
@@ -806,6 +820,17 @@ fn authorized_producer_matches_frozen_identity_without_authorizing_candidate() {
         drifted_policy.assembly.component_completion_revision()
     );
 
+    let publication = produced.assembly.complete_publication_source().unwrap();
+    assert_eq!(
+        publication.member_count(),
+        produced.identity.session_count as usize
+    );
+    assert_eq!(publication.plan_source(), produced.assembly.plan_source());
+    assert_eq!(
+        publication.source_coverage(),
+        produced.assembly.source_coverage()
+    );
+
     let debug = format!("{produced:?}");
     assert!(!debug.contains("/Users/"));
     assert!(!debug.contains("/home/"));
@@ -866,6 +891,36 @@ fn planned_and_builtin_candidate_cannot_authorize_producer_execution() {
 const ABSENT_CATALOG_ROOT: &str = "/spaghetti-rfc012-b2-absent-catalog";
 const HEAD_PHASE_MEMBER: &str = "55555555-5555-5555-5555-555555555555";
 
+#[test]
+fn producer_bind_rejects_missing_roots_before_source_access() {
+    let composition = claude_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let executable = composition
+        .authorize_execution(synthetic_claude_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    let instance = SourceInstance {
+        id: 1,
+        spec: SourceInstanceSpec {
+            identity_contract_version: 1,
+            stable_key: SourceInstanceKey::new(FIXTURE_SOURCE_INSTANCE.to_vec()).unwrap(),
+            display_name: "missing-root".to_string(),
+            roots: vec![SourceRoot {
+                name: "home".to_string(),
+                path: Path::new(ABSENT_CATALOG_ROOT).to_path_buf(),
+            }],
+            discovery_reason: "missing composition root".to_string(),
+        },
+    };
+    let error = executable.bind_source_instance(&instance).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("missing a required composition root"));
+    assert!(!message.contains(ABSENT_CATALOG_ROOT));
+    assert!(!message.contains("/Users/"));
+}
+
 fn conformance_promoted_binding() -> CatalogPromotedBinding {
     CatalogPromotedBinding::from_digests(
         *Sha256Digest::of(claude_conformance_source_declaration_bytes()).as_bytes(),
@@ -900,14 +955,13 @@ fn produce_error_for_composition(
             CompatibilityClass::ExactSupported,
         ))
         .unwrap();
-    produce_claude_library_coverage(
+    produce_from_root(
         &executable,
         catalog_root,
         FIXTURE_SOURCE_INSTANCE,
         CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap(),
     )
     .unwrap_err()
-    .to_string()
 }
 
 fn assert_rejected_before_source_access(composition: CatalogSourceComposition) {
@@ -1017,14 +1071,13 @@ fn produce_with_post_head_mutation(
     let access = synthetic_claude_catalog_access(&selection, CompatibilityClass::ExactSupported);
     let executable = composition.authorize_execution(access).unwrap();
     let policy = CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap();
-    produce_claude_library_coverage_with_post_head_mutation(
-        &executable,
-        root,
-        FIXTURE_SOURCE_INSTANCE,
-        policy,
-        mutate,
-    )
-    .map_err(|error| error.to_string())
+    let instance = claude_catalog_source_instance(root, FIXTURE_SOURCE_INSTANCE)
+        .map_err(|error| error.to_string())?;
+    let bound = executable
+        .bind_source_instance(&instance)
+        .map_err(|error| error.to_string())?;
+    produce_claude_library_coverage_with_post_head_mutation(&bound, policy, mutate)
+        .map_err(|error| error.to_string())
 }
 
 fn privacy_safe_mutation_error(message: &str) {
@@ -1051,9 +1104,8 @@ fn membership_created_during_transcript_head_reads_cannot_publish_complete_cover
     let access = synthetic_claude_catalog_access(&selection, CompatibilityClass::ExactSupported);
     let executable = composition.authorize_execution(access).unwrap();
     let policy = CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap();
-    let stable =
-        produce_claude_library_coverage(&executable, &root, FIXTURE_SOURCE_INSTANCE, policy)
-            .expect("synthetic catalog must produce complete coverage before the mutation seam");
+    let stable = produce_from_root(&executable, &root, FIXTURE_SOURCE_INSTANCE, policy)
+        .expect("synthetic catalog must produce complete coverage before the mutation seam");
     assert_eq!(
         stable.assembly.source_coverage().completeness,
         crate::adapter::CoverageSetCompleteness::Complete
@@ -1162,7 +1214,7 @@ fn producer_member_identity_separates_source_instances() {
             CompatibilityClass::ExactSupported,
         ))
         .unwrap();
-    let second = produce_claude_library_coverage(
+    let second = produce_from_root(
         &executable,
         &fixture_root(),
         b"claude-other-source-instance-v1",

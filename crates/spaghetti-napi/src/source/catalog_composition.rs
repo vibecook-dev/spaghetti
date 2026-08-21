@@ -1,11 +1,13 @@
 //! Planned RFC 012B catalog-tier source compositions.
 //!
 //! This crate-private contract describes bounded catalog views in the same
-//! vocabulary as an RFC 012A source declaration. It deliberately performs no
-//! source access and names no concrete adapter. A promoted adapter declaration
-//! must bind these values before the runtime may execute the composition.
+//! vocabulary as an RFC 012A source declaration. Binding a source instance
+//! proves required composition roots are declared; it does not read native
+//! bytes or mint catalog authorization. A promoted adapter declaration must
+//! bind these values before the runtime may execute the composition.
 
 use std::fmt;
+use std::path::Path;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
@@ -18,7 +20,7 @@ use crate::adapter::{
     ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
     CoverageDomain, CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
     CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, SourceCoveragePoint,
-    SourceCoverageSet, SOURCE_COVERAGE_CONTRACT_VERSION,
+    SourceCoverageSet, SourceInstance, SourceRoot, SOURCE_COVERAGE_CONTRACT_VERSION,
 };
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogPublicationMemberRef, CatalogSourceCompletionRevision,
@@ -1057,6 +1059,10 @@ impl CatalogSourceComposition {
         self.composition_id
     }
 
+    pub(crate) fn promoted_binding(&self) -> Option<CatalogPromotedBinding> {
+        self.binding.promoted_binding()
+    }
+
     fn component(&self, component_id: &str) -> Option<&CatalogSourceComponent> {
         self.components
             .binary_search_by(|component| component.component_id.as_str().cmp(component_id))
@@ -1097,12 +1103,113 @@ impl CatalogSourceComposition {
     }
 }
 
+fn bound_root_ids(composition: &CatalogSourceComposition) -> Vec<&str> {
+    let mut ids: Vec<&str> = composition
+        .components
+        .iter()
+        .map(|component| component.root_id.as_str())
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+fn canonical_source_instance_key(
+    instance: &SourceInstance,
+) -> Result<CanonicalSourceInstanceKey, CatalogCompositionError> {
+    CanonicalSourceInstanceKey::derive(
+        instance.spec.identity_contract_version,
+        instance.spec.stable_key.as_bytes(),
+    )
+    .map_err(|_| CatalogCompositionError::invalid("catalog source instance identity is invalid"))
+}
+
+fn source_root_is_usable(root: &SourceRoot) -> bool {
+    !root.name.is_empty()
+        && !root.path.as_os_str().is_empty()
+        && root.path.components().all(|component| {
+            !matches!(
+                component,
+                std::path::Component::CurDir | std::path::Component::ParentDir
+            )
+        })
+}
+
 pub(crate) struct CatalogExecutableComposition<'composition, 'authorization> {
     composition: &'composition CatalogSourceComposition,
     authorization: AuthorizedCatalogAccess<'authorization>,
 }
 
-impl CatalogExecutableComposition<'_, '_> {
+/// Borrowed proof that an executable catalog composition declared every
+/// required source root on one `SourceInstance`. This is not a filesystem
+/// handle, serde DTO, or transferable path capability.
+pub(crate) struct CatalogBoundSourceAccess<'a, 'composition, 'authorization> {
+    executable: &'a CatalogExecutableComposition<'composition, 'authorization>,
+    instance: &'a SourceInstance,
+}
+
+impl std::fmt::Debug for CatalogBoundSourceAccess<'_, '_, '_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogBoundSourceAccess")
+            .field("adapter_id", &self.executable.composition.adapter_id)
+            .field(
+                "support_release_id",
+                &self.executable.composition.support_release_id,
+            )
+            .field(
+                "composition_id",
+                &self.executable.composition.composition_id,
+            )
+            .field("root_ids", &bound_root_ids(self.executable.composition))
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, 'composition, 'authorization> CatalogBoundSourceAccess<'a, 'composition, 'authorization> {
+    pub(crate) fn executable(
+        &self,
+    ) -> &'a CatalogExecutableComposition<'composition, 'authorization> {
+        self.executable
+    }
+
+    pub(crate) fn instance(&self) -> &'a SourceInstance {
+        self.instance
+    }
+
+    pub(crate) fn source_instance_key(
+        &self,
+    ) -> Result<CanonicalSourceInstanceKey, CatalogCompositionError> {
+        canonical_source_instance_key(self.instance)
+    }
+
+    pub(crate) fn root(&self, root_id: &str) -> Result<&'a Path, CatalogCompositionError> {
+        if !self
+            .executable
+            .composition
+            .components
+            .iter()
+            .any(|component| component.root_id == root_id)
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog source access does not expose a root outside the executable composition",
+            ));
+        }
+        self.instance
+            .spec
+            .roots
+            .iter()
+            .find(|root| root.name == root_id)
+            .map(|root| root.path.as_path())
+            .ok_or_else(|| {
+                CatalogCompositionError::invalid(
+                    "catalog source instance is missing a required composition root",
+                )
+            })
+    }
+}
+
+impl<'composition, 'authorization> CatalogExecutableComposition<'composition, 'authorization> {
     pub(crate) fn composition(&self) -> &CatalogSourceComposition {
         self.composition
     }
@@ -1113,6 +1220,49 @@ impl CatalogExecutableComposition<'_, '_> {
 
     pub(crate) fn contract_selection(&self) -> &ContractVersionSelection {
         self.authorization.contracts()
+    }
+
+    /// Bind one source instance whose declared roots cover every composition
+    /// `root_id`. Missing or unusable roots fail closed without reading the
+    /// filesystem. Extra usable roots are retained for adapter stream loading.
+    pub(crate) fn bind_source_instance<'a>(
+        &'a self,
+        instance: &'a SourceInstance,
+    ) -> Result<CatalogBoundSourceAccess<'a, 'composition, 'authorization>, CatalogCompositionError>
+    {
+        self.composition.validate()?;
+        instance.spec.validate().map_err(|_| {
+            CatalogCompositionError::invalid("catalog source instance identity is invalid")
+        })?;
+        canonical_source_instance_key(instance)?;
+
+        let mut names = Vec::with_capacity(instance.spec.roots.len());
+        for root in &instance.spec.roots {
+            if !source_root_is_usable(root) {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog source instance declares an unusable source root",
+                ));
+            }
+            names.push(root.name.as_str());
+        }
+        names.sort_unstable();
+        if names.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(CatalogCompositionError::invalid(
+                "catalog source instance declares a duplicate source root",
+            ));
+        }
+        for root_id in bound_root_ids(self.composition) {
+            if names.binary_search(&root_id).is_err() {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog source instance is missing a required composition root",
+                ));
+            }
+        }
+
+        Ok(CatalogBoundSourceAccess {
+            executable: self,
+            instance,
+        })
     }
 
     /// Bind produced membership and complete component enumerations into one
