@@ -1058,6 +1058,73 @@ impl TaskRevisionFact {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveStateDimension {
+    Model,
+    Effort,
+    SessionMode,
+    PermissionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveStateEvidenceKind {
+    ConfiguredIntent,
+    ResponseObserved,
+    NativeTransition,
+}
+
+/// RFC 012C effective runtime state. One revisioned entity per actor/dimension;
+/// absence is unknown, not an inherited default.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveStateRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub dimension: EffectiveStateDimension,
+    pub value: String,
+    pub evidence_kind: EffectiveStateEvidenceKind,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+}
+
+impl EffectiveStateRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        validate_runtime_semantic_text("effective-state value", Some(self.value.as_str()))
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.effective-state/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        encoded.push(match self.dimension {
+            EffectiveStateDimension::Model => 1,
+            EffectiveStateDimension::Effort => 2,
+            EffectiveStateDimension::SessionMode => 3,
+            EffectiveStateDimension::PermissionMode => 4,
+        });
+        push_component(&mut encoded, self.value.as_bytes());
+        encoded.push(match self.evidence_kind {
+            EffectiveStateEvidenceKind::ConfiguredIntent => 1,
+            EffectiveStateEvidenceKind::ResponseObserved => 2,
+            EffectiveStateEvidenceKind::NativeTransition => 3,
+        });
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
 fn validate_runtime_semantic_text(field: &str, value: Option<&str>) -> Result<(), AdapterError> {
     if value.is_some_and(|value| {
         value.is_empty() || value.len() > MAX_RUNTIME_SEMANTIC_TEXT_BYTES || value.trim() != value
@@ -1989,6 +2056,7 @@ pub enum Fact {
     UserInputRequestRevision(UserInputRequestRevisionFact),
     MessageRevision(MessageRevisionFact),
     TaskRevision(TaskRevisionFact),
+    EffectiveStateRevision(EffectiveStateRevisionFact),
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
     DelegationSpawn(DelegationSpawnFact),
@@ -2026,6 +2094,7 @@ impl Fact {
             Self::UserInputRequestRevision(_) => "runtime.user-input-request",
             Self::MessageRevision(_) => "runtime.message",
             Self::TaskRevision(_) => "runtime.task",
+            Self::EffectiveStateRevision(_) => "runtime.effective-state",
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
             Self::DelegationSpawn(_) => "delegation_spawn",
@@ -2058,7 +2127,8 @@ impl Fact {
             | Self::ActorAffiliationRevision(_)
             | Self::UserInputRequestRevision(_)
             | Self::MessageRevision(_)
-            | Self::TaskRevision(_) => None,
+            | Self::TaskRevision(_)
+            | Self::EffectiveStateRevision(_) => None,
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
             Self::DelegationSpawn(fact) => Some(&fact.spawn),
@@ -2087,6 +2157,7 @@ impl Fact {
             Self::UserInputRequestRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::MessageRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::TaskRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::EffectiveStateRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ArtifactMetadataSnapshot(revision) => revision.semantic_revision_key(),
             Self::ArtifactContent(revision) => revision.semantic_revision_key(),
             _ => Ok(None),
@@ -2647,6 +2718,10 @@ impl FactBatch {
                             )
                             | (Fact::MessageRevision(_), Fact::MessageRevision(_))
                             | (Fact::TaskRevision(_), Fact::TaskRevision(_))
+                            | (
+                                Fact::EffectiveStateRevision(_),
+                                Fact::EffectiveStateRevision(_)
+                            )
                             | (
                                 Fact::ArtifactMetadataSnapshot(_),
                                 Fact::ArtifactMetadataSnapshot(_)

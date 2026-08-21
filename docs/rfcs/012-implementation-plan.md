@@ -5,8 +5,9 @@
   Gate met. D2 now composes Promoted `ChildDirectoryByNativeId` membership
   before bootstrap; D3 query workers share the observer pass pool; scoped
   `runtime.user-input-request` replacement is live. C1 now also freezes
-  `runtime.message` and `runtime.task` fixtures; D3 projects those families
-  as current-generation-log and owned-set replacement. D2/D3 remain In progress
+  `runtime.message`, `runtime.task`, and `runtime.effective-state` fixtures;
+  D3 projects those families as current-generation-log, owned-set, and
+  revisioned-entity replacement. D2/D3 remain In progress
   against Claude Candidate promotion. Default-on (`Rolled out`) and child-RFC
   012B/C/D ratification remain later product decisions.
 - **Created:** 2026-08-15
@@ -140,7 +141,7 @@ prerequisite for early vertical slices.
 | C4. Runtime semantic downstream suite    | 012C                | Gate met    | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | Gate met    | attach/bootstrap/poll/close/deps; no store/global scan         |
 | D2. Claude scope composition             | 012D                | In progress | Promoted directory membership; Candidate promotion later       |
-| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input/message/task replacement; no Gate met  |
+| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input/message/task/effective-state replacement; no Gate met |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
 | D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
 | X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
@@ -2856,7 +2857,12 @@ current set.
 projects C1 `runtime.task` as revisioned-entity plus complete owned-set
 snapshot: created→updated→completed revises one task, complete retract
 removes it, and a complete owned-set listing only the peer native id retracts
-the omitted current task while keeping the peer. D3 remains In progress; this
+the omitted current task while keeping the peer.
+`rfc012d_effective_state_replaces_one_revisioned_entity_without_duplicates`
+projects C1 `runtime.effective-state` as `RevisionedEntityCurrent`: configured
+intent revises to response-observed evidence on one dimension entity, complete
+retract removes it, partial retract does not, and bootstrap/correction
+replacement digests match at the same current set. D3 remains In progress; this
 slice does not stamp Gate met. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable

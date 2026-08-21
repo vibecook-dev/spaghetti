@@ -20,6 +20,8 @@ import {
   ACTOR_AFFILIATION_FAMILY_VERSION,
   ACTOR_RUN_FAMILY,
   ACTOR_RUN_FAMILY_VERSION,
+  EFFECTIVE_STATE_FAMILY,
+  EFFECTIVE_STATE_FAMILY_VERSION,
   MESSAGE_FAMILY,
   MESSAGE_FAMILY_VERSION,
   TASK_FAMILY,
@@ -35,7 +37,7 @@ export const SCOPED_REPLACEMENT_MANIFEST_CONTRACT_VERSION = 1 as const;
 export const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION = 1 as const;
 
 const MAX_CONTEXT_COVERAGE_SETS = 64;
-const MAX_MANIFEST_FAMILIES = 6;
+const MAX_MANIFEST_FAMILIES = 7;
 type UnknownRecord = Record<string, unknown>;
 
 export type ScopedReplacementRepresentation =
@@ -149,6 +151,8 @@ function familyContract(family: unknown): {
       };
     case ACTOR_RUN_FAMILY:
       return { family, version: ACTOR_RUN_FAMILY_VERSION, representation: 'revisioned_entity_current' };
+    case EFFECTIVE_STATE_FAMILY:
+      return { family, version: EFFECTIVE_STATE_FAMILY_VERSION, representation: 'revisioned_entity_current' };
     case MESSAGE_FAMILY:
       return { family, version: MESSAGE_FAMILY_VERSION, representation: 'current_generation_log' };
     case TASK_FAMILY:

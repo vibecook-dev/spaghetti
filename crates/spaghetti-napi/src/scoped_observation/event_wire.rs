@@ -13,9 +13,9 @@ use serde_json::Value as JsonValue;
 
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
-    CoverageObjectKey, CoverageStreamKey, ExternalEntityRef, MessageRevisionRole,
-    NativeIdentityClaim, TaskLifecycleState, UserInputKind, UserInputLifecycleState,
-    UserInputQuestion,
+    CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
+    ExternalEntityRef, MessageRevisionRole, NativeIdentityClaim, TaskLifecycleState, UserInputKind,
+    UserInputLifecycleState, UserInputQuestion,
 };
 use crate::observation_contract::unknown_wire::ObservationUnknownWireContractSelection;
 use crate::observation_contract::ObservationContractSelection;
@@ -78,6 +78,18 @@ struct TaskEnvelopeWire {
     state: TaskLifecycleState,
     completeness: ContractCompleteness,
     owned_set: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct EffectiveStateEnvelopeWire {
+    fact_family: &'static str,
+    fact_id: CanonicalFactId,
+    operation: &'static str,
+    dimension: EffectiveStateDimension,
+    value: String,
+    evidence_kind: EffectiveStateEvidenceKind,
+    completeness: ContractCompleteness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +304,30 @@ impl ScopedObservationKnownEnvelope {
                         state: revision.state,
                         completeness: revision.completeness,
                         owned_set: revision.owned_set.clone(),
+                    })?,
+                    common_context()?,
+                )
+            }
+            ScopedObservationEvent::EffectiveState {
+                fact_id,
+                operation,
+                revision,
+                ..
+            } => {
+                require_no_specialized_contexts(&contexts)?;
+                (
+                    ScopedObservationKnownEventFamily::Interaction,
+                    serialize_wire(EffectiveStateEnvelopeWire {
+                        fact_family: "runtime.effective-state",
+                        fact_id: *fact_id,
+                        operation: match operation {
+                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
+                            super::ScopedRevisionedEntityOperation::Retract => "retract",
+                        },
+                        dimension: revision.dimension,
+                        value: revision.value.clone(),
+                        evidence_kind: revision.evidence_kind,
+                        completeness: revision.completeness,
                     })?,
                     common_context()?,
                 )
