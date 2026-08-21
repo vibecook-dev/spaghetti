@@ -56,7 +56,7 @@
     },
     {
       "claim_id": "claude-identity-rules",
-      "statement": "Current object bootstrap code validates transcript, descendant, workflow, task, artifact, and settings path shapes before deriving native keys; cross-device and reuse conformance remains incomplete.",
+      "statement": "Current object bootstrap code validates transcript, descendant, workflow, task, artifact, and settings path shapes before deriving native keys. A sanitizer-v2 declared-input identity matrix records replay permutation, registration reorder, ordinary configured-root path-spelling, in-place replacement sameness, move/clone/cross-device non-merge, transcript/index/active-session same-session inputs, child-sidecar parentage that is not the root session, tombstone native-ID non-reuse, generation-scoped source-record supersession, and ambiguous parent-subagent joins that must not pick a winner. The matrix does not execute decoders and does not mint SourceRecordId, FactId, or SemanticRevisionRef; decoder-executed identity-determinism remains open.",
       "state": "degraded",
       "sources": [
         {
@@ -74,8 +74,8 @@
         {
           "kind": "sanitized_fixture",
           "path": "agent-support/claude-code/candidate-2026-08-15/fixtures/identity/replay-reorder.json",
-          "sha256": "sha256:d975a072db80e1ae1ab12738df7e3c0540a41f68dfb9114e310c6330f3e5bdd0",
-          "locator": "two synthetic records with distinct session and parent identifiers; not an executed replay matrix"
+          "sha256": "sha256:1ff8f02e79f88436eac7f0120ce043aca7e02b1358e82dbfd6a05a5abbf09762",
+          "locator": "declared-input identity matrix for replay, registration reorder, path-spelling, replacement, move/clone/cross-device, never-reuse, generation-scoped supersession, same-session multi-family inputs, child sidecar parentage, and ambiguous joins; not decoder-executed fact or revision identities"
         }
       ]
     },
