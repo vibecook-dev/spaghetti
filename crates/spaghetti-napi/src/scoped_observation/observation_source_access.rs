@@ -2,8 +2,9 @@
 //!
 //! This module owns attachment-bound confined directory listing and member
 //! reads. It joins declaration/runtime stream proof to the exact source
-//! instance approved by the scoped attachment and prepares nonconstructible
-//! decoder inputs without granting adapters any additional source access.
+//! instance approved by the scoped attachment, prepares nonconstructible
+//! decoder inputs, and runs the declaration-owned ReplaceDocument driver plus
+//! store-agnostic decode without granting adapters any additional source access.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -12,11 +13,17 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::adapter::{
-    AdapterId, AdapterObjectContext, AgentAdapter, CanonicalSourceInstanceKey, CoverageObjectKey,
-    CoverageStreamKey, DriverSpec, FactSemanticContext, ScopeRelationPrimitive, SourceInstance,
-    SourceInstanceKey, SourceObjectDescriptor, StreamSpec,
+    AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AgentAdapter,
+    CanonicalSourceInstanceKey, CoverageAbsenceKind, CoverageObjectKey, CoverageStreamKey,
+    DecodeDisposition, DriverSpec, Fact, FactBatch, FactSemanticContext, RawRetentionPolicy,
+    ScopeRelationPrimitive, SourceAccess, SourceInstance, SourceInstanceKey,
+    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
+    SourceSnapshot, StreamSpec,
 };
-use crate::decode_runtime::bootstrap_object_without_source_access;
+use crate::decode_runtime::{
+    bootstrap_object_without_source_access, decode_record, diagnostic_excerpt, DecodeRuntimeLimits,
+    DecodeRuntimeRequest,
+};
 use crate::source::{
     confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,
     AccessBudgetError, AccessObjectToken, AccessOperation, AccessOutcome,
@@ -36,6 +43,8 @@ use super::{
 
 const MEMBERSHIP_STREAM_DOMAIN: &[u8] = b"spaghetti/rfc012d/scope-relation-membership-stream/v1\0";
 const MEMBERSHIP_OBJECT_NAMESPACE: &str = "spaghetti.scope-relation-membership-v1";
+const DIRECTORY_MEMBER_MAX_FACTS: usize = 8_192;
+const DIRECTORY_MEMBER_MAX_DIAGNOSTICS: usize = 256;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ScopedObservationRuntimeSourceError {
@@ -329,8 +338,9 @@ pub(crate) enum ScopedObservationDirectoryScan {
 
 /// One exact selected member read under its listing-derived authority. Retry
 /// carries no bytes because the membership checkpoint became stale. Oversized
-/// retains only opaque identity/revision; stable content remains crate-private
-/// for the future declaration-owned decoder join.
+/// retains only opaque identity/revision and never enters decode or projection.
+/// Stable content remains crate-private until the declaration-owned
+/// ReplaceDocument driver and decode runtime consume it.
 pub(crate) enum ScopedObservationDirectoryMemberRead {
     RetryTransient,
     Oversized {
@@ -376,6 +386,47 @@ pub(crate) struct ScopedObservationDirectoryMemberFrameFailure {
     class: ScopedSourceFailureClass,
     input: Box<ScopedObservationDirectoryMemberDecodeInput>,
 }
+
+/// Whole-document child after one confined ReplaceDocument read and one
+/// store-agnostic decode. Facts remain crate-private until admission.
+pub(crate) struct ScopedObservationDirectoryMemberDecodedSnapshot {
+    binding: ScopedObservationDirectoryMemberBinding,
+    object_context: AdapterObjectContext,
+    checkpoint: ReplaceCheckpoint,
+    record: SourceRecord,
+    disposition: DecodeDisposition,
+    batch: FactBatch,
+    next_decoder_state: Option<Vec<u8>>,
+    quarantined: bool,
+}
+
+pub(crate) struct ScopedObservationDirectoryMemberObserveFailure {
+    kind: ScopedObservationDirectoryMemberObserveFailureKind,
+    input: Box<ScopedObservationDirectoryMemberDecodeInput>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScopedObservationDirectoryMemberObserveFailureKind {
+    Source(ScopedSourceFailureClass),
+    Decode(ScopedDecodeFailureClass),
+}
+
+/// Path-free child lifecycle after the declaration-owned ReplaceDocument pass.
+/// Present carries decoded facts; missing is explicit absence; oversized never
+/// enters decode or projection.
+pub(crate) enum ScopedObservationDirectoryMemberLifecycle {
+    Present(ScopedObservationDirectoryMemberDecodedSnapshot),
+    Absent {
+        binding: ScopedObservationDirectoryMemberBinding,
+        generation: u64,
+        kind: CoverageAbsenceKind,
+    },
+    Oversized {
+        binding: ScopedObservationDirectoryMemberBinding,
+    },
+}
+
+struct DirectoryMemberSourceAccessDenied;
 
 /// Completed, path-free evidence that one exact native directory entry was
 /// accounted beneath the listing root before it can enter membership.
@@ -537,6 +588,56 @@ impl fmt::Debug for ScopedObservationDirectoryMemberFrameFailure {
             .field("class", &self.class)
             .field("input", &self.input)
             .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberDecodedSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberDecodedSnapshot")
+            .field("binding", &self.binding)
+            .field("object_context_version", &self.object_context.version())
+            .field("object_context_bytes", &self.object_context.payload().len())
+            .field("generation", &self.checkpoint.generation)
+            .field("has_checkpoint_revision", &true)
+            .field("record_state", &self.record.state)
+            .field("record_bytes", &self.record.payload.len())
+            .field("disposition", &self.disposition)
+            .field("fact_count", &self.batch.facts().len())
+            .field("diagnostic_count", &self.batch.diagnostics().len())
+            .field("has_next_decoder_state", &self.next_decoder_state.is_some())
+            .field("quarantined", &self.quarantined)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberObserveFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberObserveFailure")
+            .field("kind", &self.kind)
+            .field("input", &self.input)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberLifecycle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Present(snapshot) => formatter.debug_tuple("Present").field(snapshot).finish(),
+            Self::Absent {
+                generation, kind, ..
+            } => formatter
+                .debug_struct("Absent")
+                .field("generation", generation)
+                .field("kind", kind)
+                .field("has_binding", &true)
+                .finish_non_exhaustive(),
+            Self::Oversized { .. } => formatter
+                .debug_struct("Oversized")
+                .field("has_binding", &true)
+                .finish_non_exhaustive(),
+        }
     }
 }
 
@@ -934,6 +1035,39 @@ impl ScopedObservationDirectoryListing {
             && self.completed_members.len() == self.members.len()
     }
 
+    /// Observe one already-bootstrapped selected child through the declaration-
+    /// owned ReplaceDocument confined read and the store-agnostic decode
+    /// runtime. The listing still owns the approved native root; callers cannot
+    /// supply a path.
+    pub(crate) fn observe_bootstrapped_member(
+        &self,
+        input: ScopedObservationDirectoryMemberDecodeInput,
+        origin: &RecordOrigin,
+    ) -> Result<
+        ScopedObservationDirectoryMemberLifecycle,
+        ScopedObservationDirectoryMemberObserveFailure,
+    > {
+        let identity = input.binding.identity();
+        if !self.member_reads_complete()
+            || self.root.as_os_str().is_empty()
+            || !self.root.is_absolute()
+            || !identity.matches_attachment(&self.identity.attachment_authority)
+            || identity.relation_id.as_ref() != self.identity.relation_id
+            || !self
+                .completed_members
+                .iter()
+                .any(|completed| completed.source == identity.source)
+        {
+            return Err(ScopedObservationDirectoryMemberObserveFailure {
+                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidCursor,
+                ),
+                input: Box::new(input),
+            });
+        }
+        input.observe_replace_confined(&self.root, origin)
+    }
+
     pub(super) fn finalize_for_membership(
         &mut self,
     ) -> Option<BTreeSet<ScopedSourceObjectIdentity>> {
@@ -1187,6 +1321,10 @@ impl ScopedObservationDirectoryMemberBinding {
         &self.descriptor
     }
 
+    pub(crate) fn oversized_lifecycle(self) -> ScopedObservationDirectoryMemberLifecycle {
+        ScopedObservationDirectoryMemberLifecycle::Oversized { binding: self }
+    }
+
     fn valid_for_dependency_free_bootstrap(&self) -> bool {
         let identity = self.identity();
         let stream = self.runtime_stream();
@@ -1317,6 +1455,167 @@ impl ScopedObservationDirectoryMemberDecodeInput {
         })
     }
 
+    /// Re-open the completed child through the retained ReplaceDocument bound
+    /// and descriptor, then decode any present record without extra source
+    /// access. Missing and oversized outcomes never enter decode.
+    pub(super) fn observe_replace_confined(
+        self,
+        root: &Path,
+        origin: &RecordOrigin,
+    ) -> Result<
+        ScopedObservationDirectoryMemberLifecycle,
+        ScopedObservationDirectoryMemberObserveFailure,
+    > {
+        if !self.binding.valid_for_dependency_free_bootstrap()
+            || origin.source_instance_id != self.binding.source_instance().id
+            || root.as_os_str().is_empty()
+            || !root.is_absolute()
+        {
+            return Err(ScopedObservationDirectoryMemberObserveFailure {
+                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidCursor,
+                ),
+                input: Box::new(self),
+            });
+        }
+        let DriverSpec::ReplaceDocument(config) = &self.binding.runtime_stream().driver else {
+            return Err(ScopedObservationDirectoryMemberObserveFailure {
+                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidConfiguration,
+                ),
+                input: Box::new(self),
+            });
+        };
+        let driver = match ReplaceDocument::new(config.clone()) {
+            Ok(driver) => driver,
+            Err(error) => {
+                return Err(ScopedObservationDirectoryMemberObserveFailure {
+                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                        super::source_failure_class(&error),
+                    ),
+                    input: Box::new(self),
+                });
+            }
+        };
+        let read = match driver.read_confined(
+            root,
+            &self.binding.descriptor().relative_path,
+            None,
+            origin,
+            false,
+        ) {
+            Ok(read) => read,
+            Err(error) => {
+                return Err(ScopedObservationDirectoryMemberObserveFailure {
+                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                        super::source_failure_class(&error),
+                    ),
+                    input: Box::new(self),
+                });
+            }
+        };
+        match read {
+            ReplaceRead::Missing => Ok(ScopedObservationDirectoryMemberLifecycle::Absent {
+                binding: self.binding,
+                generation: 1,
+                kind: CoverageAbsenceKind::Absent,
+            }),
+            ReplaceRead::RetryTransient => Err(ScopedObservationDirectoryMemberObserveFailure {
+                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::Unstable,
+                ),
+                input: Box::new(self),
+            }),
+            ReplaceRead::Unchanged { .. } => Err(ScopedObservationDirectoryMemberObserveFailure {
+                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidCursor,
+                ),
+                input: Box::new(self),
+            }),
+            ReplaceRead::Removed { checkpoint, .. } => {
+                Ok(ScopedObservationDirectoryMemberLifecycle::Absent {
+                    binding: self.binding,
+                    generation: checkpoint.generation,
+                    kind: CoverageAbsenceKind::Deleted,
+                })
+            }
+            ReplaceRead::Quarantined { .. } => {
+                Ok(ScopedObservationDirectoryMemberLifecycle::Oversized {
+                    binding: self.binding,
+                })
+            }
+            ReplaceRead::Record {
+                record,
+                checkpoint,
+                generation_changed: true,
+            } => self.decode_replace_record(record, checkpoint),
+            ReplaceRead::Record {
+                generation_changed: false,
+                ..
+            } => Err(ScopedObservationDirectoryMemberObserveFailure {
+                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidCursor,
+                ),
+                input: Box::new(self),
+            }),
+        }
+    }
+
+    fn decode_replace_record(
+        self,
+        record: SourceRecord,
+        checkpoint: ReplaceCheckpoint,
+    ) -> Result<
+        ScopedObservationDirectoryMemberLifecycle,
+        ScopedObservationDirectoryMemberObserveFailure,
+    > {
+        let attempt = decode_record(DecodeRuntimeRequest {
+            adapter: self.binding.adapter().as_ref(),
+            decoder: &self.binding.runtime_stream().decoder,
+            object_context: &self.object_context,
+            source_access: &DirectoryMemberSourceAccessDenied,
+            record: &record,
+            semantic_context: self.binding.identity().semantic_context(),
+            decoder_state: None,
+            retention: self.binding.runtime_stream().retention,
+            limits: DecodeRuntimeLimits {
+                max_facts: DIRECTORY_MEMBER_MAX_FACTS,
+                max_diagnostics: DIRECTORY_MEMBER_MAX_DIAGNOSTICS,
+            },
+        });
+        let decoded = match attempt.result {
+            Ok(decoded) if decoded.disposition != DecodeDisposition::RetryTransient => decoded,
+            Ok(_) => {
+                return Err(ScopedObservationDirectoryMemberObserveFailure {
+                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Decode(
+                        ScopedDecodeFailureClass::Transient,
+                    ),
+                    input: Box::new(self),
+                });
+            }
+            Err(error) => {
+                return Err(ScopedObservationDirectoryMemberObserveFailure {
+                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Decode(
+                        super::decode_failure_class(&error),
+                    ),
+                    input: Box::new(self),
+                });
+            }
+        };
+        Ok(ScopedObservationDirectoryMemberLifecycle::Present(
+            ScopedObservationDirectoryMemberDecodedSnapshot {
+                binding: self.binding,
+                object_context: self.object_context,
+                checkpoint,
+                record,
+                disposition: decoded.disposition,
+                batch: decoded.batch,
+                next_decoder_state: decoded.next_decoder_state,
+                quarantined: decoded.quarantined,
+            },
+        ))
+    }
+
     #[cfg(test)]
     pub(crate) fn identity_for_test(&self) -> &ScopedObservationDirectoryMemberIdentity {
         self.binding.identity()
@@ -1413,6 +1712,180 @@ impl ScopedObservationDirectoryMemberFrameFailure {
     pub(crate) fn into_input_for_test(self) -> ScopedObservationDirectoryMemberDecodeInput {
         *self.input
     }
+}
+
+impl ScopedObservationDirectoryMemberDecodedSnapshot {
+    pub(super) fn runtime_stream(&self) -> &StreamSpec {
+        self.binding.runtime_stream()
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.checkpoint.generation
+    }
+
+    pub(super) fn revision(&self) -> Revision {
+        self.checkpoint.revision
+    }
+
+    pub(super) fn admission_measurement(&self) -> Option<(u64, u64)> {
+        let semantic_items = self
+            .batch
+            .facts()
+            .len()
+            .checked_add(self.batch.diagnostics().len())?
+            .max(1);
+        let data_events = u64::try_from(semantic_items).ok()?;
+        let mut retained_native_bytes = match self.binding.runtime_stream().retention {
+            RawRetentionPolicy::None | RawRetentionPolicy::HashOnly => 0,
+            RawRetentionPolicy::DiagnosticExcerpt => {
+                u64::try_from(diagnostic_excerpt(&self.record.payload).len()).ok()?
+            }
+            RawRetentionPolicy::Full => u64::try_from(self.record.payload.len()).ok()?,
+        };
+        for fact in self.batch.facts() {
+            if let Fact::UnknownRecord { raw_payload, .. } = &fact.value {
+                retained_native_bytes =
+                    retained_native_bytes.checked_add(u64::try_from(raw_payload.len()).ok()?)?;
+            }
+        }
+        Some((data_events, retained_native_bytes))
+    }
+
+    pub(super) fn into_admission_parts(
+        self,
+    ) -> (
+        ScopedObservationDirectoryMemberBinding,
+        AdapterObjectContext,
+        ReplaceCheckpoint,
+        SourceRecord,
+        DecodeDisposition,
+        FactBatch,
+        Option<Vec<u8>>,
+        bool,
+    ) {
+        (
+            self.binding,
+            self.object_context,
+            self.checkpoint,
+            self.record,
+            self.disposition,
+            self.batch,
+            self.next_decoder_state,
+            self.quarantined,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disposition_for_test(&self) -> DecodeDisposition {
+        self.disposition
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fact_count_for_test(&self) -> usize {
+        self.batch.facts().len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn facts_for_test(&self) -> &[crate::adapter::FactEnvelope] {
+        self.batch.facts()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_payload_for_test(&self) -> &[u8] {
+        &self.record.payload
+    }
+}
+
+impl ScopedObservationDirectoryMemberObserveFailure {
+    #[cfg(test)]
+    pub(crate) fn kind_for_test(&self) -> ScopedObservationDirectoryMemberObserveFailureKind {
+        self.kind
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_input_for_test(self) -> ScopedObservationDirectoryMemberDecodeInput {
+        *self.input
+    }
+}
+
+impl ScopedObservationDirectoryMemberLifecycle {
+    pub(crate) fn source(&self) -> &ScopedSourceObjectIdentity {
+        match self {
+            Self::Present(snapshot) => snapshot.binding.identity().source(),
+            Self::Absent { binding, .. } | Self::Oversized { binding } => {
+                binding.identity().source()
+            }
+        }
+    }
+
+    pub(crate) fn relation_id(&self) -> &str {
+        match self {
+            Self::Present(snapshot) => snapshot.binding.identity().relation_id(),
+            Self::Absent { binding, .. } | Self::Oversized { binding } => {
+                binding.identity().relation_id()
+            }
+        }
+    }
+
+    pub(super) fn present_snapshot(
+        &self,
+    ) -> Option<&ScopedObservationDirectoryMemberDecodedSnapshot> {
+        match self {
+            Self::Present(snapshot) => Some(snapshot),
+            Self::Absent { .. } | Self::Oversized { .. } => None,
+        }
+    }
+
+    pub(super) fn absence(&self) -> Option<(u64, CoverageAbsenceKind)> {
+        match self {
+            Self::Absent {
+                generation, kind, ..
+            } => Some((*generation, *kind)),
+            Self::Present(_) | Self::Oversized { .. } => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn present_snapshot_for_test(
+        &self,
+    ) -> Option<&ScopedObservationDirectoryMemberDecodedSnapshot> {
+        self.present_snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn absence_for_test(&self) -> Option<(u64, CoverageAbsenceKind)> {
+        self.absence()
+    }
+}
+
+impl SourceAccess for DirectoryMemberSourceAccessDenied {
+    fn read_object(
+        &self,
+        _root_name: &str,
+        _relative_path: &Path,
+        _max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError> {
+        Err(directory_member_dependency_access_error())
+    }
+
+    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
+        Err(directory_member_dependency_access_error())
+    }
+
+    fn list_objects(
+        &self,
+        _request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError> {
+        Err(directory_member_dependency_access_error())
+    }
+}
+
+fn directory_member_dependency_access_error() -> AdapterError {
+    AdapterError::new(
+        AdapterErrorClass::InvalidContract,
+        "scoped_dependency_access_undeclared",
+        "decoder requested dependency access without a scoped relation-backed grant",
+    )
 }
 
 impl ScopedObservationDirectoryMemberIdentity {
