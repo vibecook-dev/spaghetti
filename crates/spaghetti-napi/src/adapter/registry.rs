@@ -226,7 +226,8 @@ pub(crate) mod tests {
         ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContextualPollResolution,
         ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationDirectoryScan, ScopedObservationEvent,
+        ScopedObservationDeliveryLimits, ScopedObservationDirectoryMemberRead,
+        ScopedObservationDirectoryScan, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -2789,7 +2790,7 @@ pub(crate) mod tests {
 
         std::fs::write(listing_root.join("root.jsonl"), b"root-expanded").unwrap();
         let (refresh_plan, refresh_binding) = make_bound(b"secret-session-id");
-        let refreshed =
+        let mut refreshed =
             match scan_observation_directory_membership_for_test(refresh_binding, Some(&first))
                 .unwrap()
             {
@@ -2802,7 +2803,145 @@ pub(crate) mod tests {
         assert!(!refreshed.root_moved());
         assert_ne!(refreshed.checkpoint().revision, first_revision);
         assert_eq!(refreshed.checkpoint().generation, 1);
+        assert!(!refreshed.member_reads_complete());
+        let mut member_bytes = Vec::new();
+        while let Some(read) = refreshed.read_next_member().unwrap() {
+            match read {
+                ScopedObservationDirectoryMemberRead::Stable(content) => {
+                    assert_ne!(content.listing_revision(), content.content_revision());
+                    assert!(!format!("{content:?}").contains("root-expanded"));
+                    let _object_token = content.object_token();
+                    member_bytes.push(content.bytes().to_vec());
+                }
+                other => panic!("expected a stable selected member, got {other:?}"),
+            }
+        }
+        member_bytes.sort();
+        assert_eq!(
+            member_bytes,
+            vec![b"child".to_vec(), b"root-expanded".to_vec()]
+        );
+        assert!(refreshed.member_reads_complete());
+        assert!(refreshed.read_next_member().unwrap().is_none());
         assert!(refresh_plan.report().verify_digest());
+        let refreshed_relation = refresh_plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(refreshed_relation.attempts, 6);
+        assert_eq!(refreshed_relation.completed, 6);
+        assert_eq!(refreshed_relation.bytes_read, 18);
+        assert!(refreshed_relation.trace[4..]
+            .iter()
+            .all(|entry| entry.operation == AccessOperation::ObjectRead
+                && entry.reserved_bytes == 1_024
+                && entry.outcome == AccessOutcome::Available));
+
+        let race_root = approved_root.root.join("sessions/race-session-id/children");
+        std::fs::create_dir_all(&race_root).unwrap();
+        let race_member = race_root.join("victim.jsonl");
+        std::fs::write(&race_member, b"before").unwrap();
+        let (race_plan, race_binding) = make_bound(b"race-session-id");
+        let mut race_listing =
+            match scan_observation_directory_membership_for_test(race_binding, None).unwrap() {
+                ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                other => panic!("expected a race listing, got {other:?}"),
+            };
+        std::fs::remove_file(&race_member).unwrap();
+        std::fs::write(&race_member, b"replacement").unwrap();
+        assert!(matches!(
+            race_listing.read_next_member().unwrap(),
+            Some(ScopedObservationDirectoryMemberRead::RetryTransient)
+        ));
+        assert!(!race_listing.member_reads_complete());
+        assert!(ScopedRelationMembershipObservation::from_directory_listing(race_listing).is_err());
+        let race_relation = race_plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            race_relation.trace.last().unwrap().operation,
+            AccessOperation::ObjectRead
+        );
+        assert_eq!(
+            race_relation.trace.last().unwrap().outcome,
+            AccessOutcome::Failed
+        );
+
+        let oversized_root = approved_root
+            .root
+            .join("sessions/oversized-session-id/children");
+        std::fs::create_dir_all(&oversized_root).unwrap();
+        std::fs::write(oversized_root.join("large.jsonl"), vec![b'x'; 1_025]).unwrap();
+        let (oversized_plan, oversized_binding) = make_bound(b"oversized-session-id");
+        let mut oversized_listing = match scan_observation_directory_membership_for_test(
+            oversized_binding,
+            None,
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+            other => panic!("expected an oversized listing, got {other:?}"),
+        };
+        let Some(ScopedObservationDirectoryMemberRead::Oversized {
+            object_token: _oversized_token,
+            listing_revision: _oversized_revision,
+        }) = oversized_listing.read_next_member().unwrap()
+        else {
+            panic!("expected one stable oversized member")
+        };
+        assert!(oversized_listing.member_reads_complete());
+        assert!(
+            ScopedRelationMembershipObservation::from_directory_listing(oversized_listing).is_ok()
+        );
+        let oversized_relation = oversized_plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            oversized_relation.trace.last().unwrap().outcome,
+            AccessOutcome::Oversized
+        );
+        assert_eq!(oversized_relation.trace.last().unwrap().bytes_read, 0);
+
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStringExt;
+
+            let non_utf8_root = approved_root
+                .root
+                .join("sessions/non-utf8-session-id/children");
+            std::fs::create_dir_all(&non_utf8_root).unwrap();
+            let non_utf8_name = std::ffi::OsString::from_vec(vec![
+                b'c', b'h', b'i', b'l', b'd', 0xff, b'.', b'j', b's', b'o', b'n', b'l',
+            ]);
+            std::fs::write(non_utf8_root.join(non_utf8_name), b"binary-name").unwrap();
+            let (_non_utf8_plan, non_utf8_binding) = make_bound(b"non-utf8-session-id");
+            let mut non_utf8_listing =
+                match scan_observation_directory_membership_for_test(non_utf8_binding, None)
+                    .unwrap()
+                {
+                    ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                    other => panic!("expected a non-UTF-8 listing, got {other:?}"),
+                };
+            let Some(ScopedObservationDirectoryMemberRead::Stable(non_utf8_content)) =
+                non_utf8_listing.read_next_member().unwrap()
+            else {
+                panic!("expected one stable non-UTF-8 member")
+            };
+            assert_eq!(non_utf8_content.bytes(), b"binary-name");
+            assert!(non_utf8_listing.read_next_member().unwrap().is_none());
+            assert!(non_utf8_listing.member_reads_complete());
+        }
 
         let (substituted_plan, substituted_binding) = make_bound(b"other-session-id");
         let error =
@@ -2899,6 +3038,50 @@ pub(crate) mod tests {
                 .trace
                 .iter()
                 .any(|entry| entry.outcome == AccessOutcome::Failed));
+
+            let link_root = approved_root
+                .root
+                .join("sessions/read-link-session-id/children");
+            std::fs::create_dir_all(&link_root).unwrap();
+            let link_member = link_root.join("selected.jsonl");
+            let outside = temp.path().join("outside-private.jsonl");
+            std::fs::write(&link_member, b"inside").unwrap();
+            std::fs::write(&outside, b"outside-private-bytes").unwrap();
+            let (link_plan, link_binding) = make_bound(b"read-link-session-id");
+            let mut link_listing =
+                match scan_observation_directory_membership_for_test(link_binding, None).unwrap() {
+                    ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                    other => panic!("expected a pre-link listing, got {other:?}"),
+                };
+            std::fs::remove_file(&link_member).unwrap();
+            symlink(&outside, &link_member).unwrap();
+            let error = link_listing.read_next_member().unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "scoped observation directory scan failed"
+            );
+            for private in ["outside-private", "selected.jsonl", "outside-private-bytes"] {
+                assert!(!error.to_string().contains(private));
+            }
+            assert!(!link_listing.member_reads_complete());
+            assert!(
+                ScopedRelationMembershipObservation::from_directory_listing(link_listing).is_err()
+            );
+            let link_relation = link_plan
+                .report()
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "descendant-objects")
+                .unwrap()
+                .clone();
+            assert_eq!(
+                link_relation.trace.last().unwrap().operation,
+                AccessOperation::ObjectRead
+            );
+            assert_eq!(
+                link_relation.trace.last().unwrap().outcome,
+                AccessOutcome::Failed
+            );
         }
 
         let observation =
@@ -2907,6 +3090,7 @@ pub(crate) mod tests {
         admission
             .record_relation_membership(7, ScopedAppendDeliveryPhase::Correction, observation)
             .unwrap();
+        assert!(ScopedRelationMembershipObservation::from_directory_listing(first).is_err());
     }
 
     #[test]

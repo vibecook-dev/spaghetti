@@ -923,6 +923,8 @@ pub(crate) struct AuthorizedObservationRuntimeStreamReservation {
 pub(crate) struct AuthorizedObservationDirectoryEntryReservation {
     object_token: AccessObjectToken,
     reservation: AccessReservation,
+    listing_state: Arc<Mutex<AuthorizedObservationDirectoryListingState>>,
+    coordinate: AuthorizedObservationDirectoryMemberCoordinate,
 }
 
 /// In-memory identity of one exact listing-root reservation. Pointer identity
@@ -933,6 +935,39 @@ pub(crate) struct AuthorizedObservationDirectoryRootAuthority {
     inner: Arc<AccessBudgetInner>,
     sequence: u64,
     object_token: AccessObjectToken,
+    listing_state: Arc<Mutex<AuthorizedObservationDirectoryListingState>>,
+}
+
+/// Post-listing authority for exactly the opaque children accounted by one
+/// completed directory pass. It carries the reviewed ReplaceDocument bound,
+/// but no native path or caller-constructible identity.
+pub(crate) struct AuthorizedObservationDirectoryReadAuthority {
+    inner: Arc<AccessBudgetInner>,
+    root_object_token: AccessObjectToken,
+    phase: AccessPhase,
+    max_object_bytes: u64,
+    listing_state: Arc<Mutex<AuthorizedObservationDirectoryListingState>>,
+}
+
+/// One-shot read reservation for an exact child already admitted by the
+/// listing authority. Dropping it consumes the declared byte bound.
+pub(crate) struct AuthorizedObservationDirectoryMemberReadReservation {
+    reservation: AccessReservation,
+    max_object_bytes: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct AuthorizedObservationDirectoryMemberCoordinate {
+    parent_token: AccessObjectToken,
+    object_token: AccessObjectToken,
+    depth: u32,
+}
+
+#[derive(Default)]
+struct AuthorizedObservationDirectoryListingState {
+    sealed: bool,
+    accounted: BTreeMap<AuthorizedObservationDirectoryMemberCoordinate, bool>,
+    reads_reserved: BTreeSet<AuthorizedObservationDirectoryMemberCoordinate>,
 }
 
 impl std::fmt::Debug for AuthorizedObservationSourceReservation {
@@ -977,6 +1012,26 @@ impl std::fmt::Debug for AuthorizedObservationDirectoryRootAuthority {
             .debug_struct("AuthorizedObservationDirectoryRootAuthority")
             .field("has_access_pass", &true)
             .field("has_object_token", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AuthorizedObservationDirectoryReadAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedObservationDirectoryReadAuthority")
+            .field("has_access_pass", &true)
+            .field("has_root_object_token", &true)
+            .field("max_object_bytes", &self.max_object_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AuthorizedObservationDirectoryMemberReadReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedObservationDirectoryMemberReadReservation")
+            .field("max_object_bytes", &self.max_object_bytes)
             .finish_non_exhaustive()
     }
 }
@@ -1320,6 +1375,32 @@ impl AuthorizedObservationRuntimeStreamReservation {
         self.reservation.directory_root_authority()
     }
 
+    /// Seal this exact audited listing and, only for an available
+    /// ChildDirectory/ReplaceDocument stream, mint authority to read its
+    /// accounted children under the declaration-owned object bound.
+    pub(crate) fn complete_directory_listing(
+        self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        outcome: AccessOutcome,
+    ) -> Result<Option<AuthorizedObservationDirectoryReadAuthority>, AccessBudgetError> {
+        let max_object_bytes = match self.reservation.driver() {
+            AuthorizedObservationSourceDriver::ReplaceDocument { max_object_bytes }
+                if max_object_bytes > 0 =>
+            {
+                max_object_bytes
+            }
+            _ => {
+                self.fail_conservative();
+                return Err(invalid_directory_read_authority());
+            }
+        };
+        self.reservation.reservation.complete_directory_listing(
+            authority,
+            max_object_bytes,
+            outcome,
+        )
+    }
+
     pub(crate) fn complete(
         self,
         bytes_read: u64,
@@ -1338,8 +1419,88 @@ impl AuthorizedObservationDirectoryEntryReservation {
         self.object_token
     }
 
-    pub(crate) fn complete(self) -> Result<(), AccessBudgetError> {
-        self.reservation.complete(0, 0, AccessOutcome::Available)
+    pub(crate) fn complete(self, selected_file: bool) -> Result<(), AccessBudgetError> {
+        let Self {
+            reservation,
+            listing_state,
+            coordinate,
+            ..
+        } = self;
+        let mut state = listing_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.sealed || state.accounted.contains_key(&coordinate) {
+            reservation.fail_conservative();
+            return Err(invalid_directory_entry_reservation());
+        }
+        reservation.complete(0, 0, AccessOutcome::Available)?;
+        state.accounted.insert(coordinate, selected_file);
+        Ok(())
+    }
+
+    pub(crate) fn fail_conservative(self) {
+        self.reservation.fail_conservative();
+    }
+}
+
+impl AuthorizedObservationDirectoryReadAuthority {
+    pub(crate) fn max_object_bytes(&self) -> u64 {
+        self.max_object_bytes
+    }
+
+    pub(crate) fn reserve_member_read(
+        &self,
+        object_token: AccessObjectToken,
+        parent_token: AccessObjectToken,
+        depth: u32,
+    ) -> Result<AuthorizedObservationDirectoryMemberReadReservation, AccessBudgetError> {
+        let coordinate = AuthorizedObservationDirectoryMemberCoordinate {
+            parent_token,
+            object_token,
+            depth,
+        };
+        let mut state = self
+            .listing_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !state.sealed
+            || object_token == self.root_object_token
+            || parent_token == object_token
+            || state.accounted.get(&coordinate) != Some(&true)
+            || !state.reads_reserved.insert(coordinate)
+        {
+            return Err(invalid_directory_member_read_reservation());
+        }
+        let reservation = AccessBudget {
+            inner: Arc::clone(&self.inner),
+        }
+        .reserve(AccessReservationRequest {
+            operation: AccessOperation::ObjectRead,
+            phase: self.phase,
+            parent_token: Some(parent_token),
+            object_token,
+            depth,
+            max_bytes: self.max_object_bytes,
+            max_rows: 0,
+        })?;
+        Ok(AuthorizedObservationDirectoryMemberReadReservation {
+            reservation,
+            max_object_bytes: self.max_object_bytes,
+        })
+    }
+}
+
+impl AuthorizedObservationDirectoryMemberReadReservation {
+    pub(crate) fn max_object_bytes(&self) -> u64 {
+        self.max_object_bytes
+    }
+
+    pub(crate) fn complete(
+        self,
+        bytes_read: u64,
+        outcome: AccessOutcome,
+    ) -> Result<(), AccessBudgetError> {
+        self.reservation.complete(bytes_read, 0, outcome)
     }
 
     pub(crate) fn fail_conservative(self) {
@@ -1429,6 +1590,12 @@ impl ScopeAccessReservation {
         Ok(AuthorizedObservationDirectoryEntryReservation {
             object_token,
             reservation,
+            listing_state: Arc::clone(&authority.listing_state),
+            coordinate: AuthorizedObservationDirectoryMemberCoordinate {
+                parent_token,
+                object_token,
+                depth,
+            },
         })
     }
 
@@ -1466,7 +1633,61 @@ impl ScopeAccessReservation {
             inner: Arc::clone(&reservation.inner),
             sequence: reservation.sequence,
             object_token: self.object_token,
+            listing_state: Arc::new(Mutex::new(
+                AuthorizedObservationDirectoryListingState::default(),
+            )),
         })
+    }
+
+    fn complete_directory_listing(
+        self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        max_object_bytes: u64,
+        outcome: AccessOutcome,
+    ) -> Result<Option<AuthorizedObservationDirectoryReadAuthority>, AccessBudgetError> {
+        if self.declaration.primitive != ScopeRelationPrimitive::ChildDirectoryByNativeId
+            || self.operation() != AccessOperation::ObjectListing
+            || max_object_bytes == 0
+            || !matches!(
+                outcome,
+                AccessOutcome::Available | AccessOutcome::Unavailable
+            )
+            || !self.matches_directory_root_authority(authority)
+        {
+            self.fail_conservative();
+            return Err(invalid_directory_read_authority());
+        }
+        let reservation = self
+            .reservation
+            .as_ref()
+            .expect("scope reservation is consumed only once");
+        let inner = Arc::clone(&reservation.inner);
+        let phase = reservation.request.phase;
+        {
+            let mut state = authority
+                .listing_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if state.sealed
+                || (outcome == AccessOutcome::Unavailable && !state.accounted.is_empty())
+            {
+                drop(state);
+                self.fail_conservative();
+                return Err(invalid_directory_read_authority());
+            }
+            state.sealed = true;
+        }
+        let read_authority = (outcome == AccessOutcome::Available).then(|| {
+            AuthorizedObservationDirectoryReadAuthority {
+                inner,
+                root_object_token: self.object_token,
+                phase,
+                max_object_bytes,
+                listing_state: Arc::clone(&authority.listing_state),
+            }
+        });
+        self.complete(0, 0, outcome)?;
+        Ok(read_authority)
     }
 
     fn matches_directory_root_authority(
@@ -1746,6 +1967,18 @@ fn invalid_observation_runtime_stream_binding() -> AccessBudgetError {
 fn invalid_directory_entry_reservation() -> AccessBudgetError {
     AccessBudgetError::InvalidConfig(
         "authorized directory entry reservation requires one confined enumerated child".to_string(),
+    )
+}
+
+fn invalid_directory_read_authority() -> AccessBudgetError {
+    AccessBudgetError::InvalidConfig(
+        "authorized directory read authority requires one completed bound listing".to_string(),
+    )
+}
+
+fn invalid_directory_member_read_reservation() -> AccessBudgetError {
+    AccessBudgetError::InvalidConfig(
+        "authorized directory member read requires one unread enumerated child".to_string(),
     )
 }
 
@@ -2553,10 +2786,10 @@ mod tests {
             .reserve_directory_entry(&authority, &child_a, None, 1)
             .unwrap();
         let first_token = first.object_token();
-        first.complete().unwrap();
+        first.complete(true).unwrap();
         root.reserve_directory_entry(&authority, &child_b, None, 1)
             .unwrap()
-            .complete()
+            .complete(true)
             .unwrap();
         let error = root
             .reserve_directory_entry(&authority, &child_c, None, 1)
@@ -2604,6 +2837,92 @@ mod tests {
             }
         ));
         replay_root.fail_conservative();
+    }
+
+    #[test]
+    fn completed_directory_listing_mints_one_shot_bounded_member_reads() {
+        let identity = [
+            ScopeIdentityInput {
+                name: "project-key",
+                value: b"project-a",
+            },
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"session-7",
+            },
+        ];
+        let reserve_root = |plan: &ScopeAccessPlan| {
+            plan.reserve(ScopeAccessRequest {
+                relation_id: "descendant-transcripts",
+                operation: AccessOperation::ObjectListing,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 1,
+                max_rows: 0,
+            })
+            .unwrap()
+        };
+        let child_key = confined_relative_path_key(Path::new("child.jsonl")).unwrap();
+        let ignored_key = confined_relative_path_key(Path::new("ignored.tmp")).unwrap();
+
+        let plan = child_directory_scope_plan("{project-key}/{native-session-id}/subagents");
+        let root = reserve_root(&plan);
+        let root_token = root.object_token();
+        let authority = root.directory_root_authority().unwrap();
+        let child = root
+            .reserve_directory_entry(&authority, &child_key, None, 1)
+            .unwrap();
+        let child_token = child.object_token();
+        child.complete(true).unwrap();
+        let ignored = root
+            .reserve_directory_entry(&authority, &ignored_key, None, 1)
+            .unwrap();
+        let ignored_token = ignored.object_token();
+        ignored.complete(false).unwrap();
+        let read_authority = root
+            .complete_directory_listing(&authority, 16, AccessOutcome::Available)
+            .unwrap()
+            .unwrap();
+        assert_eq!(read_authority.max_object_bytes(), 16);
+
+        let read = read_authority
+            .reserve_member_read(child_token, root_token, 1)
+            .unwrap();
+        assert_eq!(read.max_object_bytes(), 16);
+        read.complete(5, AccessOutcome::Available).unwrap();
+        assert!(matches!(
+            read_authority.reserve_member_read(child_token, root_token, 1),
+            Err(AccessBudgetError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            read_authority.reserve_member_read(ignored_token, root_token, 1),
+            Err(AccessBudgetError::InvalidConfig(_))
+        ));
+        let fabricated =
+            AccessObjectToken::derive("descendant-transcripts", &[b"fabricated"]).unwrap();
+        assert!(matches!(
+            read_authority.reserve_member_read(fabricated, root_token, 1),
+            Err(AccessBudgetError::InvalidConfig(_))
+        ));
+
+        let snapshot = plan.snapshot("descendant-transcripts").unwrap();
+        assert_eq!(snapshot.attempts, 4);
+        assert_eq!(snapshot.completed, 4);
+        assert_eq!(snapshot.bytes_read, 5);
+        assert_eq!(snapshot.trace[3].operation, AccessOperation::ObjectRead);
+        assert_eq!(snapshot.trace[3].reserved_bytes, 16);
+        assert_eq!(snapshot.trace[3].parent_token, Some(root_token));
+
+        let unavailable_plan =
+            child_directory_scope_plan("{project-key}/{native-session-id}/subagents");
+        let unavailable_root = reserve_root(&unavailable_plan);
+        let unavailable_authority = unavailable_root.directory_root_authority().unwrap();
+        assert!(unavailable_root
+            .complete_directory_listing(&unavailable_authority, 16, AccessOutcome::Unavailable,)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

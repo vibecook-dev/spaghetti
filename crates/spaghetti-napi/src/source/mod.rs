@@ -22,8 +22,9 @@ mod conformance;
 
 pub(crate) use access::{
     validate_evidence_locator_template, validate_relation_id,
-    AuthorizedObservationDirectoryEntryReservation, AuthorizedObservationDirectoryRootAuthority,
-    AuthorizedObservationRuntimeStreamReservation, MAX_IDENTITY_VALUE_BYTES,
+    AuthorizedObservationDirectoryEntryReservation, AuthorizedObservationDirectoryReadAuthority,
+    AuthorizedObservationDirectoryRootAuthority, AuthorizedObservationRuntimeStreamReservation,
+    MAX_IDENTITY_VALUE_BYTES,
 };
 pub use access::{
     AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
@@ -45,9 +46,9 @@ pub use directory_snapshot::{
     DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySelector, DirectorySnapshot,
     DirectorySnapshotConfig,
 };
-pub(crate) use file::confined_relative_path_key;
 pub use file::platform_path_key;
-pub(crate) use file::{read_stable_file_confined, StableRead};
+pub(crate) use file::{confined_relative_path_from_key, confined_relative_path_key};
+pub(crate) use file::{read_stable_file_confined, FileStamp, StableRead};
 pub use key_value_snapshot::{
     KeyValueCheckpoint, KeyValueRead, KeyValueRecord, KeyValueSnapshot, KeyValueSnapshotConfig,
 };

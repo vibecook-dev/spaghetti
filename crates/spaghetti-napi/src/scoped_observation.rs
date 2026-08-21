@@ -911,8 +911,11 @@ pub(crate) struct ScopedRelationMembershipObservation {
 
 impl ScopedRelationMembershipObservation {
     pub(crate) fn from_directory_listing(
-        listing: ScopedObservationDirectoryListing,
+        mut listing: ScopedObservationDirectoryListing,
     ) -> Result<Self, ScopedAdmissionError> {
+        if !listing.retire_member_read_authority() {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
         let relation_id = listing.relation_id().to_string();
         let source = listing.source().clone();
         let checkpoint = listing.checkpoint();
@@ -19099,7 +19102,7 @@ pub(crate) use observation_source_access::{
     bind_observation_runtime_source_for_test, prepare_observation_directory_membership_for_test,
     scan_observation_directory_membership_for_test,
     scan_observation_directory_membership_with_foreign_attachment_for_test,
-    ScopedObservationDirectoryScan,
+    ScopedObservationDirectoryMemberRead, ScopedObservationDirectoryScan,
 };
 
 #[cfg(test)]

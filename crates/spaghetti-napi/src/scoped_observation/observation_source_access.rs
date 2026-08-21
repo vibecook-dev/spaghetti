@@ -16,12 +16,14 @@ use crate::adapter::{
     ScopeRelationPrimitive, SourceInstance, SourceInstanceKey, StreamSpec,
 };
 use crate::source::{
-    confined_relative_path_key, AccessBudgetError, AccessObjectToken, AccessOperation,
-    AccessOutcome, AuditedDirectoryScanError, AuthorizedObservationDirectoryEntryReservation,
-    AuthorizedObservationDirectoryRootAuthority, AuthorizedObservationRuntimeStreamReservation,
-    DirectoryChange, DirectoryCheckpoint, DirectoryEntryAuditReservation, DirectoryEntryAuditor,
-    DirectoryEntryKind, DirectoryScan, DirectorySelection, DirectorySnapshot,
-    DirectorySnapshotConfig, GlobPattern, ScopeAccessRequest,
+    confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,
+    AccessBudgetError, AccessObjectToken, AccessOperation, AccessOutcome,
+    AuditedDirectoryScanError, AuthorizedObservationDirectoryEntryReservation,
+    AuthorizedObservationDirectoryReadAuthority, AuthorizedObservationDirectoryRootAuthority,
+    AuthorizedObservationRuntimeStreamReservation, DirectoryChange, DirectoryCheckpoint,
+    DirectoryEntryAuditReservation, DirectoryEntryAuditor, DirectoryEntryKind, DirectoryEntryState,
+    DirectoryScan, DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, FileStamp,
+    GlobPattern, Revision, ScopeAccessRequest, StableRead,
 };
 
 use super::{
@@ -169,6 +171,14 @@ impl ScopedObservationRuntimeSourceBinding {
         self.runtime.complete(bytes_read, outcome)
     }
 
+    fn complete_directory_listing(
+        self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        outcome: AccessOutcome,
+    ) -> Result<Option<AuthorizedObservationDirectoryReadAuthority>, AccessBudgetError> {
+        self.runtime.complete_directory_listing(authority, outcome)
+    }
+
     pub(crate) fn fail_conservative(self) {
         self.runtime.fail_conservative();
     }
@@ -238,6 +248,16 @@ impl Eq for ScopedObservationDirectoryContractIdentity {}
 struct ScopedObservationDirectoryAccountedEntry {
     kind: DirectoryEntryKind,
     selected: bool,
+    parent_token: AccessObjectToken,
+    depth: u32,
+}
+
+struct ScopedObservationDirectoryMemberCoordinate {
+    object_token: AccessObjectToken,
+    parent_token: AccessObjectToken,
+    depth: u32,
+    relative_path: PathBuf,
+    expected: DirectoryEntryState,
 }
 
 /// One completed, non-serializable listing proof. Native relative names remain
@@ -249,6 +269,11 @@ pub(crate) struct ScopedObservationDirectoryListing {
     changes: Vec<DirectoryChange>,
     root_moved: bool,
     accounted_entries: BTreeMap<AccessObjectToken, ScopedObservationDirectoryAccountedEntry>,
+    read_authority: Option<AuthorizedObservationDirectoryReadAuthority>,
+    root: PathBuf,
+    members: Vec<ScopedObservationDirectoryMemberCoordinate>,
+    next_member_read: usize,
+    member_read_failed: bool,
 }
 
 #[derive(Debug)]
@@ -256,6 +281,26 @@ pub(crate) enum ScopedObservationDirectoryScan {
     Unavailable,
     RetryTransient,
     Snapshot(Box<ScopedObservationDirectoryListing>),
+}
+
+/// One exact selected member read under its listing-derived authority. Retry
+/// carries no bytes because the membership checkpoint became stale. Oversized
+/// retains only opaque identity/revision; stable content remains crate-private
+/// for the future declaration-owned decoder join.
+pub(crate) enum ScopedObservationDirectoryMemberRead {
+    RetryTransient,
+    Oversized {
+        object_token: AccessObjectToken,
+        listing_revision: Revision,
+    },
+    Stable(ScopedObservationDirectoryMemberContent),
+}
+
+pub(crate) struct ScopedObservationDirectoryMemberContent {
+    object_token: AccessObjectToken,
+    listing_revision: Revision,
+    content_revision: Revision,
+    bytes: Vec<u8>,
 }
 
 /// Completed, path-free evidence that one exact native directory entry was
@@ -271,6 +316,7 @@ pub(crate) struct ScopedObservationDirectoryEntryReservation<'audit> {
     proof: &'audit mut ScopedObservationDirectoryMembershipProof,
     reservation: Option<AuthorizedObservationDirectoryEntryReservation>,
     object_token: AccessObjectToken,
+    parent_token: AccessObjectToken,
     depth: u32,
     file_selected: bool,
 }
@@ -308,7 +354,36 @@ impl fmt::Debug for ScopedObservationDirectoryListing {
             .field("accounted_entries", &self.accounted_entries.len())
             .field("changes", &self.changes.len())
             .field("root_moved", &self.root_moved)
+            .field("member_reads", &self.next_member_read)
+            .field("member_read_count", &self.members.len())
+            .field("member_read_failed", &self.member_read_failed)
             .field("has_membership_source", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberRead {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RetryTransient => formatter.write_str("RetryTransient"),
+            Self::Oversized { .. } => formatter
+                .debug_struct("Oversized")
+                .field("has_object_token", &true)
+                .field("has_listing_revision", &true)
+                .finish(),
+            Self::Stable(content) => content.fmt(formatter),
+        }
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberContent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberContent")
+            .field("has_object_token", &true)
+            .field("has_listing_revision", &true)
+            .field("has_content_revision", &true)
+            .field("byte_count", &self.bytes.len())
             .finish_non_exhaustive()
     }
 }
@@ -402,7 +477,14 @@ impl ScopedObservationDirectoryScanAuthority {
             };
         match scan {
             DirectoryScan::Unavailable => {
-                self.binding.complete(0, AccessOutcome::Unavailable)?;
+                let authority = &self.proof.authority;
+                if self
+                    .binding
+                    .complete_directory_listing(authority, AccessOutcome::Unavailable)?
+                    .is_some()
+                {
+                    return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+                }
                 Ok(ScopedObservationDirectoryScan::Unavailable)
             }
             DirectoryScan::RetryTransient => {
@@ -419,7 +501,16 @@ impl ScopedObservationDirectoryScanAuthority {
                     return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
                 }
                 let ScopedObservationDirectoryScanAuthority { binding, proof } = self;
-                binding.complete(0, AccessOutcome::Available)?;
+                let members = match proof.read_members(&binding, &locator, &checkpoint) {
+                    Ok(members) => members,
+                    Err(error) => {
+                        binding.fail_conservative();
+                        return Err(error);
+                    }
+                };
+                let read_authority = binding
+                    .complete_directory_listing(&proof.authority, AccessOutcome::Available)?
+                    .ok_or(ScopedObservationRuntimeSourceError::InvalidBinding)?;
                 Ok(ScopedObservationDirectoryScan::Snapshot(Box::new(
                     ScopedObservationDirectoryListing {
                         identity: proof.identity,
@@ -427,6 +518,11 @@ impl ScopedObservationDirectoryScanAuthority {
                         changes,
                         root_moved,
                         accounted_entries: proof.entries,
+                        read_authority: Some(read_authority),
+                        root,
+                        members,
+                        next_member_read: 0,
+                        member_read_failed: false,
                     },
                 )))
             }
@@ -536,6 +632,7 @@ impl ScopedObservationDirectoryMembershipProof {
             proof: self,
             reservation: Some(reservation),
             object_token,
+            parent_token,
             depth,
             file_selected,
         })
@@ -561,6 +658,43 @@ impl ScopedObservationDirectoryMembershipProof {
                 .and_then(|token| self.entries.get(&token))
                 .is_some_and(|entry| entry.selected && entry.kind == state.kind)
         })
+    }
+
+    fn read_members(
+        &self,
+        binding: &ScopedObservationRuntimeSourceBinding,
+        locator: &Path,
+        checkpoint: &DirectoryCheckpoint,
+    ) -> Result<Vec<ScopedObservationDirectoryMemberCoordinate>, ScopedObservationRuntimeSourceError>
+    {
+        let mut members = Vec::with_capacity(checkpoint.entries.len());
+        for state in checkpoint.entries.values() {
+            if state.kind != DirectoryEntryKind::File {
+                return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+            }
+            let object_token = binding
+                .runtime
+                .directory_entry_token(&self.authority, &state.path_key)
+                .map_err(ScopedObservationRuntimeSourceError::Access)?;
+            let accounted = self
+                .entries
+                .get(&object_token)
+                .filter(|entry| entry.selected && entry.kind == DirectoryEntryKind::File)
+                .ok_or(ScopedObservationRuntimeSourceError::InvalidBinding)?;
+            let member_path = confined_relative_path_from_key(&state.path_key)
+                .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+            let relative_path = locator.join(member_path);
+            confined_relative_path_key(&relative_path)
+                .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+            members.push(ScopedObservationDirectoryMemberCoordinate {
+                object_token,
+                parent_token: accounted.parent_token,
+                depth: accounted.depth,
+                relative_path,
+                expected: state.clone(),
+            });
+        }
+        Ok(members)
     }
 }
 
@@ -591,6 +725,137 @@ impl ScopedObservationDirectoryListing {
 
     pub(crate) fn root_moved(&self) -> bool {
         self.root_moved
+    }
+
+    pub(crate) fn member_reads_complete(&self) -> bool {
+        !self.member_read_failed && self.next_member_read == self.members.len()
+    }
+
+    pub(super) fn retire_member_read_authority(&mut self) -> bool {
+        if !self.member_reads_complete() {
+            return false;
+        }
+        self.read_authority = None;
+        self.root = PathBuf::new();
+        self.members.clear();
+        self.next_member_read = 0;
+        true
+    }
+
+    /// Read the next selected member in canonical checkpoint order. No caller
+    /// supplies a path or token, and the common reservation is acquired before
+    /// the no-follow open. Missing/replaced members invalidate this listing;
+    /// a stable oversized member remains an explicit bounded outcome.
+    pub(crate) fn read_next_member(
+        &mut self,
+    ) -> Result<Option<ScopedObservationDirectoryMemberRead>, ScopedObservationRuntimeSourceError>
+    {
+        if self.member_read_failed {
+            return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+        }
+        let Some(member) = self.members.get(self.next_member_read) else {
+            return Ok(None);
+        };
+        let authority = self
+            .read_authority
+            .as_ref()
+            .ok_or(ScopedObservationRuntimeSourceError::InvalidBinding)?;
+        let reservation = match authority.reserve_member_read(
+            member.object_token,
+            member.parent_token,
+            member.depth,
+        ) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.member_read_failed = true;
+                return Err(ScopedObservationRuntimeSourceError::Access(error));
+            }
+        };
+        let max_bytes = match usize::try_from(reservation.max_object_bytes()) {
+            Ok(max_bytes) if max_bytes > 0 => max_bytes,
+            _ => {
+                reservation.fail_conservative();
+                self.member_read_failed = true;
+                return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+            }
+        };
+        self.next_member_read += 1;
+        let read = match read_stable_file_confined(&self.root, &member.relative_path, max_bytes) {
+            Ok(read) => read,
+            Err(_) => {
+                reservation.fail_conservative();
+                self.member_read_failed = true;
+                return Err(ScopedObservationRuntimeSourceError::DirectoryScan);
+            }
+        };
+        match read {
+            StableRead::Missing => {
+                reservation.complete(0, AccessOutcome::Unavailable)?;
+                self.member_read_failed = true;
+                Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient))
+            }
+            StableRead::Unstable => {
+                reservation.fail_conservative();
+                self.member_read_failed = true;
+                Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient))
+            }
+            StableRead::Oversized(stamp) => {
+                if !directory_member_stamp_matches(&stamp, &member.expected) {
+                    reservation.fail_conservative();
+                    self.member_read_failed = true;
+                    return Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient));
+                }
+                reservation.complete(0, AccessOutcome::Oversized)?;
+                Ok(Some(ScopedObservationDirectoryMemberRead::Oversized {
+                    object_token: member.object_token,
+                    listing_revision: member.expected.revision,
+                }))
+            }
+            StableRead::Stable {
+                stamp,
+                bytes,
+                revision,
+            } => {
+                if !directory_member_stamp_matches(&stamp, &member.expected) {
+                    reservation.fail_conservative();
+                    self.member_read_failed = true;
+                    return Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient));
+                }
+                reservation.complete(bytes.len() as u64, AccessOutcome::Available)?;
+                Ok(Some(ScopedObservationDirectoryMemberRead::Stable(
+                    ScopedObservationDirectoryMemberContent {
+                        object_token: member.object_token,
+                        listing_revision: member.expected.revision,
+                        content_revision: revision,
+                        bytes,
+                    },
+                )))
+            }
+        }
+    }
+}
+
+fn directory_member_stamp_matches(stamp: &FileStamp, expected: &DirectoryEntryState) -> bool {
+    stamp.identity == expected.identity
+        && stamp.len == expected.size_bytes
+        && stamp.modified_ns == expected.modified_ns
+}
+
+impl ScopedObservationDirectoryMemberContent {
+    pub(crate) fn object_token(&self) -> AccessObjectToken {
+        self.object_token
+    }
+
+    pub(crate) fn listing_revision(&self) -> Revision {
+        self.listing_revision
+    }
+
+    pub(crate) fn content_revision(&self) -> Revision {
+        self.content_revision
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -629,17 +894,22 @@ impl ScopedObservationDirectoryEntryReservation<'_> {
             .reservation
             .take()
             .expect("directory entry reservation is consumed only once");
-        if let Err(error) = reservation.complete() {
+        let selected = kind == DirectoryEntryKind::File && self.file_selected;
+        if let Err(error) = reservation.complete(selected) {
             self.proof.failed = true;
             return Err(ScopedObservationRuntimeSourceError::Access(error));
         }
-        let selected = kind == DirectoryEntryKind::File && self.file_selected;
         if self
             .proof
             .entries
             .insert(
                 self.object_token,
-                ScopedObservationDirectoryAccountedEntry { kind, selected },
+                ScopedObservationDirectoryAccountedEntry {
+                    kind,
+                    selected,
+                    parent_token: self.parent_token,
+                    depth: self.depth,
+                },
             )
             .is_some()
         {
@@ -890,6 +1160,11 @@ impl ScopedObservationDirectoryListing {
             changes: Vec::new(),
             root_moved: false,
             accounted_entries: BTreeMap::new(),
+            read_authority: None,
+            root: PathBuf::new(),
+            members: Vec::new(),
+            next_member_read: 0,
+            member_read_failed: false,
         }
     }
 }

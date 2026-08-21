@@ -411,6 +411,90 @@ pub(crate) fn confined_relative_path_key(path: &Path) -> Result<Vec<u8>, SourceD
     Ok(output)
 }
 
+/// Reconstruct an exact confined path from the component-framed identity
+/// emitted by [`confined_relative_path_key`]. This is the only supported way
+/// to reopen a selected directory member because display paths are lossy for
+/// non-UTF-8 native names. A canonical round trip rejects fabricated
+/// separators, dot components, truncation, and platform-invalid encodings.
+pub(crate) fn confined_relative_path_from_key(
+    path_key: &[u8],
+) -> Result<PathBuf, SourceDriverError> {
+    if path_key.first() != Some(&1) || path_key.len() == 1 {
+        return Err(invalid_confined_path_key());
+    }
+    let mut path = PathBuf::new();
+    let mut offset = 1_usize;
+    while offset < path_key.len() {
+        let length_end = offset
+            .checked_add(8)
+            .filter(|end| *end <= path_key.len())
+            .ok_or_else(invalid_confined_path_key)?;
+        let length = usize::try_from(u64::from_be_bytes(
+            path_key[offset..length_end]
+                .try_into()
+                .expect("the checked component length prefix has eight bytes"),
+        ))
+        .map_err(|_| invalid_confined_path_key())?;
+        if length == 0 {
+            return Err(invalid_confined_path_key());
+        }
+        let component_end = length_end
+            .checked_add(length)
+            .filter(|end| *end <= path_key.len())
+            .ok_or_else(invalid_confined_path_key)?;
+        path.push(os_string_from_key_component(
+            &path_key[length_end..component_end],
+        )?);
+        offset = component_end;
+    }
+    if confined_relative_path_key(&path).ok().as_deref() != Some(path_key) {
+        return Err(invalid_confined_path_key());
+    }
+    Ok(path)
+}
+
+fn invalid_confined_path_key() -> SourceDriverError {
+    SourceDriverError::InvalidCursor(
+        "confined relative path key is not canonical for this platform".to_string(),
+    )
+}
+
+#[cfg(unix)]
+fn os_string_from_key_component(bytes: &[u8]) -> Result<std::ffi::OsString, SourceDriverError> {
+    use std::os::unix::ffi::OsStringExt;
+
+    if bytes.contains(&0) {
+        return Err(invalid_confined_path_key());
+    }
+    Ok(std::ffi::OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(windows)]
+fn os_string_from_key_component(bytes: &[u8]) -> Result<std::ffi::OsString, SourceDriverError> {
+    use std::os::windows::ffi::OsStringExt;
+
+    if !bytes.len().is_multiple_of(2) {
+        return Err(invalid_confined_path_key());
+    }
+    let wide = bytes
+        .chunks_exact(2)
+        .map(|unit| u16::from_be_bytes([unit[0], unit[1]]))
+        .collect::<Vec<_>>();
+    if wide.contains(&0) {
+        return Err(invalid_confined_path_key());
+    }
+    Ok(std::ffi::OsString::from_wide(&wide))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn os_string_from_key_component(bytes: &[u8]) -> Result<std::ffi::OsString, SourceDriverError> {
+    let component = std::str::from_utf8(bytes).map_err(|_| invalid_confined_path_key())?;
+    if component.contains('\0') {
+        return Err(invalid_confined_path_key());
+    }
+    Ok(std::ffi::OsString::from(component))
+}
+
 /// Binary-safe component-framed key for an already host-approved platform
 /// path. Unlike [`confined_relative_path_key`], absolute roots are allowed.
 pub fn platform_path_key(path: &Path) -> Vec<u8> {
@@ -467,6 +551,60 @@ mod tests {
             confined_relative_path_key(Path::new("../escape")),
             Err(SourceDriverError::PathEscape(_))
         ));
+    }
+
+    #[test]
+    fn confined_path_keys_round_trip_exact_components() {
+        let path = Path::new("nested/child.jsonl");
+        let key = confined_relative_path_key(path).unwrap();
+        assert_eq!(confined_relative_path_from_key(&key).unwrap(), path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_path_keys_round_trip_non_utf8_components() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = PathBuf::from("nested").join(std::ffi::OsString::from_vec(vec![
+            b'c', b'h', b'i', b'l', b'd', 0xff,
+        ]));
+        let key = confined_relative_path_key(&path).unwrap();
+        assert_eq!(confined_relative_path_from_key(&key).unwrap(), path);
+    }
+
+    #[test]
+    fn confined_path_key_inverse_rejects_noncanonical_input_without_echoing_it() {
+        let framed = |component: &[u8]| {
+            let mut key = vec![1];
+            key.extend_from_slice(&(component.len() as u64).to_be_bytes());
+            key.extend_from_slice(component);
+            key
+        };
+        let mut truncated_component = framed(b"child");
+        truncated_component.pop();
+        let mut trailing_junk = framed(b"child");
+        trailing_junk.push(0xff);
+
+        for invalid in [
+            Vec::new(),
+            vec![1],
+            vec![2, 0, 0, 0, 0, 0, 0, 0, 1, b'a'],
+            vec![1, 0, 0, 0],
+            vec![1, 0, 0, 0, 0, 0, 0, 0, 0],
+            truncated_component,
+            trailing_junk,
+            framed(b"."),
+            framed(b".."),
+            framed(b"nested/escape"),
+            framed(b"nul\0byte"),
+        ] {
+            let error = confined_relative_path_from_key(&invalid).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "invalid source cursor: confined relative path key is not canonical for this platform"
+            );
+            assert!(!error.to_string().contains("nested/escape"));
+        }
     }
 
     #[cfg(unix)]

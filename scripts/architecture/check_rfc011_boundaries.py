@@ -548,6 +548,21 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         for binding in required_directory_membership_bindings
     ) or "from_directory_checkpoint" in combined_directory_membership_text:
         found.add(f"{relative}#missing-authorized-directory-membership-listing")
+    required_directory_member_read_bindings = (
+        "pub(crate) struct ScopedObservationDirectoryMemberContent",
+        "pub(crate) fn read_next_member(",
+        "complete_directory_listing(",
+        "reserve_member_read(",
+        "confined_relative_path_from_key(",
+        "read_stable_file_confined(",
+        "directory_member_stamp_matches(",
+        "if !listing.retire_member_read_authority()",
+    )
+    if any(
+        binding not in combined_directory_membership_text
+        for binding in required_directory_member_read_bindings
+    ):
+        found.add(f"{relative}#missing-authorized-directory-member-read")
     continuity_wire = scoped_dir / "continuity_wire.rs"
     continuity_wire_text = (
         production_rust_text(continuity_wire)
