@@ -33,7 +33,7 @@ pub use facts::{
     FactSemanticContext, FactSemanticRevision, HookEventSummary,
     InterpretationSettingsDocumentStatus, InterpretationSettingsFact, InterpretationSettingsLayer,
     InterpretationSettingsSnapshot, MessageFact, MessageRevisionFact, MessageRevisionRole,
-    MessageRole, PersistedToolResultFact, PlanSnapshotFact, PresenceFact,
+    MessageRole, PersistedToolResultFact, PlanRevisionFact, PlanSnapshotFact, PresenceFact,
     ProjectMemoryDocumentFact, QualifiedTimestamp, RelationStrength, RunEvidenceFact, RunFact,
     SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, TaskCollectionKind,
     TaskItemSnapshot, TaskLifecycleState, TaskRevisionFact, TaskSnapshotCoverage, TaskSnapshotFact,

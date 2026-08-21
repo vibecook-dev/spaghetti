@@ -32,10 +32,12 @@ export const USAGE_V2_FAMILY = 'runtime.usage-v2' as const;
 export const EFFECTIVE_STATE_FAMILY = 'runtime.effective-state' as const;
 export const USER_INPUT_FAMILY = 'runtime.user-input-request' as const;
 export const MESSAGE_FAMILY = 'runtime.message' as const;
+export const PLAN_FAMILY = 'runtime.plan' as const;
 export const TASK_FAMILY = 'runtime.task' as const;
 export const EFFECTIVE_STATE_FAMILY_VERSION = 1 as const;
 export const USER_INPUT_FAMILY_VERSION = 1 as const;
 export const MESSAGE_FAMILY_VERSION = 1 as const;
+export const PLAN_FAMILY_VERSION = 1 as const;
 export const TASK_FAMILY_VERSION = 1 as const;
 export const ACTOR_RUN_FAMILY_VERSION = 1 as const;
 export const ACTOR_AFFILIATION_FAMILY_VERSION = 1 as const;
@@ -1694,4 +1696,193 @@ export function parseTaskFixture(value: unknown, expectedContextInput: unknown):
 
 export function parseRfc012cTaskV1Json(json: string, expectedContextInput: unknown): TaskFixture {
   return parseTaskFixture(preflightSemanticFixtureJson(json), expectedContextInput);
+}
+
+export interface PlanRevisionSlot {
+  completeness: ContractCompleteness;
+  operation: UserInputOperation;
+  ordered_step_keys: string[];
+  owned_set: string[] | null;
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+}
+
+export interface PlanFixture {
+  adapter_id: string;
+  actor_run: OpaqueContractReference;
+  family: typeof PLAN_FAMILY;
+  family_version: typeof PLAN_FAMILY_VERSION;
+  fixture_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  native_plan_id: string;
+  peer_native_plan_id: string;
+  fact_id: OpaqueContractReference;
+  peer_fact_id: OpaqueContractReference;
+  source_record_id: OpaqueContractReference;
+  subject: string;
+  current: PlanRevisionSlot;
+  complete_steps: PlanRevisionSlot;
+  partial_steps: PlanRevisionSlot;
+  retract: PlanRevisionSlot;
+  partial: PlanRevisionSlot;
+  collection_omit: PlanRevisionSlot;
+  runtime_semantic_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  session: OpaqueContractReference;
+  source_instance_key: OpaqueContractReference;
+}
+
+const PLAN_SLOT_FIELDS = [
+  'completeness',
+  'operation',
+  'ordered_step_keys',
+  'owned_set',
+  'semantic_revision_key_hex',
+  'semantic_revision_ref',
+] as const;
+
+function parsePlanSlot(
+  value: unknown,
+  label: string,
+  operation: UserInputOperation,
+  completeness: ContractCompleteness,
+  expectedKeys: readonly string[],
+  ownedSet: string[] | null,
+): PlanRevisionSlot {
+  const input = record(value, label);
+  assertKnownFields(input, PLAN_SLOT_FIELDS, label);
+  if (input.operation !== operation) {
+    throw new ContractValidationError(`${label} operation does not match its fixture slot`);
+  }
+  if (input.completeness !== completeness) {
+    throw new ContractValidationError(`${label} completeness does not match its fixture slot`);
+  }
+  if (!Array.isArray(input.ordered_step_keys) || input.ordered_step_keys.length === 0) {
+    throw new ContractValidationError(`${label} ordered_step_keys must be a non-empty array`);
+  }
+  const keys = input.ordered_step_keys.map((key, index) =>
+    boundedText(key, `${label} step ${index}`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+  );
+  if (keys.join('\0') !== expectedKeys.join('\0')) {
+    throw new ContractValidationError(`${label} ordered_step_keys do not match the declared snapshot`);
+  }
+  let parsedOwned: string[] | null = null;
+  if (input.owned_set !== null) {
+    if (!Array.isArray(input.owned_set) || input.owned_set.length === 0) {
+      throw new ContractValidationError(`${label} owned_set must be null or a non-empty array`);
+    }
+    parsedOwned = input.owned_set.map((member, index) =>
+      boundedText(member, `${label} owned_set ${index}`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    );
+  }
+  if ((parsedOwned ?? null) === null && ownedSet !== null) {
+    throw new ContractValidationError(`${label} owned_set does not match the declared snapshot`);
+  }
+  if (parsedOwned && ownedSet && parsedOwned.join('\0') !== ownedSet.join('\0')) {
+    throw new ContractValidationError(`${label} owned_set does not match the declared snapshot`);
+  }
+  if (parsedOwned && ownedSet === null) {
+    throw new ContractValidationError(`${label} owned_set does not match the declared snapshot`);
+  }
+  return {
+    completeness: parseContractCompleteness(input.completeness, `${label} completeness`),
+    operation,
+    ordered_step_keys: keys,
+    owned_set: parsedOwned,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+  };
+}
+
+function parsePlanFixtureShape(value: unknown): PlanFixture {
+  const input = record(value, 'plan fixture');
+  assertKnownFields(
+    input,
+    [
+      'adapter_id',
+      'actor_run',
+      'family',
+      'family_version',
+      'fixture_contract_version',
+      'native_plan_id',
+      'peer_native_plan_id',
+      'fact_id',
+      'peer_fact_id',
+      'source_record_id',
+      'subject',
+      'current',
+      'complete_steps',
+      'partial_steps',
+      'retract',
+      'partial',
+      'collection_omit',
+      'runtime_semantic_contract_version',
+      'session',
+      'source_instance_key',
+    ],
+    'plan fixture',
+  );
+  if (input.family !== PLAN_FAMILY || input.family_version !== PLAN_FAMILY_VERSION) {
+    throw new ContractValidationError('plan fixture family must be runtime.plan@1');
+  }
+  const current = parsePlanSlot(input.current, 'current', 'upsert', 'complete', ['step-a', 'step-b'], null);
+  const completeSteps = parsePlanSlot(input.complete_steps, 'complete_steps', 'upsert', 'complete', ['step-a'], null);
+  const partialSteps = parsePlanSlot(input.partial_steps, 'partial_steps', 'upsert', 'partial', ['step-a'], null);
+  const retract = parsePlanSlot(input.retract, 'retract', 'retract', 'complete', ['step-a', 'step-b'], null);
+  const partial = parsePlanSlot(input.partial, 'partial', 'upsert', 'partial', ['step-a', 'step-b'], null);
+  const collectionOmit = parsePlanSlot(
+    input.collection_omit,
+    'collection_omit',
+    'upsert',
+    'complete',
+    ['step-a'],
+    ['fixture-plan-2'],
+  );
+  if (
+    current.completeness !== 'complete' ||
+    completeSteps.completeness !== 'complete' ||
+    partialSteps.completeness !== 'partial' ||
+    partial.completeness !== 'partial'
+  ) {
+    throw new ContractValidationError('plan completeness does not match its fixture slot');
+  }
+  return {
+    adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
+    actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
+    family: PLAN_FAMILY,
+    family_version: PLAN_FAMILY_VERSION,
+    fixture_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    native_plan_id: boundedText(input.native_plan_id, 'native_plan_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    peer_native_plan_id: boundedText(input.peer_native_plan_id, 'peer_native_plan_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    fact_id: parseOpaqueContractReference(input.fact_id, 'plan fact id'),
+    peer_fact_id: parseOpaqueContractReference(input.peer_fact_id, 'peer plan fact id'),
+    source_record_id: parseOpaqueContractReference(input.source_record_id, 'plan source record id'),
+    subject: boundedText(input.subject, 'subject', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    current,
+    complete_steps: completeSteps,
+    partial_steps: partialSteps,
+    retract,
+    partial,
+    collection_omit: collectionOmit,
+    runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    session: parseOpaqueContractReference(input.session, 'session'),
+    source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
+  };
+}
+
+export function parsePlanFixture(value: unknown, expectedContextInput: unknown): PlanFixture {
+  const expected = parsePlanFixtureShape(expectedContextInput);
+  const parsed = parsePlanFixtureShape(value);
+  if (parsed.fact_id !== expected.fact_id || parsed.peer_fact_id !== expected.peer_fact_id) {
+    throw new ContractValidationError('plan identity does not match the caller-held revision identity');
+  }
+  bindSlotIdentity('current', parsed.current, expected.current);
+  bindSlotIdentity('complete_steps', parsed.complete_steps, expected.complete_steps);
+  bindSlotIdentity('partial_steps', parsed.partial_steps, expected.partial_steps);
+  bindSlotIdentity('retract', parsed.retract, expected.retract);
+  bindSlotIdentity('partial', parsed.partial, expected.partial);
+  bindSlotIdentity('collection_omit', parsed.collection_omit, expected.collection_omit);
+  return parsed;
+}
+
+export function parseRfc012cPlanV1Json(json: string, expectedContextInput: unknown): PlanFixture {
+  return parsePlanFixture(preflightSemanticFixtureJson(json), expectedContextInput);
 }

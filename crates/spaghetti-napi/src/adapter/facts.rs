@@ -1058,6 +1058,96 @@ impl TaskRevisionFact {
     }
 }
 
+const MAX_PLAN_STEPS: usize = 32;
+
+/// RFC 012C plan revision. One revisioned entity; a complete ordered step
+/// snapshot replaces prior steps, and a complete owned-set may retract members
+/// absent from that set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub native_plan_id: String,
+    pub subject: String,
+    pub ordered_step_keys: Vec<String>,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub owned_set: Option<Vec<String>>,
+}
+
+impl PlanRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        validate_runtime_semantic_text("native_plan_id", Some(self.native_plan_id.as_str()))?;
+        validate_runtime_semantic_text("subject", Some(self.subject.as_str()))?;
+        if self.ordered_step_keys.is_empty() || self.ordered_step_keys.len() > MAX_PLAN_STEPS {
+            return Err(AdapterError::invalid_contract(
+                "plan ordered_step_keys must be a bounded non-empty snapshot",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for key in &self.ordered_step_keys {
+            validate_runtime_semantic_text("plan step key", Some(key.as_str()))?;
+            if !seen.insert(key.as_str()) {
+                return Err(AdapterError::invalid_contract(
+                    "plan step keys must be unique in one snapshot",
+                ));
+            }
+        }
+        if let Some(owned_set) = &self.owned_set {
+            if owned_set.is_empty() {
+                return Err(AdapterError::invalid_contract(
+                    "plan owned_set must be omitted or non-empty",
+                ));
+            }
+            let mut owned_seen = BTreeSet::new();
+            for member in owned_set {
+                validate_runtime_semantic_text("owned plan id", Some(member.as_str()))?;
+                if !owned_seen.insert(member.as_str()) {
+                    return Err(AdapterError::invalid_contract(
+                        "plan owned_set members must be unique",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.plan/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.native_plan_id.as_bytes());
+        push_component(&mut encoded, self.subject.as_bytes());
+        encoded.extend_from_slice(&(self.ordered_step_keys.len() as u64).to_be_bytes());
+        for key in &self.ordered_step_keys {
+            push_component(&mut encoded, key.as_bytes());
+        }
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        match &self.owned_set {
+            Some(owned_set) => {
+                encoded.push(1);
+                encoded.extend_from_slice(&(owned_set.len() as u64).to_be_bytes());
+                for member in owned_set {
+                    push_component(&mut encoded, member.as_bytes());
+                }
+            }
+            None => encoded.push(0),
+        }
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectiveStateDimension {
@@ -2056,6 +2146,7 @@ pub enum Fact {
     UserInputRequestRevision(UserInputRequestRevisionFact),
     MessageRevision(MessageRevisionFact),
     TaskRevision(TaskRevisionFact),
+    PlanRevision(PlanRevisionFact),
     EffectiveStateRevision(EffectiveStateRevisionFact),
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
@@ -2094,6 +2185,7 @@ impl Fact {
             Self::UserInputRequestRevision(_) => "runtime.user-input-request",
             Self::MessageRevision(_) => "runtime.message",
             Self::TaskRevision(_) => "runtime.task",
+            Self::PlanRevision(_) => "runtime.plan",
             Self::EffectiveStateRevision(_) => "runtime.effective-state",
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
@@ -2128,6 +2220,7 @@ impl Fact {
             | Self::UserInputRequestRevision(_)
             | Self::MessageRevision(_)
             | Self::TaskRevision(_)
+            | Self::PlanRevision(_)
             | Self::EffectiveStateRevision(_) => None,
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
@@ -2157,6 +2250,7 @@ impl Fact {
             Self::UserInputRequestRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::MessageRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::TaskRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::PlanRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::EffectiveStateRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ArtifactMetadataSnapshot(revision) => revision.semantic_revision_key(),
             Self::ArtifactContent(revision) => revision.semantic_revision_key(),
@@ -2718,6 +2812,7 @@ impl FactBatch {
                             )
                             | (Fact::MessageRevision(_), Fact::MessageRevision(_))
                             | (Fact::TaskRevision(_), Fact::TaskRevision(_))
+                            | (Fact::PlanRevision(_), Fact::PlanRevision(_))
                             | (
                                 Fact::EffectiveStateRevision(_),
                                 Fact::EffectiveStateRevision(_)

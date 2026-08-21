@@ -69,6 +69,19 @@ struct MessageEnvelopeWire {
 
 #[derive(Serialize)]
 #[serde(deny_unknown_fields)]
+struct PlanEnvelopeWire {
+    fact_family: &'static str,
+    fact_id: CanonicalFactId,
+    operation: &'static str,
+    native_plan_id: String,
+    subject: String,
+    ordered_step_keys: Vec<String>,
+    completeness: ContractCompleteness,
+    owned_set: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
 struct TaskEnvelopeWire {
     fact_family: &'static str,
     fact_id: CanonicalFactId,
@@ -279,6 +292,31 @@ impl ScopedObservationKnownEnvelope {
                         role: revision.role,
                         ordered_content_block_keys: revision.ordered_content_block_keys.clone(),
                         completeness: revision.completeness,
+                    })?,
+                    common_context()?,
+                )
+            }
+            ScopedObservationEvent::Plan {
+                fact_id,
+                operation,
+                revision,
+                ..
+            } => {
+                require_no_specialized_contexts(&contexts)?;
+                (
+                    ScopedObservationKnownEventFamily::Interaction,
+                    serialize_wire(PlanEnvelopeWire {
+                        fact_family: "runtime.plan",
+                        fact_id: *fact_id,
+                        operation: match operation {
+                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
+                            super::ScopedRevisionedEntityOperation::Retract => "retract",
+                        },
+                        native_plan_id: revision.native_plan_id.clone(),
+                        subject: revision.subject.clone(),
+                        ordered_step_keys: revision.ordered_step_keys.clone(),
+                        completeness: revision.completeness,
+                        owned_set: revision.owned_set.clone(),
                     })?,
                     common_context()?,
                 )

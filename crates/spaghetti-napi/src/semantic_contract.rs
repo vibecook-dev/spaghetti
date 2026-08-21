@@ -31,10 +31,12 @@ const USAGE_V2_FAMILY: &str = "runtime.usage-v2";
 const EFFECTIVE_STATE_FAMILY: &str = "runtime.effective-state";
 const USER_INPUT_FAMILY: &str = "runtime.user-input-request";
 const MESSAGE_FAMILY: &str = "runtime.message";
+const PLAN_FAMILY: &str = "runtime.plan";
 const TASK_FAMILY: &str = "runtime.task";
 const MAX_INTERACTION_QUESTIONS: usize = 32;
 const MAX_INTERACTION_OPTIONS: usize = 32;
 const MAX_MESSAGE_CONTENT_BLOCKS: usize = 32;
+const MAX_PLAN_STEPS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -362,6 +364,42 @@ pub(crate) struct TaskFixtureWire {
     pub retract: TaskRevisionSlotWire,
     pub partial: TaskRevisionSlotWire,
     pub collection_omit: TaskRevisionSlotWire,
+    pub runtime_semantic_contract_version: u32,
+    pub session: CanonicalEntityKey,
+    pub source_instance_key: CanonicalSourceInstanceKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PlanRevisionSlotWire {
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub ordered_step_keys: Vec<String>,
+    pub owned_set: Option<Vec<String>>,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PlanFixtureWire {
+    pub adapter_id: String,
+    pub actor_run: CanonicalEntityKey,
+    pub family: String,
+    pub family_version: u32,
+    pub fixture_contract_version: u32,
+    pub native_plan_id: String,
+    pub peer_native_plan_id: String,
+    pub fact_id: CanonicalFactId,
+    pub peer_fact_id: CanonicalFactId,
+    pub source_record_id: SourceRecordId,
+    pub subject: String,
+    pub current: PlanRevisionSlotWire,
+    pub complete_steps: PlanRevisionSlotWire,
+    pub partial_steps: PlanRevisionSlotWire,
+    pub retract: PlanRevisionSlotWire,
+    pub partial: PlanRevisionSlotWire,
+    pub collection_omit: PlanRevisionSlotWire,
     pub runtime_semantic_contract_version: u32,
     pub session: CanonicalEntityKey,
     pub source_instance_key: CanonicalSourceInstanceKey,
@@ -1698,6 +1736,182 @@ fn validate_rfc012c_task_fixture(fixture: &TaskFixtureWire) -> Result<(), Semant
     Ok(())
 }
 
+fn validate_plan_slot(
+    fixture: &PlanFixtureWire,
+    slot_name: &str,
+    slot: &PlanRevisionSlotWire,
+    expected_operation: UserInputOperation,
+    expected_completeness: ContractCompleteness,
+    expected_keys: &[&str],
+    expected_owned_set: Option<&[&str]>,
+) -> Result<(), SemanticFixtureError> {
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "plan {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != expected_completeness {
+        return Err(SemanticFixtureError::invalid(format!(
+            "plan {slot_name} completeness does not match its fixture slot"
+        )));
+    }
+    if slot.ordered_step_keys.is_empty() || slot.ordered_step_keys.len() > MAX_PLAN_STEPS {
+        return Err(SemanticFixtureError::invalid(format!(
+            "plan {slot_name} ordered_step_keys must contain 1..={MAX_PLAN_STEPS} keys"
+        )));
+    }
+    if slot.ordered_step_keys != expected_keys {
+        return Err(SemanticFixtureError::invalid(format!(
+            "plan {slot_name} ordered_step_keys do not match the declared snapshot"
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for key in &slot.ordered_step_keys {
+        validate_canonical_runtime_text("plan step key", key)?;
+        if !seen.insert(key.as_str()) {
+            return Err(SemanticFixtureError::invalid(
+                "plan step keys must be unique in one snapshot",
+            ));
+        }
+    }
+    match (expected_owned_set, slot.owned_set.as_ref()) {
+        (None, None) => {}
+        (Some(expected), Some(actual))
+            if actual
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied()) =>
+        {
+            for member in actual {
+                validate_canonical_runtime_text("owned plan id", member)?;
+            }
+        }
+        _ => {
+            return Err(SemanticFixtureError::invalid(format!(
+                "plan {slot_name} owned_set does not match the declared snapshot"
+            )));
+        }
+    }
+    verify_slot_identity(
+        PLAN_FAMILY,
+        fixture.native_plan_id.as_bytes(),
+        slot_name,
+        &fixture.fact_id,
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+    )
+}
+
+fn validate_rfc012c_plan_fixture(fixture: &PlanFixtureWire) -> Result<(), SemanticFixtureError> {
+    if fixture.fixture_contract_version != RFC012C_FIXTURE_CONTRACT_VERSION
+        || fixture.runtime_semantic_contract_version != RUNTIME_SEMANTIC_CONTRACT_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "unsupported plan fixture contract version",
+        ));
+    }
+    if fixture.family != PLAN_FAMILY || fixture.family_version != FAMILY_VERSION {
+        return Err(SemanticFixtureError::invalid(
+            "plan fixture family must be runtime.plan@1",
+        ));
+    }
+    validate_canonical_source_string("adapter_id", &fixture.adapter_id, MAX_ADAPTER_ID_BYTES)?;
+    validate_canonical_runtime_text("native_plan_id", &fixture.native_plan_id)?;
+    validate_canonical_runtime_text("peer_native_plan_id", &fixture.peer_native_plan_id)?;
+    validate_canonical_runtime_text("subject", &fixture.subject)?;
+    if fixture.native_plan_id == fixture.peer_native_plan_id {
+        return Err(SemanticFixtureError::invalid(
+            "plan fixture peer must be a distinct plan identity",
+        ));
+    }
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        PLAN_FAMILY,
+        fixture.native_plan_id.as_bytes(),
+        &fixture.fact_id,
+    )?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        PLAN_FAMILY,
+        fixture.peer_native_plan_id.as_bytes(),
+        &fixture.peer_fact_id,
+    )?;
+    validate_plan_slot(
+        fixture,
+        "current",
+        &fixture.current,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        &["step-a", "step-b"],
+        None,
+    )?;
+    validate_plan_slot(
+        fixture,
+        "complete_steps",
+        &fixture.complete_steps,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        &["step-a"],
+        None,
+    )?;
+    validate_plan_slot(
+        fixture,
+        "partial_steps",
+        &fixture.partial_steps,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+        &["step-a"],
+        None,
+    )?;
+    validate_plan_slot(
+        fixture,
+        "retract",
+        &fixture.retract,
+        UserInputOperation::Retract,
+        ContractCompleteness::Complete,
+        &["step-a", "step-b"],
+        None,
+    )?;
+    validate_plan_slot(
+        fixture,
+        "partial",
+        &fixture.partial,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+        &["step-a", "step-b"],
+        None,
+    )?;
+    validate_plan_slot(
+        fixture,
+        "collection_omit",
+        &fixture.collection_omit,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        &["step-a"],
+        Some(&["fixture-plan-2"]),
+    )?;
+    let refs = [
+        &fixture.current.semantic_revision_ref,
+        &fixture.complete_steps.semantic_revision_ref,
+        &fixture.partial_steps.semantic_revision_ref,
+        &fixture.retract.semantic_revision_ref,
+        &fixture.partial.semantic_revision_ref,
+        &fixture.collection_omit.semantic_revision_ref,
+    ];
+    for (index, left) in refs.iter().enumerate() {
+        for right in refs.iter().skip(index + 1) {
+            if left == right {
+                return Err(SemanticFixtureError::invalid(
+                    "plan revision slots must have distinct semantic identity",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_rfc012c_effective_state_v1(
     json: &str,
 ) -> Result<EffectiveStateFixtureWire, SemanticFixtureError> {
@@ -1748,6 +1962,16 @@ pub(crate) fn parse_rfc012c_task_v1_json(json: &str) -> Result<String, SemanticF
     encode_json(&decode_rfc012c_task_v1(json)?)
 }
 
+pub(crate) fn decode_rfc012c_plan_v1(json: &str) -> Result<PlanFixtureWire, SemanticFixtureError> {
+    let fixture: PlanFixtureWire = decode_json(json)?;
+    validate_rfc012c_plan_fixture(&fixture)?;
+    Ok(fixture)
+}
+
+pub(crate) fn parse_rfc012c_plan_v1_json(json: &str) -> Result<String, SemanticFixtureError> {
+    encode_json(&decode_rfc012c_plan_v1(json)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1761,6 +1985,7 @@ mod tests {
     const RFC012C_MESSAGE_FIXTURE: &str =
         include_str!("../fixtures/contracts/rfc012c-message-v1.json");
     const RFC012C_TASK_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-task-v1.json");
+    const RFC012C_PLAN_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-plan-v1.json");
 
     fn assert_privacy_safe(json: &str) {
         assert!(!json.contains("/Users/"));
@@ -2284,6 +2509,36 @@ mod tests {
         assert_ne!(
             fixture.created.semantic_revision_ref,
             fixture.completed.semantic_revision_ref
+        );
+    }
+
+    #[test]
+    fn rfc012c_plan_fixture_parses_step_replacement_and_owned_set_omission() {
+        let parsed = parse_rfc012c_plan_v1_json(RFC012C_PLAN_FIXTURE).unwrap();
+        assert_privacy_safe(&parsed);
+        let original: serde_json::Value = serde_json::from_str(RFC012C_PLAN_FIXTURE).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(round_trip, original);
+        let fixture: PlanFixtureWire = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(fixture.current.ordered_step_keys, ["step-a", "step-b"]);
+        assert_eq!(fixture.complete_steps.ordered_step_keys, ["step-a"]);
+        assert_eq!(
+            fixture.complete_steps.completeness,
+            ContractCompleteness::Complete
+        );
+        assert_eq!(
+            fixture.partial_steps.completeness,
+            ContractCompleteness::Partial
+        );
+        assert_eq!(fixture.retract.operation, UserInputOperation::Retract);
+        assert_eq!(
+            fixture.collection_omit.owned_set,
+            Some(vec!["fixture-plan-2".to_owned()])
+        );
+        assert_ne!(fixture.fact_id, fixture.peer_fact_id);
+        assert_ne!(
+            fixture.current.semantic_revision_ref,
+            fixture.complete_steps.semantic_revision_ref
         );
     }
 }

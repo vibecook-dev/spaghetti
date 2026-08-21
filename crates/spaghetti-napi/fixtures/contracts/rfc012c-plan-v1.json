@@ -1,0 +1,82 @@
+{
+  "adapter_id": "fixture-adapter",
+  "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+  "family": "runtime.plan",
+  "family_version": 1,
+  "fixture_contract_version": 1,
+  "native_plan_id": "fixture-plan-1",
+  "peer_native_plan_id": "fixture-plan-2",
+  "fact_id": "v1:kviv_bKZKSDqWJUt3WpKZKbKK9R5vLU2fS2TKKj2Um8",
+  "peer_fact_id": "v1:Jugc0R6wcwIgJxNFNswwRM1anSJf63r9erDUiCRehf8",
+  "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+  "subject": "Close remaining RFC 012C plan replacement evidence",
+  "current": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "ordered_step_keys": ["step-a", "step-b"],
+    "owned_set": null,
+    "semantic_revision_key_hex": "5bcfdb2c554d111c791a725958fbb1ef653f60f58aad60a06a0c979303eb98b8",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:pdOlAASmqHAvmMAgLkg0IFL1DteNpeCwnZfEWk10sXI"
+    }
+  },
+  "complete_steps": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "ordered_step_keys": ["step-a"],
+    "owned_set": null,
+    "semantic_revision_key_hex": "ee9811678da78b5a714badcb022f6a91996ce4f8027d6a224cabfdf4aad72128",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:HfPfMm1m-Irb2vmZ8KIv0-W3Yw8UOjaEQBXTs87gzkk"
+    }
+  },
+  "partial_steps": {
+    "completeness": "partial",
+    "operation": "upsert",
+    "ordered_step_keys": ["step-a"],
+    "owned_set": null,
+    "semantic_revision_key_hex": "1a7db1f9ebdf6acb84ac0126f10a165f9d3398e953a189f4d28ecf7da779d01d",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:ND7qp5Je6vT14rkYUG2KB2p8T7HQDUMeaT3rszoiPIE"
+    }
+  },
+  "retract": {
+    "completeness": "complete",
+    "operation": "retract",
+    "ordered_step_keys": ["step-a", "step-b"],
+    "owned_set": null,
+    "semantic_revision_key_hex": "4bdbb882e1552ff68844f1fd619a1589d436e43e127c15b142e527ea5263c1e1",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:A5A-C0fxTe3z2pAO3PRQQeEG6Up5I_vmIqKL-8_P1QQ"
+    }
+  },
+  "partial": {
+    "completeness": "partial",
+    "operation": "upsert",
+    "ordered_step_keys": ["step-a", "step-b"],
+    "owned_set": null,
+    "semantic_revision_key_hex": "f052fb9b4abd129887a8556b3c25d6f5ba85ea90e9f6d59a866f8d88b730b8d4",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:o7jvRkXRUfgAH7fQpmE2wXxmhh2uaDcgkNv-bZK-47U"
+    }
+  },
+  "collection_omit": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "ordered_step_keys": ["step-a"],
+    "owned_set": ["fixture-plan-2"],
+    "semantic_revision_key_hex": "5c47a26bc3a45d096728d0446d396159eed3916d236406123b31e13cbdfd2b97",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:I8ZJDI44YuqL6Mjfn3rJMrzJ7OAUqaYfH1ESIJyS6LE"
+    }
+  },
+  "runtime_semantic_contract_version": 1,
+  "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+  "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM"
+}
