@@ -2709,6 +2709,22 @@ Debug, and prove exact-set capacity, cross-relation exclusion, and omission
 failure. No member decode, object state, live transition, watcher, public API,
 promotion-guard relaxation, or Candidate status change is included.
 
+Commit `d9d2b12` binds the path-free member identity to the exact native
+decoder descriptor without invoking the adapter. Every selected child now
+retains the already-verified runtime `StreamSpec` and a durable-style
+`SourceObjectDescriptor` whose stream ID and binary object key match the
+member's semantic context and whose full relative path was constructed only by
+the authorized listing owner. One shared immutable stream contract is reused
+across the bounded member set rather than reconstructed from caller strings.
+Stable and explicit oversized outcomes carry the same non-serializable binding;
+its path-bearing descriptor is visible only to the scoped owner (plus focused
+test inspection), and all Debug surfaces disclose presence flags and bounded
+counts rather than stream, relation, or native path material. Tests prove the
+root and nested descriptor coordinates, exact verified runtime stream, and
+oversized-path retention while freezing that redaction. No adapter bootstrap,
+dependency access, decode, child lifecycle state, admission, watcher, public
+API, promotion-guard relaxation, or Candidate status change is included.
+
 ### D3. Identity, control, and resync
 
 Implement:
