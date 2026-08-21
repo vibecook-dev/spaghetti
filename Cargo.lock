@@ -1170,6 +1170,14 @@ name = "spaghetti-architecture"
 version = "0.7.0"
 
 [[package]]
+name = "spaghetti-coverage"
+version = "0.7.0"
+dependencies = [
+ "blake3",
+ "thiserror",
+]
+
+[[package]]
 name = "spaghetti-napi"
 version = "0.7.0"
 dependencies = [
@@ -1190,6 +1198,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sonic-rs",
+ "spaghetti-coverage",
  "tempfile",
  "thiserror",
  "tiktoken-rs",

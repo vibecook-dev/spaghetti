@@ -3541,3 +3541,66 @@ fn retained_page_sql_uses_primary_key_ranges_without_temp_sort_or_offset() {
         assert!(!joined.contains("USE TEMP B-TREE"));
     }
 }
+
+#[test]
+fn last_complete_catalog_pages_while_search_bootstrap_is_incomplete() {
+    let published = publish_catalog(1, 1);
+    let snapshot_id = published.state.readiness.last_complete_snapshot.unwrap();
+    let authority = published.state.ready_read_authority().unwrap();
+    let catalog_page = read_retained_catalog_page(
+        &published.connection,
+        &authority,
+        &CatalogRetainedPageRequest::projects_all(
+            published.selection.clone(),
+            snapshot_id,
+            10,
+            None,
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Projects(page) = catalog_page else {
+        panic!("expected last-complete project page");
+    };
+    assert_eq!(page.rows.len(), 1);
+
+    published
+        .connection
+        .execute(
+            "INSERT INTO schema_meta(key, value) VALUES ('query_bootstrap_state', 'building') \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )
+        .unwrap();
+    let still_catalog = read_retained_catalog_page(
+        &published.connection,
+        &authority,
+        &CatalogRetainedPageRequest::projects_all(
+            published.selection.clone(),
+            snapshot_id,
+            10,
+            None,
+        ),
+    )
+    .unwrap();
+    let CatalogRetainedPage::Projects(still_catalog) = still_catalog else {
+        panic!("expected last-complete project page after search became incomplete");
+    };
+    assert_eq!(still_catalog.rows.len(), 1);
+    assert!(matches!(
+        crate::engine::search_query::read_search_page(
+            &published.connection,
+            &crate::engine::search_query::SearchPageRequest {
+                text: "anything".to_string(),
+                project_id: None,
+                session_id: None,
+                adapter_ids: Vec::new(),
+                roles: Vec::new(),
+                native_kinds: Vec::new(),
+                branch_kind: None,
+                cursor: None,
+                limit: 10,
+            },
+        ),
+        Err(crate::engine::EngineError::BootstrapInProgress)
+    ));
+}

@@ -1166,6 +1166,28 @@ def discover_rfc012_semantic_contract_boundary_violations() -> set[str]:
     return found
 
 
+def discover_rfc012_coverage_crate_boundary_violations() -> set[str]:
+    """Physical spaghetti-coverage crate must own membership encoding without store/N-API."""
+    found: set[str] = set()
+    crate_root = REPO_ROOT / "crates/spaghetti-coverage/src"
+    if not crate_root.exists():
+        found.add("crates/spaghetti-coverage/src")
+        return found
+    forbidden = re.compile(r"\b(?:rusqlite|napi|crate::(?:engine|claude|codex|grok|factory))\b")
+    for path in crate_root.rglob("*.rs"):
+        if forbidden.search(production_rust_text(path)):
+            found.add(repo_path(path))
+    cargo = REPO_ROOT / "crates/spaghetti-coverage/Cargo.toml"
+    cargo_text = cargo.read_text(encoding="utf-8") if cargo.exists() else ""
+    if re.search(r"(?m)^\s*(?:rusqlite|napi|spaghetti-napi)\s*=", cargo_text):
+        found.add("crates/spaghetti-coverage/Cargo.toml")
+    wrapper = REPO_ROOT / "crates/spaghetti-napi/src/coverage_runtime.rs"
+    wrapper_text = production_rust_text(wrapper) if wrapper.exists() else ""
+    if "spaghetti_coverage::encode_membership" not in wrapper_text:
+        found.add("crates/spaghetti-napi/src/coverage_runtime.rs#missing-coverage-crate")
+    return found
+
+
 def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
     """Draft RFC 012B semantics cannot acquire storage, source, vendor, or transport authority."""
     relative = "crates/spaghetti-napi/src/catalog_contract.rs"
@@ -1355,6 +1377,7 @@ DISCOVERERS: dict[str, Callable[[], set[str]]] = {
     "rfc012_scoped_host_boundary_violations": discover_rfc012_scoped_host_boundary_violations,
     "rfc012_decode_runtime_boundary_violations": discover_rfc012_decode_runtime_boundary_violations,
     "rfc012_catalog_contract_boundary_violations": discover_rfc012_catalog_contract_boundary_violations,
+    "rfc012_coverage_crate_boundary_violations": discover_rfc012_coverage_crate_boundary_violations,
     "rfc012_semantic_contract_boundary_violations": discover_rfc012_semantic_contract_boundary_violations,
     "migrated_client_direct_engine_queries": discover_migrated_client_direct_engine_queries,
     "portable_client_runtime_boundary_violations": discover_portable_client_runtime_boundary_violations,

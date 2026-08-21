@@ -58,6 +58,10 @@
       "description": "The shared RFC 012 decode runtime cannot depend on persistence, delivery sinks, N-API, scoped orchestration, or concrete adapters.",
       "allowed": []
     },
+    "rfc012_coverage_crate_boundary_violations": {
+      "description": "Coverage membership encoding lives in spaghetti-coverage and cannot acquire SQLite, N-API, or engine/adapter authority.",
+      "allowed": []
+    },
     "rfc012_catalog_contract_boundary_violations": {
       "description": "The draft RFC 012B catalog semantic contract cannot depend on persistence, source runtime, N-API, scoped observation, or concrete adapters, and cannot be exported publicly before its transport contract is complete.",
       "allowed": []

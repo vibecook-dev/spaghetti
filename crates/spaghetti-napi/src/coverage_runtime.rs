@@ -2,8 +2,7 @@
 //! scoped observation topologies.
 
 use crate::adapter::{
-    CoverageDomain, CoverageMembershipRevision, CoverageMembershipRevisionBuilder,
-    SemanticContractError,
+    CoverageDomain, CoverageMembershipRevision, SemanticContractError,
 };
 
 pub(crate) const DECODE_SOURCE_MEMBERSHIP_PREFIX: &[u8] = b"decode/source-membership/v1";
@@ -65,74 +64,41 @@ pub(crate) fn source_membership_prefix(
     }
 }
 
-/// Derive one membership revision without materializing the encoded set.
-///
-/// The encoding is intentionally shared with the durable usage-v2 baseline:
-/// a domain prefix, length-framed declared streams, then length-framed object
-/// stream/object keys followed by generation and the explicit-absence bit.
+/// Derive one membership revision without keeping the encoded set in the
+/// observation crate. Encoding lives in `spaghetti-coverage`.
 pub(crate) fn derive_coverage_membership_revision(
     prefix: &[u8],
     streams: &[&[u8]],
     objects: &[CoverageMembershipObject<'_>],
 ) -> Result<CoverageMembershipRevision, CoverageMembershipEncodingError> {
-    if prefix.is_empty() {
-        return Err(CoverageMembershipEncodingError::EmptyPrefix);
-    }
-    if !streams.windows(2).all(|pair| pair[0] < pair[1]) {
-        return Err(CoverageMembershipEncodingError::StreamsNotCanonical);
-    }
-    if !objects.windows(2).all(|pair| {
-        (pair[0].stream_key, pair[0].object_key, pair[0].generation)
-            < (pair[1].stream_key, pair[1].object_key, pair[1].generation)
-    }) {
-        return Err(CoverageMembershipEncodingError::ObjectsNotCanonical);
-    }
-
-    let mut encoded_bytes = prefix.len();
-    for stream in streams {
-        encoded_bytes = checked_component_len(encoded_bytes, stream)?;
-    }
-    for object in objects {
-        encoded_bytes = checked_component_len(encoded_bytes, object.stream_key)?;
-        encoded_bytes = checked_component_len(encoded_bytes, object.object_key)?;
-        encoded_bytes = encoded_bytes
-            .checked_add(std::mem::size_of::<u64>() + std::mem::size_of::<u8>())
-            .ok_or(CoverageMembershipEncodingError::LengthExhausted)?;
-    }
-
-    let mut output = CoverageMembershipRevision::begin_streaming(encoded_bytes)?;
-    output.update(prefix)?;
-    for stream in streams {
-        append_component(&mut output, stream)?;
-    }
-    for object in objects {
-        append_component(&mut output, object.stream_key)?;
-        append_component(&mut output, object.object_key)?;
-        output.update(&object.generation.to_be_bytes())?;
-        output.update(&[u8::from(object.absent)])?;
-    }
-    output.finish().map_err(Into::into)
-}
-
-fn checked_component_len(
-    current: usize,
-    component: &[u8],
-) -> Result<usize, CoverageMembershipEncodingError> {
-    current
-        .checked_add(std::mem::size_of::<u64>())
-        .and_then(|length| length.checked_add(component.len()))
-        .ok_or(CoverageMembershipEncodingError::LengthExhausted)
-}
-
-fn append_component(
-    output: &mut CoverageMembershipRevisionBuilder,
-    component: &[u8],
-) -> Result<(), CoverageMembershipEncodingError> {
-    let length = u64::try_from(component.len())
-        .map_err(|_| CoverageMembershipEncodingError::LengthExhausted)?;
-    output.update(&length.to_be_bytes())?;
-    output.update(component)?;
-    Ok(())
+    let encoded = spaghetti_coverage::encode_membership(
+        prefix,
+        streams,
+        &objects
+            .iter()
+            .map(|object| spaghetti_coverage::MembershipObject {
+                stream_key: object.stream_key,
+                object_key: object.object_key,
+                generation: object.generation,
+                absent: object.absent,
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| match error {
+        spaghetti_coverage::CoverageEncodingError::EmptyPrefix => {
+            CoverageMembershipEncodingError::EmptyPrefix
+        }
+        spaghetti_coverage::CoverageEncodingError::StreamsNotCanonical => {
+            CoverageMembershipEncodingError::StreamsNotCanonical
+        }
+        spaghetti_coverage::CoverageEncodingError::ObjectsNotCanonical => {
+            CoverageMembershipEncodingError::ObjectsNotCanonical
+        }
+        spaghetti_coverage::CoverageEncodingError::LengthExhausted => {
+            CoverageMembershipEncodingError::LengthExhausted
+        }
+    })?;
+    CoverageMembershipRevision::derive(&encoded).map_err(Into::into)
 }
 
 fn append_vec_component(

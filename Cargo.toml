@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/spaghetti-napi",
     "crates/spaghetti-architecture",
+    "crates/spaghetti-coverage",
 ]
 
 [workspace.package]

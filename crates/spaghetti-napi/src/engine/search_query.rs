@@ -147,6 +147,15 @@ pub(super) fn read_search_page(
     connection: &Connection,
     request: &SearchPageRequest,
 ) -> Result<SearchPage, EngineError> {
+    if crate::core::schema::query_bootstrap_state(connection)
+        .map_err(|error| EngineError::Sqlite {
+            operation: "read search completeness",
+            detail: error.to_string(),
+        })?
+        .is_some()
+    {
+        return Err(EngineError::BootstrapInProgress);
+    }
     let validated = validate_request(request)?;
     let cursor = decode_optional_cursor(request.cursor.as_deref(), &validated.scope_hash)?;
     let cursor_key = cursor_message_key(cursor.as_ref())?;
@@ -1234,5 +1243,23 @@ mod tests {
         let mut root = request("pending endpoint marker", 10);
         root.branch_kind = Some("root".to_string());
         assert_eq!(read_search_page(&connection, &root).unwrap().total, 0);
+    }
+
+    #[test]
+    fn search_stays_unavailable_until_query_bootstrap_completes() {
+        let mut connection = seeded_connection();
+        let available = read_search_page(&connection, &request("alpha common phrase", 10)).unwrap();
+        assert_eq!(available.total, 3);
+        connection
+            .execute(
+                "INSERT INTO schema_meta(key, value) VALUES ('query_bootstrap_state', 'building') \
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            read_search_page(&connection, &request("alpha common phrase", 10)),
+            Err(EngineError::BootstrapInProgress)
+        ));
     }
 }
