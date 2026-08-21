@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "manifest_id": "fixture-agent-evidence-2026-08-21-promoted",
+  "adapter_id": "fixture-agent",
+  "ads_id": "fixture-agent-ads-2026-08-21-promoted",
+  "sanitizer": {
+    "version": 2,
+    "prohibited_scan": "pass",
+    "raw_capture_committed": false
+  },
+  "claims": [
+    {
+      "claim_id": "fixture-agent-source-observed",
+      "statement": "Pinned fixture-agent streams use only DirectorySnapshot, AppendDelimited, and ReplaceDocument.",
+      "state": "observed",
+      "sources": [
+        {
+          "kind": "code_reference",
+          "path": "crates/spaghetti-napi/src/factory/adapter.rs",
+          "sha256": null,
+          "locator": "common source primitives"
+        }
+      ]
+    },
+    {
+      "claim_id": "fixture-agent-privacy-policy",
+      "statement": "Committed fixture-agent evidence is synthetic and path-free.",
+      "state": "observed",
+      "sources": [
+        {
+          "kind": "design_record",
+          "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md",
+          "sha256": null,
+          "locator": "Security and privacy"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "package": "X4",
+  "status": "pass",
+  "checks": [
+    "schema-validation",
+    "sanitizer",
+    "family-disposition",
+    "source-bounds",
+    "scope-access",
+    "version-classifier",
+    "contract-negotiation",
+    "identity-determinism",
+    "tier-compositionality",
+    "unknown-retention",
+    "cross-topology-parity"
+  ]
+}

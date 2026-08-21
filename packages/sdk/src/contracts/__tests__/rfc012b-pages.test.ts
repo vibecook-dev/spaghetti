@@ -10,6 +10,7 @@ import {
   parseCatalogReadinessResponse,
   parseCatalogSessionPage,
   parseCatalogSnapshotExpired,
+  progressiveStartupView,
 } from '../rfc012b-pages.js';
 
 interface PageFixture {
@@ -98,6 +99,25 @@ test('Rust RFC 012B project/session, readiness, resolution, and expiration fixtu
     fixture.snapshot_expired.scope,
   );
   assert.ok(expiration.latest_snapshot.complete_commit > expiration.request.snapshot_id.complete_commit);
+});
+
+test('catalog-first startup can query last-complete catalog while search stays complete-only', () => {
+  const readiness = parseCatalogReadinessResponse(
+    fixture.readiness_response,
+    fixture.contract_selection,
+    fixture.current_plan,
+  );
+  const beforeSearch = progressiveStartupView(readiness, false);
+  assert.equal(beforeSearch.catalogQueryReady, readiness.state === 'ready' || readiness.state === 'degraded');
+  assert.equal(beforeSearch.searchAvailable, false);
+  assert.equal(beforeSearch.selectedHydrationAvailable, beforeSearch.catalogQueryReady);
+
+  if (beforeSearch.catalogQueryReady) {
+    const afterSearch = progressiveStartupView(readiness, true);
+    assert.equal(afterSearch.searchAvailable, true);
+  } else {
+    reject(() => progressiveStartupView(readiness, true));
+  }
 });
 
 test('pages bind exact caller selection, snapshot, query, sort, size, ordering, and final cursor', () => {

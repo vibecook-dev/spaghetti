@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "support_release_id": "fixture-agent-support-2026-08-21-promoted",
+  "adapter_id": "fixture-agent",
+  "status": "promoted",
+  "artifact_compatibility": {
+    "family": "fixture-agent",
+    "platforms": [
+      "darwin"
+    ],
+    "exact_versions": [
+      "1.0.0-fixture"
+    ],
+    "ranges": [],
+    "required_markers": [
+      "sessionid.shape",
+      "record-type"
+    ],
+    "forward_catalog_only": false
+  },
+  "references": {
+    "ads": {
+      "path": "agent-support/fixture-agent/promoted-2026-08-21/ads.json",
+      "sha256": "sha256:7fb38395b4ec6ad2b5cc166678a134753d4a24352123ce79ac0ed789a8f10713"
+    },
+    "source_declaration": {
+      "path": "agent-support/fixture-agent/promoted-2026-08-21/source-declarations.json",
+      "sha256": "sha256:dfc5c04f0c8aa15a5e28b63a67a5ad7eadc4af8fe20e7fa025edaa35ea63c517"
+    },
+    "scope_program": {
+      "path": "agent-support/fixture-agent/promoted-2026-08-21/scope-programs.json",
+      "sha256": "sha256:bf2679527dae7562d91bc4628ae5eb0cfed9e77331404386cc2db40bc8d0d082"
+    },
+    "evidence": {
+      "path": "agent-support/fixture-agent/promoted-2026-08-21/evidence.json",
+      "sha256": "sha256:1b8cb7c5e3a490dfa37336fe2127a13cd6223c9ee0df1bbd59d990659fa0546a"
+    },
+    "conformance": {
+      "path": "agent-support/fixture-agent/promoted-2026-08-21/conformance.json",
+      "sha256": "sha256:bbe139aad3daece6ead146d8f8cd45a12dc483c225073bdf26590533845e839b"
+    }
+  },
+  "versions": {
+    "adapter_package": "0.7.0",
+    "decoder_contract": 1,
+    "decoder_state": [
+      1
+    ],
+    "source_record_identity": 1,
+    "fact_identity": 1,
+    "external_entity_reference": 1,
+    "semantic_revision_reference": 1,
+    "coverage": [
+      1
+    ],
+    "durable_contracts": {},
+    "observation_contracts": {}
+  },
+  "capabilities": [
+    {
+      "capability_id": "project-session-catalog",
+      "topology": "catalog",
+      "level": "unsupported",
+      "notes": "Catalog is not selected for fixture-agent."
+    },
+    {
+      "capability_id": "session-transcripts",
+      "topology": "durable",
+      "level": "supported",
+      "notes": "Durable jsonl sessions are the promoted surface."
+    },
+    {
+      "capability_id": "root-session-observation",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "Scoped observation stays unsupported."
+    }
+  ],
+  "stream_contracts": [
+    {
+      "stream_id": "session-membership",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "full_snapshot"
+    },
+    {
+      "stream_id": "session-transcripts",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "session-documents",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    }
+  ],
+  "reports": {
+    "conformance_sha256": "sha256:c5a6b6ff59e65834cf08d09d166dbfa4b82b85f124f8fe1518022cb76f576334",
+    "performance_sha256": "sha256:8f21499f660b87cae716e322aab69ac379ca0b47363782c1b749efe75c35c167"
+  },
+  "sanitizer_review": {
+    "status": "approved",
+    "reviewed_at": "2026-08-21",
+    "reviewer": "rfc012-integrator"
+  },
+  "lifecycle": {
+    "candidate_at": "2026-08-21",
+    "promoted_at": "2026-08-21",
+    "retired_at": null,
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "known_limitations": [
+    "Synthetic fixture-agent is promoted for RFC 012 X4 rollback/telemetry only."
+  ],
+  "drift_signatures": [],
+  "promotion_blockers": []
+}

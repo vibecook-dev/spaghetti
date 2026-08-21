@@ -191,6 +191,28 @@ export type CatalogReadinessReason =
       snapshot_disposition: 'independently_safe' | 'discarded';
     };
 
+export interface ProgressiveStartupView {
+  catalogQueryReady: boolean;
+  searchAvailable: boolean;
+  selectedHydrationAvailable: boolean;
+}
+
+/** Catalog-first UX: last-complete/degraded catalog may query before FTS. */
+export function progressiveStartupView(
+  readiness: CatalogReadinessSnapshot,
+  searchPackComplete: boolean,
+): ProgressiveStartupView {
+  const catalogQueryReady = readiness.state === 'ready' || readiness.state === 'degraded';
+  if (searchPackComplete && !catalogQueryReady) {
+    throw new ContractValidationError('complete search cannot precede a queryable catalog');
+  }
+  return {
+    catalogQueryReady,
+    searchAvailable: catalogQueryReady && searchPackComplete,
+    selectedHydrationAvailable: catalogQueryReady,
+  };
+}
+
 export interface CatalogReadinessSnapshot {
   readiness_contract_version: typeof CATALOG_READINESS_CONTRACT_VERSION;
   scope: CatalogCoverageScope;

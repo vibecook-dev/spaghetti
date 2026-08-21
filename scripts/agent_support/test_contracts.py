@@ -914,9 +914,13 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(
             {bundle.document("ads.json")["adapter_id"] for bundle in bundles},
-            {"claude-code", "codex", "factory", "grok"},
+            {"claude-code", "codex", "factory", "fixture-agent", "grok"},
         )
         releases = [bundle.document("support-release.json") for bundle in bundles]
+        self.assertEqual(
+            {release["status"] for release in releases if release["adapter_id"] == "fixture-agent"},
+            {"promoted"},
+        )
         for release in releases:
             probe = RuntimeProbe(
                 release["artifact_compatibility"]["family"],
@@ -925,8 +929,19 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                 frozenset(release["artifact_compatibility"]["required_markers"]),
             )
             result = classify_runtime(probe, releases)
-            self.assertEqual(result.compatibility_class, CompatibilityClass.RECOGNIZED_UNVERIFIED)
-            self.assertIsNone(result.support_release_id)
+            if release["status"] == "candidate":
+                self.assertEqual(result.compatibility_class, CompatibilityClass.RECOGNIZED_UNVERIFIED)
+                self.assertIsNone(result.support_release_id)
+            else:
+                fixture_probe = RuntimeProbe(
+                    "fixture-agent",
+                    "darwin",
+                    "1.0.0-fixture",
+                    frozenset(release["artifact_compatibility"]["required_markers"]),
+                )
+                promoted = classify_runtime(fixture_probe, releases)
+                self.assertEqual(promoted.compatibility_class, CompatibilityClass.EXACT_SUPPORTED)
+                self.assertEqual(promoted.support_release_id, "fixture-agent-support-2026-08-21-promoted")
 
 
 if __name__ == "__main__":

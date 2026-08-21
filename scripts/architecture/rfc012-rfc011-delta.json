@@ -80,9 +80,9 @@
       "rollback": "Keep the durable topology and legacy single-file tail until parity and migration gates pass.",
       "evidence": [
         {
-          "state": "planned",
-          "target": "docs/rfcs/012-implementation-plan.md",
-          "claim": "A1 and D4 compare durable and scoped semantic digests at equal coverage."
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/runtime_semantic_merge.rs",
+          "claim": "Durable usage-v2 contributions and scoped observer events join on SemanticRevisionRef at a comparable coverage vector."
         }
       ]
     },
@@ -122,9 +122,9 @@
       "rollback": "Keep watchSessionTranscript and durable observation until the compatibility window closes.",
       "evidence": [
         {
-          "state": "planned",
-          "target": "docs/rfcs/012d-session-scoped-observation.md",
-          "claim": "D1-D4 implement and migrate the store-free observer."
+          "state": "implemented",
+          "target": "packages/sdk/src/sources/claude-code/live/session-observation-shadow.ts",
+          "claim": "Feature-flagged shadow compares scoped usage envelopes beside watchSessionTranscript and rolls back to the legacy tail."
         }
       ]
     },
@@ -138,9 +138,9 @@
       "rollback": "Unmigrated adapters remain on an explicitly versioned legacy support release; no new escape hatch is allowed.",
       "evidence": [
         {
-          "state": "planned",
-          "target": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md",
-          "claim": "A2/A3 support manifests classify every production mechanic."
+          "state": "implemented",
+          "target": "scripts/architecture/check_rfc011_boundaries.py",
+          "claim": "Architecture ratchets reject adapter-private storage, access authority, and missing built-in support bindings including the fourth Factory adapter."
         }
       ]
     },
@@ -185,9 +185,9 @@
       "rollback": "Select blocking full-search startup and retain the last accepted durable catalog.",
       "evidence": [
         {
-          "state": "planned",
-          "target": "docs/rfcs/012b-catalog-readiness-and-progressive-startup.md",
-          "claim": "B1-B4 cover transition, warm-state, and progressive-host behavior."
+          "state": "implemented",
+          "target": "packages/sdk/src/contracts/rfc012b-pages.ts",
+          "claim": "Portable catalog readiness distinguishes queryable last-complete catalog from complete-only search."
         }
       ]
     },
@@ -206,9 +206,9 @@
           "claim": "The common fact batch and deterministic legacy fact IDs remain covered by Rust tests."
         },
         {
-          "state": "planned",
-          "target": "docs/rfcs/012c-runtime-semantics-and-usage-v2.md",
-          "claim": "C1/C4 add versioned revision and reducer parity fixtures."
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-interaction-v1.json",
+          "claim": "Versioned interaction serialization is frozen beside usage-v2 actor fixtures."
         }
       ]
     },
@@ -227,9 +227,9 @@
           "claim": "Rust derives the v1 references and coverage fixture; the portable TypeScript SDK validates it and agrees on comparison outcomes."
         },
         {
-          "state": "planned",
-          "target": "docs/rfcs/012-implementation-plan.md",
-          "claim": "Each durable fact family and scoped observer event migrates from legacy runtime-ID-based keys to the canonical references."
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/projection.rs",
+          "claim": "Selected actor-run, affiliation, and usage-v2 identities survive durable rows and scoped envelopes under SemanticRevisionRef."
         }
       ]
     },
@@ -274,9 +274,9 @@
       "rollback": "Consumers may disable the scoped overlay and read durable state only.",
       "evidence": [
         {
-          "state": "planned",
-          "target": "docs/rfcs/012-implementation-plan.md",
-          "claim": "C4/D4 exercise deduplication, overlay retirement, correction, and incomparable coverage."
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/src/engine/runtime_semantic_merge.rs",
+          "claim": "Durable/live merge deduplicates by event_id, preserves A-B-A, retires complete overlays, and keeps stale overlay on incomparable coverage."
         }
       ]
     }

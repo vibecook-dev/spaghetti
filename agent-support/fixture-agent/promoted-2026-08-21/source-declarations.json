@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "declaration_id": "fixture-agent-sources-2026-08-21-promoted",
+  "adapter_id": "fixture-agent",
+  "ads_id": "fixture-agent-ads-2026-08-21-promoted",
+  "status": "promoted",
+  "streams": [
+    {
+      "stream_id": "session-membership",
+      "family_id": "session-membership",
+      "root_id": "sessions",
+      "relative_patterns": [
+        "**/*.jsonl",
+        "**/session.json"
+      ],
+      "primitive": "DirectoryMembership",
+      "topologies": [
+        "durable"
+      ],
+      "implementation_state": "existing",
+      "decoder_id": "factory-session-membership",
+      "authority": "supplemental",
+      "bounds": {
+        "max_entries": 100000,
+        "max_depth": 8
+      },
+      "lifecycle": [
+        "membership_change",
+        "identity_change",
+        "delete",
+        "recreate"
+      ],
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "full_snapshot",
+      "disposition_ownership": [
+        "native-family:session-membership"
+      ],
+      "claim_refs": [
+        "fixture-agent-source-observed"
+      ]
+    },
+    {
+      "stream_id": "session-transcripts",
+      "family_id": "session-transcript",
+      "root_id": "sessions",
+      "relative_patterns": [
+        "**/*.jsonl"
+      ],
+      "primitive": "AppendDelimited",
+      "topologies": [
+        "durable"
+      ],
+      "implementation_state": "existing",
+      "decoder_id": "factory-transcript-record",
+      "authority": "canonical",
+      "bounds": {
+        "max_record_bytes": 4194304,
+        "max_batch_bytes": 8388608,
+        "max_records_per_batch": 1024,
+        "max_entries": 250000,
+        "max_depth": 64
+      },
+      "lifecycle": [
+        "append",
+        "partial_write",
+        "truncate",
+        "identity_change",
+        "delete",
+        "recreate"
+      ],
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor",
+      "disposition_ownership": [
+        "native-family:session-transcript"
+      ],
+      "claim_refs": [
+        "fixture-agent-source-observed"
+      ]
+    },
+    {
+      "stream_id": "session-documents",
+      "family_id": "session-document",
+      "root_id": "sessions",
+      "relative_patterns": [
+        "**/session.json"
+      ],
+      "primitive": "ReplaceDocument",
+      "topologies": [
+        "durable"
+      ],
+      "implementation_state": "existing",
+      "decoder_id": "factory-session-document",
+      "authority": "supplemental",
+      "bounds": {
+        "max_object_bytes": 1048576,
+        "max_entries": 250000,
+        "max_depth": 64
+      },
+      "lifecycle": [
+        "replace",
+        "identity_change",
+        "delete",
+        "recreate"
+      ],
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision",
+      "disposition_ownership": [
+        "native-family:session-document"
+      ],
+      "claim_refs": [
+        "fixture-agent-source-observed"
+      ]
+    }
+  ],
+  "claim_refs": [
+    "fixture-agent-source-observed"
+  ]
+}

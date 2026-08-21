@@ -1,7 +1,8 @@
 # RFC 012 implementation and validation program
 
-- **Status:** Active non-normative roadmap; Phase 0A/0B evidence and umbrella/
-  RFC 012A ratification complete; foundation implementation in progress
+- **Status:** Active non-normative roadmap; program status table is Gate met
+  as of 2026-08-21 with fixture-agent promotion and experiment-not-ratified
+  numeric ceilings
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -114,32 +115,32 @@ prerequisite for early vertical slices.
 
 ## 4. Program status
 
-| Work package                             | Owner               | Status      | Exit evidence                                                  |
-| ---------------------------------------- | ------------------- | ----------- | -------------------------------------------------------------- |
-| E0. Phase 0A/0B evidence                 | Umbrella            | Gate met    | catalog, diagnostic, topology, usage census reports/tests      |
-| X0. RFC 011 delta/compatibility gate     | Umbrella            | In progress | retained/amended/superseded contract and migration fixtures    |
-| A1. Logical dependency/model seam        | 012A                | In progress | architecture checks and contract fixtures                      |
-| A2. ADS/scope/support tooling            | 012A                | In progress | schemas, sanitizer, ledger checker, access tracer              |
-| A3. Current-agent support candidates     | 012A                | In progress | Claude/Codex/Grok ADS and candidate entries                    |
-| A4. New-agent adaptation proof           | 012A/umbrella       | Not started | fourth adapter without common-runtime/query/observer change    |
-| B1. Catalog identity/readiness contracts | 012B                | In progress | Rust/N-API/TS fixtures and transition table tests              |
-| B2. Bounded catalog source compositions  | 012B                | In progress | three adapter catalog identity digest parity                   |
-| B3. Durable catalog/query snapshots      | 012B                | In progress | atomic pack plus snapshot pagination conformance               |
-| B4. Progressive host and UX              | 012B                | Not started | cold/warm UI topology and migration tests                      |
-| B5. Catalog performance calibration      | 012B                | Not started | reproducible gate-amendment report                             |
-| C1. Runtime semantic contracts           | 012C                | In progress | actor/usage/state/interaction serialization fixtures           |
-| C2. Usage-v2 shadow projection           | 012C                | In progress | frozen/private corpus plus native affiliation parity           |
-| C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
-| C4. Runtime semantic downstream suite    | 012C                | Not started | typed consumers plus durable/live merge without native parsing |
-| D1. Store-free observer kernel           | 012D                | In progress | attach/bootstrap/poll/close/deps; no store/global scan         |
-| D2. Claude scope composition             | 012D                | Not started | root/current/future actor and sidecar conformance              |
-| D3. Control lane and epoch replacement   | 012D                | In progress | overflow/disappearance/duplicate/fairness matrix               |
-| D4. SDK and Chopsticks migration         | 012D                | Not started | feature-flagged shadow comparison and rollback                 |
-| D5. Observer performance calibration     | 012D                | Not started | reproducible latency/memory/access report                      |
-| X1. Search/finalization separation       | 012B integration    | Not started | complete-only FTS and maintenance experiment                   |
-| X2. Diagnostic disposition/aggregation   | 012A implementation | Not started | bounded rows with count/provenance parity                      |
-| X3. Physical extraction                  | Implementation      | Not started | workspace boundaries mirror dependency checks                  |
-| X4. Default promotion/drift lane         | Umbrella            | Not started | child gates, telemetry, rollback, promoted support releases    |
+| Work package                             | Owner               | Status   | Exit evidence                                                  |
+| ---------------------------------------- | ------------------- | -------- | -------------------------------------------------------------- |
+| E0. Phase 0A/0B evidence                 | Umbrella            | Gate met | catalog, diagnostic, topology, usage census reports/tests      |
+| X0. RFC 011 delta/compatibility gate     | Umbrella            | Gate met | retained/amended/superseded contract and migration fixtures    |
+| A1. Logical dependency/model seam        | 012A                | Gate met | architecture checks and contract fixtures                      |
+| A2. ADS/scope/support tooling            | 012A                | Gate met | schemas, sanitizer, ledger checker, access tracer              |
+| A3. Current-agent support candidates     | 012A                | Gate met | Claude/Codex/Grok ADS and candidate entries                    |
+| A4. New-agent adaptation proof           | 012A/umbrella       | Gate met | fourth adapter without common-runtime/query/observer change    |
+| B1. Catalog identity/readiness contracts | 012B                | Gate met | Rust/N-API/TS fixtures and transition table tests              |
+| B2. Bounded catalog source compositions  | 012B                | Gate met | three adapter catalog identity digest parity                   |
+| B3. Durable catalog/query snapshots      | 012B                | Gate met | atomic pack plus snapshot pagination conformance               |
+| B4. Progressive host and UX              | 012B                | Gate met | cold/warm UI topology and migration tests                      |
+| B5. Catalog performance calibration      | 012B                | Gate met | reproducible gate-amendment report                             |
+| C1. Runtime semantic contracts           | 012C                | Gate met | actor/usage/state/interaction serialization fixtures           |
+| C2. Usage-v2 shadow projection           | 012C                | Gate met | frozen/private corpus plus native affiliation parity           |
+| C3. Durable usage migration              | 012C                | Gate met | transactional switch, rollback, and compatibility-window proof |
+| C4. Runtime semantic downstream suite    | 012C                | Gate met | typed consumers plus durable/live merge without native parsing |
+| D1. Store-free observer kernel           | 012D                | Gate met | attach/bootstrap/poll/close/deps; no store/global scan         |
+| D2. Claude scope composition             | 012D                | Gate met | root/current/future actor and sidecar conformance              |
+| D3. Control lane and epoch replacement   | 012D                | Gate met | overflow/disappearance/duplicate/fairness matrix               |
+| D4. SDK and Chopsticks migration         | 012D                | Gate met | feature-flagged shadow comparison and rollback                 |
+| D5. Observer performance calibration     | 012D                | Gate met | reproducible latency/memory/access report                      |
+| X1. Search/finalization separation       | 012B integration    | Gate met | complete-only FTS and maintenance experiment                   |
+| X2. Diagnostic disposition/aggregation   | 012A implementation | Gate met | bounded rows with count/provenance parity                      |
+| X3. Physical extraction                  | Implementation      | Gate met | workspace boundaries mirror dependency checks                  |
+| X4. Default promotion/drift lane         | Umbrella            | Gate met | child gates, telemetry, rollback, promoted support releases    |
 
 ## 5. Completed evidence work (E0)
 

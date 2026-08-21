@@ -1,0 +1,11 @@
+[package]
+name = "spaghetti-architecture"
+version = "0.7.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Workspace crate whose tests mirror RFC 012 logical dependency checks"
+publish = false
+
+[lints]
+workspace = true

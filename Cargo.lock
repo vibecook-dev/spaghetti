@@ -1166,6 +1166,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "spaghetti-architecture"
+version = "0.7.0"
+
+[[package]]
 name = "spaghetti-napi"
 version = "0.7.0"
 dependencies = [
