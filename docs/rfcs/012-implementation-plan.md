@@ -2429,6 +2429,20 @@ explicit bound no broader than its aggregate ceiling. This is a driver safety
 precondition only: no scoped relation invokes the driver, no entry receives a
 child access token, and the dynamic-relation promotion guard remains closed.
 
+Commit `91aa1d1` adds a descriptor-confined directory-snapshot path for the
+currently evidenced POSIX platform without attaching it to RFC 012D. The
+approved access root and rendered relative locator are opened component by
+component with `openat`, directory entries and descendants are opened relative
+to retained directory descriptors with no-follow semantics, and symlink or
+unsupported entry kinds fail closed. The confined path counts the entire
+enumerated set before selection, retains binary-safe relative identities, and
+revalidates every traversed directory handle plus its descriptor-confined path
+before returning a checkpoint; a membership mutation yields a transient retry,
+not a complete partial snapshot. Platforms without that descriptor primitive
+fail closed. The ordinary catalog driver remains behaviorally unchanged. No
+scoped access pass calls this method yet, so this commit does not authorize a
+listing, interpret a Claude selector, admit a child object, or relax `9f9749b`.
+
 ### D3. Identity, control, and resync
 
 Implement:
