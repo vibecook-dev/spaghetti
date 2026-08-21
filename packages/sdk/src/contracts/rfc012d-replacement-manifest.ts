@@ -20,6 +20,10 @@ import {
   ACTOR_AFFILIATION_FAMILY_VERSION,
   ACTOR_RUN_FAMILY,
   ACTOR_RUN_FAMILY_VERSION,
+  MESSAGE_FAMILY,
+  MESSAGE_FAMILY_VERSION,
+  TASK_FAMILY,
+  TASK_FAMILY_VERSION,
   USAGE_V2_FAMILY,
   USAGE_V2_FAMILY_VERSION,
   USER_INPUT_FAMILY,
@@ -31,13 +35,15 @@ export const SCOPED_REPLACEMENT_MANIFEST_CONTRACT_VERSION = 1 as const;
 export const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION = 1 as const;
 
 const MAX_CONTEXT_COVERAGE_SETS = 64;
-const MAX_MANIFEST_FAMILIES = 4;
+const MAX_MANIFEST_FAMILIES = 6;
 type UnknownRecord = Record<string, unknown>;
 
 export type ScopedReplacementRepresentation =
   | 'revisioned_entity_current'
   | 'usage_latest_contribution_per_response'
-  | 'correlated_lifecycle_current';
+  | 'correlated_lifecycle_current'
+  | 'current_generation_log'
+  | 'owned_set_snapshot_current';
 
 export interface ScopedReplacementFamilyManifest {
   fact_family: string;
@@ -143,6 +149,10 @@ function familyContract(family: unknown): {
       };
     case ACTOR_RUN_FAMILY:
       return { family, version: ACTOR_RUN_FAMILY_VERSION, representation: 'revisioned_entity_current' };
+    case MESSAGE_FAMILY:
+      return { family, version: MESSAGE_FAMILY_VERSION, representation: 'current_generation_log' };
+    case TASK_FAMILY:
+      return { family, version: TASK_FAMILY_VERSION, representation: 'owned_set_snapshot_current' };
     case USAGE_V2_FAMILY:
       return {
         family,

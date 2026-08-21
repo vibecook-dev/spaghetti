@@ -566,6 +566,8 @@ impl ScopedContinuityEnvelopeConsumerContext {
             | ScopedObservationEvent::ActorRun { .. }
             | ScopedObservationEvent::ActorAffiliation { .. }
             | ScopedObservationEvent::UserInputRequest { .. }
+            | ScopedObservationEvent::Message { .. }
+            | ScopedObservationEvent::Task { .. }
             | ScopedObservationEvent::ArtifactAvailability { .. }
             | ScopedObservationEvent::UnknownWire { .. }
             | ScopedObservationEvent::ObserverBootstrapComplete { .. }

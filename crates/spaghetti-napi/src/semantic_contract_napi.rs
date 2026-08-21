@@ -85,3 +85,17 @@ pub fn parse_rfc012c_interaction_v1_json(json: Utf16String) -> Result<String> {
     let json = utf16_json_to_utf8(json)?;
     crate::semantic_contract::parse_rfc012c_interaction_v1_json(&json).map_err(public_fixture_error)
 }
+
+/// Parse one committed RFC 012C v1 message fixture from a JSON string.
+#[napi(js_name = "parseRfc012cMessageV1Json")]
+pub fn parse_rfc012c_message_v1_json(json: Utf16String) -> Result<String> {
+    let json = utf16_json_to_utf8(json)?;
+    crate::semantic_contract::parse_rfc012c_message_v1_json(&json).map_err(public_fixture_error)
+}
+
+/// Parse one committed RFC 012C v1 task fixture from a JSON string.
+#[napi(js_name = "parseRfc012cTaskV1Json")]
+pub fn parse_rfc012c_task_v1_json(json: Utf16String) -> Result<String> {
+    let json = utf16_json_to_utf8(json)?;
+    crate::semantic_contract::parse_rfc012c_task_v1_json(&json).map_err(public_fixture_error)
+}

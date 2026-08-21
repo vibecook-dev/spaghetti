@@ -895,6 +895,169 @@ impl UserInputRequestRevisionFact {
     }
 }
 
+const MAX_MESSAGE_CONTENT_BLOCKS: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRevisionRole {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLifecycleState {
+    Created,
+    Updated,
+    Completed,
+    Failed,
+    Cancelled,
+    Removed,
+}
+
+/// RFC 012C current-generation message. Ordered block keys are the complete
+/// snapshot when completeness is complete; a partial list cannot prove absence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub native_message_id: String,
+    pub role: MessageRevisionRole,
+    pub ordered_content_block_keys: Vec<String>,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+}
+
+impl MessageRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        validate_runtime_semantic_text("native_message_id", Some(self.native_message_id.as_str()))?;
+        if self.ordered_content_block_keys.is_empty()
+            || self.ordered_content_block_keys.len() > MAX_MESSAGE_CONTENT_BLOCKS
+        {
+            return Err(AdapterError::invalid_contract(
+                "message ordered_content_block_keys must be a bounded non-empty snapshot",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for key in &self.ordered_content_block_keys {
+            validate_runtime_semantic_text("content block key", Some(key.as_str()))?;
+            if !seen.insert(key.as_str()) {
+                return Err(AdapterError::invalid_contract(
+                    "message content block keys must be unique in one snapshot",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.message/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.native_message_id.as_bytes());
+        encoded.push(match self.role {
+            MessageRevisionRole::User => 1,
+            MessageRevisionRole::Assistant => 2,
+            MessageRevisionRole::System => 3,
+        });
+        encoded.extend_from_slice(&(self.ordered_content_block_keys.len() as u64).to_be_bytes());
+        for key in &self.ordered_content_block_keys {
+            push_component(&mut encoded, key.as_bytes());
+        }
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
+/// RFC 012C task revision. Individual upserts are revisioned entities; a
+/// complete owned-set snapshot may retract members absent from that set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub native_task_id: String,
+    pub subject: String,
+    pub state: TaskLifecycleState,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub owned_set: Option<Vec<String>>,
+}
+
+impl TaskRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        validate_runtime_semantic_text("native_task_id", Some(self.native_task_id.as_str()))?;
+        validate_runtime_semantic_text("subject", Some(self.subject.as_str()))?;
+        if let Some(owned_set) = &self.owned_set {
+            if owned_set.is_empty() {
+                return Err(AdapterError::invalid_contract(
+                    "task owned_set must be omitted or non-empty",
+                ));
+            }
+            let mut seen = BTreeSet::new();
+            for member in owned_set {
+                validate_runtime_semantic_text("owned task id", Some(member.as_str()))?;
+                if !seen.insert(member.as_str()) {
+                    return Err(AdapterError::invalid_contract(
+                        "task owned_set members must be unique",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.task/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.native_task_id.as_bytes());
+        push_component(&mut encoded, self.subject.as_bytes());
+        encoded.push(match self.state {
+            TaskLifecycleState::Created => 1,
+            TaskLifecycleState::Updated => 2,
+            TaskLifecycleState::Completed => 3,
+            TaskLifecycleState::Failed => 4,
+            TaskLifecycleState::Cancelled => 5,
+            TaskLifecycleState::Removed => 6,
+        });
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        match &self.owned_set {
+            Some(owned_set) => {
+                encoded.push(1);
+                encoded.extend_from_slice(&(owned_set.len() as u64).to_be_bytes());
+                for member in owned_set {
+                    push_component(&mut encoded, member.as_bytes());
+                }
+            }
+            None => encoded.push(0),
+        }
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
 fn validate_runtime_semantic_text(field: &str, value: Option<&str>) -> Result<(), AdapterError> {
     if value.is_some_and(|value| {
         value.is_empty() || value.len() > MAX_RUNTIME_SEMANTIC_TEXT_BYTES || value.trim() != value
@@ -1824,6 +1987,8 @@ pub enum Fact {
     ActorRunRevision(ActorRunRevisionFact),
     ActorAffiliationRevision(ActorAffiliationRevisionFact),
     UserInputRequestRevision(UserInputRequestRevisionFact),
+    MessageRevision(MessageRevisionFact),
+    TaskRevision(TaskRevisionFact),
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
     DelegationSpawn(DelegationSpawnFact),
@@ -1859,6 +2024,8 @@ impl Fact {
             Self::ActorRunRevision(_) => "runtime.actor-run",
             Self::ActorAffiliationRevision(_) => "runtime.actor-affiliation",
             Self::UserInputRequestRevision(_) => "runtime.user-input-request",
+            Self::MessageRevision(_) => "runtime.message",
+            Self::TaskRevision(_) => "runtime.task",
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
             Self::DelegationSpawn(_) => "delegation_spawn",
@@ -1889,7 +2056,9 @@ impl Fact {
             Self::Run(fact) => Some(&fact.run),
             Self::ActorRunRevision(_)
             | Self::ActorAffiliationRevision(_)
-            | Self::UserInputRequestRevision(_) => None,
+            | Self::UserInputRequestRevision(_)
+            | Self::MessageRevision(_)
+            | Self::TaskRevision(_) => None,
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
             Self::DelegationSpawn(fact) => Some(&fact.spawn),
@@ -1916,6 +2085,8 @@ impl Fact {
             Self::ActorRunRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ActorAffiliationRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::UserInputRequestRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::MessageRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::TaskRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ArtifactMetadataSnapshot(revision) => revision.semantic_revision_key(),
             Self::ArtifactContent(revision) => revision.semantic_revision_key(),
             _ => Ok(None),
@@ -2474,6 +2645,8 @@ impl FactBatch {
                                 Fact::UserInputRequestRevision(_),
                                 Fact::UserInputRequestRevision(_)
                             )
+                            | (Fact::MessageRevision(_), Fact::MessageRevision(_))
+                            | (Fact::TaskRevision(_), Fact::TaskRevision(_))
                             | (
                                 Fact::ArtifactMetadataSnapshot(_),
                                 Fact::ArtifactMetadataSnapshot(_)

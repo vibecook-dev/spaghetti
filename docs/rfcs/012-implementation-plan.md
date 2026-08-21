@@ -4,10 +4,11 @@
   search are on the engine path. C1 actor/usage/state/interaction fixtures are
   Gate met. D2 now composes Promoted `ChildDirectoryByNativeId` membership
   before bootstrap; D3 query workers share the observer pass pool; scoped
-  `runtime.user-input-request` replacement is live. D2/D3 remain In progress
-  against Claude Candidate promotion and message/task replacement fixtures.
-  Default-on (`Rolled out`) and child-RFC 012B/C/D ratification remain later
-  product decisions.
+  `runtime.user-input-request` replacement is live. C1 now also freezes
+  `runtime.message` and `runtime.task` fixtures; D3 projects those families
+  as current-generation-log and owned-set replacement. D2/D3 remain In progress
+  against Claude Candidate promotion. Default-on (`Rolled out`) and child-RFC
+  012B/C/D ratification remain later product decisions.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -133,13 +134,13 @@ prerequisite for early vertical slices.
 | B3. Durable catalog/query snapshots      | 012B                | Gate met    | atomic pack plus snapshot pagination conformance               |
 | B4. Progressive host and UX              | 012B                | Gate met    | cold/warm UI topology and migration tests                      |
 | B5. Catalog performance calibration      | 012B                | Gate met    | reproducible gate-amendment report                             |
-| C1. Runtime semantic contracts           | 012C                | Gate met    | actor/usage/state/interaction serialization fixtures           |
+| C1. Runtime semantic contracts           | 012C                | Gate met    | actor/usage/state/interaction/message/task serialization fixtures |
 | C2. Usage-v2 shadow projection           | 012C                | Gate met    | frozen/private corpus plus native affiliation parity           |
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
 | C4. Runtime semantic downstream suite    | 012C                | Gate met    | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | Gate met    | attach/bootstrap/poll/close/deps; no store/global scan         |
 | D2. Claude scope composition             | 012D                | In progress | Promoted directory membership; Candidate promotion later       |
-| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input replacement; message/task later        |
+| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input/message/task replacement; no Gate met  |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
 | D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
 | X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
@@ -2844,10 +2845,19 @@ projects C1 `runtime.user-input-request` as a correlated-lifecycle family:
 pending→resolved revises one entity, complete retract removes it, partial
 retract does not, and bootstrap/correction replacement digests match at the
 same current set. The replacement representation is
-`correlated_lifecycle_current`. Message/task replacement manifests remain
-open: C1 deferred those family fixtures, and RFC 011 `MessageFact`/
-`TaskSnapshotFact` are not RFC 012C `MessageRevision`/`TaskRevision`. Adding
-them without those fixtures would invent policy. Native-derived
+`correlated_lifecycle_current`.
+`rfc012d_message_replaces_one_generation_log_without_duplicate_entities`
+projects C1 `runtime.message` as `CurrentGenerationLog`: a correction revises
+one message, a partial block list cannot drop a previously known key, a
+complete block list retracts absent keys, complete retract removes the
+entity, and bootstrap/correction replacement digests match at the same
+current set.
+`rfc012d_task_replaces_one_revisioned_entity_and_omits_from_complete_owned_set`
+projects C1 `runtime.task` as revisioned-entity plus complete owned-set
+snapshot: created→updated→completed revises one task, complete retract
+removes it, and a complete owned-set listing only the peer native id retracts
+the omitted current task while keeping the peer. D3 remains In progress; this
+slice does not stamp Gate met. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have

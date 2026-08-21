@@ -4,6 +4,8 @@
 //! coverage, actor-run, actor-affiliation, and usage-v2 value contracts. It
 //! does not open a source, query, or delivery path.
 
+use std::collections::BTreeSet;
+
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -28,8 +30,11 @@ const ACTOR_AFFILIATION_FAMILY: &str = "runtime.actor-affiliation";
 const USAGE_V2_FAMILY: &str = "runtime.usage-v2";
 const EFFECTIVE_STATE_FAMILY: &str = "runtime.effective-state";
 const USER_INPUT_FAMILY: &str = "runtime.user-input-request";
+const MESSAGE_FAMILY: &str = "runtime.message";
+const TASK_FAMILY: &str = "runtime.task";
 const MAX_INTERACTION_QUESTIONS: usize = 32;
 const MAX_INTERACTION_OPTIONS: usize = 32;
+const MAX_MESSAGE_CONTENT_BLOCKS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -269,6 +274,94 @@ pub(crate) struct InteractionFixtureWire {
     pub retract: InteractionLifecycleSlotWire,
     pub partial: InteractionLifecycleSlotWire,
     pub questions: Vec<UserInputQuestion>,
+    pub runtime_semantic_contract_version: u32,
+    pub session: CanonicalEntityKey,
+    pub source_instance_key: CanonicalSourceInstanceKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MessageRevisionRole {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MessageRevisionSlotWire {
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub ordered_content_block_keys: Vec<String>,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MessageFixtureWire {
+    pub adapter_id: String,
+    pub actor_run: CanonicalEntityKey,
+    pub family: String,
+    pub family_version: u32,
+    pub fixture_contract_version: u32,
+    pub native_message_id: String,
+    pub fact_id: CanonicalFactId,
+    pub source_record_id: SourceRecordId,
+    pub role: MessageRevisionRole,
+    pub current: MessageRevisionSlotWire,
+    pub correction: MessageRevisionSlotWire,
+    pub complete_blocks: MessageRevisionSlotWire,
+    pub partial_blocks: MessageRevisionSlotWire,
+    pub retract: MessageRevisionSlotWire,
+    pub partial: MessageRevisionSlotWire,
+    pub runtime_semantic_contract_version: u32,
+    pub session: CanonicalEntityKey,
+    pub source_instance_key: CanonicalSourceInstanceKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TaskLifecycleState {
+    Created,
+    Updated,
+    Completed,
+    Failed,
+    Cancelled,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TaskRevisionSlotWire {
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub owned_set: Option<Vec<String>>,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+    pub state: TaskLifecycleState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TaskFixtureWire {
+    pub adapter_id: String,
+    pub actor_run: CanonicalEntityKey,
+    pub family: String,
+    pub family_version: u32,
+    pub fixture_contract_version: u32,
+    pub native_task_id: String,
+    pub peer_native_task_id: String,
+    pub fact_id: CanonicalFactId,
+    pub peer_fact_id: CanonicalFactId,
+    pub source_record_id: SourceRecordId,
+    pub subject: String,
+    pub created: TaskRevisionSlotWire,
+    pub updated: TaskRevisionSlotWire,
+    pub completed: TaskRevisionSlotWire,
+    pub retract: TaskRevisionSlotWire,
+    pub partial: TaskRevisionSlotWire,
+    pub collection_omit: TaskRevisionSlotWire,
     pub runtime_semantic_contract_version: u32,
     pub session: CanonicalEntityKey,
     pub source_instance_key: CanonicalSourceInstanceKey,
@@ -1302,6 +1395,309 @@ fn validate_rfc012c_interaction_fixture(
     Ok(())
 }
 
+fn validate_message_slot(
+    fixture: &MessageFixtureWire,
+    slot_name: &str,
+    slot: &MessageRevisionSlotWire,
+    expected_operation: UserInputOperation,
+    expected_completeness: ContractCompleteness,
+    expected_keys: &[&str],
+) -> Result<(), SemanticFixtureError> {
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "message {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != expected_completeness {
+        return Err(SemanticFixtureError::invalid(format!(
+            "message {slot_name} completeness does not match its fixture slot"
+        )));
+    }
+    if slot.ordered_content_block_keys.len() > MAX_MESSAGE_CONTENT_BLOCKS
+        || slot.ordered_content_block_keys.is_empty()
+    {
+        return Err(SemanticFixtureError::invalid(format!(
+            "message {slot_name} ordered_content_block_keys must contain 1..={MAX_MESSAGE_CONTENT_BLOCKS} keys"
+        )));
+    }
+    if slot.ordered_content_block_keys != expected_keys {
+        return Err(SemanticFixtureError::invalid(format!(
+            "message {slot_name} ordered_content_block_keys do not match the declared snapshot"
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    for key in &slot.ordered_content_block_keys {
+        validate_canonical_runtime_text("content block key", key)?;
+        if !seen.insert(key.as_str()) {
+            return Err(SemanticFixtureError::invalid(
+                "message content block keys must be unique in one snapshot",
+            ));
+        }
+    }
+    verify_slot_identity(
+        MESSAGE_FAMILY,
+        fixture.native_message_id.as_bytes(),
+        slot_name,
+        &fixture.fact_id,
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+    )
+}
+
+fn validate_rfc012c_message_fixture(
+    fixture: &MessageFixtureWire,
+) -> Result<(), SemanticFixtureError> {
+    if fixture.fixture_contract_version != RFC012C_FIXTURE_CONTRACT_VERSION
+        || fixture.runtime_semantic_contract_version != RUNTIME_SEMANTIC_CONTRACT_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "unsupported message fixture contract version",
+        ));
+    }
+    if fixture.family != MESSAGE_FAMILY || fixture.family_version != FAMILY_VERSION {
+        return Err(SemanticFixtureError::invalid(
+            "message fixture family must be runtime.message@1",
+        ));
+    }
+    validate_canonical_source_string("adapter_id", &fixture.adapter_id, MAX_ADAPTER_ID_BYTES)?;
+    validate_canonical_runtime_text("native_message_id", &fixture.native_message_id)?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        MESSAGE_FAMILY,
+        fixture.native_message_id.as_bytes(),
+        &fixture.fact_id,
+    )?;
+    validate_message_slot(
+        fixture,
+        "current",
+        &fixture.current,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        &["block-a", "block-b"],
+    )?;
+    validate_message_slot(
+        fixture,
+        "correction",
+        &fixture.correction,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        &["block-a", "block-b"],
+    )?;
+    validate_message_slot(
+        fixture,
+        "complete_blocks",
+        &fixture.complete_blocks,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        &["block-a"],
+    )?;
+    validate_message_slot(
+        fixture,
+        "partial_blocks",
+        &fixture.partial_blocks,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+        &["block-a"],
+    )?;
+    validate_message_slot(
+        fixture,
+        "retract",
+        &fixture.retract,
+        UserInputOperation::Retract,
+        ContractCompleteness::Complete,
+        &["block-a", "block-b"],
+    )?;
+    validate_message_slot(
+        fixture,
+        "partial",
+        &fixture.partial,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+        &["block-a", "block-b"],
+    )?;
+    let refs = [
+        &fixture.current.semantic_revision_ref,
+        &fixture.correction.semantic_revision_ref,
+        &fixture.complete_blocks.semantic_revision_ref,
+        &fixture.partial_blocks.semantic_revision_ref,
+        &fixture.retract.semantic_revision_ref,
+        &fixture.partial.semantic_revision_ref,
+    ];
+    for (index, left) in refs.iter().enumerate() {
+        for right in refs.iter().skip(index + 1) {
+            if left == right {
+                return Err(SemanticFixtureError::invalid(
+                    "message revision slots must have distinct semantic identity",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_task_slot(
+    fixture: &TaskFixtureWire,
+    slot_name: &str,
+    slot: &TaskRevisionSlotWire,
+    expected_state: TaskLifecycleState,
+    expected_operation: UserInputOperation,
+    expected_completeness: ContractCompleteness,
+    expected_owned_set: Option<&[&str]>,
+) -> Result<(), SemanticFixtureError> {
+    if slot.state != expected_state {
+        return Err(SemanticFixtureError::invalid(
+            "task lifecycle state does not match its fixture slot",
+        ));
+    }
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "task {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != expected_completeness {
+        return Err(SemanticFixtureError::invalid(format!(
+            "task {slot_name} completeness does not match its fixture slot"
+        )));
+    }
+    match (expected_owned_set, slot.owned_set.as_ref()) {
+        (None, None) => {}
+        (Some(expected), Some(actual))
+            if actual
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied()) =>
+        {
+            for member in actual {
+                validate_canonical_runtime_text("owned task id", member)?;
+            }
+        }
+        _ => {
+            return Err(SemanticFixtureError::invalid(format!(
+                "task {slot_name} owned_set does not match the declared snapshot"
+            )));
+        }
+    }
+    verify_slot_identity(
+        TASK_FAMILY,
+        fixture.native_task_id.as_bytes(),
+        slot_name,
+        &fixture.fact_id,
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+    )
+}
+
+fn validate_rfc012c_task_fixture(fixture: &TaskFixtureWire) -> Result<(), SemanticFixtureError> {
+    if fixture.fixture_contract_version != RFC012C_FIXTURE_CONTRACT_VERSION
+        || fixture.runtime_semantic_contract_version != RUNTIME_SEMANTIC_CONTRACT_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "unsupported task fixture contract version",
+        ));
+    }
+    if fixture.family != TASK_FAMILY || fixture.family_version != FAMILY_VERSION {
+        return Err(SemanticFixtureError::invalid(
+            "task fixture family must be runtime.task@1",
+        ));
+    }
+    validate_canonical_source_string("adapter_id", &fixture.adapter_id, MAX_ADAPTER_ID_BYTES)?;
+    validate_canonical_runtime_text("native_task_id", &fixture.native_task_id)?;
+    validate_canonical_runtime_text("peer_native_task_id", &fixture.peer_native_task_id)?;
+    validate_canonical_runtime_text("subject", &fixture.subject)?;
+    if fixture.native_task_id == fixture.peer_native_task_id {
+        return Err(SemanticFixtureError::invalid(
+            "task fixture peer must be a distinct task identity",
+        ));
+    }
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        TASK_FAMILY,
+        fixture.native_task_id.as_bytes(),
+        &fixture.fact_id,
+    )?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        TASK_FAMILY,
+        fixture.peer_native_task_id.as_bytes(),
+        &fixture.peer_fact_id,
+    )?;
+    validate_task_slot(
+        fixture,
+        "created",
+        &fixture.created,
+        TaskLifecycleState::Created,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        None,
+    )?;
+    validate_task_slot(
+        fixture,
+        "updated",
+        &fixture.updated,
+        TaskLifecycleState::Updated,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        None,
+    )?;
+    validate_task_slot(
+        fixture,
+        "completed",
+        &fixture.completed,
+        TaskLifecycleState::Completed,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        None,
+    )?;
+    validate_task_slot(
+        fixture,
+        "retract",
+        &fixture.retract,
+        TaskLifecycleState::Created,
+        UserInputOperation::Retract,
+        ContractCompleteness::Complete,
+        None,
+    )?;
+    validate_task_slot(
+        fixture,
+        "partial",
+        &fixture.partial,
+        TaskLifecycleState::Created,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+        None,
+    )?;
+    validate_task_slot(
+        fixture,
+        "collection_omit",
+        &fixture.collection_omit,
+        TaskLifecycleState::Created,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        Some(&["fixture-task-2"]),
+    )?;
+    let refs = [
+        &fixture.created.semantic_revision_ref,
+        &fixture.updated.semantic_revision_ref,
+        &fixture.completed.semantic_revision_ref,
+        &fixture.retract.semantic_revision_ref,
+        &fixture.partial.semantic_revision_ref,
+        &fixture.collection_omit.semantic_revision_ref,
+    ];
+    for (index, left) in refs.iter().enumerate() {
+        for right in refs.iter().skip(index + 1) {
+            if left == right {
+                return Err(SemanticFixtureError::invalid(
+                    "task revision slots must have distinct semantic identity",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_rfc012c_effective_state_v1(
     json: &str,
 ) -> Result<EffectiveStateFixtureWire, SemanticFixtureError> {
@@ -1330,6 +1726,28 @@ pub(crate) fn parse_rfc012c_interaction_v1_json(
     encode_json(&decode_rfc012c_interaction_v1(json)?)
 }
 
+pub(crate) fn decode_rfc012c_message_v1(
+    json: &str,
+) -> Result<MessageFixtureWire, SemanticFixtureError> {
+    let fixture: MessageFixtureWire = decode_json(json)?;
+    validate_rfc012c_message_fixture(&fixture)?;
+    Ok(fixture)
+}
+
+pub(crate) fn parse_rfc012c_message_v1_json(json: &str) -> Result<String, SemanticFixtureError> {
+    encode_json(&decode_rfc012c_message_v1(json)?)
+}
+
+pub(crate) fn decode_rfc012c_task_v1(json: &str) -> Result<TaskFixtureWire, SemanticFixtureError> {
+    let fixture: TaskFixtureWire = decode_json(json)?;
+    validate_rfc012c_task_fixture(&fixture)?;
+    Ok(fixture)
+}
+
+pub(crate) fn parse_rfc012c_task_v1_json(json: &str) -> Result<String, SemanticFixtureError> {
+    encode_json(&decode_rfc012c_task_v1(json)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1340,6 +1758,9 @@ mod tests {
         include_str!("../fixtures/contracts/rfc012c-effective-state-v1.json");
     const RFC012C_INTERACTION_FIXTURE: &str =
         include_str!("../fixtures/contracts/rfc012c-interaction-v1.json");
+    const RFC012C_MESSAGE_FIXTURE: &str =
+        include_str!("../fixtures/contracts/rfc012c-message-v1.json");
+    const RFC012C_TASK_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-task-v1.json");
 
     fn assert_privacy_safe(json: &str) {
         assert!(!json.contains("/Users/"));
@@ -1804,5 +2225,65 @@ mod tests {
         let oversized = "x".repeat(MAX_SEMANTIC_FIXTURE_JSON_BYTES + 1);
         assert!(parse_rfc012c_effective_state_v1_json(&oversized).is_err());
         assert!(parse_rfc012c_interaction_v1_json(&oversized).is_err());
+    }
+
+    #[test]
+    fn rfc012c_message_fixture_parses_correction_and_block_replacement() {
+        let parsed = parse_rfc012c_message_v1_json(RFC012C_MESSAGE_FIXTURE).unwrap();
+        assert_privacy_safe(&parsed);
+        let original: serde_json::Value = serde_json::from_str(RFC012C_MESSAGE_FIXTURE).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(round_trip, original);
+        let fixture: MessageFixtureWire = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(fixture.role, MessageRevisionRole::Assistant);
+        assert_eq!(
+            fixture.current.ordered_content_block_keys,
+            ["block-a", "block-b"]
+        );
+        assert_eq!(
+            fixture.complete_blocks.ordered_content_block_keys,
+            ["block-a"]
+        );
+        assert_eq!(
+            fixture.complete_blocks.completeness,
+            ContractCompleteness::Complete
+        );
+        assert_eq!(
+            fixture.partial_blocks.completeness,
+            ContractCompleteness::Partial
+        );
+        assert_eq!(fixture.retract.operation, UserInputOperation::Retract);
+        assert_ne!(
+            fixture.current.semantic_revision_ref,
+            fixture.correction.semantic_revision_ref
+        );
+        assert_ne!(
+            fixture.complete_blocks.semantic_revision_ref,
+            fixture.partial_blocks.semantic_revision_ref
+        );
+    }
+
+    #[test]
+    fn rfc012c_task_fixture_parses_lifecycle_and_owned_set_omission() {
+        let parsed = parse_rfc012c_task_v1_json(RFC012C_TASK_FIXTURE).unwrap();
+        assert_privacy_safe(&parsed);
+        let original: serde_json::Value = serde_json::from_str(RFC012C_TASK_FIXTURE).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(round_trip, original);
+        let fixture: TaskFixtureWire = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(fixture.created.state, TaskLifecycleState::Created);
+        assert_eq!(fixture.updated.state, TaskLifecycleState::Updated);
+        assert_eq!(fixture.completed.state, TaskLifecycleState::Completed);
+        assert_eq!(fixture.retract.operation, UserInputOperation::Retract);
+        assert_eq!(fixture.partial.completeness, ContractCompleteness::Partial);
+        assert_eq!(
+            fixture.collection_omit.owned_set,
+            Some(vec!["fixture-task-2".to_owned()])
+        );
+        assert_ne!(fixture.fact_id, fixture.peer_fact_id);
+        assert_ne!(
+            fixture.created.semantic_revision_ref,
+            fixture.completed.semantic_revision_ref
+        );
     }
 }

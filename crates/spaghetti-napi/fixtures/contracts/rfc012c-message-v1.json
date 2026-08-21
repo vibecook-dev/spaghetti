@@ -1,0 +1,74 @@
+{
+  "adapter_id": "fixture-adapter",
+  "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+  "family": "runtime.message",
+  "family_version": 1,
+  "fixture_contract_version": 1,
+  "native_message_id": "fixture-message-1",
+  "fact_id": "v1:aFw8HzmdOlzrkxuD3a6-gv2syszlHd1BY_AsW_J-bOU",
+  "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+  "role": "assistant",
+  "current": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "ordered_content_block_keys": ["block-a", "block-b"],
+    "semantic_revision_key_hex": "9c16dd2935728b34c131297f99d6a071695949c5f33cae983cc388c60a69a2e2",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:hxB7MiwQzUd1aXo1CQTZHTOfbELRHhzXkeO2PwuKmbw"
+    }
+  },
+  "correction": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "ordered_content_block_keys": ["block-a", "block-b"],
+    "semantic_revision_key_hex": "912656a77b5fb603684499ef54593bef735bab029d334e7c18a4d579aa8127b7",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:hnrmSJXQuUSM1qiNNaYcL8V8rcw-9aseCEgt-2bLfp8"
+    }
+  },
+  "complete_blocks": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "ordered_content_block_keys": ["block-a"],
+    "semantic_revision_key_hex": "0afeece40c97433fe9aa07a52d31dce4d7b468c3a4c2b3b04de35fd2020beb3a",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:Xzj2PqxuaxQj5p6LVZR2_S6_JnunsL02NtVWTSEd2So"
+    }
+  },
+  "partial_blocks": {
+    "completeness": "partial",
+    "operation": "upsert",
+    "ordered_content_block_keys": ["block-a"],
+    "semantic_revision_key_hex": "436cc309e8440b6e0a9641e8c53c6aff958030bce831c744fe9828efba879ead",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:C9mLlMkjeV1Dci8eWQH1VMQ5sxV1oSj0iNZnwZtt7a0"
+    }
+  },
+  "retract": {
+    "completeness": "complete",
+    "operation": "retract",
+    "ordered_content_block_keys": ["block-a", "block-b"],
+    "semantic_revision_key_hex": "3f33465e830e526b17020da2995b0cf6e12ac1c594f750bbf5e47ceb4e2a33a5",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:HElYUvFKXjie_IIcgjhtstj6xzPaLf7KDYGoAKwmGDQ"
+    }
+  },
+  "partial": {
+    "completeness": "partial",
+    "operation": "upsert",
+    "ordered_content_block_keys": ["block-a", "block-b"],
+    "semantic_revision_key_hex": "4e6cfa1b1f075e7f24530bdc63e48446de2498220d64900ea8a7dfcfcf7b7868",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:VmAbZISJlWPrli5lnSKE1r--li_x8NYm8HD_LR0CGn8"
+    }
+  },
+  "runtime_semantic_contract_version": 1,
+  "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+  "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM"
+}

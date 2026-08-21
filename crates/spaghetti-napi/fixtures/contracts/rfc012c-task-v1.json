@@ -1,0 +1,82 @@
+{
+  "adapter_id": "fixture-adapter",
+  "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+  "family": "runtime.task",
+  "family_version": 1,
+  "fixture_contract_version": 1,
+  "native_task_id": "fixture-task-1",
+  "peer_native_task_id": "fixture-task-2",
+  "fact_id": "v1:H5biUmYIxrqz-V78TSjSd7jP4vPb-fPiGya8v2s0q-E",
+  "peer_fact_id": "v1:O_QRNaZbO-w_4b3tiDxgaDp6mZPnPZvhB-Bndf8Nt3s",
+  "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+  "subject": "Capture the remaining conformance evidence",
+  "created": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "owned_set": null,
+    "semantic_revision_key_hex": "1cd03ac17758ec13a3d7c11abfe7fdc8421d0a70fc225427b4fb9d8c7459efcf",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:WmCE8saqJ7jB6iZ_exjUqCfOcOK9lkBFFSRYXQEenxU"
+    },
+    "state": "created"
+  },
+  "updated": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "owned_set": null,
+    "semantic_revision_key_hex": "b79c489655f7bb7ef8678a32fdd5cce57cc911aee7aee464f7ffe9e824eaf1cf",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:6a5WO_n6L5F-dVlPeFdC02IDT8mZskpZs2BTFv6Bcuk"
+    },
+    "state": "updated"
+  },
+  "completed": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "owned_set": null,
+    "semantic_revision_key_hex": "1b5acd8d25e7b01d837dee8e49a6e970f96f63aada95c92c46cb5382d8170f5d",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:ZvG0sVt6cwaOJ9LH0OEz8ujFn53EgyMxh-ECGIlVtmI"
+    },
+    "state": "completed"
+  },
+  "retract": {
+    "completeness": "complete",
+    "operation": "retract",
+    "owned_set": null,
+    "semantic_revision_key_hex": "3f5fab062a5605aca896babb66264e2f1850a831a7711c69c3e5a2cb2233c42a",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:_Dddk2sB3m-QvVf3zCwRoFpp89YQW1cEyaypGiyDqm4"
+    },
+    "state": "created"
+  },
+  "partial": {
+    "completeness": "partial",
+    "operation": "upsert",
+    "owned_set": null,
+    "semantic_revision_key_hex": "13d382b60c513b36691814a2ef6d33ec9518cbd5716a2fe90f0f9a81b7888f41",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:dxTm3vuMcgoh97sNZNfZj6Zk7RJqtHhCfZW5jqkrPgM"
+    },
+    "state": "created"
+  },
+  "collection_omit": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "owned_set": ["fixture-task-2"],
+    "semantic_revision_key_hex": "5c285e569bf79a07f8cdb24f48d2a96f2cbc16686ca2867865b97d869ace8cd3",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:3bboCBBzJEgFXb_rdJU2UZ7gWiGT1psWNn3RRvzw8Ps"
+    },
+    "state": "created"
+  },
+  "runtime_semantic_contract_version": 1,
+  "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+  "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM"
+}

@@ -13,8 +13,9 @@ use serde_json::Value as JsonValue;
 
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
-    CoverageObjectKey, CoverageStreamKey, ExternalEntityRef, NativeIdentityClaim, UserInputKind,
-    UserInputLifecycleState, UserInputQuestion,
+    CoverageObjectKey, CoverageStreamKey, ExternalEntityRef, MessageRevisionRole,
+    NativeIdentityClaim, TaskLifecycleState, UserInputKind, UserInputLifecycleState,
+    UserInputQuestion,
 };
 use crate::observation_contract::unknown_wire::ObservationUnknownWireContractSelection;
 use crate::observation_contract::ObservationContractSelection;
@@ -52,6 +53,31 @@ struct InteractionEnvelopeWire {
     completeness: ContractCompleteness,
     result_reference: Option<String>,
     questions: Vec<UserInputQuestion>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct MessageEnvelopeWire {
+    fact_family: &'static str,
+    fact_id: CanonicalFactId,
+    operation: &'static str,
+    native_message_id: String,
+    role: MessageRevisionRole,
+    ordered_content_block_keys: Vec<String>,
+    completeness: ContractCompleteness,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct TaskEnvelopeWire {
+    fact_family: &'static str,
+    fact_id: CanonicalFactId,
+    operation: &'static str,
+    native_task_id: String,
+    subject: String,
+    state: TaskLifecycleState,
+    completeness: ContractCompleteness,
+    owned_set: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +243,55 @@ impl ScopedObservationKnownEnvelope {
                         completeness: revision.completeness,
                         result_reference: revision.result_reference.clone(),
                         questions: revision.questions.clone(),
+                    })?,
+                    common_context()?,
+                )
+            }
+            ScopedObservationEvent::Message {
+                fact_id,
+                operation,
+                revision,
+                ..
+            } => {
+                require_no_specialized_contexts(&contexts)?;
+                (
+                    ScopedObservationKnownEventFamily::Interaction,
+                    serialize_wire(MessageEnvelopeWire {
+                        fact_family: "runtime.message",
+                        fact_id: *fact_id,
+                        operation: match operation {
+                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
+                            super::ScopedRevisionedEntityOperation::Retract => "retract",
+                        },
+                        native_message_id: revision.native_message_id.clone(),
+                        role: revision.role,
+                        ordered_content_block_keys: revision.ordered_content_block_keys.clone(),
+                        completeness: revision.completeness,
+                    })?,
+                    common_context()?,
+                )
+            }
+            ScopedObservationEvent::Task {
+                fact_id,
+                operation,
+                revision,
+                ..
+            } => {
+                require_no_specialized_contexts(&contexts)?;
+                (
+                    ScopedObservationKnownEventFamily::Interaction,
+                    serialize_wire(TaskEnvelopeWire {
+                        fact_family: "runtime.task",
+                        fact_id: *fact_id,
+                        operation: match operation {
+                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
+                            super::ScopedRevisionedEntityOperation::Retract => "retract",
+                        },
+                        native_task_id: revision.native_task_id.clone(),
+                        subject: revision.subject.clone(),
+                        state: revision.state,
+                        completeness: revision.completeness,
+                        owned_set: revision.owned_set.clone(),
                     })?,
                     common_context()?,
                 )

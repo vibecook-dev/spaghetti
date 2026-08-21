@@ -31,8 +31,12 @@ export const ACTOR_AFFILIATION_FAMILY = 'runtime.actor-affiliation' as const;
 export const USAGE_V2_FAMILY = 'runtime.usage-v2' as const;
 export const EFFECTIVE_STATE_FAMILY = 'runtime.effective-state' as const;
 export const USER_INPUT_FAMILY = 'runtime.user-input-request' as const;
+export const MESSAGE_FAMILY = 'runtime.message' as const;
+export const TASK_FAMILY = 'runtime.task' as const;
 export const EFFECTIVE_STATE_FAMILY_VERSION = 1 as const;
 export const USER_INPUT_FAMILY_VERSION = 1 as const;
+export const MESSAGE_FAMILY_VERSION = 1 as const;
+export const TASK_FAMILY_VERSION = 1 as const;
 export const ACTOR_RUN_FAMILY_VERSION = 1 as const;
 export const ACTOR_AFFILIATION_FAMILY_VERSION = 1 as const;
 export const USAGE_V2_FAMILY_VERSION = 1 as const;
@@ -1364,4 +1368,330 @@ export function parseInteractionFixture(value: unknown, expectedContextInput: un
 
 export function parseRfc012cInteractionV1Json(json: string, expectedContextInput: unknown): InteractionFixture {
   return parseInteractionFixture(preflightSemanticFixtureJson(json), expectedContextInput);
+}
+
+export type MessageRevisionRole = 'user' | 'assistant' | 'system';
+export type TaskLifecycleState = 'created' | 'updated' | 'completed' | 'failed' | 'cancelled' | 'removed';
+
+export interface MessageRevisionSlot {
+  completeness: ContractCompleteness;
+  operation: UserInputOperation;
+  ordered_content_block_keys: string[];
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+}
+
+export interface MessageFixture {
+  adapter_id: string;
+  actor_run: OpaqueContractReference;
+  family: typeof MESSAGE_FAMILY;
+  family_version: typeof MESSAGE_FAMILY_VERSION;
+  fixture_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  native_message_id: string;
+  fact_id: OpaqueContractReference;
+  source_record_id: OpaqueContractReference;
+  role: MessageRevisionRole;
+  current: MessageRevisionSlot;
+  correction: MessageRevisionSlot;
+  complete_blocks: MessageRevisionSlot;
+  partial_blocks: MessageRevisionSlot;
+  retract: MessageRevisionSlot;
+  partial: MessageRevisionSlot;
+  runtime_semantic_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  session: OpaqueContractReference;
+  source_instance_key: OpaqueContractReference;
+}
+
+export interface TaskRevisionSlot {
+  completeness: ContractCompleteness;
+  operation: UserInputOperation;
+  owned_set: string[] | null;
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+  state: TaskLifecycleState;
+}
+
+export interface TaskFixture {
+  adapter_id: string;
+  actor_run: OpaqueContractReference;
+  family: typeof TASK_FAMILY;
+  family_version: typeof TASK_FAMILY_VERSION;
+  fixture_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  native_task_id: string;
+  peer_native_task_id: string;
+  fact_id: OpaqueContractReference;
+  peer_fact_id: OpaqueContractReference;
+  source_record_id: OpaqueContractReference;
+  subject: string;
+  created: TaskRevisionSlot;
+  updated: TaskRevisionSlot;
+  completed: TaskRevisionSlot;
+  retract: TaskRevisionSlot;
+  partial: TaskRevisionSlot;
+  collection_omit: TaskRevisionSlot;
+  runtime_semantic_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  session: OpaqueContractReference;
+  source_instance_key: OpaqueContractReference;
+}
+
+const MESSAGE_SLOT_FIELDS = [
+  'completeness',
+  'operation',
+  'ordered_content_block_keys',
+  'semantic_revision_key_hex',
+  'semantic_revision_ref',
+] as const;
+
+function parseMessageSlot(
+  value: unknown,
+  label: string,
+  operation: UserInputOperation,
+  completeness: ContractCompleteness,
+  expectedKeys: readonly string[],
+): MessageRevisionSlot {
+  const input = record(value, label);
+  assertKnownFields(input, MESSAGE_SLOT_FIELDS, label);
+  if (input.operation !== operation) {
+    throw new ContractValidationError(`${label} operation does not match its fixture slot`);
+  }
+  if (!Array.isArray(input.ordered_content_block_keys) || input.ordered_content_block_keys.length === 0) {
+    throw new ContractValidationError(`${label} ordered_content_block_keys must be a non-empty array`);
+  }
+  const keys = input.ordered_content_block_keys.map((key, index) =>
+    boundedText(key, `${label} block ${index}`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+  );
+  if (keys.join('\0') !== expectedKeys.join('\0')) {
+    throw new ContractValidationError(`${label} ordered_content_block_keys do not match the declared snapshot`);
+  }
+  return {
+    completeness: parseContractCompleteness(input.completeness, `${label} completeness`),
+    operation,
+    ordered_content_block_keys: keys,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+  };
+}
+
+function parseMessageFixtureShape(value: unknown): MessageFixture {
+  const input = record(value, 'message fixture');
+  assertKnownFields(
+    input,
+    [
+      'adapter_id',
+      'actor_run',
+      'family',
+      'family_version',
+      'fixture_contract_version',
+      'native_message_id',
+      'fact_id',
+      'source_record_id',
+      'role',
+      'current',
+      'correction',
+      'complete_blocks',
+      'partial_blocks',
+      'retract',
+      'partial',
+      'runtime_semantic_contract_version',
+      'session',
+      'source_instance_key',
+    ],
+    'message fixture',
+  );
+  if (input.family !== MESSAGE_FAMILY || input.family_version !== MESSAGE_FAMILY_VERSION) {
+    throw new ContractValidationError('message fixture family must be runtime.message@1');
+  }
+  const role = input.role;
+  if (role !== 'user' && role !== 'assistant' && role !== 'system') {
+    throw new ContractValidationError('unsupported message role');
+  }
+  const current = parseMessageSlot(input.current, 'current', 'upsert', 'complete', ['block-a', 'block-b']);
+  const correction = parseMessageSlot(input.correction, 'correction', 'upsert', 'complete', ['block-a', 'block-b']);
+  const completeBlocks = parseMessageSlot(input.complete_blocks, 'complete_blocks', 'upsert', 'complete', ['block-a']);
+  const partialBlocks = parseMessageSlot(input.partial_blocks, 'partial_blocks', 'upsert', 'partial', ['block-a']);
+  const retract = parseMessageSlot(input.retract, 'retract', 'retract', 'complete', ['block-a', 'block-b']);
+  const partial = parseMessageSlot(input.partial, 'partial', 'upsert', 'partial', ['block-a', 'block-b']);
+  if (
+    current.completeness !== 'complete' ||
+    correction.completeness !== 'complete' ||
+    completeBlocks.completeness !== 'complete'
+  ) {
+    throw new ContractValidationError('complete message snapshots must declare complete coverage');
+  }
+  if (partialBlocks.completeness !== 'partial' || partial.completeness !== 'partial') {
+    throw new ContractValidationError('partial message snapshots must declare partial coverage');
+  }
+  return {
+    adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
+    actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
+    family: MESSAGE_FAMILY,
+    family_version: MESSAGE_FAMILY_VERSION,
+    fixture_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    native_message_id: boundedText(input.native_message_id, 'native_message_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    fact_id: parseOpaqueContractReference(input.fact_id, 'message fact id'),
+    source_record_id: parseOpaqueContractReference(input.source_record_id, 'message source record id'),
+    role,
+    current,
+    correction,
+    complete_blocks: completeBlocks,
+    partial_blocks: partialBlocks,
+    retract,
+    partial,
+    runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    session: parseOpaqueContractReference(input.session, 'session'),
+    source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
+  };
+}
+
+export function parseMessageFixture(value: unknown, expectedContextInput: unknown): MessageFixture {
+  const expected = parseMessageFixtureShape(expectedContextInput);
+  const parsed = parseMessageFixtureShape(value);
+  if (parsed.fact_id !== expected.fact_id || parsed.session !== expected.session) {
+    throw new ContractValidationError('message identity does not match the caller-held revision identity');
+  }
+  bindSlotIdentity('current', parsed.current, expected.current);
+  bindSlotIdentity('correction', parsed.correction, expected.correction);
+  bindSlotIdentity('complete_blocks', parsed.complete_blocks, expected.complete_blocks);
+  bindSlotIdentity('partial_blocks', parsed.partial_blocks, expected.partial_blocks);
+  bindSlotIdentity('retract', parsed.retract, expected.retract);
+  bindSlotIdentity('partial', parsed.partial, expected.partial);
+  return parsed;
+}
+
+export function parseRfc012cMessageV1Json(json: string, expectedContextInput: unknown): MessageFixture {
+  return parseMessageFixture(preflightSemanticFixtureJson(json), expectedContextInput);
+}
+
+function parseTaskSlot(
+  value: unknown,
+  label: string,
+  state: TaskLifecycleState,
+  operation: UserInputOperation,
+  completeness: ContractCompleteness,
+  ownedSet: string[] | null,
+): TaskRevisionSlot {
+  const input = record(value, label);
+  assertKnownFields(
+    input,
+    ['completeness', 'operation', 'owned_set', 'semantic_revision_key_hex', 'semantic_revision_ref', 'state'],
+    label,
+  );
+  if (input.state !== state || input.operation !== operation) {
+    throw new ContractValidationError(`${label} lifecycle does not match its fixture slot`);
+  }
+  let parsedOwned: string[] | null = null;
+  if (input.owned_set !== null) {
+    if (!Array.isArray(input.owned_set) || input.owned_set.length === 0) {
+      throw new ContractValidationError(`${label} owned_set must be null or a non-empty array`);
+    }
+    parsedOwned = input.owned_set.map((member, index) =>
+      boundedText(member, `${label} owned_set ${index}`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    );
+  }
+  if ((parsedOwned ?? null) === null && ownedSet !== null) {
+    throw new ContractValidationError(`${label} owned_set does not match the declared snapshot`);
+  }
+  if (parsedOwned && ownedSet && parsedOwned.join('\0') !== ownedSet.join('\0')) {
+    throw new ContractValidationError(`${label} owned_set does not match the declared snapshot`);
+  }
+  if (parsedOwned && ownedSet === null) {
+    throw new ContractValidationError(`${label} owned_set does not match the declared snapshot`);
+  }
+  return {
+    completeness: parseContractCompleteness(input.completeness, `${label} completeness`),
+    operation,
+    owned_set: parsedOwned,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+    state,
+  };
+}
+
+function parseTaskFixtureShape(value: unknown): TaskFixture {
+  const input = record(value, 'task fixture');
+  assertKnownFields(
+    input,
+    [
+      'adapter_id',
+      'actor_run',
+      'family',
+      'family_version',
+      'fixture_contract_version',
+      'native_task_id',
+      'peer_native_task_id',
+      'fact_id',
+      'peer_fact_id',
+      'source_record_id',
+      'subject',
+      'created',
+      'updated',
+      'completed',
+      'retract',
+      'partial',
+      'collection_omit',
+      'runtime_semantic_contract_version',
+      'session',
+      'source_instance_key',
+    ],
+    'task fixture',
+  );
+  if (input.family !== TASK_FAMILY || input.family_version !== TASK_FAMILY_VERSION) {
+    throw new ContractValidationError('task fixture family must be runtime.task@1');
+  }
+  const created = parseTaskSlot(input.created, 'created', 'created', 'upsert', 'complete', null);
+  const updated = parseTaskSlot(input.updated, 'updated', 'updated', 'upsert', 'complete', null);
+  const completed = parseTaskSlot(input.completed, 'completed', 'completed', 'upsert', 'complete', null);
+  const retract = parseTaskSlot(input.retract, 'retract', 'created', 'retract', 'complete', null);
+  const partial = parseTaskSlot(input.partial, 'partial', 'created', 'upsert', 'partial', null);
+  const collectionOmit = parseTaskSlot(input.collection_omit, 'collection_omit', 'created', 'upsert', 'complete', [
+    'fixture-task-2',
+  ]);
+  if (
+    created.completeness !== 'complete' ||
+    collectionOmit.completeness !== 'complete' ||
+    partial.completeness !== 'partial'
+  ) {
+    throw new ContractValidationError('task completeness does not match its fixture slot');
+  }
+  return {
+    adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
+    actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
+    family: TASK_FAMILY,
+    family_version: TASK_FAMILY_VERSION,
+    fixture_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    native_task_id: boundedText(input.native_task_id, 'native_task_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    peer_native_task_id: boundedText(input.peer_native_task_id, 'peer_native_task_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    fact_id: parseOpaqueContractReference(input.fact_id, 'task fact id'),
+    peer_fact_id: parseOpaqueContractReference(input.peer_fact_id, 'peer task fact id'),
+    source_record_id: parseOpaqueContractReference(input.source_record_id, 'task source record id'),
+    subject: boundedText(input.subject, 'subject', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    created,
+    updated,
+    completed,
+    retract,
+    partial,
+    collection_omit: collectionOmit,
+    runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    session: parseOpaqueContractReference(input.session, 'session'),
+    source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
+  };
+}
+
+export function parseTaskFixture(value: unknown, expectedContextInput: unknown): TaskFixture {
+  const expected = parseTaskFixtureShape(expectedContextInput);
+  const parsed = parseTaskFixtureShape(value);
+  if (parsed.fact_id !== expected.fact_id || parsed.peer_fact_id !== expected.peer_fact_id) {
+    throw new ContractValidationError('task identity does not match the caller-held revision identity');
+  }
+  bindSlotIdentity('created', parsed.created, expected.created);
+  bindSlotIdentity('updated', parsed.updated, expected.updated);
+  bindSlotIdentity('completed', parsed.completed, expected.completed);
+  bindSlotIdentity('retract', parsed.retract, expected.retract);
+  bindSlotIdentity('partial', parsed.partial, expected.partial);
+  bindSlotIdentity('collection_omit', parsed.collection_omit, expected.collection_omit);
+  return parsed;
+}
+
+export function parseRfc012cTaskV1Json(json: string, expectedContextInput: unknown): TaskFixture {
+  return parseTaskFixture(preflightSemanticFixtureJson(json), expectedContextInput);
 }

@@ -40,6 +40,7 @@ pub use facts::{
     UsageBucketsV2, UsageFact, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
     UsageScope, UsageValueAuthority, UsageValueProvenance, UserInputKind, UserInputLifecycleState,
     UserInputOperation, UserInputOption, UserInputQuestion, UserInputRequestRevisionFact,
+    MessageRevisionFact, MessageRevisionRole, TaskLifecycleState, TaskRevisionFact,
     ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
     WorkflowStatus,
 };

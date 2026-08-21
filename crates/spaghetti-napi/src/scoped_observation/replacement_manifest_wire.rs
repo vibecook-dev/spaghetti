@@ -17,7 +17,8 @@ use crate::observation_contract::ObservationContractSelection;
 use super::{
     selected_replacement_coverage_completeness, ScopedReplacementFamilyManifest,
     ScopedReplacementRepresentation, RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
-    RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION, RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+    RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION, RUNTIME_MESSAGE_FACT_FAMILY_CONTRACT_VERSION,
+    RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION, RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
     RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION, SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
     SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
 };
@@ -53,6 +54,8 @@ enum ScopedReplacementRepresentationWire {
     RevisionedEntityCurrent,
     UsageLatestContributionPerResponse,
     CorrelatedLifecycleCurrent,
+    CurrentGenerationLog,
+    OwnedSetSnapshotCurrent,
 }
 
 impl From<ScopedReplacementRepresentation> for ScopedReplacementRepresentationWire {
@@ -66,6 +69,10 @@ impl From<ScopedReplacementRepresentation> for ScopedReplacementRepresentationWi
             }
             ScopedReplacementRepresentation::CorrelatedLifecycleCurrent => {
                 Self::CorrelatedLifecycleCurrent
+            }
+            ScopedReplacementRepresentation::CurrentGenerationLog => Self::CurrentGenerationLog,
+            ScopedReplacementRepresentation::OwnedSetSnapshotCurrent => {
+                Self::OwnedSetSnapshotCurrent
             }
         }
     }
@@ -341,6 +348,14 @@ fn family_contract(
         "runtime.actor-run" => Ok((
             RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
             ScopedReplacementRepresentationWire::RevisionedEntityCurrent,
+        )),
+        "runtime.message" => Ok((
+            RUNTIME_MESSAGE_FACT_FAMILY_CONTRACT_VERSION,
+            ScopedReplacementRepresentationWire::CurrentGenerationLog,
+        )),
+        "runtime.task" => Ok((
+            RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION,
+            ScopedReplacementRepresentationWire::OwnedSetSnapshotCurrent,
         )),
         "runtime.usage-v2" => Ok((
             RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
