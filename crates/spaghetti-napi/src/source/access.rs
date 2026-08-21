@@ -864,6 +864,19 @@ impl ScopeAccessReservation {
         render_confined_locator(&self.declaration.locator, identity_inputs)
     }
 
+    /// Render one fixed sibling or evidence-referenced observation object
+    /// after the exact declared identity inputs have minted this reservation's
+    /// opaque token. The result remains relative to the selected host root and
+    /// does not itself authorize or perform a native read.
+    pub(crate) fn render_related_object_locator(
+        &self,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+    ) -> Result<PathBuf, AccessBudgetError> {
+        validate_related_object_locator_template(&self.declaration)?;
+        self.validate_locator_identity_binding(identity_inputs)?;
+        render_confined_locator(&self.declaration.locator, identity_inputs)
+    }
+
     fn validate_locator_identity_binding(
         &self,
         identity_inputs: &[ScopeIdentityInput<'_>],
@@ -925,6 +938,18 @@ fn validate_child_directory_locator_template(
     )
 }
 
+fn validate_related_object_locator_template(
+    declaration: &ScopeRelationDeclaration,
+) -> Result<(), AccessBudgetError> {
+    if !matches!(
+        declaration.primitive,
+        ScopeRelationPrimitive::SiblingObject | ScopeRelationPrimitive::ReferencedObjectFromField
+    ) {
+        return Err(invalid_locator_template());
+    }
+    validate_locator_identity_placeholders(declaration)
+}
+
 fn validate_bound_locator_template(
     declaration: &ScopeRelationDeclaration,
     expected_primitive: ScopeRelationPrimitive,
@@ -932,6 +957,12 @@ fn validate_bound_locator_template(
     if declaration.primitive != expected_primitive {
         return Err(invalid_locator_template());
     }
+    validate_locator_identity_placeholders(declaration)
+}
+
+fn validate_locator_identity_placeholders(
+    declaration: &ScopeRelationDeclaration,
+) -> Result<(), AccessBudgetError> {
     let placeholders = locator_placeholders(&declaration.locator)?;
     if placeholders.is_empty()
         || placeholders.iter().any(|(_, _, name)| {
@@ -1665,6 +1696,46 @@ mod tests {
         .render_child_directory_locator(&identity)
     }
 
+    fn related_object_scope_plan(
+        primitive: ScopeRelationPrimitive,
+        locator: &str,
+        identity_inputs: &[&str],
+    ) -> ScopeAccessPlan {
+        let mut manifest = grok_scope_manifest();
+        let relation = manifest.programs[0]
+            .relations
+            .iter_mut()
+            .find(|relation| relation.relation_id == "summary-sidecar")
+            .unwrap();
+        relation.relation_id = "related-object".to_owned();
+        relation.primitive = primitive;
+        relation.locator = locator.to_owned();
+        relation.identity_inputs = identity_inputs
+            .iter()
+            .map(|value| (*value).to_owned())
+            .collect();
+        relation.bounds.max_fan_out = 32;
+        relation.bounds.max_objects = 32;
+        ScopeAccessPlan::for_program(&manifest, "observe-session-sidecars").unwrap()
+    }
+
+    fn reserve_related_object<'a>(
+        plan: &'a ScopeAccessPlan,
+        identity_inputs: &'a [ScopeIdentityInput<'a>],
+    ) -> ScopeAccessReservation {
+        plan.reserve(ScopeAccessRequest {
+            relation_id: "related-object",
+            operation: AccessOperation::ObjectRead,
+            phase: AccessPhase::Revalidation,
+            parent_token: None,
+            identity_inputs,
+            depth: 1,
+            max_bytes: 1,
+            max_rows: 0,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn child_directory_locator_is_confined_and_bound_to_the_reserved_identity() {
         assert_eq!(
@@ -1755,6 +1826,104 @@ mod tests {
             .unwrap();
         assert!(artifact_reservation
             .render_child_directory_locator(&artifact_identity)
+            .is_err());
+    }
+
+    #[test]
+    fn related_object_locators_are_confined_and_bound_to_the_reserved_identity() {
+        let sibling_plan = related_object_scope_plan(
+            ScopeRelationPrimitive::SiblingObject,
+            "{actor-transcript}.meta.json",
+            &["actor-transcript"],
+        );
+        let sibling_identity = [ScopeIdentityInput {
+            name: "actor-transcript",
+            value: b"agent-worker",
+        }];
+        assert_eq!(
+            reserve_related_object(&sibling_plan, &sibling_identity)
+                .render_related_object_locator(&sibling_identity)
+                .unwrap(),
+            PathBuf::from("agent-worker.meta.json")
+        );
+
+        let reference_plan = related_object_scope_plan(
+            ScopeRelationPrimitive::ReferencedObjectFromField,
+            "{team}/inboxes/{recipient}.json",
+            &["team", "recipient"],
+        );
+        let reference_identity = [
+            ScopeIdentityInput {
+                name: "team",
+                value: b"alpha",
+            },
+            ScopeIdentityInput {
+                name: "recipient",
+                value: b"team-lead",
+            },
+        ];
+        let reservation = reserve_related_object(&reference_plan, &reference_identity);
+        assert_eq!(
+            reservation
+                .render_related_object_locator(&reference_identity)
+                .unwrap(),
+            PathBuf::from("alpha/inboxes/team-lead.json")
+        );
+
+        let substituted_identity = [
+            ScopeIdentityInput {
+                name: "team",
+                value: b"other-team",
+            },
+            reference_identity[1],
+        ];
+        assert!(reservation
+            .render_related_object_locator(&substituted_identity)
+            .is_err());
+
+        for invalid in [
+            b"..".as_slice(),
+            b"nested/team".as_slice(),
+            b"nested\\team".as_slice(),
+            b"line\nbreak".as_slice(),
+            b"\xff".as_slice(),
+        ] {
+            let identity = [
+                ScopeIdentityInput {
+                    name: "team",
+                    value: invalid,
+                },
+                reference_identity[1],
+            ];
+            assert!(reserve_related_object(&reference_plan, &identity)
+                .render_related_object_locator(&identity)
+                .is_err());
+        }
+
+        let child_plan = child_directory_scope_plan("{project-key}/{native-session-id}");
+        let child_identity = [
+            ScopeIdentityInput {
+                name: "project-key",
+                value: b"project-a",
+            },
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"session-7",
+            },
+        ];
+        assert!(child_plan
+            .reserve(ScopeAccessRequest {
+                relation_id: "descendant-transcripts",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Revalidation,
+                parent_token: None,
+                identity_inputs: &child_identity,
+                depth: 1,
+                max_bytes: 1,
+                max_rows: 0,
+            })
+            .unwrap()
+            .render_related_object_locator(&child_identity)
             .is_err());
     }
 
