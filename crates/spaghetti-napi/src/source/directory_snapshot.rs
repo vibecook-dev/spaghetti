@@ -1,6 +1,12 @@
 use std::collections::BTreeMap;
+#[cfg(unix)]
+use std::fs::File;
 use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
+#[cfg(unix)]
+use super::file::open_confined_directory;
 use super::file::{confined_relative_path_key, file_stamp, stamp_revision, FileStamp};
 use super::model::{io_error, CursorReader};
 use super::{FileIdentity, Revision, SourceCursor, SourceDriverError};
@@ -250,6 +256,19 @@ pub struct DirectorySnapshot {
     config: DirectorySnapshotConfig,
 }
 
+#[cfg(unix)]
+struct ConfinedDirectoryProof {
+    relative_path: PathBuf,
+    handle: File,
+    stamp: FileStamp,
+}
+
+#[cfg(unix)]
+struct ConfinedDirectoryEnumeration {
+    entries: BTreeMap<Vec<u8>, DirectoryEntryState>,
+    proofs: Vec<ConfinedDirectoryProof>,
+}
+
 impl DirectorySnapshot {
     pub fn new(config: DirectorySnapshotConfig) -> Result<Self, SourceDriverError> {
         config.validate()?;
@@ -284,14 +303,8 @@ impl DirectorySnapshot {
             )));
         }
         let root_before = file_stamp(root, &root_metadata);
-        let root_moved = previous.is_some_and(|old| old.root_identity != root_before.identity);
-        let generation = match previous {
-            Some(old) if root_moved => next_generation(old.generation)?,
-            Some(old) => old.generation,
-            None => 1,
-        };
 
-        let mut entries = match self.enumerate(root, selector) {
+        let entries = match self.enumerate(root, selector) {
             Ok(entries) => entries,
             Err(SourceDriverError::Io { source, .. })
                 if source.kind() == std::io::ErrorKind::NotFound =>
@@ -300,7 +313,6 @@ impl DirectorySnapshot {
             }
             Err(error) => return Err(error),
         };
-        assign_entry_generations(&mut entries, previous, root_moved)?;
 
         let root_after_metadata = match std::fs::symlink_metadata(root) {
             Ok(metadata) => metadata,
@@ -314,18 +326,77 @@ impl DirectorySnapshot {
             return Ok(DirectoryScan::RetryTransient);
         }
 
-        let revision = snapshot_revision(&root_before.identity, &entries);
-        let changes = diff_entries(previous, &entries, root_moved);
-        Ok(DirectoryScan::Snapshot {
-            changes,
-            checkpoint: DirectoryCheckpoint {
-                root_identity: root_before.identity,
-                generation,
-                revision,
-                entries,
-            },
-            root_moved,
-        })
+        finish_directory_snapshot(root_before, entries, previous)
+    }
+
+    /// Enumerate one already-authorized relative directory from directory
+    /// descriptors rather than a re-resolved joined path. Every source-owned
+    /// component and discovered descendant is opened with no-follow semantics;
+    /// unsupported entry kinds fail closed instead of disappearing from a
+    /// purportedly complete membership snapshot.
+    pub(crate) fn scan_confined<S>(
+        &self,
+        access_root: &Path,
+        relative_root: &Path,
+        previous: Option<&DirectoryCheckpoint>,
+        selector: &S,
+    ) -> Result<DirectoryScan, SourceDriverError>
+    where
+        S: DirectorySelector + ?Sized,
+    {
+        #[cfg(unix)]
+        {
+            let Some(root_handle) = open_confined_directory(access_root, relative_root)? else {
+                return Ok(DirectoryScan::Unavailable);
+            };
+            let display_root = access_root.join(relative_root);
+            let root_metadata = root_handle.metadata().map_err(|error| {
+                io_error(
+                    "reading confined directory metadata for",
+                    &display_root,
+                    error,
+                )
+            })?;
+            if !root_metadata.is_dir() {
+                return Err(SourceDriverError::PathEscape(
+                    display_root.to_string_lossy().into_owned(),
+                ));
+            }
+            let root_before = file_stamp(&display_root, &root_metadata);
+            let enumeration =
+                match self.enumerate_confined(access_root, relative_root, root_handle, selector) {
+                    Ok(value) => value,
+                    Err(SourceDriverError::Unstable(_)) => {
+                        return Ok(DirectoryScan::RetryTransient);
+                    }
+                    Err(SourceDriverError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        return Ok(DirectoryScan::RetryTransient);
+                    }
+                    Err(error) => return Err(error),
+                };
+            if !self.revalidate_confined_directories(access_root, &enumeration.proofs)? {
+                return Ok(DirectoryScan::RetryTransient);
+            }
+            if enumeration
+                .proofs
+                .first()
+                .is_none_or(|proof| proof.stamp != root_before)
+            {
+                return Ok(DirectoryScan::RetryTransient);
+            }
+            finish_directory_snapshot(root_before, enumeration.entries, previous)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = (access_root, relative_root, previous, selector);
+            Err(SourceDriverError::InvalidConfig(
+                "descriptor-confined directory snapshots are unavailable on this platform"
+                    .to_string(),
+            ))
+        }
     }
 
     fn enumerate<S>(
@@ -427,6 +498,274 @@ impl DirectorySnapshot {
             }
         }
         Ok(entries)
+    }
+
+    #[cfg(unix)]
+    fn enumerate_confined<S>(
+        &self,
+        access_root: &Path,
+        relative_root: &Path,
+        root_handle: File,
+        selector: &S,
+    ) -> Result<ConfinedDirectoryEnumeration, SourceDriverError>
+    where
+        S: DirectorySelector + ?Sized,
+    {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        use rustix::fs::{statat, AtFlags, Dir, FileType};
+
+        let mut entries = BTreeMap::new();
+        let mut proofs = Vec::new();
+        let mut pending = vec![(root_handle, PathBuf::new(), 0_usize)];
+        let mut enumerated_total = 0_usize;
+        while let Some((directory_handle, directory_relative, depth)) = pending.pop() {
+            let access_relative = relative_root.join(&directory_relative);
+            let display_directory = access_root.join(&access_relative);
+            let directory_metadata = directory_handle.metadata().map_err(|error| {
+                io_error(
+                    "reading confined directory metadata for",
+                    &display_directory,
+                    error,
+                )
+            })?;
+            if !directory_metadata.is_dir() {
+                return Err(SourceDriverError::Unstable(
+                    "confined directory changed type during enumeration".to_string(),
+                ));
+            }
+            let directory_stamp = file_stamp(&display_directory, &directory_metadata);
+            let directory_stream = Dir::read_from(&directory_handle).map_err(|error| {
+                io_error(
+                    "opening confined directory stream for",
+                    &display_directory,
+                    error.into(),
+                )
+            })?;
+            let visible_entries = directory_stream.filter_map(|entry| match entry {
+                Ok(entry) if matches!(entry.file_name().to_bytes(), b"." | b"..") => None,
+                other => Some(other),
+            });
+            for (enumerated_in_directory, entry_result) in visible_entries.enumerate() {
+                let entry = entry_result.map_err(|error| {
+                    io_error(
+                        "enumerating confined directory",
+                        &display_directory,
+                        error.into(),
+                    )
+                })?;
+                if enumerated_in_directory == self.config.max_entries_per_directory {
+                    return Err(SourceDriverError::LimitExceeded(format!(
+                        "directory snapshot exceeded {} entries in one directory",
+                        self.config.max_entries_per_directory
+                    )));
+                }
+                if enumerated_total == self.config.max_entries {
+                    return Err(SourceDriverError::LimitExceeded(format!(
+                        "confined directory snapshot exceeded {} enumerated entries",
+                        self.config.max_entries
+                    )));
+                }
+                enumerated_total += 1;
+
+                let name = OsStr::from_bytes(entry.file_name().to_bytes());
+                let relative_path = directory_relative.join(name);
+                let access_relative_path = relative_root.join(&relative_path);
+                let display_path = access_root.join(&access_relative_path);
+                let stat = statat(
+                    &directory_handle,
+                    entry.file_name(),
+                    AtFlags::SYMLINK_NOFOLLOW,
+                )
+                .map_err(|error| confined_entry_stat_error(&display_path, error))?;
+                let native_kind = FileType::from_raw_mode(stat.st_mode);
+                let kind = if native_kind.is_file() {
+                    DirectoryEntryKind::File
+                } else if native_kind.is_dir() {
+                    DirectoryEntryKind::Directory
+                } else if native_kind.is_symlink() {
+                    return Err(SourceDriverError::PathEscape(
+                        display_path.to_string_lossy().into_owned(),
+                    ));
+                } else {
+                    return Err(SourceDriverError::InvalidConfig(
+                        "confined directory contains an unsupported entry type".to_string(),
+                    ));
+                };
+                let selection = selector.select(&relative_path, kind);
+                if selection == DirectorySelection::Ignore {
+                    continue;
+                }
+                if selection.includes() && entries.len() == self.config.max_entries {
+                    return Err(SourceDriverError::LimitExceeded(format!(
+                        "directory snapshot exceeded {} entries",
+                        self.config.max_entries
+                    )));
+                }
+
+                let child_handle = open_confined_child_entry(
+                    &directory_handle,
+                    entry.file_name(),
+                    kind,
+                    &display_path,
+                )?;
+                let metadata = child_handle.metadata().map_err(|error| {
+                    io_error("reading confined entry metadata for", &display_path, error)
+                })?;
+                let same_kind = match kind {
+                    DirectoryEntryKind::File => metadata.is_file(),
+                    DirectoryEntryKind::Directory => metadata.is_dir(),
+                };
+                if !same_kind {
+                    return Err(SourceDriverError::Unstable(
+                        "confined directory entry changed type during enumeration".to_string(),
+                    ));
+                }
+                let stamp = file_stamp(&display_path, &metadata);
+                if selection.includes() {
+                    let path_key = confined_relative_path_key(&relative_path)?;
+                    let revision = entry_revision(kind, &stamp);
+                    let state = DirectoryEntryState {
+                        path_key: path_key.clone(),
+                        display_path: relative_path.to_string_lossy().into_owned(),
+                        kind,
+                        identity: stamp.identity.clone(),
+                        revision,
+                        size_bytes: stamp.len,
+                        modified_ns: stamp.modified_ns,
+                        generation: 1,
+                    };
+                    if entries.insert(path_key, state).is_some() {
+                        return Err(SourceDriverError::Unstable(
+                            "confined directory repeated one path identity".to_string(),
+                        ));
+                    }
+                }
+                if kind == DirectoryEntryKind::Directory
+                    && selection.recurses()
+                    && depth < self.config.max_depth
+                {
+                    pending.push((child_handle, relative_path, depth + 1));
+                }
+            }
+            proofs.push(ConfinedDirectoryProof {
+                relative_path: access_relative,
+                handle: directory_handle,
+                stamp: directory_stamp,
+            });
+        }
+        Ok(ConfinedDirectoryEnumeration { entries, proofs })
+    }
+
+    #[cfg(unix)]
+    fn revalidate_confined_directories(
+        &self,
+        access_root: &Path,
+        proofs: &[ConfinedDirectoryProof],
+    ) -> Result<bool, SourceDriverError> {
+        for proof in proofs {
+            let display_path = access_root.join(&proof.relative_path);
+            let handle_metadata = proof.handle.metadata().map_err(|error| {
+                io_error(
+                    "rechecking confined directory handle for",
+                    &display_path,
+                    error,
+                )
+            })?;
+            if file_stamp(&display_path, &handle_metadata) != proof.stamp {
+                return Ok(false);
+            }
+            let Some(reopened) = open_confined_directory(access_root, &proof.relative_path)? else {
+                return Ok(false);
+            };
+            let reopened_metadata = reopened.metadata().map_err(|error| {
+                io_error(
+                    "rechecking confined directory path for",
+                    &display_path,
+                    error,
+                )
+            })?;
+            if file_stamp(&display_path, &reopened_metadata) != proof.stamp {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn finish_directory_snapshot(
+    root: FileStamp,
+    mut entries: BTreeMap<Vec<u8>, DirectoryEntryState>,
+    previous: Option<&DirectoryCheckpoint>,
+) -> Result<DirectoryScan, SourceDriverError> {
+    let root_moved = previous.is_some_and(|old| old.root_identity != root.identity);
+    let generation = match previous {
+        Some(old) if root_moved => next_generation(old.generation)?,
+        Some(old) => old.generation,
+        None => 1,
+    };
+    assign_entry_generations(&mut entries, previous, root_moved)?;
+    let revision = snapshot_revision(&root.identity, &entries);
+    let changes = diff_entries(previous, &entries, root_moved);
+    Ok(DirectoryScan::Snapshot {
+        changes,
+        checkpoint: DirectoryCheckpoint {
+            root_identity: root.identity,
+            generation,
+            revision,
+            entries,
+        },
+        root_moved,
+    })
+}
+
+#[cfg(unix)]
+fn confined_entry_stat_error(path: &Path, error: rustix::io::Errno) -> SourceDriverError {
+    if error == rustix::io::Errno::NOENT {
+        return SourceDriverError::Unstable(
+            "confined directory entry disappeared during enumeration".to_string(),
+        );
+    }
+    io_error(
+        "reading confined entry type for",
+        path,
+        std::io::Error::from(error),
+    )
+}
+
+#[cfg(unix)]
+fn open_confined_child_entry(
+    parent: &File,
+    name: &std::ffi::CStr,
+    kind: DirectoryEntryKind,
+    path: &Path,
+) -> Result<File, SourceDriverError> {
+    use rustix::fs::{openat, Mode, OFlags};
+
+    let flags = OFlags::RDONLY
+        | OFlags::CLOEXEC
+        | OFlags::NOFOLLOW
+        | OFlags::NONBLOCK
+        | match kind {
+            DirectoryEntryKind::File => OFlags::empty(),
+            DirectoryEntryKind::Directory => OFlags::DIRECTORY,
+        };
+    match openat(parent, name, flags, Mode::empty()) {
+        Ok(handle) => Ok(File::from(handle)),
+        Err(error) if error == rustix::io::Errno::NOENT || error == rustix::io::Errno::NOTDIR => {
+            Err(SourceDriverError::Unstable(
+                "confined directory entry changed during enumeration".to_string(),
+            ))
+        }
+        Err(error) if error == rustix::io::Errno::LOOP => Err(SourceDriverError::PathEscape(
+            path.to_string_lossy().into_owned(),
+        )),
+        Err(error) => Err(io_error(
+            "opening confined directory entry",
+            path,
+            std::io::Error::from(error),
+        )),
     }
 }
 
@@ -622,6 +961,7 @@ fn next_generation(current: u64) -> Result<u64, SourceDriverError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
 
     use tempfile::TempDir;
@@ -637,6 +977,13 @@ mod tests {
                 DirectorySelection::Include
             }
             DirectoryEntryKind::File => DirectorySelection::Ignore,
+        }
+    }
+
+    fn all_entries(_relative: &Path, kind: DirectoryEntryKind) -> DirectorySelection {
+        match kind {
+            DirectoryEntryKind::Directory => DirectorySelection::IncludeAndRecurse,
+            DirectoryEntryKind::File => DirectorySelection::Include,
         }
     }
 
@@ -971,5 +1318,134 @@ mod tests {
             assert!(matches!(error, SourceDriverError::InvalidConfig(_)));
             assert!(error.to_string().contains("max_entries_per_directory"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_snapshot_enumerates_from_the_exact_no_follow_root() {
+        let approved = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("one.json"), b"1").unwrap();
+        std::fs::write(root.join("nested/two.json"), b"2").unwrap();
+        let config = DirectorySnapshotConfig {
+            max_entries: 3,
+            max_entries_per_directory: 2,
+            max_depth: 1,
+        };
+        let (_, checkpoint, root_moved) = snapshot(
+            DirectorySnapshot::new(config.clone())
+                .unwrap()
+                .scan_confined(approved.path(), relative_root, None, &all_entries)
+                .unwrap(),
+        );
+        assert!(!root_moved);
+        let paths = checkpoint
+            .entries
+            .values()
+            .map(|entry| entry.display_path.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            paths,
+            BTreeSet::from(["nested", "nested/two.json", "one.json"])
+        );
+        assert_eq!(
+            DirectoryCheckpoint::decode_for_config(&checkpoint.encode(), &config).unwrap(),
+            checkpoint
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_snapshot_rejects_symlink_entries_and_locator_components() {
+        use std::os::unix::fs::symlink;
+
+        let approved = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(outside.path().join("secret.json"), b"secret").unwrap();
+        symlink(outside.path().join("secret.json"), root.join("linked.json")).unwrap();
+        let driver = DirectorySnapshot::new(DirectorySnapshotConfig {
+            max_entries: 4,
+            max_entries_per_directory: 4,
+            max_depth: 1,
+        })
+        .unwrap();
+        assert!(matches!(
+            driver.scan_confined(approved.path(), relative_root, None, &all_entries),
+            Err(SourceDriverError::PathEscape(_))
+        ));
+
+        std::fs::remove_file(root.join("linked.json")).unwrap();
+        std::fs::create_dir_all(outside.path().join("nested")).unwrap();
+        symlink(outside.path(), approved.path().join("redirect")).unwrap();
+        assert!(matches!(
+            driver.scan_confined(
+                approved.path(),
+                Path::new("redirect/nested"),
+                None,
+                &all_entries,
+            ),
+            Err(SourceDriverError::PathEscape(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_snapshot_revalidates_each_enumerated_directory() {
+        use std::cell::Cell;
+
+        let approved = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("nested/seed.json"), b"seed").unwrap();
+        let mutated = Cell::new(false);
+        let selector = |relative: &Path, kind| {
+            if relative == Path::new("nested/seed.json") && !mutated.replace(true) {
+                std::fs::write(root.join("nested/raced.json"), b"raced").unwrap();
+            }
+            all_entries(relative, kind)
+        };
+        let scan = DirectorySnapshot::new(DirectorySnapshotConfig {
+            max_entries: 4,
+            max_entries_per_directory: 2,
+            max_depth: 1,
+        })
+        .unwrap()
+        .scan_confined(approved.path(), relative_root, None, &selector)
+        .unwrap();
+        assert!(mutated.get());
+        assert_eq!(scan, DirectoryScan::RetryTransient);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_snapshot_bounds_the_total_enumerated_set_before_selection() {
+        let approved = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        for directory in ["left", "right"] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+            std::fs::write(root.join(directory).join("one.txt"), b"1").unwrap();
+            std::fs::write(root.join(directory).join("two.txt"), b"2").unwrap();
+        }
+        let selector = |_relative: &Path, kind| match kind {
+            DirectoryEntryKind::Directory => DirectorySelection::Recurse,
+            DirectoryEntryKind::File => DirectorySelection::Ignore,
+        };
+        let error = DirectorySnapshot::new(DirectorySnapshotConfig {
+            max_entries: 3,
+            max_entries_per_directory: 2,
+            max_depth: 1,
+        })
+        .unwrap()
+        .scan_confined(approved.path(), relative_root, None, &selector)
+        .unwrap_err();
+        assert!(matches!(error, SourceDriverError::LimitExceeded(_)));
+        assert!(error.to_string().contains("3 enumerated entries"));
     }
 }

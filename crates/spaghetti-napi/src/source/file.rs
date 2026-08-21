@@ -267,6 +267,57 @@ pub(crate) fn open_confined_file(
     }
 }
 
+/// Open a source directory relative to an already-approved root without
+/// following symlinks in any source-owned path component. The returned handle
+/// is suitable for descriptor-relative enumeration on POSIX hosts; callers
+/// must not re-resolve the joined path for native access.
+pub(crate) fn open_confined_directory(
+    root: &Path,
+    relative_path: &Path,
+) -> Result<Option<File>, SourceDriverError> {
+    confined_relative_path_key(relative_path)?;
+    let components = relative_path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(PathBuf::from(value)),
+            Component::CurDir => None,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if components.is_empty() {
+        return Err(SourceDriverError::PathEscape(
+            relative_path.to_string_lossy().into_owned(),
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use rustix::fs::{openat, Mode, OFlags, CWD};
+
+        let directory_flags =
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+        let mut directory = match openat(CWD, root, directory_flags, Mode::empty()) {
+            Ok(directory) => directory,
+            Err(error) => return classify_confined_open_error(root, relative_path, error),
+        };
+        for component in components {
+            directory = match openat(&directory, component, directory_flags, Mode::empty()) {
+                Ok(directory) => directory,
+                Err(error) => return classify_confined_open_error(root, relative_path, error),
+            };
+        }
+        Ok(Some(File::from(directory)))
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = (root, components);
+        Err(SourceDriverError::InvalidConfig(
+            "descriptor-confined directory access is unavailable on this platform".to_string(),
+        ))
+    }
+}
+
 #[cfg(unix)]
 fn classify_confined_open_error(
     root: &Path,
@@ -439,6 +490,39 @@ mod tests {
         symlink(&outside, root.join("nested")).unwrap();
         assert!(matches!(
             open_confined_file(&root, Path::new("nested/secret")),
+            Err(SourceDriverError::PathEscape(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_directory_open_is_descriptor_relative_and_no_follow() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(root.join("project/session/children")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let directory = open_confined_directory(&root, Path::new("project/session/children"))
+            .unwrap()
+            .unwrap();
+        assert!(directory.metadata().unwrap().is_dir());
+        assert!(open_confined_directory(&root, Path::new("missing"))
+            .unwrap()
+            .is_none());
+
+        symlink(&outside, root.join("final-link")).unwrap();
+        assert!(matches!(
+            open_confined_directory(&root, Path::new("final-link")),
+            Err(SourceDriverError::PathEscape(_))
+        ));
+
+        std::fs::create_dir_all(outside.join("nested")).unwrap();
+        symlink(&outside, root.join("redirect")).unwrap();
+        assert!(matches!(
+            open_confined_directory(&root, Path::new("redirect/nested")),
             Err(SourceDriverError::PathEscape(_))
         ));
     }
