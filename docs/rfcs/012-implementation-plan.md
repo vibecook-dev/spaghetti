@@ -2741,6 +2741,25 @@ adapter bootstrap or dependencies, decode a record, construct child lifecycle
 state, admit projection, install a watcher, relax the promotion guard, or
 change Candidate support.
 
+Commit `4503e3b` invokes object-context bootstrap for the first time, but only
+through a new explicit dependency-free adapter opt-in. The trait default fails
+closed, Claude opts in by reusing its pure path-to-context parser, and the
+common decode boundary contains adapter panics without retaining or returning
+their payload. Before invoking that boundary, the scoped owner revalidates the
+exact retained source instance, declaration-owned `ReplaceDocument` stream,
+selector, descriptor stream/object coordinates, durable semantic source, and
+framing version. Success consumes the member content into a nonconstructible
+decode input that retains the exact adapter, source instance, stream,
+descriptor, context, content revision, and bytes. An invalid binding or adapter
+failure returns only a bounded decode-failure class while preserving the same
+content for retry; custom Debug implementations expose counts and presence
+flags rather than paths, native identifiers, context bytes, or payloads. Tests
+prove default denial, Claude opt-in parity at every declared coordinate, panic
+redaction, exact success binding, and path-free retry retention. No record has
+yet entered the declaration-owned `ReplaceDocument` driver or decoder, no
+child lifecycle state or projection admission exists, and watcher, public API,
+promotion-guard, and Candidate status remain unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
