@@ -344,7 +344,7 @@ fn merge_consumes_typed_usage_and_interaction_values_without_native_payloads() {
 
 #[test]
 fn engine_query_service_is_the_durable_live_merge_consumer() {
-    use crate::engine::{EngineError, EngineOptions, SpaghettiEngineCore};
+    use crate::engine::{EngineOptions, SpaghettiEngineCore};
 
     let fixture = runtime_fixture();
     let (baseline, _, _) = coverage_sets();
@@ -362,10 +362,13 @@ fn engine_query_service_is_the_durable_live_merge_consumer() {
         defer_query_structures: true,
     };
     let bootstrapping = SpaghettiEngineCore::open(options.clone()).unwrap();
-    assert!(matches!(
-        bootstrapping.merge_runtime_usage_live(&[], &baseline, &events, &partial),
-        Err(EngineError::BootstrapInProgress)
-    ));
+    let bootstrapping_merged = bootstrapping
+        .merge_runtime_usage_live(&[], &baseline, &events, &partial)
+        .expect("typed merge is not gated on FTS bootstrap");
+    assert_eq!(
+        bootstrapping_merged.overlay,
+        OverlayDisposition::Retained { stale: true }
+    );
     bootstrapping.shutdown().unwrap();
 
     options.defer_query_structures = false;

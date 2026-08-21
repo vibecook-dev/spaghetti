@@ -218,7 +218,7 @@ pub enum EngineError {
     #[error("engine is shutting down or already stopped")]
     ShuttingDown,
 
-    #[error("query service is unavailable while durable bootstrap finalization is incomplete")]
+    #[error("search is unavailable until query bootstrap completes")]
     BootstrapInProgress,
 
     #[error("query was cancelled")]
@@ -564,11 +564,9 @@ impl SpaghettiEngineCore {
         let writer = WriterRuntime::start(database_path.clone())?;
         let bootstrap_active =
             options.defer_query_structures && writer.client().begin_query_bootstrap()?;
-        let queries = if bootstrap_active {
-            None
-        } else {
-            Some(QueryPool::start(database_path.clone(), query_workers)?)
-        };
+        // Catalog-first: admit the read pool while FTS bootstrap is still
+        // incomplete. Search stays BootstrapInProgress until finalization.
+        let queries = Some(QueryPool::start(database_path.clone(), query_workers)?);
         let latest_commit_seq = queries
             .as_ref()
             .map(|pool| pool.client().overview().map(|overview| overview.commit_seq))
@@ -669,7 +667,7 @@ impl SpaghettiEngineCore {
                 lifecycle.phase.as_str().to_string()
             },
             database_path: self.database_path.to_string_lossy().into_owned(),
-            accepting_queries: running && !bootstrap_active,
+            accepting_queries: running && alive_query_workers > 0,
             catalog_query_ready,
             search_available,
             writer_alive,
@@ -1019,9 +1017,8 @@ impl SpaghettiEngineCore {
 
     /// Durable usage-v2 query service plus scoped observer merge.
     ///
-    /// Requires the live query pool (fails with `BootstrapInProgress` while FTS
-    /// structures are incomplete). Consumers supply already-typed observer
-    /// events; this path never parses native JSON.
+    /// Pure overlay join on already-typed contributions. FTS bootstrap does
+    /// not gate this path; it never parses native JSON.
     pub(crate) fn merge_runtime_usage_live(
         &self,
         durable: &[runtime_semantic_merge::DurableUsageContribution],
@@ -1029,7 +1026,6 @@ impl SpaghettiEngineCore {
         observer_events: &[runtime_semantic_merge::ScopedUsageObserverEvent],
         observer_coverage: &SourceCoverageSet,
     ) -> Result<runtime_semantic_merge::DurableLiveUsageMerge, EngineError> {
-        let _ = self.query_client()?;
         runtime_semantic_merge::merge_durable_and_scoped_usage(
             durable,
             durable_coverage,
@@ -1877,10 +1873,8 @@ impl SpaghettiEngineCore {
         Ok(true)
     }
 
-    /// Rebuild deferred query structures, validate the durable database, and
-    /// only then admit the persistent read pool. This is idempotent so a host
-    /// can safely call it after every startup regardless of whether the size
-    /// gate selected bootstrap mode.
+    /// Rebuild deferred FTS structures and clear the complete-only search
+    /// gate. Catalog/history reads are already admitted. Idempotent.
     pub fn complete_query_bootstrap(&self) -> Result<Option<u64>, EngineError> {
         let (writer, supervisor_clients) = {
             let lifecycle = self.lock_lifecycle();
@@ -1917,13 +1911,9 @@ impl SpaghettiEngineCore {
         }
         let snapshot_watermark = finalization?;
         resume_result?;
-        let mut queries = QueryPool::start(self.database_path.clone(), self.query_workers)?;
-        let latest_commit_seq = queries.client().overview()?.commit_seq;
 
         let mut lifecycle = self.lock_lifecycle();
         if lifecycle.phase != LifecyclePhase::Running {
-            drop(lifecycle);
-            let _ = queries.shutdown();
             return Err(EngineError::ShuttingDown);
         }
         let runtime = lifecycle
@@ -1931,13 +1921,22 @@ impl SpaghettiEngineCore {
             .as_mut()
             .expect("running engine must own its runtime");
         if !runtime.bootstrap_active {
-            drop(lifecycle);
-            let _ = queries.shutdown();
             return Ok(snapshot_watermark);
         }
-        debug_assert!(runtime.queries.is_none());
-        runtime.queries = Some(queries);
+        if runtime.queries.is_none() {
+            runtime.queries = Some(QueryPool::start(
+                self.database_path.clone(),
+                self.query_workers,
+            )?);
+        }
         runtime.bootstrap_active = false;
+        let latest_commit_seq = runtime
+            .queries
+            .as_ref()
+            .expect("query pool admitted for catalog-first reads")
+            .client()
+            .overview()?
+            .commit_seq;
         drop(lifecycle);
         self.commit_notifications.publish(latest_commit_seq);
         Ok(snapshot_watermark)
@@ -2236,7 +2235,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_withholds_queries_until_writer_finalization() {
+    fn bootstrap_admits_catalog_queries_and_withholds_search_until_finalization() {
         let dir = tempdir().unwrap();
         let database = dir.path().join("bootstrap.db");
         let mut bootstrap_options = options(database);
@@ -2245,13 +2244,25 @@ mod tests {
 
         let status = engine.status();
         assert_eq!(status.state, "bootstrapping");
-        assert!(!status.accepting_queries);
+        assert!(status.accepting_queries);
         assert!(status.writer_alive);
-        assert_eq!(status.alive_query_workers, 0);
-        assert!(matches!(
-            engine.overview(),
-            Err(EngineError::BootstrapInProgress)
-        ));
+        assert_eq!(status.alive_query_workers, 2);
+        assert_eq!(engine.overview().unwrap().commit_seq, 0);
+        let search = engine.search_cancellable(
+            super::search_query::SearchPageRequest {
+                text: "anything".to_string(),
+                project_id: None,
+                session_id: None,
+                adapter_ids: Vec::new(),
+                roles: Vec::new(),
+                native_kinds: Vec::new(),
+                branch_kind: None,
+                cursor: None,
+                limit: 10,
+            },
+            QueryCancellationToken::default(),
+        );
+        assert!(matches!(search, Err(EngineError::BootstrapInProgress)));
 
         assert_eq!(engine.complete_query_bootstrap().unwrap(), Some(0));
         let ready = engine.status();
@@ -2283,10 +2294,8 @@ mod tests {
         let status = engine.status();
         assert!(!status.search_available);
         assert!(!status.catalog_query_ready);
-        assert!(matches!(
-            engine.overview(),
-            Err(EngineError::BootstrapInProgress)
-        ));
+        assert!(status.accepting_queries);
+        assert_eq!(engine.overview().unwrap().commit_seq, 0);
 
         engine.complete_query_bootstrap().unwrap();
         let ready = engine.progressive_host_readiness();
@@ -2296,6 +2305,89 @@ mod tests {
             !ready.catalog_query_ready,
             "empty DB has no last-complete catalog snapshot"
         );
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn rfc012_x1_emit_complete_only_ingest_trace() {
+        use std::time::Instant;
+
+        let dir = tempdir().unwrap();
+        let mut bootstrap_options = options(dir.path().join("x1-fts.db"));
+        bootstrap_options.defer_query_structures = true;
+        let started = Instant::now();
+        let engine = SpaghettiEngineCore::open(bootstrap_options).unwrap();
+        let catalog_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        assert!(engine.status().accepting_queries);
+        let _ = engine.overview().unwrap();
+        let history_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let search_request = super::search_query::SearchPageRequest {
+            text: "anything".to_string(),
+            project_id: None,
+            session_id: None,
+            adapter_ids: Vec::new(),
+            roles: Vec::new(),
+            native_kinds: Vec::new(),
+            branch_kind: None,
+            cursor: None,
+            limit: 10,
+        };
+        assert!(matches!(
+            engine.search_cancellable(search_request.clone(), QueryCancellationToken::default()),
+            Err(EngineError::BootstrapInProgress)
+        ));
+        let incomplete_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        engine.complete_query_bootstrap().unwrap();
+        assert!(!matches!(
+            engine.search_cancellable(search_request, QueryCancellationToken::default()),
+            Err(EngineError::BootstrapInProgress)
+        ));
+        let fts_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        assert!(fts_ms >= incomplete_ms);
+        let trace = serde_json::json!({
+            "source_test": "rfc012_x1_emit_complete_only_ingest_trace",
+            "complete_only_gate": "schema_meta.query_bootstrap_state",
+            "milestones": [
+                {
+                    "label": "catalog-ready",
+                    "history_complete": false,
+                    "catalog_complete": true,
+                    "fts_complete": false,
+                    "t_ms": catalog_ms
+                },
+                {
+                    "label": "history-ready",
+                    "history_complete": true,
+                    "catalog_complete": true,
+                    "fts_complete": false,
+                    "t_ms": history_ms
+                },
+                {
+                    "label": "fts-incomplete",
+                    "history_complete": true,
+                    "catalog_complete": true,
+                    "fts_complete": false,
+                    "t_ms": incomplete_ms
+                },
+                {
+                    "label": "fts-complete",
+                    "history_complete": true,
+                    "catalog_complete": true,
+                    "fts_complete": true,
+                    "t_ms": fts_ms
+                }
+            ]
+        });
+        let default_path = dir.path().join("fts-bootstrap-trace.json");
+        let path = std::env::var_os("RFC012_X1_TRACE").map_or(default_path, std::path::PathBuf::from);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let mut body = serde_json::to_vec_pretty(&trace).unwrap();
+        if !body.ends_with(b"\n") {
+            body.push(b'\n');
+        }
+        std::fs::write(&path, body).unwrap();
         engine.shutdown().unwrap();
     }
 

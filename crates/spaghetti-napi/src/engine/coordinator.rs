@@ -6192,17 +6192,62 @@ mod tests {
                     "../../scripts/rfc012_experiments/fixtures/source-record-errors.sqlite",
                 )
             });
-        // VACUUM INTO cannot replace an existing file.
         if dump.exists() {
             std::fs::remove_file(&dump).unwrap();
         }
-        let dump_str = dump.to_str().expect("RFC012_X2_DUMP must be utf-8");
-        if source.execute("VACUUM INTO ?1", [dump_str]).is_err() {
-            let escaped = dump_str.replace('\'', "''");
-            source
-                .execute_batch(&format!("VACUUM INTO '{escaped}'"))
-                .unwrap();
+        if let Some(parent) = dump.parent() {
+            std::fs::create_dir_all(parent).unwrap();
         }
+        {
+            let dest = Connection::open(&dump).unwrap();
+            dest.execute_batch(
+                r#"
+                CREATE TABLE source_instances (
+                  source_instance_id INTEGER PRIMARY KEY,
+                  adapter_id TEXT NOT NULL
+                );
+                CREATE TABLE source_streams (
+                  source_stream_id INTEGER PRIMARY KEY,
+                  source_instance_id INTEGER NOT NULL,
+                  stream_key TEXT NOT NULL
+                );
+                CREATE TABLE source_objects (
+                  source_object_id INTEGER PRIMARY KEY,
+                  source_stream_id INTEGER NOT NULL
+                );
+                CREATE TABLE source_record_errors (
+                  source_object_id INTEGER NOT NULL,
+                  generation INTEGER NOT NULL,
+                  error_class TEXT NOT NULL,
+                  first_commit_seq INTEGER NOT NULL,
+                  payload_hash BLOB NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+        }
+        source
+            .execute("ATTACH DATABASE ?1 AS dump", [dump.to_str().unwrap()])
+            .unwrap();
+        source
+            .execute_batch(
+                r#"
+                DELETE FROM dump.source_instances;
+                INSERT INTO dump.source_instances(source_instance_id, adapter_id)
+                  SELECT source_instance_id, adapter_id FROM source_instances;
+                INSERT INTO dump.source_streams(source_stream_id, source_instance_id, stream_key)
+                  SELECT source_stream_id, source_instance_id, stream_key FROM source_streams;
+                INSERT INTO dump.source_objects(source_object_id, source_stream_id)
+                  SELECT source_object_id, source_stream_id FROM source_objects;
+                INSERT INTO dump.source_record_errors(
+                  source_object_id, generation, error_class, first_commit_seq, payload_hash
+                )
+                  SELECT source_object_id, generation, error_class, first_commit_seq, payload_hash
+                    FROM source_record_errors;
+                "#,
+            )
+            .unwrap();
+        source.execute_batch("DETACH DATABASE dump;").unwrap();
 
         let dumped =
             Connection::open_with_flags(&dump, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -6212,14 +6257,15 @@ mod tests {
             })
             .unwrap();
         assert!(dump_errors >= 2);
-        let table: String = dumped
-            .query_row(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_record_errors'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(table, "source_record_errors");
+        let native_columns = dumped
+            .prepare("PRAGMA table_info(source_record_errors)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|name| name == "error_message" || name == "raw_payload")
+            .count();
+        assert_eq!(native_columns, 0);
     }
 
     #[test]

@@ -69,6 +69,16 @@ describe('watchSessionObservationShadow', () => {
     assert.deepEqual(Object.keys(tail).sort(), Object.keys(legacy).sort());
   });
 
+  test('rfc012dObserver true without observerSource is rejected', () => {
+    const dir = makeDir();
+    const file = path.join(dir, `${SESSION_ID}.jsonl`);
+    writeFileSync(file, line({ role: 'user', content: 'need-source' }));
+    assert.throws(
+      () => watchSessionObservationShadow(file, { rfc012dObserver: true, pollIntervalMs: 60_000 }),
+      /observerSource/,
+    );
+  });
+
   test('rfc012dObserver true runs the legacy tail and live observer records', async () => {
     const dir = makeDir();
     const file = path.join(dir, 'later', `${SESSION_ID}.jsonl`);

@@ -2165,7 +2165,7 @@ export interface SpaghettiEngine {
   refreshClaudeObservation(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   /** Stop Claude watch registration without disposing the engine. */
   stopClaudeObservation(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
-  /** Complete a selected cold bootstrap before admitting product queries. */
+  /** Finish complete-only FTS after catalog-first queries are already admitted. */
   completeQueryBootstrap(): Promise<SpaghettiEngineStatus>;
   cancelPendingQueries(): number;
   dispose(): Promise<SpaghettiEngineStatus>;

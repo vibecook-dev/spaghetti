@@ -1,4 +1,4 @@
-"""Read engine-produced source_record_errors from a napi dump database."""
+"""Read engine-produced source_record_errors from a privacy-safe napi dump."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ CENSUS_SQL = """
 SELECT si.adapter_id,
        ss.stream_key,
        sre.error_class,
-       sre.error_message,
        sre.source_object_id,
        sre.generation,
        sre.first_commit_seq,
@@ -35,6 +34,12 @@ def load_diagnostic_rows(path: Path) -> list[tuple]:
         }
         if "source_record_errors" not in tables:
             raise ValueError(f"{path} is not an engine dump: missing source_record_errors")
+        columns = {
+            name
+            for (name, *_) in connection.execute("PRAGMA table_info(source_record_errors)")
+        }
+        if "error_message" in columns or "raw_payload" in columns:
+            raise ValueError(f"{path} is not privacy-safe: native diagnostic payload columns present")
         return list(connection.execute(CENSUS_SQL))
     finally:
         connection.close()

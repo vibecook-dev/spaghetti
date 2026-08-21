@@ -2611,15 +2611,8 @@ fn open_reader(database_path: &PathBuf) -> Result<Connection, EngineError> {
             operation: "configure query mmap window",
             detail: error.to_string(),
         })?;
-    if schema::query_bootstrap_state(&connection)
-        .map_err(|error| EngineError::Sqlite {
-            operation: "read durable query bootstrap state",
-            detail: error.to_string(),
-        })?
-        .is_some()
-    {
-        return Err(EngineError::BootstrapInProgress);
-    }
+    // Catalog/history reads stay available while FTS bootstrap is incomplete.
+    // Search remains complete-only in search_query::read_search_page.
     connection.set_prepared_statement_cache_capacity(128);
     Ok(connection)
 }

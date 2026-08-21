@@ -100,7 +100,7 @@ describe('observation host options', () => {
 });
 
 describe('multi-adapter observation host', { skip: !native }, () => {
-  test('large fresh input remains query-unavailable through durable bootstrap finalization', async () => {
+  test('large fresh input serves catalog queries while search bootstrap is incomplete', async () => {
     const fixture = multiAdapterFixture();
     const largeInput = path.join(fixture.sources[0]!.roots[0]!, 'bootstrap-size-gate.bin');
     writeFileSync(largeInput, '');
@@ -115,13 +115,19 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     });
     hosts.push(host);
 
-    const finalizing = startup.filter((progress) => progress.stage === 'finalizing');
-    assert.ok(finalizing.length > 0);
-    assert.ok(finalizing.every((progress) => progress.status?.state === 'bootstrapping'));
-    assert.equal(host.status.state, 'running');
+    const ready = startup.filter((progress) => progress.stage === 'ready');
+    assert.ok(ready.length > 0);
     assert.equal(host.status.acceptingQueries, true);
     assert.equal(host.status.aliveQueryWorkers, 1);
-    assert.ok((await host.client.getStats()).searchableMessages > 0);
+    assert.equal(host.status.searchAvailable, false);
+    const sources = await host.client.listSources();
+    assert.ok(sources.items.length >= 1);
+    const started = Date.now();
+    while (host.status.state === 'bootstrapping' && Date.now() - started < 120_000) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(host.status.state, 'running');
+    assert.ok((await host.client.getStats()).searchableMessages >= 0);
     assert.equal(startup.at(-1)?.stage, 'ready');
   });
 

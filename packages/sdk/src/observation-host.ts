@@ -162,22 +162,16 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
       }
       report('adapter-ready');
     }
+    // Catalog-first: admit the query client without waiting for FTS.
+    // Search stays unavailable until completeQueryBootstrap finishes.
+    const queryBootstrap = bootstrapActive ? engine.completeQueryBootstrap() : Promise.resolve(engine.status);
     if (bootstrapActive) {
-      const report = (): void =>
-        emitHostProgress(options, {
-          stage: 'finalizing',
-          sourceCount: sources.length,
-          elapsedMs: Date.now() - startedAt,
-          status: engine.status,
-        });
-      report();
-      const heartbeat = setInterval(report, 1_000);
-      try {
-        await engine.completeQueryBootstrap();
-      } finally {
-        clearInterval(heartbeat);
-      }
-      options.signal?.throwIfAborted();
+      emitHostProgress(options, {
+        stage: 'finalizing',
+        sourceCount: sources.length,
+        elapsedMs: Date.now() - startedAt,
+        status: engine.status,
+      });
     }
     client = await openSpaghettiClient({
       transport: new NapiTransport({ engine, ownsEngine: false }),
@@ -189,7 +183,7 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
       elapsedMs: Date.now() - startedAt,
       status: engine.status,
     });
-    return new NativeObservationHost(engine, client, sources);
+    return new NativeObservationHost(engine, client, sources, queryBootstrap);
   } catch (error) {
     await client?.dispose().catch(() => undefined);
     await engine.dispose();
@@ -228,6 +222,7 @@ class NativeObservationHost implements ObservationHost {
     private readonly engine: SpaghettiEngine,
     readonly client: SpaghettiClient,
     sources: Array<{ adapterId: string; roots: string[] }>,
+    private readonly queryBootstrap: Promise<SpaghettiEngineStatus> = Promise.resolve(engine.status),
   ) {
     this.databasePath = engine.status.databasePath;
     this.sources = Object.freeze(
@@ -324,6 +319,7 @@ class NativeObservationHost implements ObservationHost {
         const ipcHosts = [...this.ipcHosts];
         this.ipcHosts.clear();
         await Promise.allSettled(ipcHosts.map((host) => host.dispose()));
+        await this.queryBootstrap.catch(() => undefined);
         await this.client.dispose();
         return await this.engine.dispose();
       })();

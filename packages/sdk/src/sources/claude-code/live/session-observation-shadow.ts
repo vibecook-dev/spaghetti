@@ -99,11 +99,10 @@ export function watchSessionObservationShadow(
   if (!rfc012dObserver) {
     return tail;
   }
-  const source = observerSource ?? {
-    scopeEpoch: () => 1,
-    poll: () => [],
-  };
-  const shadow = new EpochBoundShadow(source, source.scopeEpoch());
+  if (!observerSource) {
+    throw new TypeError('rfc012dObserver requires a typed observerSource; empty poll is not a live observer');
+  }
+  const shadow = new EpochBoundShadow(observerSource, observerSource.scopeEpoch());
   return Object.assign(tail, {
     rfc012dObserver: true as const,
     shadow,

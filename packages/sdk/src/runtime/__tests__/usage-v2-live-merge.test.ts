@@ -68,6 +68,33 @@ test('SDK merge consumer joins typed durable and scoped usage without native pay
   assert.equal(merged.contributions[0]?.origin, 'overlay');
 });
 
+test('retract drops durable facts that are not re-upserted', () => {
+  const runtime = parseRfc012cRuntimeV1Json(rfc012cJson, JSON.parse(rfc012cJson));
+  const example = runtime.usage.response_revisions.a;
+  const baseline = coverage(rfc012a.coverage.baseline);
+  const partial: SourceCoverageSet = { ...baseline, completeness: 'partial' };
+  const merged = mergeDurableAndScopedUsage(
+    [
+      {
+        factId: example.fact_id,
+        semanticRevisionRef: example.semantic_revision_ref,
+      },
+    ],
+    baseline,
+    [
+      {
+        eventId: 'evt-retract',
+        factId: example.fact_id,
+        semanticRevisionRef: example.semantic_revision_ref,
+        operation: 'retract',
+      },
+    ],
+    partial,
+  );
+  assert.deepEqual(merged.overlay, { retained: { stale: true } });
+  assert.equal(merged.contributions.length, 0);
+});
+
 test('complete comparable observer coverage retires the overlay', () => {
   const runtime = parseRfc012cRuntimeV1Json(rfc012cJson, JSON.parse(rfc012cJson));
   const example = runtime.usage.response_revisions.a;

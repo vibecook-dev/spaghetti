@@ -33,16 +33,37 @@ class AggregatedDiagnostic:
     provenance_objects: tuple[str, ...]
 
 
+_DISPOSITION = {
+    "record_permanent": "RecordPermanent",
+    "transient": "RetryTransient",
+    "stream_fatal": "StreamFatal",
+    "adapter_fatal": "AdapterFatal",
+    "invalid_contract": "InvalidContract",
+    "malformed_usage": "RecordPermanent",
+}
+
+
+def _family_for(stream: str, error_class: str) -> str:
+    key = stream.lower()
+    if "transcript" in key or "session" in key:
+        return "runtime.usage-v2"
+    if "artifact" in key or "file-history" in key or "backup" in key:
+        return "runtime.artifacts"
+    if error_class == "malformed_usage":
+        return "runtime.usage-v2"
+    return "history.message"
+
+
 def rows_from_sqlite_census(records: Iterable[tuple]) -> list[DiagnosticRow]:
     """Map census-shaped source_record_errors joins into aggregator rows."""
     rows: list[DiagnosticRow] = []
-    for adapter_id, stream, error_class, _message, source_object, generation, commit_seq, payload_hex in records:
+    for adapter_id, stream, error_class, source_object, generation, commit_seq, payload_hex in records:
         rows.append(
             DiagnosticRow(
                 adapter_id=str(adapter_id),
                 stream=str(stream),
-                family="runtime.usage-v2" if error_class == "malformed_usage" else "history.message",
-                reason=str(error_class),
+                family=_family_for(str(stream), str(error_class)),
+                reason=_DISPOSITION.get(str(error_class), str(error_class)),
                 source_object=f"obj-{source_object}",
                 generation=int(generation),
                 commit_seq=int(commit_seq),

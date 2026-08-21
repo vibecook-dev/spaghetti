@@ -1,8 +1,9 @@
 # RFC 012 implementation and validation program
 
-- **Status:** Active non-normative roadmap. Wave IV remaining-gate closeout
-  is Gate met. Default-on (`Rolled out`) and child-RFC 012B/C/D ratification
-  remain explicit later product decisions.
+- **Status:** Active non-normative roadmap. Catalog-first host and complete-only
+  search are on the engine path. C1/D2/D3 remain In progress against their
+  owning RFC Exit bars. Default-on (`Rolled out`) and child-RFC 012B/C/D
+  ratification remain later product decisions.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -128,19 +129,19 @@ prerequisite for early vertical slices.
 | B3. Durable catalog/query snapshots      | 012B                | Gate met    | atomic pack plus snapshot pagination conformance               |
 | B4. Progressive host and UX              | 012B                | Gate met    | cold/warm UI topology and migration tests                      |
 | B5. Catalog performance calibration      | 012B                | Gate met    | reproducible gate-amendment report                             |
-| C1. Runtime semantic contracts           | 012C                | Gate met    | actor/usage/state/interaction serialization fixtures           |
+| C1. Runtime semantic contracts           | 012C                | In progress | actor/usage/state/interaction serialization fixtures           |
 | C2. Usage-v2 shadow projection           | 012C                | Gate met    | frozen/private corpus plus native affiliation parity           |
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
 | C4. Runtime semantic downstream suite    | 012C                | Gate met    | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | Gate met    | attach/bootstrap/poll/close/deps; no store/global scan         |
-| D2. Claude scope composition             | 012D                | Gate met    | root/current/future actor and sidecar conformance              |
-| D3. Control lane and epoch replacement   | 012D                | Gate met    | overflow/disappearance/duplicate/fairness matrix               |
+| D2. Claude scope composition             | 012D                | In progress | root/current/future actor and sidecar conformance              |
+| D3. Control lane and epoch replacement   | 012D                | In progress | overflow/disappearance/duplicate/fairness matrix               |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
 | D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
 | X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
 | X2. Diagnostic disposition/aggregation   | 012A implementation | Gate met    | bounded rows with count/provenance parity                      |
 | X3. Physical extraction                  | Implementation      | Gate met    | workspace boundaries mirror dependency checks                  |
-| X4. Default promotion/drift lane         | Umbrella            | Gate met    | child gates, telemetry, rollback, promoted support releases    |
+| X4. Default promotion/drift lane         | Umbrella            | Gate met    | promoted durable Claude 2.1.223 + rollback; corpus telemetry later |
 
 ## 5. Completed evidence work (E0)
 
@@ -2398,12 +2399,13 @@ primitives.
 Hooks remain in Chopsticks as root lifecycle and immediate-poll signals during
 this package.
 
-Current landing status (2026-08-21): D2 Gate met for decoder-executed Claude
-composition. `claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records`
-drives the real Claude decoder for root, child, workflow, and team facts
-(`Fact::UnknownRecord` is not Exit evidence). Promoted support is durable-only
-with a KnownObject root-transcript program; candidate still holds the full
-RFC 012D relation set. The promotion guard in `9f9749b` closes one unsafe interim
+Current landing status (2026-08-21): D2 remains `In progress` for observer-
+composed Claude current/future actor and sidecar scope. Decoder-executed
+`claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records`
+proves typed root/child/workflow/team facts (`Fact::UnknownRecord` is not
+that slice). Promoted support is durable-only with a KnownObject
+root-transcript program; candidate still holds the full RFC 012D relation
+set. The promotion guard in `9f9749b` closes one unsafe interim
 state: after typed support authorization selects a Promoted scope program, the
 scoped host now rejects attachment if that program contains any observation
 relation primitive whose membership is not represented by the current exact
@@ -3462,15 +3464,10 @@ Normal validation rejects malformed or unclassified contracts. Release mode
 uses `--require-complete` and additionally rejects every remaining `planned`
 evidence item.
 
-The [2026-08-17 evidence audit](./012-rfc011-delta-evidence-audit-2026-08-17.md)
-reproduced all 12 previously planned entries and promoted five without
-broadening their claims: common reconciliation ordering, adapter authority
-boundaries, D3 scoped barrier atomicity, usage-v2 oracle/switch/rollback, and
-fixed-snapshot expiration. The executable ledger now has six fully evidenced
-contracts and seven with planned evidence. X0 remains `In progress`; durable/
-scoped decoder parity, the public scoped migration, exhaustive declared-
-mechanic classification, catalog readiness, full common-fact and identity
-migration, and the durable/live consumer handoff retain concrete gaps.
+The executable ledger in
+[`rfc012-rfc011-delta.json`](../../scripts/architecture/rfc012-rfc011-delta.json)
+is complete: every contract is `implemented`, and
+`check_rfc012_delta.py --require-complete` passes. X0 is `Gate met`.
 
 ### X1. Search and finalization separation
 
@@ -3580,22 +3577,24 @@ durable state except for the explicitly versioned usage-v2 correction.
 
 ## 14. Immediate next work
 
-Wave IV remaining-gate closeout is complete. Every section 4 work package is
-`Gate met`. D5 times `scoped_resync_required_invalidates_backlog_and_delivers_next`
-as `scoped-resync-overflow` (numeric ceilings stay unratified). X1 compares
-three complete-only FTS strategies on a rust-emitted ingest trace with nonzero
-`t_ms`. X2 aggregates engine-produced `source_record_errors` from a
-`VACUUM INTO` dump after WAL checkpoint (not literal INSERTs). X4 promoted
-Claude 2.1.223 remains durable-only KnownObject with `artifact_digest` null.
-D4 feature-flagged session-observation-shadow has four live tests including
-epoch swap.
+Catalog-first host no longer waits for FTS: the query pool is admitted while
+search stays `BootstrapInProgress` until `completeQueryBootstrap`. X1 emits
+that real bootstrap trace. X2 extracts privacy-safe `source_record_errors`
+columns (no `error_message`/`raw_payload`) and maps engine classes to RFC 012A
+dispositions. C4 merge is not gated on FTS; the SDK retracts durable facts the
+same way Rust does. D4 requires a typed `observerSource` when the flag is on.
+C1 (effective-state / RFC §11 interaction fixtures), D2 (observer-composed
+Claude current/future/sidecar), and D3 (durable/catalog fairness plus
+message/question/task replacement) stay `In progress`.
 
 Later product decisions, not implementation gates:
 
 1. ratify draft children RFC 012B/C/D against the landed evidence;
 2. consider default-on switches (`Rolled out`) after one compatible release
    cycle of telemetry and rollback;
-3. amend RFC 012B/012D only if numeric p95 ceilings are actually ratified.
+3. amend RFC 012B/012D only if numeric p95 ceilings are actually ratified;
+4. wire D4 `observerSource` to a public scoped-observer facade once that
+   contract is intentionally published.
 
 No step may use a temporary renderer catalog, private adapter tail, arbitrary
 scope search, second database, or duplicated native decoder to shorten the

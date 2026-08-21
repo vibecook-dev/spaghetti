@@ -70,21 +70,30 @@ def catalog_calibration() -> dict[str, object]:
 
 
 def observer_calibration() -> dict[str, object]:
-    def once() -> str:
+    def overflow() -> str:
         completed = run_napi_lib_test("scoped_resync_required_invalidates_backlog_and_delivers_next")
         if "test result: ok" not in completed.stdout:
             raise RuntimeError("scoped resync/overflow test did not pass")
         return "scoped-resync-overflow"
 
-    timed = time_call("scoped-resync-overflow", once)
-    operation = timed.pop("result")
+    def fairness() -> str:
+        completed = run_napi_lib_test("scoped_three_observers_isolate_slow_overflow_from_healthy_progress")
+        if "test result: ok" not in completed.stdout:
+            raise RuntimeError("multi-scope observer fairness test did not pass")
+        return "multi-scope-slow-consumer"
+
+    overflow_timed = time_call("scoped-resync-overflow", overflow)
+    fairness_timed = time_call("multi-scope-slow-consumer", fairness)
+    overflow_timed.pop("result")
+    fairness_timed.pop("result")
     return {
         "package": "D5",
         "gate": "experiment-not-ratified-ceiling",
-        "operation": operation,
+        "operation": "scoped-resync-overflow",
         "environment": environment_digest(),
-        "timing": timed,
-        "note": "Attach/bootstrap/poll numeric ceilings stay provisional until RFC 012D amendment.",
+        "timing": overflow_timed,
+        "fairness_timing": fairness_timed,
+        "note": "Measures overflow/resync and three-scope slow-consumer kernel paths. Numeric ceilings stay unratified.",
     }
 
 

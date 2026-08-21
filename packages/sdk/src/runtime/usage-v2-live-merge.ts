@@ -67,6 +67,7 @@ export function mergeDurableAndScopedUsage(
   const delivered: DurableLiveUsageMerge['deliveredObserverOccurrences'] = [];
   const seenEventIds = new Set<string>();
   const overlay = new Map<string, ScopedUsageObserverEvent>();
+  const retracted = new Set<string>();
   for (const event of observerEvents) {
     if (seenEventIds.has(event.eventId)) {
       continue;
@@ -79,7 +80,9 @@ export function mergeDurableAndScopedUsage(
     });
     if (event.operation === 'retract') {
       overlay.delete(event.factId);
+      retracted.add(event.factId);
     } else {
+      retracted.delete(event.factId);
       overlay.set(event.factId, event);
     }
   }
@@ -106,6 +109,8 @@ export function mergeDurableAndScopedUsage(
         semanticRevisionRef: live.semanticRevisionRef,
         origin: 'overlay',
       });
+    } else if (retracted.has(item.factId)) {
+      continue;
     } else {
       contributions.push({
         factId: item.factId,
