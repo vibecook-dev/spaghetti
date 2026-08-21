@@ -2725,6 +2725,22 @@ oversized-path retention while freezing that redaction. No adapter bootstrap,
 dependency access, decode, child lifecycle state, admission, watcher, public
 API, promotion-guard relaxation, or Candidate status change is included.
 
+Commit `a951d2d` removes caller-supplied adapter and source-instance inputs from
+that future bootstrap join. The runtime-source/root binding now retains the
+exact attachment-owned `Arc<dyn AgentAdapter>` and `Arc<SourceInstance>` that
+were used to verify the authorized stream; adapter manifest identity is checked
+alongside the existing numeric instance, identity-contract, stable-key,
+canonical-key, root-label, and native-root equality before the binding can
+escape. Each selected member receives those same immutable owners with its
+runtime stream and descriptor, so stable and oversized outcomes cannot later
+be bootstrapped against an equal-looking foreign adapter or reconstructed
+source instance. Native roots and stable keys remain behind custom Debug
+surfaces, and focused tests prove exact adapter pointer and source-instance
+retention plus all prior substitution failures. This still does not invoke
+adapter bootstrap or dependencies, decode a record, construct child lifecycle
+state, admit projection, install a watcher, relax the promotion guard, or
+change Candidate support.
+
 ### D3. Identity, control, and resync
 
 Implement:
