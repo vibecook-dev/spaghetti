@@ -27,6 +27,7 @@ pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 const MAX_RELATION_ID_BYTES: usize = 128;
 const MAX_TRACE_CAPACITY: usize = 16_384;
 const MAX_RENDERED_SCOPE_LOCATOR_BYTES: usize = 4 * 1024;
+const DIRECTORY_ENTRY_TOKEN_DOMAIN: &[u8] = b"spaghetti/rfc012a/directory-enumeration-entry/v1\0";
 pub(crate) const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -916,6 +917,24 @@ pub(crate) struct AuthorizedObservationRuntimeStreamReservation {
     stream: StreamSpec,
 }
 
+/// One opaque directory-entry reservation minted beneath an already-authorized
+/// listing root. It retains no native name or path and must complete before a
+/// discovered entry can become membership evidence.
+pub(crate) struct AuthorizedObservationDirectoryEntryReservation {
+    object_token: AccessObjectToken,
+    reservation: AccessReservation,
+}
+
+/// In-memory identity of one exact listing-root reservation. Pointer identity
+/// and sequence prevent a proof prepared from one pass from spending another
+/// pass's otherwise equal relation coordinates.
+#[derive(Clone)]
+pub(crate) struct AuthorizedObservationDirectoryRootAuthority {
+    inner: Arc<AccessBudgetInner>,
+    sequence: u64,
+    object_token: AccessObjectToken,
+}
+
 impl std::fmt::Debug for AuthorizedObservationSourceReservation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -939,6 +958,25 @@ impl std::fmt::Debug for AuthorizedObservationRuntimeStreamReservation {
                 &self.reservation.relative_selector().is_some(),
             )
             .field("has_source_instance", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AuthorizedObservationDirectoryEntryReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedObservationDirectoryEntryReservation")
+            .field("has_object_token", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AuthorizedObservationDirectoryRootAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedObservationDirectoryRootAuthority")
+            .field("has_access_pass", &true)
+            .field("has_object_token", &true)
             .finish_non_exhaustive()
     }
 }
@@ -1006,6 +1044,36 @@ impl AuthorizedObservationSourceReservation {
 
     pub(crate) fn object_token(&self) -> AccessObjectToken {
         self.reservation.object_token()
+    }
+
+    fn reserve_directory_entry(
+        &self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        relative_path_key: &[u8],
+        parent_relative_path_key: Option<&[u8]>,
+        depth: u32,
+    ) -> Result<AuthorizedObservationDirectoryEntryReservation, AccessBudgetError> {
+        self.reservation.reserve_directory_entry(
+            authority,
+            relative_path_key,
+            parent_relative_path_key,
+            depth,
+        )
+    }
+
+    fn directory_entry_token(
+        &self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        relative_path_key: &[u8],
+    ) -> Result<AccessObjectToken, AccessBudgetError> {
+        self.reservation
+            .directory_entry_token(authority, relative_path_key)
+    }
+
+    fn directory_root_authority(
+        &self,
+    ) -> Result<AuthorizedObservationDirectoryRootAuthority, AccessBudgetError> {
+        self.reservation.directory_root_authority()
     }
 
     /// Select exactly one stream from the adapter package already bound by the
@@ -1218,12 +1286,60 @@ impl AuthorizedObservationRuntimeStreamReservation {
         self.reservation.scope_program_digest()
     }
 
+    /// Reserve one entry yielded beneath this exact directory-listing root.
+    /// Relative path keys are common-driver binary identities and are reduced
+    /// immediately to opaque tokens; neither the reservation nor its trace
+    /// retains native path material.
+    pub(crate) fn reserve_directory_entry(
+        &self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        relative_path_key: &[u8],
+        parent_relative_path_key: Option<&[u8]>,
+        depth: u32,
+    ) -> Result<AuthorizedObservationDirectoryEntryReservation, AccessBudgetError> {
+        self.reservation.reserve_directory_entry(
+            authority,
+            relative_path_key,
+            parent_relative_path_key,
+            depth,
+        )
+    }
+
+    pub(crate) fn directory_entry_token(
+        &self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        relative_path_key: &[u8],
+    ) -> Result<AccessObjectToken, AccessBudgetError> {
+        self.reservation
+            .directory_entry_token(authority, relative_path_key)
+    }
+
+    pub(crate) fn directory_root_authority(
+        &self,
+    ) -> Result<AuthorizedObservationDirectoryRootAuthority, AccessBudgetError> {
+        self.reservation.directory_root_authority()
+    }
+
     pub(crate) fn complete(
         self,
         bytes_read: u64,
         outcome: AccessOutcome,
     ) -> Result<(), AccessBudgetError> {
         self.reservation.complete(bytes_read, outcome)
+    }
+
+    pub(crate) fn fail_conservative(self) {
+        self.reservation.fail_conservative();
+    }
+}
+
+impl AuthorizedObservationDirectoryEntryReservation {
+    pub(crate) fn object_token(&self) -> AccessObjectToken {
+        self.object_token
+    }
+
+    pub(crate) fn complete(self) -> Result<(), AccessBudgetError> {
+        self.reservation.complete(0, 0, AccessOutcome::Available)
     }
 
     pub(crate) fn fail_conservative(self) {
@@ -1274,6 +1390,104 @@ impl ScopeAccessReservation {
 
     pub fn object_token(&self) -> AccessObjectToken {
         self.object_token
+    }
+
+    fn reserve_directory_entry(
+        &self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        relative_path_key: &[u8],
+        parent_relative_path_key: Option<&[u8]>,
+        depth: u32,
+    ) -> Result<AuthorizedObservationDirectoryEntryReservation, AccessBudgetError> {
+        if self.declaration.primitive != ScopeRelationPrimitive::ChildDirectoryByNativeId
+            || self.operation() != AccessOperation::ObjectListing
+            || !self.matches_directory_root_authority(authority)
+            || relative_path_key.len() <= 1
+            || parent_relative_path_key
+                .is_some_and(|parent| parent.len() <= 1 || parent == relative_path_key)
+        {
+            return Err(invalid_directory_entry_reservation());
+        }
+        let object_token = self.directory_entry_token(authority, relative_path_key)?;
+        let parent_token = match parent_relative_path_key {
+            Some(parent) => self.directory_entry_token(authority, parent)?,
+            None => self.object_token,
+        };
+        let reservation = self
+            .reservation
+            .as_ref()
+            .expect("scope reservation is consumed only once")
+            .reserve_related(AccessReservationRequest {
+                operation: AccessOperation::ObjectListing,
+                phase: self.operation_phase(),
+                parent_token: Some(parent_token),
+                object_token,
+                depth,
+                max_bytes: 0,
+                max_rows: 0,
+            })?;
+        Ok(AuthorizedObservationDirectoryEntryReservation {
+            object_token,
+            reservation,
+        })
+    }
+
+    fn directory_entry_token(
+        &self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+        relative_path_key: &[u8],
+    ) -> Result<AccessObjectToken, AccessBudgetError> {
+        if relative_path_key.len() <= 1 || !self.matches_directory_root_authority(authority) {
+            return Err(invalid_directory_entry_reservation());
+        }
+        AccessObjectToken::derive(
+            self.relation_id(),
+            &[
+                DIRECTORY_ENTRY_TOKEN_DOMAIN,
+                self.object_token.as_bytes(),
+                relative_path_key,
+            ],
+        )
+    }
+
+    fn directory_root_authority(
+        &self,
+    ) -> Result<AuthorizedObservationDirectoryRootAuthority, AccessBudgetError> {
+        if self.declaration.primitive != ScopeRelationPrimitive::ChildDirectoryByNativeId
+            || self.operation() != AccessOperation::ObjectListing
+        {
+            return Err(invalid_directory_entry_reservation());
+        }
+        let reservation = self
+            .reservation
+            .as_ref()
+            .expect("scope reservation is consumed only once");
+        Ok(AuthorizedObservationDirectoryRootAuthority {
+            inner: Arc::clone(&reservation.inner),
+            sequence: reservation.sequence,
+            object_token: self.object_token,
+        })
+    }
+
+    fn matches_directory_root_authority(
+        &self,
+        authority: &AuthorizedObservationDirectoryRootAuthority,
+    ) -> bool {
+        let reservation = self
+            .reservation
+            .as_ref()
+            .expect("scope reservation is consumed only once");
+        Arc::ptr_eq(&authority.inner, &reservation.inner)
+            && authority.sequence == reservation.sequence
+            && authority.object_token == self.object_token
+    }
+
+    fn operation_phase(&self) -> AccessPhase {
+        self.reservation
+            .as_ref()
+            .expect("scope reservation is consumed only once")
+            .request
+            .phase
     }
 
     /// Render the declaration's exact evidence locator using the same named
@@ -1526,6 +1740,12 @@ fn invalid_observation_runtime_stream_binding() -> AccessBudgetError {
     AccessBudgetError::InvalidConfig(
         "authorized observation source does not match the selected adapter runtime stream"
             .to_string(),
+    )
+}
+
+fn invalid_directory_entry_reservation() -> AccessBudgetError {
+    AccessBudgetError::InvalidConfig(
+        "authorized directory entry reservation requires one confined enumerated child".to_string(),
     )
 }
 
@@ -1785,6 +2005,16 @@ pub struct AccessReservation {
 }
 
 impl AccessReservation {
+    fn reserve_related(
+        &self,
+        request: AccessReservationRequest,
+    ) -> Result<AccessReservation, AccessBudgetError> {
+        AccessBudget {
+            inner: Arc::clone(&self.inner),
+        }
+        .reserve(request)
+    }
+
     pub fn complete(
         mut self,
         bytes_read: u64,
@@ -1959,6 +2189,8 @@ pub(crate) fn validate_relation_id(value: &str) -> Result<(), AccessBudgetError>
 
 #[cfg(test)]
 mod tests {
+    use crate::source::confined_relative_path_key;
+
     use super::*;
 
     #[derive(Deserialize)]
@@ -2116,6 +2348,9 @@ mod tests {
         relation.primitive = ScopeRelationPrimitive::ChildDirectoryByNativeId;
         relation.locator = locator.to_owned();
         relation.identity_inputs = vec!["project-key".to_owned(), "native-session-id".to_owned()];
+        relation.bounds.max_fan_out = 2;
+        relation.bounds.max_depth = 2;
+        relation.bounds.max_objects = 4;
         ScopeAccessPlan::for_program(&manifest, "observe-session-sidecars").unwrap()
     }
 
@@ -2279,6 +2514,96 @@ mod tests {
         assert!(artifact_reservation
             .render_child_directory_locator(&artifact_identity)
             .is_err());
+    }
+
+    #[test]
+    fn directory_entry_reservations_bind_root_parent_fanout_and_depth() {
+        let identity = [
+            ScopeIdentityInput {
+                name: "project-key",
+                value: b"project-a",
+            },
+            ScopeIdentityInput {
+                name: "native-session-id",
+                value: b"session-7",
+            },
+        ];
+        let reserve_root = |plan: &ScopeAccessPlan| {
+            plan.reserve(ScopeAccessRequest {
+                relation_id: "descendant-transcripts",
+                operation: AccessOperation::ObjectListing,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 1,
+                max_rows: 0,
+            })
+            .unwrap()
+        };
+        let child_a = confined_relative_path_key(Path::new("child-a.jsonl")).unwrap();
+        let child_b = confined_relative_path_key(Path::new("child-b.jsonl")).unwrap();
+        let child_c = confined_relative_path_key(Path::new("child-c.jsonl")).unwrap();
+
+        let plan = child_directory_scope_plan("{project-key}/{native-session-id}/subagents");
+        let root = reserve_root(&plan);
+        let authority = root.directory_root_authority().unwrap();
+        let root_token = root.object_token();
+        let first = root
+            .reserve_directory_entry(&authority, &child_a, None, 1)
+            .unwrap();
+        let first_token = first.object_token();
+        first.complete().unwrap();
+        root.reserve_directory_entry(&authority, &child_b, None, 1)
+            .unwrap()
+            .complete()
+            .unwrap();
+        let error = root
+            .reserve_directory_entry(&authority, &child_c, None, 1)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AccessBudgetError::LimitExceeded {
+                limit: AccessLimit::MaxFanOut,
+                ..
+            }
+        ));
+        root.complete(1, 0, AccessOutcome::Available).unwrap();
+        let snapshot = plan.snapshot("descendant-transcripts").unwrap();
+        assert_eq!(snapshot.attempts, 4);
+        assert_eq!(snapshot.objects_accessed, 3);
+        assert_eq!(snapshot.denied, 1);
+        assert_eq!(snapshot.trace[0].parent_token, None);
+        assert_eq!(snapshot.trace[1].parent_token, Some(root_token));
+        assert_eq!(snapshot.trace[2].parent_token, Some(root_token));
+
+        let replay_plan = child_directory_scope_plan("{project-key}/{native-session-id}/subagents");
+        let replay_root = reserve_root(&replay_plan);
+        let replay_authority = replay_root.directory_root_authority().unwrap();
+        assert!(matches!(
+            replay_root.reserve_directory_entry(&authority, &child_a, None, 1),
+            Err(AccessBudgetError::InvalidConfig(_))
+        ));
+        assert_eq!(
+            replay_root
+                .reserve_directory_entry(&replay_authority, &child_a, None, 1)
+                .unwrap()
+                .object_token(),
+            first_token
+        );
+
+        let nested = confined_relative_path_key(Path::new("child-a.jsonl/nested")).unwrap();
+        let depth_error = replay_root
+            .reserve_directory_entry(&replay_authority, &nested, Some(&child_a), 3)
+            .unwrap_err();
+        assert!(matches!(
+            depth_error,
+            AccessBudgetError::LimitExceeded {
+                limit: AccessLimit::MaxDepth,
+                ..
+            }
+        ));
+        replay_root.fail_conservative();
     }
 
     #[test]

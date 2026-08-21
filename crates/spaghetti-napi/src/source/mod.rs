@@ -22,6 +22,7 @@ mod conformance;
 
 pub(crate) use access::{
     validate_evidence_locator_template, validate_relation_id,
+    AuthorizedObservationDirectoryEntryReservation, AuthorizedObservationDirectoryRootAuthority,
     AuthorizedObservationRuntimeStreamReservation, MAX_IDENTITY_VALUE_BYTES,
 };
 pub use access::{

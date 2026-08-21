@@ -40,7 +40,11 @@ impl GlobPattern {
     }
 
     pub(crate) fn matches_path(&self, path: &Path) -> bool {
-        normal_components(path).is_some_and(|path| self.matches(&path))
+        normal_components(path).is_some_and(|path| !path.is_empty() && self.matches(&path))
+    }
+
+    pub(crate) fn accepts_relative_path(path: &Path) -> bool {
+        normal_components(path).is_some_and(|components| !components.is_empty())
     }
 
     pub(crate) fn matches(&self, path: &[Vec<u8>]) -> bool {

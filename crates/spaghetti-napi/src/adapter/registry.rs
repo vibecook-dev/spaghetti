@@ -2181,10 +2181,10 @@ pub(crate) mod tests {
         ] {
             assert!(!rendered.contains(private));
         }
-        let directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
-        assert_eq!(directory.config().max_entries, 8);
-        assert_eq!(directory.config().max_entries_per_directory, 8);
-        assert_eq!(directory.config().max_depth, 2);
+        let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
+        assert_eq!(directory.config().max_entries, 7);
+        assert_eq!(directory.config().max_entries_per_directory, 7);
+        assert_eq!(directory.config().max_depth, 1);
         assert_eq!(
             directory.select(
                 PathBuf::from("nested").as_path(),
@@ -2206,6 +2206,13 @@ pub(crate) mod tests {
             ),
             DirectorySelection::Ignore
         );
+        assert_eq!(
+            directory.select(
+                PathBuf::from("../private").as_path(),
+                DirectoryEntryKind::Directory,
+            ),
+            DirectorySelection::Ignore
+        );
         assert_eq!(directory.source().adapter_id.as_str(), "fixture");
         assert_eq!(
             directory.source().source_instance_key,
@@ -2222,7 +2229,56 @@ pub(crate) mod tests {
         ] {
             assert!(!rendered.contains(private));
         }
+        let nested = directory
+            .reserve_entry(
+                &rooted,
+                PathBuf::from("nested").as_path(),
+                DirectoryEntryKind::Directory,
+            )
+            .unwrap()
+            .complete()
+            .unwrap();
+        assert_eq!(nested.kind(), DirectoryEntryKind::Directory);
+        assert_eq!(nested.depth(), 1);
+        let child_reservation = directory
+            .reserve_entry(
+                &rooted,
+                PathBuf::from("nested/agent-child.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            )
+            .unwrap();
+        assert_ne!(child_reservation.object_token(), nested.object_token());
+        let rendered = format!("{child_reservation:?}");
+        for private in ["nested", "agent-child", "jsonl", "/Users/", "alice"] {
+            assert!(!rendered.contains(private));
+        }
+        let child = child_reservation.complete().unwrap();
+        assert_eq!(child.kind(), DirectoryEntryKind::File);
+        assert_eq!(child.depth(), 2);
+        assert_ne!(child.object_token(), nested.object_token());
         rooted.complete(512, AccessOutcome::Available).unwrap();
+        let descendant_report = plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(descendant_report.attempts, 3);
+        assert_eq!(descendant_report.completed, 3);
+        assert_eq!(descendant_report.objects_accessed, 3);
+        assert_eq!(descendant_report.trace.len(), 3);
+        assert_eq!(descendant_report.trace[0].parent_token, None);
+        assert_eq!(
+            descendant_report.trace[1].parent_token,
+            Some(descendant_report.trace[0].object_token)
+        );
+        assert_eq!(
+            descendant_report.trace[2].parent_token,
+            Some(nested.object_token())
+        );
+        assert_eq!(descendant_report.trace[1].depth, 1);
+        assert_eq!(descendant_report.trace[2].depth, 2);
 
         let assert_runtime_drift = |streams: Vec<StreamSpec>| {
             let plan = make_plan();
@@ -2406,6 +2462,233 @@ pub(crate) mod tests {
             error.to_string(),
             "scoped observation source binding does not match the active attachment"
         );
+    }
+
+    #[test]
+    fn directory_membership_entry_accounting_is_bounded_and_fail_closed() {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+        let registry = AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![fixture_descendant_runtime_stream()]),
+            )
+            .build_supported(catalog)
+            .unwrap();
+        let request = scoped_access_request(PathBuf::from("/private/fixture-root"));
+        let instance = SourceInstance {
+            id: 7,
+            spec: SourceInstanceSpec {
+                identity_contract_version: 1,
+                stable_key: SourceInstanceKey::new(
+                    b"/Users/alice/private/source-instance".to_vec(),
+                )
+                .unwrap(),
+                display_name: "private fixture source".to_string(),
+                roots: vec![SourceRoot {
+                    name: "root".to_string(),
+                    path: PathBuf::from("/Users/alice/private/root"),
+                }],
+                discovery_reason: "fixture".to_string(),
+            },
+        };
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"secret-session-id",
+        }];
+        let approved_root = ScopedAccessRootGrant {
+            access_root: "root".to_string(),
+            root: PathBuf::from("/Users/alice/private/root"),
+        };
+        let expected_source_instance_key = CanonicalSourceInstanceKey::derive(
+            instance.spec.identity_contract_version,
+            instance.spec.stable_key.as_bytes(),
+        )
+        .unwrap();
+        let adapter = registry.get(&AdapterId::new("fixture").unwrap()).unwrap();
+        let make_bound = || {
+            let (_, authorization) = registry
+                .authorize_typed_access(
+                    &AdapterId::new("fixture").unwrap(),
+                    &request.artifact_probe,
+                    SupportOperation::ScopedTypedObservation,
+                    &request.observation_contract_request.contract_versions,
+                    &request.observation_contract_offer.contract_versions,
+                )
+                .unwrap();
+            let plan = AuthorizedScopeAccessPlan::from_authorized_program(
+                authorization
+                    .select_scope_program("observe-session")
+                    .unwrap(),
+            )
+            .unwrap();
+            let runtime = plan
+                .reserve_observation_source(ScopeAccessRequest {
+                    relation_id: "descendant-objects",
+                    operation: AccessOperation::ObjectListing,
+                    phase: AccessPhase::Initial,
+                    parent_token: None,
+                    identity_inputs: &identity,
+                    depth: 1,
+                    max_bytes: 1_024,
+                    max_rows: 0,
+                })
+                .unwrap()
+                .bind_runtime_stream(adapter.as_ref(), &instance)
+                .unwrap();
+            let rooted = bind_observation_runtime_source_for_test(
+                runtime,
+                &instance,
+                &approved_root,
+                &expected_source_instance_key,
+            )
+            .unwrap();
+            (plan, rooted)
+        };
+
+        let (plan, rooted) = make_bound();
+        let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
+        let orphan_error = directory
+            .reserve_entry(
+                &rooted,
+                PathBuf::from("missing/private.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            )
+            .unwrap_err();
+        assert_eq!(
+            orphan_error.to_string(),
+            "scoped observation source binding does not match the active attachment"
+        );
+        assert!(directory.is_failed());
+        assert_eq!(directory.accounted_entries(), 0);
+        for private in ["missing", "private.jsonl", "/Users/", "alice"] {
+            assert!(!orphan_error.to_string().contains(private));
+        }
+        rooted.fail_conservative();
+        let relation = plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(relation.attempts, 1);
+        assert_eq!(relation.objects_accessed, 1);
+        assert_eq!(relation.trace[0].outcome, AccessOutcome::Failed);
+
+        let (plan, rooted) = make_bound();
+        let (foreign_plan, foreign_rooted) = make_bound();
+        let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
+        let substitution_error = directory
+            .reserve_entry(
+                &foreign_rooted,
+                PathBuf::from("private-substitution.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            )
+            .unwrap_err();
+        assert_eq!(
+            substitution_error.to_string(),
+            "invalid access-budget configuration: authorized directory entry reservation requires one confined enumerated child"
+        );
+        assert!(directory.is_failed());
+        assert_eq!(directory.accounted_entries(), 0);
+        for private in ["private-substitution", "jsonl", "/Users/", "alice"] {
+            assert!(!substitution_error.to_string().contains(private));
+        }
+        rooted.fail_conservative();
+        foreign_rooted.fail_conservative();
+        for report in [plan.report(), foreign_plan.report()] {
+            let relation = report
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "descendant-objects")
+                .unwrap();
+            assert_eq!(relation.attempts, 1);
+            assert_eq!(relation.objects_accessed, 1);
+        }
+
+        let (plan, rooted) = make_bound();
+        let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
+        let dropped = directory
+            .reserve_entry(
+                &rooted,
+                PathBuf::from("private-abandoned.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            )
+            .unwrap();
+        drop(dropped);
+        assert!(directory.is_failed());
+        assert_eq!(directory.accounted_entries(), 0);
+        rooted.fail_conservative();
+        let relation = plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(relation.attempts, 2);
+        assert_eq!(relation.completed, 2);
+        assert_eq!(relation.objects_accessed, 2);
+        assert!(relation
+            .trace
+            .iter()
+            .all(|entry| entry.outcome == AccessOutcome::Failed));
+
+        let (plan, rooted) = make_bound();
+        let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
+        let mut first_token = None;
+        for index in 0..directory.config().max_entries {
+            let relative = PathBuf::from(format!("child-{index}.jsonl"));
+            let child = directory
+                .reserve_entry(&rooted, &relative, DirectoryEntryKind::File)
+                .unwrap()
+                .complete()
+                .unwrap();
+            first_token.get_or_insert(child.object_token());
+        }
+        assert_eq!(directory.accounted_entries(), 7);
+        let excess_error = directory
+            .reserve_entry(
+                &rooted,
+                PathBuf::from("child-7.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            )
+            .unwrap_err();
+        assert_eq!(
+            excess_error.to_string(),
+            "access relation descendant-objects exceeded MaxObjects"
+        );
+        assert!(!excess_error.to_string().contains("child-7.jsonl"));
+        assert!(directory.is_failed());
+        assert_eq!(directory.accounted_entries(), 7);
+        rooted.fail_conservative();
+        let relation = plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(relation.attempts, 9);
+        assert_eq!(relation.denied, 1);
+        assert_eq!(relation.objects_accessed, 8);
+
+        let (plan, rooted) = make_bound();
+        let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
+        let replayed = directory
+            .reserve_entry(
+                &rooted,
+                PathBuf::from("child-0.jsonl").as_path(),
+                DirectoryEntryKind::File,
+            )
+            .unwrap()
+            .complete()
+            .unwrap();
+        assert_eq!(Some(replayed.object_token()), first_token);
+        rooted.complete(512, AccessOutcome::Available).unwrap();
+        assert!(plan.report().verify_digest());
     }
 
     #[test]
