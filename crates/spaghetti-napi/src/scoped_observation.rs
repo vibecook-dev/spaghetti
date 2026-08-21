@@ -25,8 +25,8 @@ use crate::adapter::{
     FactSemanticContext, FactSemanticRevision, NativeArtifactProbe, NativeIdentityClaim,
     QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive,
     SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
-    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
-    SourceSnapshot, SupportOperation, TimestampQuality, TypedAccessAuthorization,
+    SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
+    SourceRows, SourceSnapshot, SupportOperation, TimestampQuality, TypedAccessAuthorization,
     UsageRevisionV2Fact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
@@ -208,10 +208,13 @@ impl ScopedObservationUnknownWireNegotiation {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ScopedObservationAccessRequest {
     pub adapter_id: String,
     pub artifact_probe: NativeArtifactProbe,
+    /// Exact source instance selected by the trusted attachment composition.
+    /// Runtime passes retain this value and never accept a caller substitute.
+    pub(crate) source_instance: SourceInstance,
     pub artifact_access_policy: ScopedArtifactAccessPolicy,
     pub observation_contract_request: ObservationContractRequest,
     pub observation_contract_offer: ObservationContractOffer,
@@ -224,6 +227,22 @@ pub struct ScopedObservationAccessRequest {
     pub known_objects: Vec<ScopedKnownObjectGrant>,
     pub access_roots: Vec<ScopedAccessRootGrant>,
     pub artifact_relations: Vec<ScopedArtifactRelationGrant>,
+}
+
+impl std::fmt::Debug for ScopedObservationAccessRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationAccessRequest")
+            .field("adapter_id", &self.adapter_id)
+            .field("has_artifact_probe", &true)
+            .field("has_source_instance", &true)
+            .field("artifact_access_policy", &self.artifact_access_policy)
+            .field("program_id", &self.program_id)
+            .field("known_object_count", &self.known_objects.len())
+            .field("access_root_count", &self.access_roots.len())
+            .field("artifact_relation_count", &self.artifact_relations.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Pre-access root identity inputs selected by the trusted adapter/support
@@ -14630,6 +14649,7 @@ impl Drop for ScopedObservationPollLease {
 /// common-runtime pass boundary and never exposes the authorization itself.
 pub struct ScopedObservationAccessHost {
     adapter: Arc<dyn AgentAdapter>,
+    source_instance: Arc<SourceInstance>,
     compatibility: CompatibilityDecision,
     observation_contract: ObservationContractSelection,
     /// Exact optional sidecar selected before source authority. The
@@ -14752,6 +14772,11 @@ impl ScopedObservationAccessHost {
                 .contract_versions
                 .external_entity_reference_version,
         )?;
+        validate_attachment_source_instance_identity(
+            &request.source_instance,
+            &request.root_identity,
+            &root_identity,
+        )?;
         let program = authorization
             .select_scope_program(&request.program_id)
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
@@ -14782,9 +14807,11 @@ impl ScopedObservationAccessHost {
             &artifact_relations,
             request.access_roots,
         )?;
+        validate_attachment_source_instance_roots(&request.source_instance, &access_roots)?;
         let attachment_authority = next_scoped_attachment_authority()?;
         Ok(Self {
             adapter,
+            source_instance: Arc::new(request.source_instance),
             compatibility,
             observation_contract,
             unknown_wire_selection,
@@ -16534,6 +16561,7 @@ impl ScopedObservationAccessHost {
         Ok(ScopedObservationAccessPass {
             pass_id,
             adapter: Arc::clone(&self.adapter),
+            source_instance: Arc::clone(&self.source_instance),
             plan,
             known_objects: Arc::clone(&self.known_objects),
             access_roots: Arc::clone(&self.access_roots),
@@ -16594,6 +16622,7 @@ impl Drop for ScopedObservationAccessHost {
 pub struct ScopedObservationAccessPass {
     pass_id: u64,
     adapter: Arc<dyn AgentAdapter>,
+    source_instance: Arc<SourceInstance>,
     plan: AuthorizedScopeAccessPlan,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
     access_roots: Arc<BTreeMap<String, ScopedAccessRootGrant>>,
@@ -18915,6 +18944,62 @@ fn validate_decode_bounds(
         || decoder.max_diagnostics_per_record > MAX_DIAGNOSTICS_PER_RECORD
     {
         return Err(ScopedObservationAccessError::InvalidDecodeBounds);
+    }
+    Ok(())
+}
+
+fn invalid_attachment_source_instance() -> ScopedObservationAccessError {
+    ScopedObservationAccessError::InvalidGrant(
+        "the attachment source instance does not match its approved identity and roots".to_string(),
+    )
+}
+
+fn validate_attachment_source_instance_identity(
+    instance: &SourceInstance,
+    requested_root: &ScopedRootIdentityRequest,
+    resolved_root: &ScopedObservationRootIdentity,
+) -> Result<(), ScopedObservationAccessError> {
+    let canonical = CanonicalSourceInstanceKey::derive(
+        instance.spec.identity_contract_version,
+        instance.spec.stable_key.as_bytes(),
+    );
+    if instance.id == 0
+        || instance.spec.validate().is_err()
+        || instance.spec.identity_contract_version
+            != requested_root.source_instance_identity_contract_version
+        || instance.spec.stable_key.as_bytes()
+            != requested_root.stable_source_instance_discriminator.as_ref()
+        || canonical.as_ref().ok() != Some(&resolved_root.source_instance_key)
+    {
+        return Err(invalid_attachment_source_instance());
+    }
+    Ok(())
+}
+
+fn validate_attachment_source_instance_roots(
+    instance: &SourceInstance,
+    access_roots: &BTreeMap<String, ScopedAccessRootGrant>,
+) -> Result<(), ScopedObservationAccessError> {
+    if instance.spec.roots.len() != access_roots.len() {
+        return Err(invalid_attachment_source_instance());
+    }
+    let mut seen = BTreeSet::new();
+    for root in &instance.spec.roots {
+        if !seen.insert(root.name.as_str())
+            || access_roots
+                .get(&root.name)
+                .is_none_or(|approved| approved.root != root.path)
+        {
+            return Err(invalid_attachment_source_instance());
+        }
+    }
+    if seen
+        != access_roots
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+    {
+        return Err(invalid_attachment_source_instance());
     }
     Ok(())
 }

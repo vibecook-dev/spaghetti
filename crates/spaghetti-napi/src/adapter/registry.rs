@@ -586,6 +586,20 @@ pub(crate) mod tests {
                 markers: vec!["fixture.marker".to_string()],
                 contradictory_markers: false,
             },
+            source_instance: SourceInstance {
+                id: 1,
+                spec: SourceInstanceSpec {
+                    identity_contract_version: 1,
+                    stable_key: SourceInstanceKey::new(b"fixture-source-instance".to_vec())
+                        .unwrap(),
+                    display_name: "fixture".to_string(),
+                    roots: vec![SourceRoot {
+                        name: "root".to_string(),
+                        path: root.clone(),
+                    }],
+                    discovery_reason: "fixture".to_string(),
+                },
+            },
             artifact_access_policy: ScopedArtifactAccessPolicy::bounded(
                 8 * 1024 * 1024,
                 ScopedArtifactContentPolicy::Inline,
@@ -1716,47 +1730,100 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn attachment_retains_one_exact_private_source_instance() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("authorized-root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let rendered = format!(
+            "{:?}",
+            scoped_access_request(PathBuf::from("/Users/alice/private/source.jsonl"))
+        );
+        for private in ["/Users/", "alice", "private", "source.jsonl"] {
+            assert!(!rendered.contains(private));
+        }
+
+        let valid =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        assert_eq!(
+            valid.root_identity().source_instance_key,
+            CanonicalSourceInstanceKey::derive(1, b"fixture-source-instance").unwrap()
+        );
+        drop(valid);
+
+        let assert_invalid = |request: ScopedObservationAccessRequest| {
+            let error = match ScopedObservationAccessHost::authorize(&registry, request) {
+                Ok(_) => panic!("a substituted source instance must fail attachment"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                ScopedObservationAccessError::InvalidGrant(ref message)
+                    if message == "the attachment source instance does not match its approved identity and roots"
+            ));
+            let rendered = error.to_string();
+            for private in ["/Users/", "alice", "private", "source.jsonl"] {
+                assert!(!rendered.contains(private));
+            }
+        };
+
+        let mut zero_id = scoped_access_request(root.clone());
+        zero_id.source_instance.id = 0;
+        assert_invalid(zero_id);
+
+        let mut wrong_identity_contract = scoped_access_request(root.clone());
+        wrong_identity_contract
+            .source_instance
+            .spec
+            .identity_contract_version = 2;
+        assert_invalid(wrong_identity_contract);
+
+        let mut substituted_identity = scoped_access_request(root.clone());
+        substituted_identity.source_instance.spec.stable_key =
+            SourceInstanceKey::new(b"/Users/alice/private/source.jsonl".to_vec()).unwrap();
+        assert_invalid(substituted_identity);
+
+        let mut substituted_root = scoped_access_request(root.clone());
+        substituted_root.source_instance.spec.roots[0].path =
+            PathBuf::from("/Users/alice/private/source.jsonl");
+        assert_invalid(substituted_root);
+
+        let mut duplicate_root = scoped_access_request(root);
+        duplicate_root
+            .source_instance
+            .spec
+            .roots
+            .push(duplicate_root.source_instance.spec.roots[0].clone());
+        assert_invalid(duplicate_root);
+    }
+
+    #[test]
     fn closed_pass_rejects_runtime_source_binding_before_reserving_access() {
         let registry = supported_fixture_registry();
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("authorized-root");
         std::fs::create_dir_all(&root).unwrap();
         let host =
-            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
-                .unwrap();
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)).unwrap();
         let pass = host.begin_pass().unwrap();
         let _barrier = host.close();
-        let instance = SourceInstance {
-            id: 1,
-            spec: SourceInstanceSpec {
-                identity_contract_version: 1,
-                stable_key: SourceInstanceKey::new(b"fixture-source".to_vec()).unwrap(),
-                display_name: "fixture".to_string(),
-                roots: vec![SourceRoot {
-                    name: "root".to_string(),
-                    path: root,
-                }],
-                discovery_reason: "fixture".to_string(),
-            },
-        };
         let identity = [ScopeIdentityInput {
             name: "native-session-id",
             value: b"secret-session-id",
         }];
         let error = pass
-            .reserve_observation_runtime_source(
-                &instance,
-                ScopeAccessRequest {
-                    relation_id: "root-object",
-                    operation: AccessOperation::ObjectRead,
-                    phase: AccessPhase::Initial,
-                    parent_token: None,
-                    identity_inputs: &identity,
-                    depth: 1,
-                    max_bytes: 128,
-                    max_rows: 0,
-                },
-            )
+            .reserve_observation_runtime_source(ScopeAccessRequest {
+                relation_id: "root-object",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 128,
+                max_rows: 0,
+            })
             .unwrap_err();
         assert_eq!(
             error.to_string(),
@@ -10317,6 +10384,8 @@ pub(crate) mod tests {
         let other_root = temp.path().join("other-bootstrap-barrier-root");
         std::fs::create_dir_all(&other_root).unwrap();
         let mut other_request = scoped_access_request(other_root);
+        other_request.source_instance.spec.stable_key =
+            SourceInstanceKey::new(b"fixture-other-source-instance".to_vec()).unwrap();
         other_request.root_identity = ScopedRootIdentityRequest::new(
             1,
             b"fixture-other-source-instance".as_slice(),

@@ -174,7 +174,6 @@ impl ScopedObservationRuntimeSourceReservation<'_> {
 impl ScopedObservationAccessPass {
     pub(crate) fn reserve_observation_runtime_source<'pass>(
         &'pass self,
-        instance: &SourceInstance,
         request: ScopeAccessRequest<'_>,
     ) -> Result<ScopedObservationRuntimeSourceReservation<'pass>, ScopedObservationRuntimeSourceError>
     {
@@ -184,14 +183,14 @@ impl ScopedObservationAccessPass {
         let runtime = self
             .plan
             .reserve_observation_source(request)?
-            .bind_runtime_stream(self.adapter.as_ref(), instance)?;
+            .bind_runtime_stream(self.adapter.as_ref(), self.source_instance.as_ref())?;
         let Some(approved_root) = self.access_roots.get(runtime.access_root()) else {
             runtime.fail_conservative();
             return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
         };
         let binding = ScopedObservationRuntimeSourceBinding::bind(
             runtime,
-            instance,
+            self.source_instance.as_ref(),
             approved_root,
             &self.root_identity.source_instance_key,
         )?;

@@ -10,7 +10,7 @@ use crate::adapter::{
     ArtifactObservationKind, CanonicalEntityKey, CanonicalSourceInstanceKey, ContractCompleteness,
     EntityKey, ExternalEntityRef, Fact, FactBatch, FactSemanticContext, NativeIdentity,
     NativeIdentityClaim, QualifiedTimestamp, QualifiedValue, QualifiedValueQuality,
-    RawRetentionPolicy, TimestampQuality,
+    RawRetentionPolicy, SourceRoot, TimestampQuality,
 };
 use crate::source::{
     AccessBudgetError, AccessObjectToken, AccessOutcome, AccessPhase, RecordOrigin, SourceCursor,
@@ -142,6 +142,10 @@ fn artifact_host(
     let artifact_root = temp.path().join(format!("{suffix}-artifacts"));
     let mut request = scoped_access_request(known_root);
     request.root_identity = exact_root_identity(with_native_claim);
+    request.source_instance.spec.roots.push(SourceRoot {
+        name: "artifact".to_string(),
+        path: artifact_root.clone(),
+    });
     request
         .access_roots
         .push(super::super::ScopedAccessRootGrant {
