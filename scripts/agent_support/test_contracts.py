@@ -909,6 +909,47 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         self.assertTrue(any("additional property" in error for error in errors))
         self.assertTrue(any("fewer than" in error for error in errors))
 
+    def test_promoted_claude_durable_path_classifies_and_keeps_catalog_scoped_closed(self) -> None:
+        bundles, errors = validate_repository()
+        self.assertEqual(errors, [])
+        releases = [bundle.document("support-release.json") for bundle in bundles]
+        claude_promoted = [
+            release
+            for release in releases
+            if release["support_release_id"] == "claude-code-support-2026-08-21-promoted"
+        ]
+        self.assertEqual(len(claude_promoted), 1)
+        self.assertEqual(claude_promoted[0]["status"], "promoted")
+        self.assertEqual(claude_promoted[0]["artifact_compatibility"]["exact_versions"], ["2.1.223"])
+        markers = frozenset(claude_promoted[0]["artifact_compatibility"]["required_markers"])
+        selected = classify_runtime(
+            RuntimeProbe("claude-code", "darwin", "2.1.223", markers),
+            releases,
+        )
+        self.assertEqual(selected.compatibility_class, CompatibilityClass.EXACT_SUPPORTED)
+        self.assertEqual(selected.support_release_id, "claude-code-support-2026-08-21-promoted")
+        self.assertTrue(selected.permissions["durable"])
+        self.assertFalse(selected.permissions["catalog"])
+        self.assertFalse(selected.permissions["scoped_observation"])
+
+        unverified = classify_runtime(
+            RuntimeProbe("claude-code", "darwin", "1.0.0", markers),
+            releases,
+        )
+        self.assertEqual(unverified.compatibility_class, CompatibilityClass.RECOGNIZED_UNVERIFIED)
+        self.assertIsNone(unverified.support_release_id)
+        self.assertFalse(unverified.permissions["durable"])
+
+        telemetry = json.loads(
+            (
+                REPO_ROOT
+                / "agent-support/claude-code/promoted-2026-08-21/reports/promotion-telemetry-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(telemetry["rollback"]["query_id"], "legacy.usage")
+        self.assertTrue(telemetry["rollback"]["compatible_cycle"])
+        self.assertEqual(telemetry["classification"]["compatibility_class"], "ExactSupported")
+
     def test_repository_bundles_are_valid_and_candidates_are_nonselectable(self) -> None:
         bundles, errors = validate_repository()
         self.assertEqual(errors, [])
@@ -920,6 +961,10 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         self.assertEqual(
             {release["status"] for release in releases if release["adapter_id"] == "fixture-agent"},
             {"promoted"},
+        )
+        self.assertEqual(
+            {release["status"] for release in releases if release["adapter_id"] == "claude-code"},
+            {"candidate", "promoted"},
         )
         for release in releases:
             probe = RuntimeProbe(
@@ -937,7 +982,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                     "fixture-agent",
                     "darwin",
                     "1.0.0-fixture",
-                    frozenset(release["artifact_compatibility"]["required_markers"]),
+                    frozenset({"sessionid.shape", "record-type"}),
                 )
                 promoted = classify_runtime(fixture_probe, releases)
                 self.assertEqual(promoted.compatibility_class, CompatibilityClass.EXACT_SUPPORTED)

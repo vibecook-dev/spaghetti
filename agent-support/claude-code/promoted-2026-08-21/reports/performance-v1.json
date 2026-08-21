@@ -1,0 +1,11 @@
+{
+  "package": "X4",
+  "adapter_id": "claude-code",
+  "native_version": "2.1.223",
+  "gate": "experiment-not-ratified-ceiling",
+  "operations": [
+    "last_complete_catalog_pages_while_search_bootstrap_is_incomplete",
+    "selectRuntimeUsageQuery promote and rollback to legacy.usage"
+  ],
+  "note": "Numeric p95 ceilings stay unratified; rollback remains the compatible cycle."
+}

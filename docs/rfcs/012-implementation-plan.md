@@ -1,8 +1,7 @@
 # RFC 012 implementation and validation program
 
-- **Status:** Active non-normative roadmap; remaining-gate Wave III closed
-  B4/B5/C4/D2/D4/D5/X0–X3 on Exit evidence. X4 stays In progress until a
-  current-agent (not fixture-agent) promoted path exists.
+- **Status:** Active non-normative roadmap; remaining-gate Wave III plus X4
+  durable Claude 2.1.223 promotion/rollback are on Exit evidence.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -140,7 +139,7 @@ prerequisite for early vertical slices.
 | X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
 | X2. Diagnostic disposition/aggregation   | 012A implementation | Gate met    | bounded rows with count/provenance parity                      |
 | X3. Physical extraction                  | Implementation      | Gate met    | workspace boundaries mirror dependency checks                  |
-| X4. Default promotion/drift lane         | Umbrella            | In progress | child gates, telemetry, rollback, promoted support releases    |
+| X4. Default promotion/drift lane         | Umbrella            | Gate met    | child gates, telemetry, rollback, promoted support releases    |
 
 ## 5. Completed evidence work (E0)
 

@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "support_release_id": "claude-code-support-2026-08-21-promoted",
+  "adapter_id": "claude-code",
+  "status": "promoted",
+  "artifact_compatibility": {
+    "family": "claude-code",
+    "platforms": [
+      "darwin"
+    ],
+    "exact_versions": [
+      "2.1.223"
+    ],
+    "ranges": [],
+    "required_markers": [
+      "active-session.version",
+      "settings.schema-shape",
+      "transcript.type"
+    ],
+    "forward_catalog_only": false
+  },
+  "references": {
+    "ads": {
+      "path": "agent-support/claude-code/promoted-2026-08-21/ads.json",
+      "sha256": "sha256:99b633214b77c37f35ce63f3ec0a3e90855ad8a929cdaef0f5109a152c0d492b"
+    },
+    "source_declaration": {
+      "path": "agent-support/claude-code/promoted-2026-08-21/source-declarations.json",
+      "sha256": "sha256:36f0dfc5d55a0d6e52d8034aaa0a45a35e70caf2c48e6d3f3e50f05351f27ec6"
+    },
+    "scope_program": {
+      "path": "agent-support/claude-code/promoted-2026-08-21/scope-programs.json",
+      "sha256": "sha256:9e354d1cc2b17465f5de7a7c286ea7d6be18e303a53eddc467db1c5f4e69316e"
+    },
+    "evidence": {
+      "path": "agent-support/claude-code/promoted-2026-08-21/evidence.json",
+      "sha256": "sha256:123fdc88bfa979f11c2f7c14d45664b46e35a108834953b2e74b37c3be66c54c"
+    },
+    "conformance": {
+      "path": "agent-support/claude-code/promoted-2026-08-21/conformance.json",
+      "sha256": "sha256:204e56d325a55d464cd65f09aad80926e2886bc98124c115e2ac5a848717feb9"
+    }
+  },
+  "versions": {
+    "adapter_package": "0.7.0",
+    "decoder_contract": 22,
+    "decoder_state": [
+      1
+    ],
+    "source_record_identity": 1,
+    "fact_identity": 1,
+    "external_entity_reference": 1,
+    "semantic_revision_reference": 1,
+    "coverage": [
+      1
+    ],
+    "durable_contracts": {},
+    "observation_contracts": {}
+  },
+  "capabilities": [
+    {
+      "capability_id": "project-session-catalog",
+      "topology": "catalog",
+      "level": "unsupported",
+      "notes": "Catalog stays off this durable-only promoted path."
+    },
+    {
+      "capability_id": "history-and-secondary-facts",
+      "topology": "durable",
+      "level": "supported",
+      "notes": "Durable Claude streams are runtime-selectable on 2.1.223."
+    },
+    {
+      "capability_id": "usage-v2-runtime-semantics",
+      "topology": "durable",
+      "level": "supported",
+      "notes": "Selected usage-v2/actor/affiliation plus query-pack promote/rollback."
+    },
+    {
+      "capability_id": "root-descendant-observation",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "Scoped observation stays unsupported; candidate retains the full RFC 012D program."
+    },
+    {
+      "capability_id": "interaction-lifecycle",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "AskUserQuestion lifecycle stays off this product path."
+    }
+  ],
+  "stream_contracts": [
+    {
+      "stream_id": "session-transcripts",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "subagent-transcripts",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "subagent-metadata",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "team-configs",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "team-inboxes",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "active-sessions",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "todo-snapshots",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "task-items",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "plan-documents",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "file-history-blobs",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "workflow-runs",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "workflow-journals",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "session-indexes",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "project-memory-documents",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "persisted-tool-results",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "interpretation-settings",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    }
+  ],
+  "reports": {
+    "conformance_sha256": "sha256:cf9c4ea8da57acc14b55ba9a15edda3f106ad32466bf7e6715e1510139a389bc",
+    "performance_sha256": "sha256:37c617563df09891b4f19dc3c19933b2fbf643e4a67dd4734079d9de52a079dc"
+  },
+  "sanitizer_review": {
+    "status": "approved",
+    "reviewed_at": "2026-08-21",
+    "reviewer": "rfc012-integrator"
+  },
+  "lifecycle": {
+    "candidate_at": "2026-08-15",
+    "promoted_at": "2026-08-21",
+    "retired_at": null,
+    "supersedes": "claude-code-support-2026-08-15-candidate",
+    "superseded_by": null
+  },
+  "known_limitations": [
+    "Durable-only promotion: catalog and scoped topologies remain unsupported.",
+    "Pinned native is Claude Code 2.1.223; other versions stay unverified.",
+    "Interaction lifecycle and unselected runtime families are not on this path.",
+    "Query-pack rollback to legacy.usage remains required through this compatible cycle."
+  ],
+  "drift_signatures": [
+    {
+      "signature_id": "bridge-session-owner-fields",
+      "family_id": "session-transcript",
+      "fields": [
+        "ownerAccountUuid",
+        "ownerOrganizationUuid"
+      ],
+      "state": "classified",
+      "claim_refs": [
+        "claude-drift-bridge-accounts"
+      ]
+    },
+    {
+      "signature_id": "active-session-name-since",
+      "family_id": "active-session",
+      "fields": [
+        "nameSince"
+      ],
+      "state": "classified",
+      "claim_refs": [
+        "claude-drift-active-name-since"
+      ]
+    },
+    {
+      "signature_id": "settings-auto-mode",
+      "family_id": "interpretation-settings",
+      "fields": [
+        "autoMode.environment",
+        "autoMode.allow",
+        "autoMode.soft_deny"
+      ],
+      "state": "classified",
+      "claim_refs": [
+        "claude-drift-auto-mode"
+      ]
+    }
+  ],
+  "promotion_blockers": []
+}

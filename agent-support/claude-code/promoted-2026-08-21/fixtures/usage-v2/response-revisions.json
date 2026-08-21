@@ -1,0 +1,298 @@
+{
+  "_fixture": {
+    "fixture_kind": "synthetic-source-record-sequence",
+    "format": "json",
+    "sanitization": "synthetic",
+    "sanitizer_version": 2
+  },
+  "scenario": {
+    "oracleContractVersion": 1,
+    "objects": [
+      {
+        "objectId": "fixture-id-002",
+        "sessionId": "fixture-id-001",
+        "actorId": "fixture-id-001",
+        "role": "root",
+        "generations": [
+          {
+            "generation": 1,
+            "records": [
+              {
+                "cursorStart": 0,
+                "cursorEnd": 100,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-010",
+                  "timestamp": "2000-01-01T00:00:00.001Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-030",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-020",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 10,
+                      "output_tokens": 5,
+                      "cache_creation_input_tokens": 2,
+                      "cache_read_input_tokens": 3
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 100,
+                "cursorEnd": 200,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-011",
+                  "timestamp": "2000-01-01T00:00:00.001Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-030",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-020",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 10,
+                      "output_tokens": 5,
+                      "cache_creation_input_tokens": 2,
+                      "cache_read_input_tokens": 3
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 200,
+                "cursorEnd": 300,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-012",
+                  "timestamp": "2000-01-01T00:00:00.003Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-030",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-020",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 14,
+                      "output_tokens": 6,
+                      "cache_creation_input_tokens": 3,
+                      "cache_read_input_tokens": 4
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 300,
+                "cursorEnd": 400,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-013",
+                  "timestamp": "2000-01-01T00:00:00.004Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-030",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-020",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 8,
+                      "output_tokens": 4,
+                      "cache_creation_input_tokens": 1,
+                      "cache_read_input_tokens": 2
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 400,
+                "cursorEnd": 500,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-014",
+                  "timestamp": "2000-01-01T00:00:00.005Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-030",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-021",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 3,
+                      "output_tokens": 2,
+                      "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 1
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 500,
+                "cursorEnd": 600,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-015",
+                  "timestamp": "2000-01-01T00:00:00.006Z",
+                  "sessionId": "fixture-id-001",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-022",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 1,
+                      "output_tokens": 1
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 600,
+                "cursorEnd": 700,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-016",
+                  "timestamp": "2000-01-01T00:00:00.007Z",
+                  "sessionId": "fixture-id-001",
+                  "message": {
+                    "model": "claude-fixture",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 0
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 700,
+                "cursorEnd": 800,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-017",
+                  "timestamp": "2000-01-01T00:00:00.008Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-030",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-020",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": "[fixture-text-001]",
+                      "output_tokens": 99,
+                      "cache_creation_input_tokens": 99,
+                      "cache_read_input_tokens": 99
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "objectId": "fixture-id-004",
+        "sessionId": "fixture-id-001",
+        "actorId": "fixture-id-003",
+        "role": "child",
+        "generations": [
+          {
+            "generation": 1,
+            "records": [
+              {
+                "cursorStart": 0,
+                "cursorEnd": 100,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-018",
+                  "timestamp": "2000-01-01T00:00:00.009Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-031",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-021",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 99,
+                      "output_tokens": 9,
+                      "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 0
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "generation": 2,
+            "records": [
+              {
+                "cursorStart": 0,
+                "cursorEnd": 100,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-023",
+                  "timestamp": "2000-01-01T00:00:00.010Z",
+                  "sessionId": "fixture-id-001",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-021",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 4,
+                      "output_tokens": 2,
+                      "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 0
+                    }
+                  }
+                }
+              },
+              {
+                "cursorStart": 100,
+                "cursorEnd": 200,
+                "record": {
+                  "type": "assistant",
+                  "uuid": "fixture-id-025",
+                  "timestamp": "2000-01-01T00:00:00.011Z",
+                  "sessionId": "fixture-id-001",
+                  "requestId": "fixture-id-031",
+                  "message": {
+                    "model": "claude-fixture",
+                    "id": "fixture-id-024",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "usage": {
+                      "input_tokens": 6,
+                      "output_tokens": 3,
+                      "cache_read_input_tokens": 2
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

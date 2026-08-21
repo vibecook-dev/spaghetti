@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "declaration_id": "claude-code-session-scope-2026-08-21-promoted",
+  "adapter_id": "claude-code",
+  "ads_id": "claude-code-ads-2026-08-21-promoted",
+  "status": "promoted",
+  "roots": [
+    "home",
+    "projects",
+    "sessions",
+    "teams"
+  ],
+  "programs": [
+    {
+      "program_id": "observe-root-transcript",
+      "root_entity_kind": "session",
+      "root_relation_id": "root-transcript",
+      "relations": [
+        {
+          "relation_id": "root-transcript",
+          "primitive": "KnownObject",
+          "access_root": "projects",
+          "locator": "known-transcript",
+          "identity_inputs": [
+            "native-session-id",
+            "transcript-locator"
+          ],
+          "bounds": {
+            "max_fan_out": 1,
+            "max_depth": 1,
+            "max_objects": 1,
+            "max_bytes": 1073741824,
+            "max_rows": 0
+          },
+          "unavailable_behavior": "record_unavailable",
+          "claim_refs": [
+            "claude-source-map"
+          ]
+        }
+      ],
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    }
+  ],
+  "blockers": [],
+  "claim_refs": [
+    "claude-source-map"
+  ]
+}

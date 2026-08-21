@@ -5962,7 +5962,7 @@ mod tests {
         assert_eq!(covered.adapter_id, "claude-code");
         assert_eq!(
             covered.support_release_id,
-            "claude-code-support-2026-08-15-candidate"
+            "claude-code-support-2026-08-21-promoted"
         );
         assert_eq!(covered.completeness, "complete");
         assert_eq!(covered.last_commit_seq, 2);

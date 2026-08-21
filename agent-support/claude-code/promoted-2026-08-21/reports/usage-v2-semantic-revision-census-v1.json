@@ -1,0 +1,151 @@
+{
+  "actors": {
+    "recordRowsByPathRole": {
+      "child": 430396,
+      "root": 666517
+    },
+    "relatedScopedObjects": {
+      "activeSessionPresence": 0,
+      "plans": 0,
+      "subagentMetadata": 2541,
+      "taskItems": 0,
+      "teamConfigs": 0,
+      "teamInboxDocuments": 0,
+      "todoDocuments": 0,
+      "workflowJournals": 47,
+      "workflowRuns": 47
+    },
+    "rootAndChildPathIdentityAvailable": 5187
+  },
+  "input": {
+    "bytesRead": 2751611672,
+    "changedDuringScan": 0,
+    "childTranscriptFiles": 4804,
+    "files": 5187,
+    "filesWithRecords": 5187,
+    "initialBytes": 2751611672,
+    "root": "<provided-root>",
+    "rootTranscriptFiles": 383,
+    "sourceSetDigest": "f74aa6289682ec3bf0158f21ad01887c61f4cd102a4502f3a397fdbd633090b7",
+    "standardChildTranscriptFiles": 4051,
+    "workflowChildTranscriptFiles": 753
+  },
+  "limitations": [
+    "This static census does not measure watcher latency, bootstrap barriers, queue backpressure, or reset delivery.",
+    "Latest means the last complete record in current file order; a production observer also keys by source generation.",
+    "Effort coverage checks known transcript field locations and does not infer launch settings or hook-only state.",
+    "Pending AskUserQuestion calls at file end may reflect compaction, deletion, or results represented outside the scanned transcript."
+  ],
+  "parse": {
+    "malformedCompleteLines": 0,
+    "otherRecordTypes": 372508,
+    "partialFinalLinesHeld": 0,
+    "recordTypes": {
+      "assistant": 344160,
+      "file-history-snapshot": 9599,
+      "progress": 149023,
+      "queue-operation": 5188,
+      "system": 14593,
+      "user": 201842
+    },
+    "records": 1096913
+  },
+  "privacy": "Aggregate counts and token totals only. Native paths, identifiers, prompts, answers, model values, and raw payloads are not emitted.",
+  "schemaVersion": 1,
+  "timing": {
+    "elapsedMs": 23181.222
+  },
+  "typedEvidence": {
+    "fieldPresence": {
+      "message.model": 344160,
+      "record.effort": 94871,
+      "record.mode": 14810,
+      "record.permissionMode": 25976
+    },
+    "observableToolCalls": {
+      "Agent": 2115,
+      "AskUserQuestion": 135,
+      "EnterPlanMode": 55,
+      "ExitPlanMode": 68,
+      "Task": 71,
+      "TaskCreate": 1373,
+      "TaskGet": 287,
+      "TaskList": 278,
+      "TaskOutput": 77,
+      "TaskStop": 85,
+      "TaskUpdate": 2824
+    },
+    "toolCalls": 185844,
+    "toolResults": 185967,
+    "userInputRequests": {
+      "askUserQuestionCalls": 135,
+      "callsWithQuestionsArray": 135,
+      "matchedErrorResults": 20,
+      "matchedSuccessfulResults": 114,
+      "pendingAtFileEnd": 1
+    }
+  },
+  "usage": {
+    "childResponseGroups": 85472,
+    "counterEqualButSemanticChangedRows": 135981,
+    "exactRepeatRowsBeyondFirst": 136946,
+    "exactSemanticRepeatRowsBeyondFirst": 965,
+    "fileScopedResponseGroups": 149671,
+    "firstResponseSnapshotTotal": {
+      "cache_creation_input_tokens": 1748146599,
+      "cache_read_input_tokens": 32360061727,
+      "input_tokens": 14392816,
+      "output_tokens": 71521128
+    },
+    "groupsWithAllBucketsKnown": 149671,
+    "groupsWithChangedCounters": 57323,
+    "groupsWithChangedSemanticSnapshot": 106776,
+    "groupsWithDownwardCorrection": 111,
+    "groupsWithEffort": 40679,
+    "groupsWithMixedRequestIds": 0,
+    "groupsWithModel": 149671,
+    "groupsWithMultipleRows": 106843,
+    "latestGroupsWithEffort": 40679,
+    "latestGroupsWithModel": 149671,
+    "latestResponseSnapshotTotal": {
+      "cache_creation_input_tokens": 1748158754,
+      "cache_read_input_tokens": 32360151470,
+      "input_tokens": 14392816,
+      "output_tokens": 127434333
+    },
+    "latestResponseUnknownGroups": {
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "input_tokens": 0,
+      "output_tokens": 0
+    },
+    "legacyMinusLatestSnapshot": {
+      "cache_creation_input_tokens": 3178834723,
+      "cache_read_input_tokens": 35617743371,
+      "input_tokens": 31866415,
+      "output_tokens": 128317574
+    },
+    "legacyPerRowDeltaTotal": {
+      "cache_creation_input_tokens": 4926993477,
+      "cache_read_input_tokens": 67977894841,
+      "input_tokens": 46259231,
+      "output_tokens": 255751907
+    },
+    "malformedUsageRows": 0,
+    "repeatedRowsBeyondFirst": 194489,
+    "requestIdsMappingToMultipleMessageIds": 8,
+    "rootResponseGroups": 64199,
+    "rowsWithEffort": 94871,
+    "rowsWithModel": 344160,
+    "rowsWithoutMessageId": 0,
+    "rowsWithoutRequestId": 268,
+    "semanticChangeFields": {
+      "bucketSnapshot": 57543,
+      "sourceTime": 193512
+    },
+    "semanticReversionsAfterInterveningRevision": 262,
+    "usageActorFiles": 5049,
+    "usageBearingAssistantRows": 344160,
+    "usageSessions": 855
+  }
+}

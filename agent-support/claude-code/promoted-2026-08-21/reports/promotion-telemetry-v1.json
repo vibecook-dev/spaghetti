@@ -1,0 +1,22 @@
+{
+  "package": "X4",
+  "adapter_id": "claude-code",
+  "native_version": "2.1.223",
+  "classification": {
+    "compatibility_class": "ExactSupported",
+    "reason": "exact_promoted_version",
+    "durable": true,
+    "catalog": false,
+    "scoped_observation": false
+  },
+  "rollback": {
+    "query_id": "legacy.usage",
+    "flag": "selectRuntimeUsageQuery",
+    "compatible_cycle": true
+  },
+  "drift": {
+    "bridge-session-owner-fields": "classified",
+    "active-session-name-since": "classified",
+    "settings-auto-mode": "classified"
+  }
+}

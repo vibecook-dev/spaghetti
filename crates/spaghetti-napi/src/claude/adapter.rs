@@ -48,7 +48,7 @@ use crate::source::{
 const ADAPTER_ID: &str = "claude-code";
 const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+    "/../../agent-support/claude-code/promoted-2026-08-21/scope-programs.json"
 ));
 const PARENT_STREAM: &str = "session-transcripts";
 const SUBAGENT_STREAM: &str = "subagent-transcripts";
@@ -150,12 +150,12 @@ impl ClaudeCodeAdapter {
                 contract_version: 22,
                 support_binding: Some(
                     AdapterSupportBinding::new(
-                        "claude-code-support-2026-08-15-candidate",
+                        "claude-code-support-2026-08-21-promoted",
                         env!("CARGO_PKG_VERSION"),
                         22,
-                        "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
-                        "sha256:937b081363e511ad240b471b28aa8541aa2f023f86dbd52ba7ae0ac487158994",
-                        "sha256:589a8bf80c4a538bdf7e54e366b4b537ea2ca1a1f968385415057643cad6e36d",
+                        "sha256:99b633214b77c37f35ce63f3ec0a3e90855ad8a929cdaef0f5109a152c0d492b",
+                        "sha256:36f0dfc5d55a0d6e52d8034aaa0a45a35e70caf2c48e6d3f3e50f05351f27ec6",
+                        "sha256:9e354d1cc2b17465f5de7a7c286ea7d6be18e303a53eddc467db1c5f4e69316e",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -5573,7 +5573,7 @@ mod tests {
         );
         let source_declaration_document = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+            "/../../agent-support/claude-code/promoted-2026-08-21/source-declarations.json"
         ));
         assert_eq!(
             support.source_declaration_digest(),
@@ -5601,7 +5601,14 @@ mod tests {
             declared_stream["bounds"]["max_object_bytes"],
             ARTIFACT_CONTENT_MAX_BYTES
         );
-        let scope = manifest.scope_programs.as_ref().unwrap();
+        let promoted_scope = manifest.scope_programs.as_ref().unwrap();
+        assert_eq!(promoted_scope.status, ScopeProgramStatus::Promoted);
+        assert!(promoted_scope.program("observe-root-transcript").is_some());
+        let scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+        )))
+        .unwrap();
         assert_eq!(scope.status, ScopeProgramStatus::Incomplete);
         let program = scope
             .program("observe-root-session-and-descendants")
@@ -5657,7 +5664,7 @@ mod tests {
         assert_eq!(artifact_stream.selector.include, ["file-history/*/*@v*"]);
         assert_eq!(artifact_stream.decoder.as_str(), ARTIFACT_CONTENT_DECODER);
 
-        let plan = ScopeAccessPlan::for_program(scope, program.program_id.as_str()).unwrap();
+        let plan = ScopeAccessPlan::for_program(&scope, program.program_id.as_str()).unwrap();
         for native_session_id in [
             "40f26ec0-7084-ef15-b183-2d832ca4ecd6",
             "f0b5e9e0-9d2e-784c-47fe-707d93b458ab",
@@ -5833,9 +5840,12 @@ mod tests {
         ];
 
         let adapter = ClaudeCodeAdapter::new();
-        let manifest = adapter.manifest();
-        let scope = manifest.scope_programs.as_ref().unwrap();
-        let program = scope
+        let candidate_scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+        )))
+        .unwrap();
+        let program = candidate_scope
             .program("observe-root-session-and-descendants")
             .unwrap();
         assert_eq!(program.root_relation_id.as_deref(), Some("root-transcript"));

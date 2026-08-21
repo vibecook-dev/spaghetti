@@ -1,0 +1,846 @@
+{
+  "schema_version": 1,
+  "ads_id": "claude-code-ads-2026-08-21-promoted",
+  "adapter_id": "claude-code",
+  "status": "promoted",
+  "native_artifact": {
+    "family": "claude-code",
+    "target": "Claude Code 2.1.223; RFC-review known-good native pin for the durable product path",
+    "identification": {
+      "state": "pinned",
+      "version_markers": [
+        "active-session.version",
+        "settings.schema-shape",
+        "transcript.type"
+      ],
+      "artifact_digest": "sha256:2121212121212121212121212121212121212121212121212121212121212121"
+    },
+    "platforms": [
+      "darwin"
+    ],
+    "relevant_flags": [
+      "teams",
+      "workflows"
+    ],
+    "claim_refs": [
+      "claude-artifact-target-pinned"
+    ]
+  },
+  "source_instance": {
+    "identity_contract_version": 1,
+    "derivation": "configured_canonical_root",
+    "canonical_roots": [
+      {
+        "root_id": "home",
+        "relative_to": "configured_root",
+        "relative_path": "",
+        "required": true
+      },
+      {
+        "root_id": "projects",
+        "relative_to": "configured_root",
+        "relative_path": "projects",
+        "required": false
+      },
+      {
+        "root_id": "sessions",
+        "relative_to": "configured_root",
+        "relative_path": "sessions",
+        "required": false
+      },
+      {
+        "root_id": "teams",
+        "relative_to": "configured_root",
+        "relative_path": "teams",
+        "required": false
+      }
+    ],
+    "move_behavior": "new_instance",
+    "clone_behavior": "new_instance",
+    "replacement_behavior": "same_instance",
+    "cross_device_behavior": "new_instance",
+    "access_policy": "configured_roots_only",
+    "claim_refs": [
+      "claude-instance-roots",
+      "claude-identity-rules"
+    ]
+  },
+  "object_families": [
+    {
+      "family_id": "session-transcript",
+      "source_schema_versions": [
+        "claude-code-jsonl-v1"
+      ],
+      "stream_ids": [
+        "session-transcripts"
+      ],
+      "native_shapes": [
+        "projects/<project>/<session>.jsonl"
+      ],
+      "framing": "json_lines",
+      "lifecycle": [
+        "append",
+        "partial_write",
+        "truncate",
+        "rotate",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "source instance",
+        "project slug",
+        "session filename",
+        "record generation and cursor"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-drift-bridge-accounts"
+      ]
+    },
+    {
+      "family_id": "subagent-transcript",
+      "source_schema_versions": [
+        "claude-code-jsonl-v1"
+      ],
+      "stream_ids": [
+        "subagent-transcripts"
+      ],
+      "native_shapes": [
+        "projects/<project>/<session>/subagents[/workflows/<workflow>]/agent-<agent>.jsonl"
+      ],
+      "framing": "json_lines",
+      "lifecycle": [
+        "append",
+        "partial_write",
+        "truncate",
+        "rotate",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "parent session",
+        "optional workflow",
+        "agent filename",
+        "record generation and cursor"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-identity-rules"
+      ]
+    },
+    {
+      "family_id": "subagent-metadata",
+      "source_schema_versions": [
+        "claude-code-subagent-meta-v1"
+      ],
+      "stream_ids": [
+        "subagent-metadata"
+      ],
+      "native_shapes": [
+        "sibling agent-<agent>.meta.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "parent session",
+        "optional workflow",
+        "agent filename"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-identity-rules"
+      ]
+    },
+    {
+      "family_id": "team-config",
+      "source_schema_versions": [
+        "claude-code-team-config-v1"
+      ],
+      "stream_ids": [
+        "team-configs"
+      ],
+      "native_shapes": [
+        "teams/<team>/config.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "team directory",
+        "native member identifiers"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "family_id": "team-inbox",
+      "source_schema_versions": [
+        "claude-code-team-inbox-v2"
+      ],
+      "stream_ids": [
+        "team-inboxes"
+      ],
+      "native_shapes": [
+        "teams/<team>/inboxes/<recipient>.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "team directory",
+        "recipient filename",
+        "message identifiers"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "family_id": "active-session",
+      "source_schema_versions": [
+        "claude-code-active-session-v1"
+      ],
+      "stream_ids": [
+        "active-sessions"
+      ],
+      "native_shapes": [
+        "sessions/<positive-pid>.json"
+      ],
+      "framing": "presence",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "positive PID filename",
+        "native session identifier",
+        "process start evidence"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "native_approximate",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-drift-active-name-since"
+      ]
+    },
+    {
+      "family_id": "todo-snapshot",
+      "source_schema_versions": [
+        "claude-code-todo-v1"
+      ],
+      "stream_ids": [
+        "todo-snapshots"
+      ],
+      "native_shapes": [
+        "todos/<session>-agent-<agent>.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "session and agent filename",
+        "todo identifiers"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "family_id": "task-item",
+      "source_schema_versions": [
+        "claude-code-task-item-v1"
+      ],
+      "stream_ids": [
+        "task-items"
+      ],
+      "native_shapes": [
+        "tasks/<collection>/<positive-task-id>.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "collection directory",
+        "task filename and matching payload ID"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "family_id": "plan-document",
+      "source_schema_versions": [
+        "claude-code-plan-v1"
+      ],
+      "stream_ids": [
+        "plan-documents"
+      ],
+      "native_shapes": [
+        "plans/<slug>.md"
+      ],
+      "framing": "text_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "plan filename",
+        "document generation"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "filesystem_only",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "not_applicable",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "family_id": "file-history-blob",
+      "source_schema_versions": [
+        "claude-code-file-history-v1"
+      ],
+      "stream_ids": [
+        "file-history-blobs"
+      ],
+      "native_shapes": [
+        "file-history/<session>/<lowercase-hex>@v<positive-version>"
+      ],
+      "framing": "text_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "session directory",
+        "backup name",
+        "version"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "filesystem_only",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "not_applicable",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-scope-relations-open"
+      ]
+    },
+    {
+      "family_id": "workflow-run",
+      "source_schema_versions": [
+        "claude-code-workflow-v1"
+      ],
+      "stream_ids": [
+        "workflow-runs"
+      ],
+      "native_shapes": [
+        "projects/<project>/<session>/workflows/wf_*.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "parent session",
+        "matching workflow filename and payload ID"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "family_id": "workflow-journal",
+      "source_schema_versions": [
+        "claude-code-workflow-v1"
+      ],
+      "stream_ids": [
+        "workflow-journals"
+      ],
+      "native_shapes": [
+        "projects/<project>/<session>/subagents/workflows/<workflow>/journal.jsonl"
+      ],
+      "framing": "json_lines",
+      "lifecycle": [
+        "append",
+        "partial_write",
+        "truncate",
+        "rotate",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "parent session",
+        "workflow directory",
+        "record generation and cursor"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "family_id": "session-index",
+      "source_schema_versions": [
+        "claude-code-session-index-v1"
+      ],
+      "stream_ids": [
+        "session-indexes"
+      ],
+      "native_shapes": [
+        "projects/<project>/sessions-index.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "project directory",
+        "entry session identifier"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "mixed",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "retain_bounded",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-identity-rules"
+      ]
+    },
+    {
+      "family_id": "project-memory-document",
+      "source_schema_versions": [
+        "claude-code-project-memory-v1"
+      ],
+      "stream_ids": [
+        "project-memory-documents"
+      ],
+      "native_shapes": [
+        "projects/<project>/memory/<name>.md"
+      ],
+      "framing": "text_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "project directory",
+        "memory filename"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "filesystem_only",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "not_applicable",
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    },
+    {
+      "family_id": "persisted-tool-result",
+      "source_schema_versions": [
+        "claude-code-persisted-tool-result-v1"
+      ],
+      "stream_ids": [
+        "persisted-tool-results"
+      ],
+      "native_shapes": [
+        "projects/<project>/<session>/tool-results/<opaque-id>.txt"
+      ],
+      "framing": "text_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "parent session",
+        "opaque filename"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "filesystem_only",
+      "missing_vs_zero": "not_applicable",
+      "unknown_field_policy": "not_applicable",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-scope-relations-open"
+      ]
+    },
+    {
+      "family_id": "interpretation-settings",
+      "source_schema_versions": [
+        "claude-code-interpretation-settings-v1"
+      ],
+      "stream_ids": [
+        "interpretation-settings"
+      ],
+      "native_shapes": [
+        "settings.json",
+        "settings.local.json"
+      ],
+      "framing": "json_document",
+      "lifecycle": [
+        "replace",
+        "delete",
+        "recreate"
+      ],
+      "identity_inputs": [
+        "source instance",
+        "fixed layer filename"
+      ],
+      "disposition": "mapped",
+      "timestamp_quality": "filesystem_only",
+      "missing_vs_zero": "distinct",
+      "unknown_field_policy": "measure_only",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-privacy-policy",
+        "claude-drift-auto-mode"
+      ]
+    }
+  ],
+  "entity_identity_rules": [
+    {
+      "entity_kind": "project",
+      "primary_inputs": [
+        "source instance",
+        "native project directory"
+      ],
+      "fallback_inputs": [],
+      "reuse_behavior": "unverified",
+      "supersession_behavior": "unverified",
+      "claim_refs": [
+        "claude-identity-rules"
+      ]
+    },
+    {
+      "entity_kind": "session",
+      "primary_inputs": [
+        "source instance",
+        "native session ID"
+      ],
+      "fallback_inputs": [
+        "transcript object identity"
+      ],
+      "reuse_behavior": "never_reuse",
+      "supersession_behavior": "generation_scoped",
+      "claim_refs": [
+        "claude-identity-rules"
+      ]
+    },
+    {
+      "entity_kind": "actor",
+      "primary_inputs": [
+        "root session",
+        "native agent ID",
+        "optional workflow ID"
+      ],
+      "fallback_inputs": [
+        "root actor role"
+      ],
+      "reuse_behavior": "unverified",
+      "supersession_behavior": "generation_scoped",
+      "claim_refs": [
+        "claude-identity-rules",
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "entity_kind": "task",
+      "primary_inputs": [
+        "task collection",
+        "native task ID"
+      ],
+      "fallback_inputs": [],
+      "reuse_behavior": "unverified",
+      "supersession_behavior": "generation_scoped",
+      "claim_refs": [
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "entity_kind": "interaction",
+      "primary_inputs": [
+        "actor",
+        "native tool-use ID"
+      ],
+      "fallback_inputs": [],
+      "reuse_behavior": "never_reuse",
+      "supersession_behavior": "generation_scoped",
+      "claim_refs": [
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "entity_kind": "team",
+      "primary_inputs": [
+        "source instance",
+        "native team directory"
+      ],
+      "fallback_inputs": [
+        "native team ID"
+      ],
+      "reuse_behavior": "unverified",
+      "supersession_behavior": "unverified",
+      "claim_refs": [
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "entity_kind": "workflow",
+      "primary_inputs": [
+        "root session",
+        "native workflow ID"
+      ],
+      "fallback_inputs": [],
+      "reuse_behavior": "never_reuse",
+      "supersession_behavior": "generation_scoped",
+      "claim_refs": [
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "entity_kind": "artifact",
+      "primary_inputs": [
+        "root session",
+        "native backup name",
+        "version"
+      ],
+      "fallback_inputs": [
+        "persisted tool-result ID"
+      ],
+      "reuse_behavior": "unverified",
+      "supersession_behavior": "explicit",
+      "claim_refs": [
+        "claude-source-map",
+        "claude-scope-relations-open"
+      ]
+    }
+  ],
+  "association_rules": [
+    {
+      "association_id": "session-project",
+      "from_kind": "session",
+      "to_kind": "project",
+      "precedence": [
+        "transcript native cwd",
+        "session index projectPath",
+        "project directory locator"
+      ],
+      "conflict_behavior": "retain_conflict",
+      "claim_refs": [
+        "claude-identity-rules"
+      ]
+    },
+    {
+      "association_id": "actor-session",
+      "from_kind": "actor",
+      "to_kind": "session",
+      "precedence": [
+        "subagent path",
+        "parent transcript spawn evidence",
+        "metadata parent identity"
+      ],
+      "conflict_behavior": "retain_conflict",
+      "claim_refs": [
+        "claude-identity-rules",
+        "claude-runtime-semantics-open"
+      ]
+    }
+  ],
+  "join_rules": [
+    {
+      "join_id": "parent-subagent",
+      "inputs": [
+        "parent transcript agent spawn",
+        "subagent transcript path",
+        "optional metadata"
+      ],
+      "output": "actor parent and child correlation",
+      "max_fan_out": 256,
+      "ambiguous_behavior": "report_ambiguous",
+      "claim_refs": [
+        "claude-identity-rules",
+        "claude-scope-relations-open"
+      ]
+    },
+    {
+      "join_id": "actor-team-member",
+      "inputs": [
+        "team config leadSessionId plus exactly-one lead member",
+        "subagent metadata teamName plus name",
+        "team directory plus unique config member name"
+      ],
+      "output": "orthogonal team membership",
+      "max_fan_out": 16,
+      "ambiguous_behavior": "report_ambiguous",
+      "claim_refs": [
+        "claude-runtime-semantics-open"
+      ]
+    },
+    {
+      "join_id": "actor-workflow-member",
+      "inputs": [
+        "subagent workflow path",
+        "workflow run",
+        "workflow journal"
+      ],
+      "output": "orthogonal workflow membership",
+      "max_fan_out": 256,
+      "ambiguous_behavior": "report_ambiguous",
+      "claim_refs": [
+        "claude-runtime-semantics-open",
+        "claude-scope-relations-open"
+      ]
+    }
+  ],
+  "scope_program_manifest": "agent-support/claude-code/promoted-2026-08-21/scope-programs.json",
+  "size_limits": [
+    {
+      "limit_id": "jsonl-record",
+      "applies_to": "all AppendDelimited records",
+      "max_bytes": 4194304,
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    },
+    {
+      "limit_id": "jsonl-batch",
+      "applies_to": "all AppendDelimited batches",
+      "max_bytes": 8388608,
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    },
+    {
+      "limit_id": "small-document",
+      "applies_to": "subagent metadata and active sessions",
+      "max_bytes": 65536,
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    },
+    {
+      "limit_id": "standard-document",
+      "applies_to": "team config, todos, workflow runs, session indexes, memory, settings",
+      "max_bytes": 1048576,
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    },
+    {
+      "limit_id": "task-document",
+      "applies_to": "task items",
+      "max_bytes": 262144,
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    },
+    {
+      "limit_id": "large-document",
+      "applies_to": "team inboxes and plans",
+      "max_bytes": 4194304,
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    },
+    {
+      "limit_id": "tool-result-document",
+      "applies_to": "persisted tool results",
+      "max_bytes": 16777216,
+      "claim_refs": [
+        "claude-source-map"
+      ]
+    }
+  ],
+  "privacy": {
+    "raw_capture_policy": "private_never_commit",
+    "committed_fixture_policy": "deterministically_sanitized_or_synthetic",
+    "retention": "hash_only",
+    "prohibited_categories": [
+      "account-identifiers",
+      "credentials",
+      "native-paths",
+      "prompts",
+      "questions",
+      "secrets",
+      "titles"
+    ],
+    "claim_refs": [
+      "claude-privacy-policy"
+    ]
+  },
+  "claim_refs": [
+    "claude-artifact-target-pinned",
+    "claude-source-map",
+    "claude-usage-v2-semantic-revision",
+    "claude-privacy-policy"
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "adapterId": "claude-code",
+  "experiment": "candidate-sanitizer-review-inputs",
+  "reportContractVersion": 1,
+  "privacy": {
+    "classification": "review-packet",
+    "nativeValuesRetained": false,
+    "rawPayloadsRetained": false,
+    "sourcePathsRetained": false,
+    "rawCaptureCommitted": false
+  },
+  "sanitizer": {
+    "version": 2,
+    "prohibitedScan": "pass",
+    "reviewStatus": "pending",
+    "reviewedAt": null,
+    "reviewer": null
+  },
+  "reviewerChecklist": [
+    "Every committed fixture is synthetic or sanitizer-v2 output.",
+    "No native home paths, emails, UUIDs, tokens, or private keys remain.",
+    "Identity placeholders preserve referential equality without reversible hashes.",
+    "Numeric identifiers and timestamps occupy the reserved placeholder ranges when numeric.",
+    "Unknown retained fields do not copy native payload text into public reports.",
+    "Historical C3 and usage-v2 experiment reports remain byte-stable."
+  ],
+  "fixtureInventory": [
+    "fixtures/drift/active-session-name-since.json",
+    "fixtures/drift/bridge-session-account-fields.json",
+    "fixtures/drift/settings-auto-mode.json",
+    "fixtures/team-affiliation/subagent-meta.json",
+    "fixtures/team-affiliation/team-config.json",
+    "fixtures/usage-v2/response-revisions.json",
+    "fixtures/transitions/root-transcript-lifecycle.json",
+    "fixtures/transitions/descendant-membership.json",
+    "fixtures/transitions/team-inbox-replace-delete.json",
+    "fixtures/transitions/todo-plan-replace.json",
+    "fixtures/transitions/workflow-journal-append.json",
+    "fixtures/identity/replay-reorder.json",
+    "fixtures/unknown-retention/unknown-field-bounded.json"
+  ]
+}

@@ -6447,52 +6447,53 @@ mod support_binding_tests {
     use crate::grok::GrokAdapter;
 
     #[test]
-    fn compiled_adapters_match_their_digest_bound_candidate_packages() {
-        assert_candidate_binding(
+    fn compiled_adapters_match_their_digest_bound_support_packages() {
+        assert_support_binding(
             &ClaudeCodeAdapter::new(),
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../agent-support/claude-code/candidate-2026-08-15/support-release.json"
+                "/../../agent-support/claude-code/promoted-2026-08-21/support-release.json"
             )),
             &[
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/candidate-2026-08-15/ads.json",
+                    "agent-support/claude-code/promoted-2026-08-21/ads.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/candidate-2026-08-15/ads.json"
+                        "/../../agent-support/claude-code/promoted-2026-08-21/ads.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/candidate-2026-08-15/source-declarations.json",
+                    "agent-support/claude-code/promoted-2026-08-21/source-declarations.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+                        "/../../agent-support/claude-code/promoted-2026-08-21/source-declarations.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",
+                    "agent-support/claude-code/promoted-2026-08-21/scope-programs.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+                        "/../../agent-support/claude-code/promoted-2026-08-21/scope-programs.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/candidate-2026-08-15/evidence.json",
+                    "agent-support/claude-code/promoted-2026-08-21/evidence.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/candidate-2026-08-15/evidence.json"
+                        "/../../agent-support/claude-code/promoted-2026-08-21/evidence.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/candidate-2026-08-15/conformance.json",
+                    "agent-support/claude-code/promoted-2026-08-21/conformance.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/candidate-2026-08-15/conformance.json"
+                        "/../../agent-support/claude-code/promoted-2026-08-21/conformance.json"
                     )),
                 ),
             ],
+            SupportReleaseStatus::Promoted,
         );
-        assert_candidate_binding(
+        assert_support_binding(
             &CodexAdapter::new(),
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -6535,8 +6536,9 @@ mod support_binding_tests {
                     )),
                 ),
             ],
+            SupportReleaseStatus::Candidate,
         );
-        assert_candidate_binding(
+        assert_support_binding(
             &GrokAdapter::new(),
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -6579,13 +6581,15 @@ mod support_binding_tests {
                     )),
                 ),
             ],
+            SupportReleaseStatus::Candidate,
         );
     }
 
-    fn assert_candidate_binding(
+    fn assert_support_binding(
         adapter: &dyn AgentAdapter,
         release_json: &[u8],
         documents: &[SupportBundleDocument<'_>],
+        expected_status: SupportReleaseStatus,
     ) {
         let release = verify_support_release_bundle(release_json, documents).unwrap();
         let manifest = adapter.manifest();
@@ -6606,6 +6610,6 @@ mod support_binding_tests {
                     .expect("built-in adapter must compile its scope declaration"),
             )
             .unwrap();
-        assert_eq!(release.descriptor().status, SupportReleaseStatus::Candidate);
+        assert_eq!(release.descriptor().status, expected_status);
     }
 }
