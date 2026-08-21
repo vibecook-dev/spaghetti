@@ -69,6 +69,7 @@ mod completion_wire;
 mod continuity_wire;
 mod dependency_access;
 mod event_wire;
+mod observation_source_access;
 mod replacement_manifest_wire;
 mod scope_coverage_wire;
 mod source_wire;
@@ -16532,6 +16533,7 @@ impl ScopedObservationAccessHost {
         };
         Ok(ScopedObservationAccessPass {
             pass_id,
+            adapter: Arc::clone(&self.adapter),
             plan,
             known_objects: Arc::clone(&self.known_objects),
             access_roots: Arc::clone(&self.access_roots),
@@ -16591,6 +16593,7 @@ impl Drop for ScopedObservationAccessHost {
 /// single-pass slot; a later pass receives a fresh declaration-sized ledger.
 pub struct ScopedObservationAccessPass {
     pass_id: u64,
+    adapter: Arc<dyn AgentAdapter>,
     plan: AuthorizedScopeAccessPlan,
     known_objects: Arc<BTreeMap<String, ScopedKnownObjectGrant>>,
     access_roots: Arc<BTreeMap<String, ScopedAccessRootGrant>>,
@@ -19001,6 +19004,9 @@ fn scoped_dependency_access_error() -> AdapterError {
         "decoder requested dependency access without a scoped relation-backed grant",
     )
 }
+
+#[cfg(test)]
+pub(crate) use observation_source_access::bind_observation_runtime_source_for_test;
 
 #[cfg(test)]
 fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecutionError) -> bool {

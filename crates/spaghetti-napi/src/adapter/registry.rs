@@ -188,10 +188,10 @@ pub(crate) mod tests {
     use crate::adapter::{
         verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, AuthorizedObservationSourceDriver, CanonicalEntityKey,
-        CompatibilityClass, ConsistencyPolicy, CoverageAbsenceKind, CoverageDomain,
-        CoveragePositionKind, CoverageSetCompleteness, CoverageStatus, DecodeContext,
-        DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope,
-        ExternalEntityRef, Fact, FactBatch, FactSemanticContext, ObjectSelector,
+        CanonicalSourceInstanceKey, CompatibilityClass, ConsistencyPolicy, CoverageAbsenceKind,
+        CoverageDomain, CoveragePositionKind, CoverageSetCompleteness, CoverageStatus,
+        DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
+        EntityScope, ExternalEntityRef, Fact, FactBatch, FactSemanticContext, ObjectSelector,
         RawRetentionPolicy, ScopeRelationPrimitive, Sha256Digest, SourceAccess, SourceInstance,
         SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
         StreamId, StreamSpec, SupportBundleDocument,
@@ -206,23 +206,23 @@ pub(crate) mod tests {
         ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
     };
     use crate::scoped_observation::{
-        ScopedAccessRootGrant, ScopedActorAttribution, ScopedActorFallbackReason,
-        ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
-        ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendPresenceChange,
-        ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy,
-        ScopedBootstrapBarrierError, ScopedContinuityError, ScopedCoverageAssemblyError,
-        ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedDeliveryError,
-        ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
-        ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
-        ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
-        ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
-        ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
-        ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
-        ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncRuntime,
-        ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
-        ScopedObservationConsumerOfferError, ScopedObservationContextualPollResolution,
-        ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        bind_observation_runtime_source_for_test, ScopedAccessRootGrant, ScopedActorAttribution,
+        ScopedActorFallbackReason, ScopedAdmissionError, ScopedAppendDecodeOutcome,
+        ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase, ScopedAppendObservation,
+        ScopedAppendPresenceChange, ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy,
+        ScopedArtifactContentPolicy, ScopedBootstrapBarrierError, ScopedContinuityError,
+        ScopedCoverageAssemblyError, ScopedDecodeFailureClass, ScopedDecodedAppendItem,
+        ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject,
+        ScopedKnownObjectGrant, ScopedKnownObjectReadRequest, ScopedObjectRead,
+        ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessPass,
+        ScopedObservationAccessRequest, ScopedObservationAdmissionLane,
+        ScopedObservationAppendPassBinding, ScopedObservationAppendPassRequest,
+        ScopedObservationAsyncHandle, ScopedObservationAsyncOwnerFirstExit,
+        ScopedObservationAsyncOwnerPair, ScopedObservationAsyncOwnerRunResult,
+        ScopedObservationAsyncRuntime, ScopedObservationAutomaticResyncError,
+        ScopedObservationCloseError, ScopedObservationConsumerOfferError,
+        ScopedObservationContextualPollResolution, ScopedObservationContinuity,
+        ScopedObservationDeliveryLane, ScopedObservationDeliveryLimits, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -1716,6 +1716,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn closed_pass_rejects_runtime_source_binding_before_reserving_access() {
+        let registry = supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("authorized-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let pass = host.begin_pass().unwrap();
+        let _barrier = host.close();
+        let instance = SourceInstance {
+            id: 1,
+            spec: SourceInstanceSpec {
+                identity_contract_version: 1,
+                stable_key: SourceInstanceKey::new(b"fixture-source".to_vec()).unwrap(),
+                display_name: "fixture".to_string(),
+                roots: vec![SourceRoot {
+                    name: "root".to_string(),
+                    path: root,
+                }],
+                discovery_reason: "fixture".to_string(),
+            },
+        };
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"secret-session-id",
+        }];
+        let error = pass
+            .reserve_observation_runtime_source(
+                &instance,
+                ScopeAccessRequest {
+                    relation_id: "root-object",
+                    operation: AccessOperation::ObjectRead,
+                    phase: AccessPhase::Initial,
+                    parent_token: None,
+                    identity_inputs: &identity,
+                    depth: 1,
+                    max_bytes: 128,
+                    max_rows: 0,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "scoped observation host closed before source binding completed"
+        );
+        let root_report = pass
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "root-object")
+            .unwrap()
+            .clone();
+        assert_eq!(root_report.attempts, 0);
+        assert_eq!(root_report.completed, 0);
+    }
+
+    #[test]
     fn typed_scope_authorization_alone_mints_bound_observation_source_reservations() {
         let registry = supported_fixture_registry_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
         let temp = TempDir::new().unwrap();
@@ -2001,7 +2059,59 @@ pub(crate) mod tests {
         ] {
             assert!(!rendered.contains(private));
         }
-        bound.complete(512, AccessOutcome::Available).unwrap();
+        let approved_root = ScopedAccessRootGrant {
+            access_root: "root".to_string(),
+            root: PathBuf::from("/Users/alice/private/root"),
+        };
+        let expected_source_instance_key = CanonicalSourceInstanceKey::derive(
+            instance.spec.identity_contract_version,
+            instance.spec.stable_key.as_bytes(),
+        )
+        .unwrap();
+        let rooted = bind_observation_runtime_source_for_test(
+            bound,
+            &instance,
+            &approved_root,
+            &expected_source_instance_key,
+        )
+        .unwrap();
+        assert_eq!(rooted.relation_id(), "descendant-objects");
+        assert_eq!(rooted.access_root(), "root");
+        assert_eq!(rooted.root(), approved_root.root.as_path());
+        assert_eq!(
+            rooted.locator(),
+            PathBuf::from("sessions/secret-session-id/children").as_path()
+        );
+        assert_eq!(rooted.relative_selector(), Some("**"));
+        assert_eq!(rooted.source_instance_id(), 7);
+        assert_eq!(
+            rooted.source_instance_key().as_bytes(),
+            b"/Users/alice/private/source-instance"
+        );
+        assert_eq!(rooted.stream().decoder.as_str(), "fixture-descendant");
+        assert_eq!(
+            rooted.object_token(),
+            AccessObjectToken::derive(
+                "descendant-objects",
+                &[
+                    b"native-session-id".as_slice(),
+                    b"secret-session-id".as_slice(),
+                ],
+            )
+            .unwrap()
+        );
+        let rendered = format!("{rooted:?}");
+        for private in [
+            "secret-session-id",
+            "fixture-descendant",
+            "descendant-stream",
+            "/Users/",
+            "alice",
+            "private",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        rooted.complete(512, AccessOutcome::Available).unwrap();
 
         let assert_runtime_drift = |streams: Vec<StreamSpec>| {
             let plan = make_plan();
@@ -2108,6 +2218,83 @@ pub(crate) mod tests {
             "invalid access-budget configuration: authorized observation source does not match the selected adapter runtime stream"
         );
         assert!(!error.to_string().contains("/Users/"));
+
+        let assert_root_drift =
+            |supplied_instance: &SourceInstance, supplied_root: ScopedAccessRootGrant| {
+                let plan = make_plan();
+                let runtime = reserve(&plan)
+                    .bind_runtime_stream(adapter.as_ref(), &instance)
+                    .unwrap();
+                let error = bind_observation_runtime_source_for_test(
+                    runtime,
+                    supplied_instance,
+                    &supplied_root,
+                    &expected_source_instance_key,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "scoped observation source binding does not match the active attachment"
+                );
+                for private in ["/Users/", "alice", "private", "secret-session-id"] {
+                    assert!(!error.to_string().contains(private));
+                }
+                let report = plan.report();
+                let relation = report
+                    .relations()
+                    .iter()
+                    .find(|relation| relation.relation_id == "descendant-objects")
+                    .unwrap();
+                assert_eq!(relation.attempts, 1);
+                assert_eq!(relation.completed, 1);
+                assert_eq!(relation.trace[0].outcome, AccessOutcome::Failed);
+            };
+        assert_root_drift(
+            &instance,
+            ScopedAccessRootGrant {
+                access_root: "root".to_string(),
+                root: PathBuf::from("/Users/alice/private/substituted-root"),
+            },
+        );
+        assert_root_drift(
+            &instance,
+            ScopedAccessRootGrant {
+                access_root: "/Users/alice/private/root-label".to_string(),
+                root: approved_root.root.clone(),
+            },
+        );
+        let substituted_instance = SourceInstance {
+            id: instance.id,
+            spec: SourceInstanceSpec {
+                identity_contract_version: instance.spec.identity_contract_version,
+                stable_key: SourceInstanceKey::new(b"substituted-source".to_vec()).unwrap(),
+                display_name: "substituted".to_string(),
+                roots: instance.spec.roots.clone(),
+                discovery_reason: "fixture".to_string(),
+            },
+        };
+        assert_root_drift(&substituted_instance, approved_root);
+
+        let plan = make_plan();
+        let runtime = reserve(&plan)
+            .bind_runtime_stream(adapter.as_ref(), &instance)
+            .unwrap();
+        let foreign_source_instance_key =
+            CanonicalSourceInstanceKey::derive(1, b"foreign-source-instance").unwrap();
+        let error = bind_observation_runtime_source_for_test(
+            runtime,
+            &instance,
+            &ScopedAccessRootGrant {
+                access_root: "root".to_string(),
+                root: PathBuf::from("/Users/alice/private/root"),
+            },
+            &foreign_source_instance_key,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "scoped observation source binding does not match the active attachment"
+        );
     }
 
     #[test]

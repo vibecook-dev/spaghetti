@@ -1144,6 +1144,10 @@ impl AuthorizedObservationRuntimeStreamReservation {
         self.reservation.locator()
     }
 
+    pub(crate) fn relative_selector(&self) -> Option<&str> {
+        self.reservation.relative_selector()
+    }
+
     pub(crate) fn object_token(&self) -> AccessObjectToken {
         self.reservation.object_token()
     }

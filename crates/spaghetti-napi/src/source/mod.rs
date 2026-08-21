@@ -20,7 +20,8 @@ mod sqlite_snapshot;
 mod conformance;
 
 pub(crate) use access::{
-    validate_evidence_locator_template, validate_relation_id, MAX_IDENTITY_VALUE_BYTES,
+    validate_evidence_locator_template, validate_relation_id,
+    AuthorizedObservationRuntimeStreamReservation, MAX_IDENTITY_VALUE_BYTES,
 };
 pub use access::{
     AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
