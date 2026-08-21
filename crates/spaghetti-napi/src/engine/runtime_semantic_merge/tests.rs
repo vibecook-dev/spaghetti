@@ -158,6 +158,37 @@ fn ordered_observer_delivery_deduplicates_by_event_id_and_preserves_a_b_a() {
 }
 
 #[test]
+fn overlay_replaces_one_fact_identity_while_preserving_semantic_revision_refs() {
+    let fixture = runtime_fixture();
+    let aba = &fixture.usage.response_revisions;
+    let (baseline, _, _) = coverage_sets();
+    let partial = with_completeness(&baseline, "partial");
+    let durable = vec![contribution(&aba.a)];
+    let merged = merge_durable_and_scoped_usage(
+        &durable,
+        &baseline,
+        &[upsert_event("evt-b", &aba.b)],
+        &partial,
+    )
+    .expect("merge");
+    assert_eq!(merged.contributions.len(), 1);
+    assert_eq!(merged.contributions[0].fact_id, aba.a.fact_id);
+    assert_eq!(merged.contributions[0].fact_id, aba.b.fact_id);
+    assert_eq!(
+        merged.contributions[0].semantic_revision_ref,
+        aba.b.semantic_revision_ref
+    );
+    assert_ne!(
+        merged.contributions[0].semantic_revision_ref,
+        aba.a.semantic_revision_ref
+    );
+    assert_eq!(
+        merged.delivered_observer_occurrences[0].semantic_revision_ref,
+        aba.b.semantic_revision_ref
+    );
+}
+
+#[test]
 fn complete_equal_or_dominating_coverage_retires_overlay() {
     let fixture = runtime_fixture();
     let durable = vec![contribution(&fixture.usage.native_message)];
@@ -375,6 +406,7 @@ fn engine_query_service_is_the_durable_live_merge_consumer() {
         query_workers: Some(1),
         owner_label: Some("merge-consumer".to_string()),
         defer_query_structures: true,
+        source_pass_pool: None,
     };
     let bootstrapping = SpaghettiEngineCore::open(options.clone()).unwrap();
     let bootstrapping_merged = bootstrapping

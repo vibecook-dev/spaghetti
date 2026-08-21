@@ -61,6 +61,24 @@ impl SharedSourcePassPool {
             .await
             .expect("the shared source pass pool never closes its semaphore")
     }
+
+    /// Blocking acquire for catalog/query worker threads that are not on a
+    /// Tokio runtime. Observer source owners keep using [`Self::acquire`].
+    pub(crate) fn blocking_acquire(&self) -> tokio::sync::OwnedSemaphorePermit {
+        match Arc::clone(&self.permits).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::Closed) => {
+                unreachable!("the shared source pass pool never closes its semaphore")
+            }
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                    .expect("shared pass pool blocking runtime")
+                    .block_on(self.acquire())
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for SharedSourcePassPool {

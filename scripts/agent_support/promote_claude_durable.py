@@ -29,7 +29,7 @@ def main() -> None:
     ads["ads_id"] = "claude-code-ads-2026-08-21-promoted"
     ads["status"] = "promoted"
     ads["native_artifact"]["target"] = (
-        "Claude Code 2.1.223; RFC-review known-good native pin for the durable product path"
+        "Claude Code 2.1.223; RFC 012A §9.2 version pin via exact_versions. Native distributable is not retained in-repo, so artifact_digest stays null."
     )
     ads["native_artifact"]["identification"]["state"] = "pinned"
     # Version pin is exact_versions 2.1.223. No placeholder blob digest.

@@ -511,8 +511,14 @@ pub(crate) mod tests {
     pub(crate) fn supported_fixture_registry_with_scope(scope_document: &[u8]) -> AdapterRegistry {
         let (catalog, binding, scope_programs) =
             promoted_fixture_catalog_with_scope(scope_document);
+        let adapter = EmptyAdapter::new("fixture").with_support(binding, scope_programs);
+        let adapter = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
+            adapter.with_streams(vec![fixture_descendant_runtime_stream()])
+        } else {
+            adapter
+        };
         AdapterRegistryBuilder::new()
-            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
+            .register(adapter)
             .build_supported(catalog)
             .unwrap()
     }
@@ -1818,25 +1824,118 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn promoted_scoped_host_rejects_uncomposed_dynamic_relations() {
+    fn promoted_scoped_host_requires_directory_membership_before_bootstrap_completion() {
         let registry = supported_fixture_registry_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
         let temp = TempDir::new().unwrap();
         let root = temp.path().join("authorized-root");
         std::fs::create_dir_all(&root).unwrap();
 
-        let error =
-            match ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root)) {
-                Ok(_) => panic!("an uncomposed dynamic relation must fail attachment"),
-                Err(error) => error,
-            };
+        let host = ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root))
+            .expect("ChildDirectoryByNativeId may attach when membership will be recorded");
+        let admission = admission_lane_for_objects(8);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        let _ticket = host.request_poll().unwrap();
+        let lease = host.begin_poll().unwrap().unwrap();
         assert!(matches!(
-            error,
-            ScopedObservationAccessError::InvalidGrant(ref message)
-                if message == "the authorized scope program contains an uncomposed observation relation"
+            host.complete_bootstrap_poll(lease, &admission, &projection, &drain),
+            Err(ScopedObservationPollError::IncompleteScopePass)
         ));
-        let rendered = error.to_string();
-        assert!(!rendered.contains("descendant-objects"));
-        assert!(!rendered.contains("sessions/"));
+    }
+
+    #[test]
+    fn rfc012_d2_host_composes_child_directory_membership_before_bootstrap_completion() {
+        let registry = supported_fixture_registry_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("composed-root");
+        let children = root.join("sessions/fixture-session/children");
+        std::fs::create_dir_all(children.join("nested")).unwrap();
+        std::fs::write(
+            children.join("nested/child.jsonl"),
+            b"{\"type\":\"child\"}\n",
+        )
+        .unwrap();
+
+        let host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let mut admission = admission_lane_for_objects(8);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 4,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 4,
+            })
+            .unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"fixture-session",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id: 10,
+            stream_id: 20,
+            object_id: 30,
+            observed_at: 40,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+
+        let ticket = host.request_poll().unwrap();
+        let lease = host.begin_poll().unwrap().unwrap();
+        let mut root_object = scoped_append_object_for_native_object(b"session.jsonl");
+        reconcile_named_relation(
+            &host,
+            lease.access_pass(),
+            "root-object",
+            &mut root_object,
+            &mut admission,
+            &identity,
+            &origin,
+            AccessPhase::Initial,
+        );
+        let binding = host
+            .bind_directory_relation_source("descendant-objects", &identity, AccessPhase::Initial)
+            .unwrap();
+        let mut listing = match host.scan_directory_membership(binding, None).unwrap() {
+            ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+            other => panic!("expected a directory snapshot, got {other:?}"),
+        };
+        assert!(listing.selected_entry_count() >= 1);
+        while listing.read_next_member().unwrap().is_some() {}
+        assert!(listing.member_reads_complete());
+        let membership = ScopedRelationMembershipObservation::from_directory_listing(listing)
+            .expect("membership observation");
+        admission
+            .record_relation_membership(
+                lease.access_pass().pass_id(),
+                ScopedAppendDeliveryPhase::Bootstrap,
+                membership,
+            )
+            .unwrap();
+        let watermark = host
+            .complete_bootstrap_poll(lease, &admission, &projection, &drain)
+            .unwrap();
+        assert!(matches!(
+            ticket.wait(),
+            ScopedObservationPollResolution::Ready(ready) if Arc::ptr_eq(&ready, &watermark)
+        ));
+        let rendered = format!("{watermark:?}");
+        assert!(!rendered.contains("fixture-session"));
+        assert!(!rendered.contains("child.jsonl"));
+        assert!(!rendered.contains("composed-root"));
     }
 
     #[test]
@@ -3812,17 +3911,28 @@ pub(crate) mod tests {
             .is_none());
         assert!(oversized_plan.report().verify_digest());
 
-        let host_error = match ScopedObservationAccessHost::authorize(
+        let host = ScopedObservationAccessHost::authorize(
             &registry,
             scoped_access_request(approved_root.root.clone()),
-        ) {
-            Ok(_) => panic!("an uncomposed dynamic relation must still fail attachment"),
-            Err(error) => error,
-        };
+        )
+        .expect("directory composition attaches; bootstrap still requires membership");
+        let admission = admission_lane_for_objects(8);
+        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+            max_usage_v2_entities: 1,
+        })
+        .unwrap();
+        let drain = host
+            .open_consumer_drain(ScopedObservationDeliveryLimits {
+                max_semantic_events: 1,
+                max_retained_native_bytes: 0,
+                max_source_control_items: 1,
+            })
+            .unwrap();
+        let _ticket = host.request_poll().unwrap();
+        let lease = host.begin_poll().unwrap().unwrap();
         assert!(matches!(
-            host_error,
-            ScopedObservationAccessError::InvalidGrant(ref message)
-                if message == "the authorized scope program contains an uncomposed observation relation"
+            host.complete_bootstrap_poll(lease, &admission, &projection, &drain),
+            Err(ScopedObservationPollError::IncompleteScopePass)
         ));
     }
 

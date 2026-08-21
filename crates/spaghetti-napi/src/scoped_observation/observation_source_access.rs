@@ -85,7 +85,7 @@ impl fmt::Debug for ScopedObservationRuntimeSourceBinding {
 }
 
 impl ScopedObservationRuntimeSourceBinding {
-    fn bind(
+    pub(crate) fn bind(
         runtime: AuthorizedObservationRuntimeStreamReservation,
         adapter: Arc<dyn AgentAdapter>,
         instance: Arc<SourceInstance>,
@@ -2261,6 +2261,15 @@ pub(crate) fn prepare_observation_directory_membership_for_test(
     let attachment_authority = super::next_scoped_attachment_authority()
         .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
     prepare_directory_membership_contract(binding, attachment_authority)
+}
+
+pub(crate) fn scan_directory_membership_with_authority(
+    binding: ScopedObservationRuntimeSourceBinding,
+    attachment_authority: Arc<super::ScopedObservationAttachmentAuthority>,
+    previous: Option<&ScopedObservationDirectoryListing>,
+) -> Result<ScopedObservationDirectoryScan, ScopedObservationRuntimeSourceError> {
+    let proof = prepare_directory_membership_contract(&binding, attachment_authority)?;
+    ScopedObservationDirectoryScanAuthority { binding, proof }.scan(previous)
 }
 
 #[cfg(test)]

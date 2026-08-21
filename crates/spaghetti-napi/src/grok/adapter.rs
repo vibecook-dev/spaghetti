@@ -1626,6 +1626,7 @@ mod tests {
                 query_workers: Some(1),
                 owner_label: Some("grok-adapter-test".to_string()),
                 defer_query_structures: false,
+                source_pass_pool: None,
             },
             registry,
         )
@@ -1694,6 +1695,7 @@ mod tests {
                     query_workers: Some(1),
                     owner_label: Some(format!("grok-{order}")),
                     defer_query_structures: false,
+                    source_pass_pool: None,
                 },
                 AdapterRegistry::builder()
                     .register(GrokAdapter::new())
@@ -1822,6 +1824,7 @@ mod tests {
                 query_workers: Some(1),
                 owner_label: Some("grok-sidecar-change".to_string()),
                 defer_query_structures: false,
+                source_pass_pool: None,
             },
             AdapterRegistry::builder()
                 .register(GrokAdapter::new())

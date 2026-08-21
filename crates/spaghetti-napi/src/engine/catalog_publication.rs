@@ -4272,6 +4272,7 @@ mod tests {
             query_workers: Some(1),
             owner_label: Some("catalog-publication-test".to_owned()),
             defer_query_structures: false,
+            source_pass_pool: None,
         })
         .unwrap();
         let coverage_plan = plan();

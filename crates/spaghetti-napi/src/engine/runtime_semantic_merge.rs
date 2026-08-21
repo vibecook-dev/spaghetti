@@ -1,8 +1,10 @@
 //! Crate-private RFC 012C durable/scoped usage merge.
 //!
 //! Reconciles a durable usage-v2 contribution list with ordered scoped observer
-//! upsert/retract events. Overlay retirement is coverage-gated. Consumers never
-//! parse native JSON payloads.
+//! upsert/retract events. Overlay replacement is grouped by canonical fact
+//! identity; SemanticRevisionRef is the revision join; event_id deduplicates
+//! delivery. Overlay retirement is coverage-gated. Consumers never parse native
+//! JSON payloads.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -260,10 +262,12 @@ fn assemble_contributions(
 
 /// Merge durable usage-v2 contributions with scoped observer events.
 ///
-/// Observer delivery is deduplicated by occurrence-scoped `event_id`. Generation
-/// reset/deletion retractions apply before remaining replay. Complete comparable
-/// scoped coverage retires the overlay; partial, unavailable, or incomparable
-/// coverage retains it and marks it stale.
+/// Observer delivery is deduplicated by occurrence-scoped `event_id`. Overlay
+/// replacement is grouped by canonical fact identity so A→B→A revises one
+/// response; each contribution carries `SemanticRevisionRef` as the revision
+/// join identity. Generation reset/deletion retractions apply before remaining
+/// replay. Complete comparable scoped coverage retires the overlay; partial,
+/// unavailable, or incomparable coverage retains it and marks it stale.
 pub(crate) fn merge_durable_and_scoped_usage(
     durable: &[DurableUsageContribution],
     durable_coverage: &SourceCoverageSet,

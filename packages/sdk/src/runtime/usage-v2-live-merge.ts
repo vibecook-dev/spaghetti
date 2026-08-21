@@ -1,8 +1,10 @@
 /**
  * Typed RFC 012C durable + scoped usage merge consumer.
  *
- * Join keys are SemanticRevisionRef and occurrence-scoped event_id. Overlay
- * retirement is coverage-gated. This module never parses native JSON payloads.
+ * Merged contributions carry SemanticRevisionRef. Overlay replacement is
+ * grouped by fact identity; occurrence-scoped event_id deduplicates delivery.
+ * Overlay retirement is coverage-gated. This module never parses native JSON
+ * payloads.
  */
 
 import { compareCoverage, type SemanticRevisionRef, type SourceCoverageSet } from '../contracts/rfc012a.js';

@@ -22,7 +22,7 @@
   "references": {
     "ads": {
       "path": "agent-support/claude-code/promoted-2026-08-21/ads.json",
-      "sha256": "sha256:42f3fc4e92cf3d291b5512382a339a14716f2c3abc1234e3c9285df0b9b1bd7c"
+      "sha256": "sha256:3da1667fc89602d1cf95e59017219fedb9e796404c4332eff4677ac1e39507bc"
     },
     "source_declaration": {
       "path": "agent-support/claude-code/promoted-2026-08-21/source-declarations.json",

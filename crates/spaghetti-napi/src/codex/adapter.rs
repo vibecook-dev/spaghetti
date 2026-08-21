@@ -1420,6 +1420,7 @@ mod tests {
                 query_workers: Some(1),
                 owner_label: Some("codex-adapter-test".to_string()),
                 defer_query_structures: false,
+                source_pass_pool: None,
             },
             registry,
         )
@@ -1501,6 +1502,7 @@ mod tests {
                 query_workers: Some(1),
                 owner_label: Some("codex-diagnostic-overflow-test".to_string()),
                 defer_query_structures: false,
+                source_pass_pool: None,
             },
             registry,
         )

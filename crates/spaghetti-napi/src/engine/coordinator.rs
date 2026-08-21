@@ -7718,6 +7718,7 @@ mod tests {
                     query_workers: Some(1),
                     owner_label: Some("coordinator-test".to_string()),
                     defer_query_structures,
+                    source_pass_pool: None,
                 },
                 AdapterRegistry::builder()
                     .register(ClaudeCodeAdapter::new())
@@ -7743,6 +7744,7 @@ mod tests {
             query_workers: Some(1),
             owner_label: Some("synthetic-coordinator-test".to_string()),
             defer_query_structures: false,
+            source_pass_pool: None,
         })
         .unwrap()
     }

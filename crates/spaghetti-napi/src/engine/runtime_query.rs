@@ -1140,7 +1140,7 @@ mod tests {
         let connection = Connection::open(&database).unwrap();
         seed_runtime(&connection);
         drop(connection);
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
 
         let first = client
@@ -1264,7 +1264,7 @@ mod tests {
         let connection = Connection::open(&database).unwrap();
         seed_runtime(&connection);
         drop(connection);
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let page = client
             .runtime_snapshot(RuntimeSnapshotRequest {

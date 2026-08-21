@@ -82,7 +82,7 @@
         {
           "state": "implemented",
           "target": "crates/spaghetti-napi/src/engine/runtime_semantic_merge.rs",
-          "claim": "Durable usage-v2 contributions and scoped observer events join on SemanticRevisionRef at a comparable coverage vector."
+          "claim": "Durable and scoped usage contributions carry SemanticRevisionRef; overlay replacement is grouped by canonical fact identity; observer delivery is deduplicated by event_id; coverage comparison gates overlay retirement."
         }
       ]
     },

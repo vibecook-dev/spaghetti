@@ -267,6 +267,8 @@ pub struct EngineOptions {
     pub query_workers: Option<usize>,
     pub owner_label: Option<String>,
     pub defer_query_structures: bool,
+    /// Caller-owned fair permit domain shared with observer source passes.
+    pub(crate) source_pass_pool: Option<crate::source::SharedSourcePassPool>,
 }
 
 /// Explicit administrative command that replaces one fact family's durable
@@ -531,6 +533,7 @@ pub struct SpaghettiEngineCore {
     lifecycle: Mutex<Lifecycle>,
     commit_notifications: CommitNotifications,
     stopped: Condvar,
+    source_pass_pool: Option<crate::source::SharedSourcePassPool>,
 }
 
 impl SpaghettiEngineCore {
@@ -566,7 +569,12 @@ impl SpaghettiEngineCore {
             options.defer_query_structures && writer.client().begin_query_bootstrap()?;
         // Catalog-first: admit the read pool while FTS bootstrap is still
         // incomplete. Search stays BootstrapInProgress until finalization.
-        let queries = Some(QueryPool::start(database_path.clone(), query_workers)?);
+        let source_pass_pool = options.source_pass_pool.clone();
+        let queries = Some(QueryPool::start(
+            database_path.clone(),
+            query_workers,
+            source_pass_pool.clone(),
+        )?);
         let latest_commit_seq = queries
             .as_ref()
             .map(|pool| pool.client().overview().map(|overview| overview.commit_seq))
@@ -601,6 +609,7 @@ impl SpaghettiEngineCore {
             }),
             commit_notifications: CommitNotifications::new(latest_commit_seq),
             stopped: Condvar::new(),
+            source_pass_pool,
         }))
     }
 
@@ -1927,6 +1936,7 @@ impl SpaghettiEngineCore {
             runtime.queries = Some(QueryPool::start(
                 self.database_path.clone(),
                 self.query_workers,
+                self.source_pass_pool.clone(),
             )?);
         }
         runtime.bootstrap_active = false;
@@ -2192,6 +2202,9 @@ fn duration_ms(value: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::SharedSourcePassPool;
+    use std::sync::mpsc;
+    use std::thread;
     use tempfile::tempdir;
 
     fn options(database_path: PathBuf) -> EngineOptions {
@@ -2200,6 +2213,7 @@ mod tests {
             query_workers: Some(2),
             owner_label: Some("engine-test".to_string()),
             defer_query_structures: false,
+            source_pass_pool: None,
         }
     }
 
@@ -2337,6 +2351,39 @@ mod tests {
             engine.search_cancellable(search_request, QueryCancellationToken::default()),
             Err(EngineError::BootstrapInProgress)
         ));
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn rfc012_d3_engine_catalog_query_workers_wait_for_shared_source_pass_pool() {
+        let dir = tempdir().unwrap();
+        let pool = SharedSourcePassPool::new(1).expect("one shared pass is valid");
+        let mut bootstrap_options = options(dir.path().join("d3-pool.db"));
+        bootstrap_options.query_workers = Some(1);
+        bootstrap_options.source_pass_pool = Some(pool.clone());
+        let engine = SpaghettiEngineCore::open(bootstrap_options).unwrap();
+        assert_eq!(pool.available_permits(), 1);
+
+        let held = pool.blocking_acquire();
+        assert_eq!(pool.available_permits(), 0);
+        let (tx, rx) = mpsc::channel();
+        let query_engine = Arc::clone(&engine);
+        let worker = thread::spawn(move || {
+            let result = query_engine.overview();
+            let _ = tx.send(result);
+        });
+        thread::sleep(Duration::from_millis(80));
+        assert!(
+            rx.try_recv().is_err(),
+            "catalog/query workers must occupy the shared permit before serving overview"
+        );
+        drop(held);
+        let overview = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("overview resumes after the shared permit is released")
+            .expect("overview succeeds after the shared permit is released");
+        assert_eq!(overview.commit_seq, 0);
+        worker.join().expect("overview worker returns");
         engine.shutdown().unwrap();
     }
 

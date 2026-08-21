@@ -1985,6 +1985,7 @@ mod tests {
             query_workers: Some(1),
             owner_label: Some("supervisor-test".to_string()),
             defer_query_structures: false,
+            source_pass_pool: None,
         })
         .unwrap()
     }

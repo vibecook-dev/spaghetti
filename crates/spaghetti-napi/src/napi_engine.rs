@@ -5113,6 +5113,7 @@ impl Task for OpenEngineTask {
                 query_workers,
                 owner_label: self.options.owner_label.clone(),
                 defer_query_structures: self.options.bootstrap_query_structures.unwrap_or(false),
+                source_pass_pool: None,
             },
             registry,
         )

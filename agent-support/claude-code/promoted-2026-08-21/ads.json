@@ -5,7 +5,7 @@
   "status": "promoted",
   "native_artifact": {
     "family": "claude-code",
-    "target": "Claude Code 2.1.223; RFC-review known-good native pin for the durable product path",
+    "target": "Claude Code 2.1.223; RFC 012A §9.2 version pin via exact_versions. Native distributable is not retained in-repo, so artifact_digest stays null.",
     "identification": {
       "state": "pinned",
       "version_markers": [

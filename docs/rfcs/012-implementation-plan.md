@@ -2,8 +2,10 @@
 
 - **Status:** Active non-normative roadmap. Catalog-first host and complete-only
   search are on the engine path. C1 actor/usage/state/interaction fixtures are
-  Gate met. D2/D3 remain In progress against observer composition and
-  replacement/fairness bars. Default-on (`Rolled out`) and child-RFC 012B/C/D
+  Gate met. D2 now composes Promoted `ChildDirectoryByNativeId` membership
+  before bootstrap; D3 query workers share the observer pass pool. D2/D3 remain
+  In progress against Claude Candidate promotion and message/question/task
+  replacement manifests. Default-on (`Rolled out`) and child-RFC 012B/C/D
   ratification remain later product decisions.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
@@ -135,8 +137,8 @@ prerequisite for early vertical slices.
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
 | C4. Runtime semantic downstream suite    | 012C                | Gate met    | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | Gate met    | attach/bootstrap/poll/close/deps; no store/global scan         |
-| D2. Claude scope composition             | 012D                | In progress | root/current/future actor and sidecar conformance              |
-| D3. Control lane and epoch replacement   | 012D                | In progress | overflow/disappearance/duplicate/fairness matrix               |
+| D2. Claude scope composition             | 012D                | In progress | Promoted directory membership; Candidate promotion later       |
+| D3. Control lane and epoch replacement   | 012D                | In progress | shared pass pool; message/question/task replacement later      |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
 | D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
 | X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
@@ -2402,8 +2404,7 @@ primitives.
 Hooks remain in Chopsticks as root lifecycle and immediate-poll signals during
 this package.
 
-Current landing status (2026-08-21): D2 remains `In progress` for Claude
-Candidate dynamic-directory composition. Decoder-executed
+Current landing status (2026-08-21): D2 remains `In progress`. Decoder-executed
 `claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records`
 now also decodes the team-inbox sidecar to `Fact::TeamInboxSnapshot` rather
 than `UnknownRecord`, and still proves typed root/child/workflow/team facts.
@@ -2412,21 +2413,21 @@ Promoted KnownObject program with Claude-shaped root-transcript, current-child,
 future-child, and team-inbox-sidecar grants. Future-child is missing at
 bootstrap (attach-before-create), then root/current/sidecar appear, then the
 future child is created later; each object keeps a distinct source identity.
-The `9f9749b` promotion guard still rejects uncomposed `ChildDirectoryByNativeId`
-relations. This is not Candidate-program authorization or a Claude support
-status flip. Promoted support is durable-only with a KnownObject
-root-transcript program; candidate still holds the full RFC 012D relation
-set. The promotion guard in `9f9749b` closes one unsafe interim
-state: after typed support authorization selects a Promoted scope program, the
-scoped host now rejects attachment if that program contains any observation
-relation primitive whose membership is not represented by the current exact
-`KnownObject` coverage vector. Evidence-derived artifact relations remain on
-their separately bound availability contract. The rejection occurs before
-construction of a native access pass and exposes neither the relation ID nor
-its locator. This does not implement child-directory, sibling, referenced,
-index, namespace, or parameterized-query composition; it prevents a later
-manifest status flip from silently treating those omitted relations as a
-complete scope.
+`rfc012_d2_host_composes_child_directory_membership_before_bootstrap_completion`
+now authorizes a Promoted fixture program that declares a KnownObject root plus
+a `ChildDirectoryByNativeId` descendant relation, binds the declared
+`descendant-stream`, scans membership, drains member reads, and records that
+directory checkpoint as AccessAttempt evidence before bootstrap completion.
+Bootstrap without membership remains `IncompleteScopePass`. Candidate support
+still cannot carry a Promoted dynamic program. This is not Candidate-program
+authorization or a Claude support status flip. Promoted Claude remains
+durable-only with a KnownObject root-transcript program; candidate still holds
+the full RFC 012D relation set. The former `9f9749b` authorize-time rejection
+of uncomposed observation primitives is replaced by bootstrap-complete-time
+membership evidence for those relations. Evidence-derived artifact relations
+remain on their separately bound availability contract. Sibling, referenced,
+index, namespace, and parameterized-query composition, and Claude Candidate
+directory promotion, remain later work.
 
 Commit `8253e51` adds the first common representation needed behind that guard
 without opening it. One complete bounded `DirectoryCheckpoint` may now be
@@ -2831,10 +2832,18 @@ proves durable overview queries run while search is still
 `rfc012_d3_shared_pass_pool_serializes_catalog_like_work_and_observer_pass`
 proves one `SharedSourcePassPool` permit serializes a catalog-labelled hold
 with an observer source pass: the observer poll waits until that permit is
-released. Engine catalog/query workers still do not acquire this pool.
-Task complete-snapshot replacement already retracts missing items; interaction
-fixtures distinguish complete retract from partial non-retraction. Per-family
-replacement manifests for message/question/task remain open. Native-derived
+released.
+`rfc012_d3_engine_catalog_query_workers_wait_for_shared_source_pass_pool`
+proves engine catalog/query workers `blocking_acquire` that same caller-owned
+pool: a held permit stalls `overview()` until release, and shutdown does not
+acquire so disposal cannot deadlock behind a held permit. Task complete-snapshot
+replacement already retracts missing items; interaction fixtures distinguish
+complete retract from partial non-retraction. Per-family replacement manifests
+for message/question/task remain open: the observer's implemented families are
+still `runtime.actor-affiliation`, `runtime.actor-run`, and `runtime.usage-v2`.
+C1 deferred message/plan/task fixtures; `runtime.user-input-request` has C1
+serialization but no observer projection. Adding those families to replacement
+without those reducers would invent policy. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have
@@ -3618,9 +3627,10 @@ TypeScript. X1 compares deferred, eager, and crash-recovery FTS on identical
 Claude input and keeps search complete-only. D5 emits attach/poll/overflow/
 three-scope Instant samples from the observer kernel. D2 now attaches
 Claude-shaped KnownObject root/current/future/sidecar grants, including
-attach-before-create for the future child; Candidate dynamic-directory
-composition stays `In progress`. D3 serializes catalog-labelled work against
-observer passes on one shared permit; engine catalog workers and
+attach-before-create for the future child, and composes Promoted
+`ChildDirectoryByNativeId` membership before bootstrap completion. Claude
+Candidate directory promotion stays `In progress` as a later policy decision.
+D3 serializes catalog/query workers and observer passes on one shared permit;
 message/question/task replacement manifests stay `In progress`. D4's public
 scoped-observer facade remains a later product decision.
 

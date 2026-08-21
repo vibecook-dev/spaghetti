@@ -153,7 +153,7 @@ impl ClaudeCodeAdapter {
                         "claude-code-support-2026-08-21-promoted",
                         env!("CARGO_PKG_VERSION"),
                         22,
-                        "sha256:42f3fc4e92cf3d291b5512382a339a14716f2c3abc1234e3c9285df0b9b1bd7c",
+                        "sha256:3da1667fc89602d1cf95e59017219fedb9e796404c4332eff4677ac1e39507bc",
                         "sha256:36f0dfc5d55a0d6e52d8034aaa0a45a35e70caf2c48e6d3f3e50f05351f27ec6",
                         "sha256:9e354d1cc2b17465f5de7a7c286ea7d6be18e303a53eddc467db1c5f4e69316e",
                     )

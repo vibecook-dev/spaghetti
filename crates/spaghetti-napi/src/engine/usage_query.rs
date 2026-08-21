@@ -1244,7 +1244,7 @@ mod tests {
         seed_usage_fixture(&connection);
         drop(connection);
 
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let project_a = encode_entity_id(PROJECT_ID_PREFIX, b"project-a");
         let project_b = encode_entity_id(PROJECT_ID_PREFIX, b"project-b");

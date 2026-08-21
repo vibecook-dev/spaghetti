@@ -14,6 +14,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::core::schema;
+use crate::source::SharedSourcePassPool;
 
 use super::capability_query::{
     read_artifact_page, read_memory_document_page, read_plan_page, read_task_collection_page,
@@ -1759,7 +1760,11 @@ pub struct QueryPool {
 }
 
 impl QueryPool {
-    pub fn start(database_path: PathBuf, workers: usize) -> Result<Self, EngineError> {
+    pub fn start(
+        database_path: PathBuf,
+        workers: usize,
+        source_pass_pool: Option<SharedSourcePassPool>,
+    ) -> Result<Self, EngineError> {
         let capacity = workers.saturating_mul(QUEUE_DEPTH_PER_WORKER).max(1);
         let (command_tx, command_rx) = bounded(capacity);
         let (ready_tx, ready_rx) = bounded(workers);
@@ -1771,6 +1776,7 @@ impl QueryPool {
             let thread_commands = command_rx.clone();
             let thread_ready = ready_tx.clone();
             let thread_control = Arc::clone(&control);
+            let thread_pool = source_pass_pool.clone();
             let join = thread::Builder::new()
                 .name(format!("spaghetti-query-{worker_id}"))
                 .spawn(move || {
@@ -1780,6 +1786,7 @@ impl QueryPool {
                         thread_commands,
                         thread_ready,
                         thread_control,
+                        thread_pool,
                     )
                 })
                 .map_err(|error| EngineError::WorkerStart {
@@ -1869,6 +1876,7 @@ fn query_thread(
     commands: Receiver<QueuedQuery>,
     ready: Sender<Result<(), EngineError>>,
     control: Arc<QueryControl>,
+    source_pass_pool: Option<SharedSourcePassPool>,
 ) {
     let connection = match open_reader(&database_path) {
         Ok(connection) => connection,
@@ -1889,6 +1897,12 @@ fn query_thread(
     drop(ready);
 
     while let Ok(queued) = commands.recv() {
+        if matches!(queued.command, QueryCommand::Shutdown) {
+            break;
+        }
+        let _pass = source_pass_pool
+            .as_ref()
+            .map(SharedSourcePassPool::blocking_acquire);
         let _measurement = queued
             .measured
             .then(|| QueryMeasurementGuard::begin(&control.telemetry, worker_id, queued.queued_at));
@@ -2534,7 +2548,9 @@ fn query_thread(
                     .is_err();
                 let _ = response.send(rejected);
             }
-            QueryCommand::Shutdown => break,
+            QueryCommand::Shutdown => {
+                unreachable!("shutdown is handled before the shared pass acquire")
+            }
         }
     }
 
@@ -4246,7 +4262,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("query.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database.clone(), 2).unwrap();
+        let mut pool = QueryPool::start(database.clone(), 2, None).unwrap();
         let client = pool.client();
 
         let probe = Connection::open(&database).unwrap();
@@ -4482,7 +4498,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
 
         let (entered_tx, entered_rx) = bounded(1);
@@ -4521,7 +4537,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("active-reader.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
 
         let (entered_tx, entered_rx) = bounded(1);
@@ -4552,7 +4568,7 @@ mod tests {
         let database = dir.path().join("pinned-reader.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
         let writer_client = writer.client();
-        let mut pool = QueryPool::start(database.clone(), 1).unwrap();
+        let mut pool = QueryPool::start(database.clone(), 1, None).unwrap();
         let queries = pool.client();
 
         let (entered_tx, entered_rx) = bounded(1);
@@ -4600,7 +4616,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("usage-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
 
         let (entered_tx, entered_rx) = bounded(1);
@@ -4637,7 +4653,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("runtime-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
 
         let (entered_tx, entered_rx) = bounded(1);
@@ -4674,7 +4690,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("team-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let cancellation = QueryCancellationToken::default();
         cancellation.cancel();
@@ -4700,7 +4716,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("change-replay-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let cancellation = QueryCancellationToken::default();
         cancellation.cancel();
@@ -4727,7 +4743,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("capability-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let cancellation = QueryCancellationToken::default();
         cancellation.cancel();
@@ -4753,7 +4769,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("search-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let cancellation = QueryCancellationToken::default();
         cancellation.cancel();
@@ -4786,7 +4802,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("timeline-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let cancellation = QueryCancellationToken::default();
         cancellation.cancel();
@@ -4822,7 +4838,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let database = dir.path().join("orchestration-cancel.db");
         let mut writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
         let cancellation = QueryCancellationToken::default();
         cancellation.cancel();
@@ -4984,7 +5000,7 @@ mod tests {
             .client()
             .commit_observation(commit_request())
             .unwrap();
-        let mut pool = QueryPool::start(database, 2).unwrap();
+        let mut pool = QueryPool::start(database, 2, None).unwrap();
         let client = pool.client();
 
         let first = client
@@ -5082,7 +5098,7 @@ mod tests {
             change.payload = vec![u8::try_from(index).unwrap(); payload_len];
         }
         writer.client().commit_observation(request).unwrap();
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let client = pool.client();
 
         let first = client
@@ -5153,7 +5169,7 @@ mod tests {
         assert_eq!(retention.oldest_retained_commit_seq, Some(3));
         assert_eq!(retention.oldest_retained_ordinal, Some(0));
 
-        let mut pool = QueryPool::start(database, 1).unwrap();
+        let mut pool = QueryPool::start(database, 1, None).unwrap();
         let queries = pool.client();
         let stale = queries
             .replay_changes(ChangeReplayRequest {
@@ -5241,7 +5257,7 @@ mod tests {
         writer.shutdown().unwrap();
 
         let mut restarted_writer = WriterRuntime::start(database.clone()).unwrap();
-        let mut restarted_queries = QueryPool::start(database, 1).unwrap();
+        let mut restarted_queries = QueryPool::start(database, 1, None).unwrap();
         let replay = restarted_queries
             .client()
             .replay_changes(ChangeReplayRequest {
@@ -5284,7 +5300,7 @@ mod tests {
         let receipt = writer.client().commit_observation(request).unwrap();
         writer.shutdown().unwrap();
 
-        let mut restarted_queries = QueryPool::start(database, 1).unwrap();
+        let mut restarted_queries = QueryPool::start(database, 1, None).unwrap();
         let missing = restarted_queries
             .client()
             .source_catalog("query-fixture", b"missing")
