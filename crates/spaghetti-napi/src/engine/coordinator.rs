@@ -6155,6 +6155,74 @@ mod tests {
     }
 
     #[test]
+    fn rfc012_x2_dump_engine_source_record_errors() {
+        let fixture = ClaudeFixture::new();
+        let mut transcript = transcript_line("m1", "covered");
+        for uuid in ["row-bad-a", "row-bad-b", "row-bad-a2"] {
+            transcript.extend_from_slice(
+                format!(
+                    r#"{{"type":"assistant","uuid":"{uuid}","timestamp":"2026-08-11T00:00:01Z","sessionId":"{SESSION}","cwd":"/repo","message":{{"model":"claude-sonnet","id":"api-bad","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":"bad"}}}}}}"#
+                )
+                .as_bytes(),
+            );
+            transcript.push(b'\n');
+        }
+        transcript.extend_from_slice(
+            br#"{"type":"file-history-delta","messageId":"delta-bad","snapshotMessageId":"checkpoint","trackingPath":"src/lib.rs","backup":{"backupFileName":"71f902cd51ee4c6e@v2","version":3,"backupTime":"2026-08-11T20:01:00.000Z"}}"#,
+        );
+        transcript.push(b'\n');
+        std::fs::write(fixture.transcript_path(), transcript).unwrap();
+        let engine = fixture.open_engine();
+
+        let outcome = fixture.reconcile(&engine);
+        assert!(outcome.records_quarantined >= 2);
+        assert!(count_rows(&fixture.database, "source_record_errors") >= 2);
+
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let source = Connection::open(&fixture.database).unwrap();
+        source
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let dump = std::env::var_os("RFC012_X2_DUMP")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "../../scripts/rfc012_experiments/fixtures/source-record-errors.sqlite",
+                )
+            });
+        // VACUUM INTO cannot replace an existing file.
+        if dump.exists() {
+            std::fs::remove_file(&dump).unwrap();
+        }
+        let dump_str = dump.to_str().expect("RFC012_X2_DUMP must be utf-8");
+        if source.execute("VACUUM INTO ?1", [dump_str]).is_err() {
+            let escaped = dump_str.replace('\'', "''");
+            source
+                .execute_batch(&format!("VACUUM INTO '{escaped}'"))
+                .unwrap();
+        }
+
+        let dumped =
+            Connection::open_with_flags(&dump, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let dump_errors: i64 = dumped
+            .query_row("SELECT COUNT(*) FROM source_record_errors", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(dump_errors >= 2);
+        let table: String = dumped
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_record_errors'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, "source_record_errors");
+    }
+
+    #[test]
     fn usage_scoped_diagnostic_blocks_usage_v2_coverage() {
         let fixture = ClaudeFixture::new();
         let malformed = format!(
