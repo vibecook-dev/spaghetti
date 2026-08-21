@@ -47,10 +47,10 @@ pub(crate) use registry::tests::{
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use scope::{
-    ScopeContractError, ScopeProgramDeclaration, ScopeProgramManifest, ScopeProgramStatus,
-    ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
-    ScopeRelationSourceBinding, ScopeRelationSourcePrimitive, ScopeUnavailableBehavior,
-    SCOPE_PROGRAM_SCHEMA_VERSION,
+    ScopeContractError, ScopeObservationSourceBinding, ScopeProgramDeclaration,
+    ScopeProgramManifest, ScopeProgramStatus, ScopeRelationBounds, ScopeRelationDeclaration,
+    ScopeRelationPrimitive, ScopeRelationSourceBinding, ScopeRelationSourcePrimitive,
+    ScopeUnavailableBehavior, SCOPE_PROGRAM_SCHEMA_VERSION,
 };
 pub(crate) use semantic::CoverageMembershipRevisionBuilder;
 pub use semantic::{

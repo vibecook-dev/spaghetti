@@ -86,6 +86,70 @@ impl ScopeRelationSourceBinding {
     }
 }
 
+/// Exact source stream and selection authority for a scoped observation
+/// relation. The source pattern must occur in the digest-bound source
+/// declaration. Directory relations additionally carry a selector relative
+/// to their already-confined rendered locator; neither value is caller input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopeObservationSourceBinding {
+    pub stream_id: String,
+    pub source_pattern: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_selector: Option<String>,
+}
+
+impl ScopeObservationSourceBinding {
+    fn validate(
+        &self,
+        relation_primitive: ScopeRelationPrimitive,
+        locator: &str,
+        identity_inputs: &[String],
+    ) -> Result<(), ScopeContractError> {
+        validate_identifier("scope observation source stream id", &self.stream_id)?;
+        validate_source_pattern("scope observation source pattern", &self.source_pattern)?;
+        let locator_pattern = locator_template_pattern(locator, identity_inputs)?;
+        match (relation_primitive, self.relative_selector.as_deref()) {
+            (ScopeRelationPrimitive::ChildDirectoryByNativeId, Some(selector)) => {
+                validate_source_pattern("scope observation relative selector", selector)?;
+                if format!("{locator_pattern}/{selector}") != self.source_pattern {
+                    return Err(invalid(
+                        "child-directory selector does not compose to its declared source pattern",
+                    ));
+                }
+            }
+            (ScopeRelationPrimitive::ChildDirectoryByNativeId, None) => {
+                return Err(invalid(
+                    "child-directory observation binding requires a relative selector",
+                ));
+            }
+            (ScopeRelationPrimitive::SiblingObject, None) => {}
+            (ScopeRelationPrimitive::ReferencedObjectFromField, None) => {
+                if locator_pattern != self.source_pattern {
+                    return Err(invalid(
+                        "referenced-object locator does not compose to its declared source pattern",
+                    ));
+                }
+            }
+            (
+                ScopeRelationPrimitive::SiblingObject
+                | ScopeRelationPrimitive::ReferencedObjectFromField,
+                Some(_),
+            ) => {
+                return Err(invalid(
+                    "exact-object observation binding cannot declare a relative selector",
+                ));
+            }
+            _ => {
+                return Err(invalid(
+                    "observation source bindings are limited to child-directory, sibling, and referenced-object relations",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeRelationBounds {
@@ -135,6 +199,10 @@ pub struct ScopeRelationDeclaration {
     /// manifests may not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_binding: Option<ScopeRelationSourceBinding>,
+    /// Digest-bound stream and selector authority for a dynamic or related
+    /// observation. This declaration alone cannot open or read a source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_binding: Option<ScopeObservationSourceBinding>,
     pub unavailable_behavior: ScopeUnavailableBehavior,
     pub claim_refs: Vec<String>,
 }
@@ -143,7 +211,7 @@ impl ScopeRelationDeclaration {
     fn validate(
         &self,
         roots: &BTreeSet<&str>,
-        require_artifact_source_binding: bool,
+        require_promoted_bindings: bool,
     ) -> Result<(), ScopeContractError> {
         validate_identifier("scope relation id", &self.relation_id)?;
         validate_identifier("scope relation access root", &self.access_root)?;
@@ -186,7 +254,7 @@ impl ScopeRelationDeclaration {
                 binding.validate(self.bounds)?;
             }
             (ScopeRelationPrimitive::ArtifactLocatorFromEvidence, None)
-                if require_artifact_source_binding =>
+                if require_promoted_bindings =>
             {
                 return Err(invalid(
                     "promoted evidence-derived artifact relation requires a source binding",
@@ -199,6 +267,27 @@ impl ScopeRelationDeclaration {
                 ));
             }
             (_, None) => {}
+        }
+        match self.observation_binding.as_ref() {
+            Some(binding) => {
+                binding.validate(self.primitive, &self.locator, &self.identity_inputs)?
+            }
+            None if require_promoted_bindings
+                && matches!(
+                    self.primitive,
+                    ScopeRelationPrimitive::SiblingObject
+                        | ScopeRelationPrimitive::ChildDirectoryByNativeId
+                        | ScopeRelationPrimitive::ReferencedObjectFromField
+                        | ScopeRelationPrimitive::BoundedIndexLookup
+                        | ScopeRelationPrimitive::ParameterizedSQLiteRows
+                        | ScopeRelationPrimitive::KeyNamespace
+                ) =>
+            {
+                return Err(invalid(
+                    "promoted dynamic observation relation requires an executable source binding",
+                ));
+            }
+            None => {}
         }
         Ok(())
     }
@@ -382,6 +471,77 @@ fn validate_identifier(label: &str, value: &str) -> Result<(), ScopeContractErro
     Ok(())
 }
 
+fn validate_source_pattern(label: &str, value: &str) -> Result<(), ScopeContractError> {
+    let first_component = value.split('/').next().unwrap_or_default().as_bytes();
+    let has_windows_drive_prefix = first_component.len() >= 2
+        && first_component[0].is_ascii_alphabetic()
+        && first_component[1] == b':';
+    let valid = !value.is_empty()
+        && value.len() <= MAX_LOCATOR_BYTES
+        && !value.starts_with('/')
+        && !has_windows_drive_prefix
+        && !value.contains('\\')
+        && !value.contains("**/**")
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+        && !value
+            .bytes()
+            .any(|byte| matches!(byte, b'?' | b'[' | b']' | b'{' | b'}'))
+        && value.split('/').all(|component| {
+            !component.is_empty()
+                && component != "."
+                && component != ".."
+                && (!component.contains("**") || component == "**")
+        });
+    if !valid {
+        return Err(invalid(format!(
+            "{label} must be a bounded canonical confined star-only pattern"
+        )));
+    }
+    Ok(())
+}
+
+fn locator_template_pattern(
+    locator: &str,
+    identity_inputs: &[String],
+) -> Result<String, ScopeContractError> {
+    let bytes = locator.as_bytes();
+    let mut output = String::with_capacity(locator.len());
+    let mut cursor = 0;
+    let mut literal_start = 0;
+    let mut placeholders = BTreeSet::new();
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'{' => {
+                output.push_str(&locator[literal_start..cursor]);
+                let end = bytes[cursor + 1..]
+                    .iter()
+                    .position(|byte| *byte == b'}')
+                    .map(|offset| cursor + 1 + offset)
+                    .ok_or_else(|| invalid("scope observation locator template is invalid"))?;
+                let name = &locator[cursor + 1..end];
+                if name.as_bytes().contains(&b'{')
+                    || validate_identifier("scope observation locator placeholder", name).is_err()
+                    || !identity_inputs.iter().any(|input| input == name)
+                    || !placeholders.insert(name)
+                {
+                    return Err(invalid("scope observation locator template is invalid"));
+                }
+                output.push('*');
+                cursor = end + 1;
+                literal_start = cursor;
+            }
+            b'}' => return Err(invalid("scope observation locator template is invalid")),
+            _ => cursor += 1,
+        }
+    }
+    if placeholders.is_empty() {
+        return Err(invalid("scope observation locator template is invalid"));
+    }
+    output.push_str(&locator[literal_start..]);
+    validate_source_pattern("scope observation locator pattern", &output)?;
+    Ok(output)
+}
+
 fn validate_identifier_list(
     label: &str,
     values: &[String],
@@ -468,6 +628,7 @@ mod tests {
         let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
         manifest.status = ScopeProgramStatus::Promoted;
         manifest.blockers.clear();
+        manifest.programs[0].relations.truncate(1);
 
         assert!(manifest
             .validate()
@@ -475,14 +636,23 @@ mod tests {
             .to_string()
             .contains("declared root relation"));
 
-        manifest.programs[0].root_relation_id = Some("summary-sidecar".to_string());
+        manifest.programs[0].root_relation_id = Some("root-history".to_string());
+        manifest.programs[0].relations[0].primitive = ScopeRelationPrimitive::SiblingObject;
+        manifest.programs[0].relations[0].locator = "history/{native-session-id}.jsonl".to_string();
+        manifest.programs[0].relations[0].observation_binding =
+            Some(ScopeObservationSourceBinding {
+                stream_id: "history-documents".to_string(),
+                source_pattern: "**/history.jsonl".to_string(),
+                relative_selector: None,
+            });
         assert!(manifest
             .validate()
             .unwrap_err()
             .to_string()
             .contains("must use KnownObject"));
 
-        manifest.programs[0].root_relation_id = Some("root-history".to_string());
+        manifest.programs[0].relations[0].primitive = ScopeRelationPrimitive::KnownObject;
+        manifest.programs[0].relations[0].observation_binding = None;
         manifest.validate().unwrap();
     }
 
@@ -552,11 +722,12 @@ mod tests {
             primitive: ScopeRelationSourcePrimitive::ReplaceDocument,
             max_object_bytes: relation.bounds.max_bytes,
         });
+        manifest.programs[0].relations.truncate(2);
         manifest.validate().unwrap();
 
         manifest.programs[0].relations[1].source_binding = None;
         manifest.programs[0].relations[1].primitive = ScopeRelationPrimitive::SiblingObject;
-        manifest.programs[0].relations[2].source_binding = Some(ScopeRelationSourceBinding {
+        manifest.programs[0].relations[0].source_binding = Some(ScopeRelationSourceBinding {
             stream_id: "events-documents".to_string(),
             primitive: ScopeRelationSourcePrimitive::ReplaceDocument,
             max_object_bytes: 1,
@@ -566,5 +737,79 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("only an evidence-derived artifact relation"));
+    }
+
+    #[test]
+    fn promoted_dynamic_relations_require_primitive_appropriate_source_bindings() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+        ));
+        let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
+        manifest.status = ScopeProgramStatus::Promoted;
+        manifest.blockers.clear();
+        manifest.programs[0].root_relation_id = Some("root-history".to_string());
+        manifest.programs[0].relations.truncate(2);
+
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires an executable source binding"));
+
+        manifest.programs[0].relations[1].observation_binding =
+            Some(ScopeObservationSourceBinding {
+                stream_id: "summary-documents".to_string(),
+                source_pattern: "**/summary.json".to_string(),
+                relative_selector: None,
+            });
+        manifest.programs[0].relations[1].locator = "{history-object}/summary.json".to_string();
+        manifest.validate().unwrap();
+
+        manifest.programs[0].relations[1].primitive =
+            ScopeRelationPrimitive::ChildDirectoryByNativeId;
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires a relative selector"));
+        manifest.programs[0].relations[1]
+            .observation_binding
+            .as_mut()
+            .unwrap()
+            .relative_selector = Some("**/entry-*.json".to_string());
+        manifest.programs[0].relations[1]
+            .observation_binding
+            .as_mut()
+            .unwrap()
+            .source_pattern = "*/summary.json/**/entry-*.json".to_string();
+        manifest.validate().unwrap();
+
+        manifest.programs[0].relations[1].primitive =
+            ScopeRelationPrimitive::ReferencedObjectFromField;
+        let binding = manifest.programs[0].relations[1]
+            .observation_binding
+            .as_mut()
+            .unwrap();
+        binding.relative_selector = None;
+        binding.source_pattern = "**/summary.json".to_string();
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("referenced-object locator"));
+        manifest.programs[0].relations[1]
+            .observation_binding
+            .as_mut()
+            .unwrap()
+            .source_pattern = "*/summary.json".to_string();
+        manifest.validate().unwrap();
+
+        manifest.programs[0].relations[1]
+            .observation_binding
+            .as_mut()
+            .unwrap()
+            .relative_selector = Some("../escape".to_string());
+        assert!(manifest.validate().is_err());
     }
 }

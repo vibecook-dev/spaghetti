@@ -563,6 +563,8 @@ struct SupportSourceDeclarationWire {
 struct SupportSourceStreamWire {
     stream_id: String,
     root_id: String,
+    #[serde(default)]
+    relative_patterns: Vec<String>,
     primitive: String,
     topologies: Vec<String>,
     implementation_state: String,
@@ -575,6 +577,10 @@ struct SupportSourceStreamWire {
 struct SupportSourceBoundsWire {
     #[serde(default)]
     max_object_bytes: Option<u64>,
+    #[serde(default)]
+    max_record_bytes: Option<u64>,
+    #[serde(default)]
+    max_batch_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -885,43 +891,112 @@ fn validate_scope_source_bindings(
         }
     }
     for relation in scope_programs.relations() {
-        let Some(binding) = relation.source_binding.as_ref() else {
-            continue;
-        };
-        let stream = streams.get(binding.stream_id.as_str()).ok_or_else(|| {
-            SupportContractError::invalid(format!(
-                "scope relation {:?} binds unknown source stream {:?}",
-                relation.relation_id, binding.stream_id
-            ))
-        })?;
-        let lifecycle = stream
-            .lifecycle
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        if stream.root_id != relation.access_root
-            || stream.primitive
-                != match binding.primitive {
-                    ScopeRelationSourcePrimitive::ReplaceDocument => "ReplaceDocument",
-                }
-            || stream.bounds.max_object_bytes != Some(binding.max_object_bytes)
-            || !stream
-                .topologies
+        if let Some(binding) = relation.source_binding.as_ref() {
+            let stream = streams.get(binding.stream_id.as_str()).ok_or_else(|| {
+                SupportContractError::invalid(format!(
+                    "scope relation {:?} binds unknown source stream {:?}",
+                    relation.relation_id, binding.stream_id
+                ))
+            })?;
+            let lifecycle = stream
+                .lifecycle
                 .iter()
-                .any(|topology| topology == "scoped")
-            || stream.implementation_state != "existing"
-            || stream.safe_decoder_state_boundary != "object_generation_revision"
-            || !["replace", "delete", "recreate"]
-                .into_iter()
-                .all(|required| lifecycle.contains(required))
-        {
-            return Err(SupportContractError::invalid(format!(
-                "scope relation {:?} source binding does not match an existing scoped ReplaceDocument stream",
-                relation.relation_id
-            )));
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>();
+            if stream.root_id != relation.access_root
+                || stream.primitive
+                    != match binding.primitive {
+                        ScopeRelationSourcePrimitive::ReplaceDocument => "ReplaceDocument",
+                    }
+                || stream.bounds.max_object_bytes != Some(binding.max_object_bytes)
+                || !stream
+                    .topologies
+                    .iter()
+                    .any(|topology| topology == "scoped")
+                || stream.implementation_state != "existing"
+                || stream.safe_decoder_state_boundary != "object_generation_revision"
+                || !["replace", "delete", "recreate"]
+                    .into_iter()
+                    .all(|required| lifecycle.contains(required))
+            {
+                return Err(SupportContractError::invalid(format!(
+                    "scope relation {:?} source binding does not match an existing scoped ReplaceDocument stream",
+                    relation.relation_id
+                )));
+            }
+        }
+        if let Some(binding) = relation.observation_binding.as_ref() {
+            let stream = streams.get(binding.stream_id.as_str()).ok_or_else(|| {
+                SupportContractError::invalid(format!(
+                    "scope relation {:?} binds unknown observation stream {:?}",
+                    relation.relation_id, binding.stream_id
+                ))
+            })?;
+            if stream.root_id != relation.access_root
+                || !stream
+                    .relative_patterns
+                    .iter()
+                    .any(|pattern| pattern == &binding.source_pattern)
+                || !stream
+                    .topologies
+                    .iter()
+                    .any(|topology| topology == "scoped")
+                || stream.implementation_state != "existing"
+                || !observation_stream_has_complete_lifecycle(stream, relation.bounds.max_bytes)
+            {
+                return Err(SupportContractError::invalid(format!(
+                    "scope relation {:?} observation binding does not match an existing scoped source stream",
+                    relation.relation_id
+                )));
+            }
         }
     }
     Ok(())
+}
+
+fn observation_stream_has_complete_lifecycle(
+    stream: &SupportSourceStreamWire,
+    relation_max_bytes: u64,
+) -> bool {
+    let lifecycle = stream
+        .lifecycle
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    match stream.primitive.as_str() {
+        "ReplaceDocument" | "PresenceObject" => {
+            stream.safe_decoder_state_boundary == "object_generation_revision"
+                && stream
+                    .bounds
+                    .max_object_bytes
+                    .is_some_and(|bound| bound <= relation_max_bytes)
+                && ["replace", "delete", "recreate"]
+                    .into_iter()
+                    .all(|required| lifecycle.contains(required))
+        }
+        "AppendDelimited" => {
+            stream.safe_decoder_state_boundary == "object_generation_cursor"
+                && stream
+                    .bounds
+                    .max_record_bytes
+                    .is_some_and(|bound| bound <= relation_max_bytes)
+                && stream
+                    .bounds
+                    .max_batch_bytes
+                    .is_some_and(|bound| bound <= relation_max_bytes)
+                && [
+                    "append",
+                    "partial_write",
+                    "truncate",
+                    "identity_change",
+                    "delete",
+                    "recreate",
+                ]
+                .into_iter()
+                .all(|required| lifecycle.contains(required))
+        }
+        _ => false,
+    }
 }
 
 fn validate_support_path(path: &str) -> Result<(), SupportContractError> {
@@ -3543,6 +3618,7 @@ mod tests {
                     statement_id: None,
                     parameter_names: None,
                     source_binding: None,
+                    observation_binding: None,
                     unavailable_behavior: ScopeUnavailableBehavior::RecordUnavailable,
                     claim_refs: vec!["scope-evidence".to_string()],
                 }],
@@ -3981,6 +4057,74 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("does not match"));
+    }
+
+    #[test]
+    fn observation_binding_is_checked_against_the_digest_bound_scoped_stream() {
+        let scope = ScopeProgramManifest::from_json(br#"{
+          "schema_version": 1,
+          "declaration_id": "fixture-scope",
+          "adapter_id": "fixture",
+          "ads_id": "fixture-ads",
+          "status": "promoted",
+          "roots": ["root"],
+          "programs": [{
+            "program_id": "observe-session",
+            "root_entity_kind": "session",
+            "root_relation_id": "root-object",
+            "relations": [
+              {
+                "relation_id": "root-object",
+                "primitive": "KnownObject",
+                "access_root": "root",
+                "locator": "known-object",
+                "identity_inputs": ["native-session-id"],
+                "bounds": {"max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
+                "unavailable_behavior": "record_unavailable",
+                "claim_refs": ["scope-evidence"]
+              },
+              {
+                "relation_id": "descendants",
+                "primitive": "ChildDirectoryByNativeId",
+                "access_root": "root",
+                "locator": "sessions/{native-session-id}/children",
+                "identity_inputs": ["native-session-id"],
+                "bounds": {"max_fan_out": 8, "max_depth": 4, "max_objects": 8, "max_bytes": 8192, "max_rows": 0},
+                "observation_binding": {"stream_id": "descendant-stream", "source_pattern": "sessions/*/children/**/entry-*.jsonl", "relative_selector": "**/entry-*.jsonl"},
+                "unavailable_behavior": "record_unavailable",
+                "claim_refs": ["scope-evidence"]
+              }
+            ],
+            "claim_refs": ["scope-evidence"]
+          }],
+          "blockers": [],
+          "claim_refs": ["scope-evidence"]
+        }"#)
+        .unwrap();
+        let mut source: SupportSourceDeclarationWire = serde_json::from_value(serde_json::json!({
+            "streams": [{
+                "stream_id": "descendant-stream",
+                "root_id": "root",
+                "relative_patterns": ["sessions/*/children/**/entry-*.jsonl"],
+                "primitive": "AppendDelimited",
+                "topologies": ["durable", "scoped"],
+                "implementation_state": "existing",
+                "bounds": {"max_record_bytes": 4096, "max_batch_bytes": 8192},
+                "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"],
+                "safe_decoder_state_boundary": "object_generation_cursor"
+            }]
+        }))
+        .unwrap();
+        validate_scope_source_bindings(&scope, &source).unwrap();
+
+        source.streams[0].relative_patterns[0] = "sessions/*/other/**".to_string();
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        source.streams[0].relative_patterns[0] = "sessions/*/children/**/entry-*.jsonl".to_string();
+        source.streams[0].bounds.max_record_bytes = Some(16_384);
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        source.streams[0].bounds.max_record_bytes = Some(4096);
+        source.streams[0].safe_decoder_state_boundary = "object_generation_revision".to_string();
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
     }
 
     #[test]

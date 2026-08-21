@@ -371,7 +371,7 @@ pub(crate) mod tests {
 
     const DEPENDENCY_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"decoder-sidecar","primitive":"KnownObject","access_root":"root","locator":"decoder-sidecar","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
-    const UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{native-session-id}/children","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+    const UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{native-session-id}/children","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"observation_binding":{"stream_id":"descendant-stream","source_pattern":"sessions/*/children/**","relative_selector":"**"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     fn promoted_fixture_catalog_with_scope(
         scope_document: &[u8],
@@ -380,17 +380,18 @@ pub(crate) mod tests {
         AdapterSupportBinding,
         crate::adapter::ScopeProgramManifest,
     ) {
+        let source_document = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
+            br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
+        } else {
+            br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
+        };
         let documents = [
             (
                 "ads",
                 "support/ads.json",
                 br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
             ),
-            (
-                "source_declaration",
-                "support/source.json",
-                br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice(),
-            ),
+            ("source_declaration", "support/source.json", source_document),
             ("scope_program", "support/scope.json", scope_document),
             (
                 "evidence",

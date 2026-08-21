@@ -663,7 +663,21 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                         }
                     }
                 if name == "source-declarations.json":
-                    return {"streams": []}
+                    return {
+                        "streams": [
+                            {
+                                "stream_id": "summary-documents",
+                                "root_id": "root",
+                                "relative_patterns": ["*/summary.json"],
+                                "primitive": "ReplaceDocument",
+                                "topologies": ["scoped"],
+                                "implementation_state": "existing",
+                                "bounds": {"max_object_bytes": 1024},
+                                "lifecycle": ["replace", "delete", "recreate"],
+                                "safe_decoder_state_boundary": "object_generation_revision",
+                            }
+                        ]
+                    }
                 self.assert_scope_name(name)
                 return self.scope
 
@@ -690,7 +704,13 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                             "relation_id": "sibling-object",
                             "primitive": "SiblingObject",
                             "access_root": "root",
-                            "locator": "summary.json",
+                            "locator": "{session}/summary.json",
+                            "identity_inputs": ["session"],
+                            "bounds": {"max_bytes": 1024},
+                            "observation_binding": {
+                                "stream_id": "summary-documents",
+                                "source_pattern": "*/summary.json",
+                            },
                         },
                     ],
                 }
@@ -782,6 +802,96 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         binding["max_object_bytes"] = 2048
         self.assertTrue(
             any("object bound" in error for error in _validate_scope_contract(bundle))
+        )
+
+    def test_observation_binding_matches_a_scoped_source_stream_and_pattern(self) -> None:
+        class FixtureBundle:
+            label = "fixture"
+
+            def __init__(self) -> None:
+                self.scope: dict[str, Any] = {
+                    "status": "promoted",
+                    "roots": ["root"],
+                    "blockers": [],
+                    "programs": [
+                        {
+                            "program_id": "observe-session",
+                            "root_relation_id": "root-object",
+                            "relations": [
+                                {
+                                    "relation_id": "root-object",
+                                    "primitive": "KnownObject",
+                                    "access_root": "root",
+                                    "locator": "session.jsonl",
+                                },
+                                {
+                                    "relation_id": "children",
+                                    "primitive": "ChildDirectoryByNativeId",
+                                    "access_root": "root",
+                                    "locator": "sessions/{session}/children",
+                                    "identity_inputs": ["session"],
+                                    "bounds": {"max_bytes": 8192},
+                                    "observation_binding": {
+                                        "stream_id": "children",
+                                        "source_pattern": "sessions/*/children/**/entry-*.jsonl",
+                                        "relative_selector": "**/entry-*.jsonl",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                }
+                self.source: dict[str, Any] = {
+                    "streams": [
+                        {
+                            "stream_id": "children",
+                            "root_id": "root",
+                            "relative_patterns": [
+                                "sessions/*/children/**/entry-*.jsonl"
+                            ],
+                            "primitive": "AppendDelimited",
+                            "topologies": ["scoped"],
+                            "implementation_state": "existing",
+                            "bounds": {
+                                "max_record_bytes": 4096,
+                                "max_batch_bytes": 8192,
+                            },
+                            "lifecycle": [
+                                "append",
+                                "partial_write",
+                                "truncate",
+                                "identity_change",
+                                "delete",
+                                "recreate",
+                            ],
+                            "safe_decoder_state_boundary": "object_generation_cursor",
+                        }
+                    ]
+                }
+
+            def document(self, name: str) -> dict[str, Any]:
+                if name == "ads.json":
+                    return {
+                        "source_instance": {"canonical_roots": [{"root_id": "root"}]}
+                    }
+                if name == "scope-programs.json":
+                    return self.scope
+                if name == "source-declarations.json":
+                    return self.source
+                raise AssertionError(name)
+
+        bundle = FixtureBundle()
+        self.assertEqual(_validate_scope_contract(bundle), [])
+
+        binding = bundle.scope["programs"][0]["relations"][1]["observation_binding"]
+        binding["source_pattern"] = "sessions/*/other/**"
+        self.assertTrue(
+            any("pattern is not declared" in error for error in _validate_scope_contract(bundle))
+        )
+        binding["source_pattern"] = "sessions/*/children/**/entry-*.jsonl"
+        binding.pop("relative_selector")
+        self.assertTrue(
+            any("requires a relative selector" in error for error in _validate_scope_contract(bundle))
         )
 
     def test_strict_schema_rejects_unknown_property(self) -> None:

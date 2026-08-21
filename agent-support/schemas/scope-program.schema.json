@@ -85,6 +85,7 @@
                 "statement_id": { "$ref": "#/$defs/id" },
                 "parameter_names": { "type": "array", "items": { "$ref": "#/$defs/id" }, "uniqueItems": true },
                 "source_binding": { "$ref": "#/$defs/sourceBinding" },
+                "observation_binding": { "$ref": "#/$defs/observationBinding" },
                 "unavailable_behavior": { "enum": ["record_unavailable", "skip_optional", "fail_scope"] },
                 "claim_refs": { "$ref": "#/$defs/claimRefs" }
               }
@@ -110,6 +111,22 @@
         "primitive": { "const": "ReplaceDocument" },
         "max_object_bytes": { "$ref": "#/$defs/positive" }
       }
+    },
+    "observationBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stream_id", "source_pattern"],
+      "properties": {
+        "stream_id": { "$ref": "#/$defs/id" },
+        "source_pattern": { "$ref": "#/$defs/sourcePattern" },
+        "relative_selector": { "$ref": "#/$defs/sourcePattern" }
+      }
+    },
+    "sourcePattern": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)(?!.*[?\\[\\]{}\\u0000-\\u001f\\u007f]).+$"
     },
     "claimRefs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/id" }, "uniqueItems": true }
   }

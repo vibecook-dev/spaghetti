@@ -349,6 +349,62 @@ def _validate_source_contract(bundle: Bundle) -> list[str]:
     return errors
 
 
+def _is_scope_source_pattern(value: object) -> bool:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 4096:
+        return False
+    first = value.split("/", 1)[0]
+    if (
+        value.startswith("/")
+        or (len(first) >= 2 and first[0].isascii() and first[0].isalpha() and first[1] == ":")
+        or "\\" in value
+        or "**/**" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or any(character in value for character in "?[]{}")
+    ):
+        return False
+    components = value.split("/")
+    return all(
+        component not in {"", ".", ".."}
+        and ("**" not in component or component == "**")
+        for component in components
+    )
+
+
+def _scope_locator_pattern(locator: object, identity_inputs: object) -> str | None:
+    if not isinstance(locator, str) or not isinstance(identity_inputs, list):
+        return None
+    declared = set(identity_inputs)
+    placeholders: set[str] = set()
+    output: list[str] = []
+    literal_start = 0
+    cursor = 0
+    while cursor < len(locator):
+        if locator[cursor] == "{":
+            output.append(locator[literal_start:cursor])
+            end = locator.find("}", cursor + 1)
+            if end < 0:
+                return None
+            name = locator[cursor + 1 : end]
+            if (
+                "{" in name
+                or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", name) is None
+                or name not in declared
+                or name in placeholders
+            ):
+                return None
+            placeholders.add(name)
+            output.append("*")
+            cursor = end + 1
+            literal_start = cursor
+        elif locator[cursor] == "}":
+            return None
+        else:
+            cursor += 1
+    output.append(locator[literal_start:])
+    result = "".join(output)
+    return result if placeholders and _is_scope_source_pattern(result) else None
+
+
 def _validate_scope_contract(bundle: Bundle) -> list[str]:
     errors: list[str] = []
     ads = bundle.document("ads.json")
@@ -364,6 +420,19 @@ def _validate_scope_contract(bundle: Bundle) -> list[str]:
         errors.append(f"{bundle.label}/scope-programs.json: candidate/promoted scope requires a program")
 
     relation_ids: list[str] = []
+    observation_primitives = {
+        "SiblingObject",
+        "ChildDirectoryByNativeId",
+        "ReferencedObjectFromField",
+        "BoundedIndexLookup",
+        "ParameterizedSQLiteRows",
+        "KeyNamespace",
+    }
+    executable_observation_primitives = {
+        "SiblingObject",
+        "ChildDirectoryByNativeId",
+        "ReferencedObjectFromField",
+    }
     for program in scope["programs"]:
         root_relation_id = program.get("root_relation_id")
         if scope["status"] == "promoted" and root_relation_id is None:
@@ -421,6 +490,80 @@ def _validate_scope_contract(bundle: Bundle) -> list[str]:
                     required_lifecycle = {"replace", "delete", "recreate"}
                     if not required_lifecycle.issubset(stream["lifecycle"]):
                         errors.append(f"{prefix}: source binding stream lacks replace/delete/recreate lifecycle")
+            observation_binding = relation.get("observation_binding")
+            is_observation = relation["primitive"] in observation_primitives
+            if scope["status"] == "promoted" and is_observation and observation_binding is None:
+                errors.append(f"{prefix}: promoted dynamic observation relation requires an executable source binding")
+            if observation_binding is not None and relation["primitive"] not in executable_observation_primitives:
+                errors.append(f"{prefix}: observation source binding is not supported for this relation primitive")
+            if observation_binding is not None:
+                relative_selector = observation_binding.get("relative_selector")
+                is_directory = relation["primitive"] == "ChildDirectoryByNativeId"
+                locator_pattern = _scope_locator_pattern(
+                    locator, relation.get("identity_inputs")
+                )
+                if locator_pattern is None:
+                    errors.append(f"{prefix}: observation locator template is invalid")
+                if not _is_scope_source_pattern(observation_binding.get("source_pattern")):
+                    errors.append(f"{prefix}: observation source pattern is not canonical")
+                if is_directory and relative_selector is None:
+                    errors.append(f"{prefix}: child-directory observation binding requires a relative selector")
+                if is_directory and relative_selector is not None and not _is_scope_source_pattern(relative_selector):
+                    errors.append(f"{prefix}: observation relative selector is not canonical")
+                if is_directory and _is_scope_source_pattern(relative_selector):
+                    if locator_pattern is None or f"{locator_pattern}/{relative_selector}" != observation_binding.get("source_pattern"):
+                        errors.append(f"{prefix}: child-directory selector does not compose to its declared source pattern")
+                if (
+                    relation["primitive"] == "ReferencedObjectFromField"
+                    and locator_pattern != observation_binding.get("source_pattern")
+                ):
+                    errors.append(f"{prefix}: referenced-object locator does not compose to its declared source pattern")
+                if not is_directory and relative_selector is not None:
+                    errors.append(f"{prefix}: exact-object observation binding cannot declare a relative selector")
+                stream = source_streams.get(observation_binding["stream_id"])
+                if stream is None:
+                    errors.append(
+                        f"{prefix}: observation binding names unknown stream {observation_binding['stream_id']}"
+                    )
+                else:
+                    source_pattern = observation_binding["source_pattern"]
+                    if source_pattern not in stream.get("relative_patterns", []):
+                        errors.append(f"{prefix}: observation source pattern is not declared by the stream")
+                    if stream["root_id"] != relation["access_root"]:
+                        errors.append(f"{prefix}: observation binding root differs from relation root")
+                    if "scoped" not in stream["topologies"]:
+                        errors.append(f"{prefix}: observation binding stream does not declare scoped topology")
+                    if stream["implementation_state"] != "existing":
+                        errors.append(f"{prefix}: observation binding stream is not implemented")
+                    primitive = stream["primitive"]
+                    lifecycle = set(stream["lifecycle"])
+                    boundary = stream["safe_decoder_state_boundary"]
+                    bounds = stream["bounds"]
+                    if primitive in {"ReplaceDocument", "PresenceObject"}:
+                        if boundary != "object_generation_revision" or not {
+                            "replace",
+                            "delete",
+                            "recreate",
+                        }.issubset(lifecycle):
+                            errors.append(f"{prefix}: observation object stream lacks a complete revision lifecycle")
+                        if bounds.get("max_object_bytes", relation["bounds"]["max_bytes"] + 1) > relation["bounds"]["max_bytes"]:
+                            errors.append(f"{prefix}: observation object bound exceeds the relation byte budget")
+                    elif primitive == "AppendDelimited":
+                        if boundary != "object_generation_cursor" or not {
+                            "append",
+                            "partial_write",
+                            "truncate",
+                            "identity_change",
+                            "delete",
+                            "recreate",
+                        }.issubset(lifecycle):
+                            errors.append(f"{prefix}: observation append stream lacks a complete cursor lifecycle")
+                        if bounds.get("max_record_bytes", relation["bounds"]["max_bytes"] + 1) > relation["bounds"]["max_bytes"]:
+                            errors.append(f"{prefix}: observation record bound exceeds the relation byte budget")
+                        if bounds.get("max_batch_bytes", relation["bounds"]["max_bytes"] + 1) > relation["bounds"]["max_bytes"]:
+                            errors.append(f"{prefix}: observation batch bound exceeds the relation byte budget")
+                    else:
+                        errors.append(f"{prefix}: observation binding stream primitive is not executable")
         if root_relation_id is not None:
             root_relations = [
                 relation
