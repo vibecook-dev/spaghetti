@@ -1,6 +1,6 @@
 # RFC 012 Wave I execution runbook
 
-- **Status:** Active
+- **Status:** Wave I lanes merged at `f53bbc7`; Claude promotion blocked
 - **Written:** 2026-08-21
 - **Product-code predecessor:** `aa9b15d`
 - **Assignment base:** the integrator commit that lands this file; announced as

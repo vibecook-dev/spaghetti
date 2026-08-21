@@ -483,6 +483,11 @@ Current landing status (2026-08-16):
   three signatures remain explicit in the support ledger as `classified`, not
   silently treated as resolved semantic mappings.
 
+Wave I (`692f78a`, 2026-08-21) rewrote the Claude identity fixture into a
+sanitizer-v2 declared-input identity matrix and rebound `claude-identity-rules`
+without flipping it off `degraded`. Decoder-executed `identity-determinism`
+stays `planned`. Compiled ADS/source/scope digests were not touched.
+
 A3 remains `In progress`: no artifact version is pinned; Codex/Grok still need
 independent sanitized transition corpora; Claude needs the complete executable
 RFC 012D relation set and RFC 012C semantic fixtures; catalog/scoped stream
@@ -790,6 +795,14 @@ different selection or policy, and planned/unbound compositions fail closed.
 This remains a no-I/O contract seam: real source producers, access-plan proof,
 forward degraded coverage, partitioning beyond the portable 250,000-point cap,
 persistence, query publication, and N-API exposure remain open.
+
+Wave I (`ef4536f`, 2026-08-21) compiles the Claude catalog coverage producer as
+crate-private runtime and replaces the raw `Path` argument with
+`CatalogBoundSourceAccess` on `CatalogExecutableComposition`. Missing roots
+fail closed before filesystem reads. The built-in Candidate still cannot
+authorize `CatalogDiscovery`. Synthetic conformance constructors stay
+`#[cfg(test)]`. Codex/Grok producers, persistence, and public catalog N-API
+remain open.
 
 ### B3. Durable pack, readiness, and pagination
 
@@ -1217,6 +1230,18 @@ Current landing status (2026-08-16):
   complete. The crate-private usage-v2 mapping described under D1 closes only
   the first common observer reducer slice; it is not the public observer
   contract.
+
+Wave I (`c50cfd2`, 2026-08-21) joins already-selected `runtime.actor-run@1`,
+`runtime.actor-affiliation@1`, and `runtime.usage-v2@1` identities across
+durable reducer rows, Claude-decoded `getRuntimeUsageV2` pages, and selected
+scoped envelopes, including A→B usage correction, affiliation present→removed,
+generation reset, and partial coverage that cannot prove absence. The
+digest-bound report is
+[`runtime-selected-family-durable-scoped-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-15/reports/runtime-selected-family-durable-scoped-parity-v1.json)
+(`sha256:2dc73693fbaab8e5e6f56840545f3f1897a43280fe8bd5327ead62cfa40aad2f`).
+Fixture-adapter facts still do not bind `getRuntimeUsageV2` membership;
+durable actor-run/affiliation coverage stays `not_materialized`; Candidate
+`cross-topology-parity` stays `planned`. C2 remains `In progress`.
 
 ### C3. Durable migration
 
