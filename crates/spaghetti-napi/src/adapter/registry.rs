@@ -2230,29 +2230,27 @@ pub(crate) mod tests {
             assert!(!rendered.contains(private));
         }
         let nested = directory
-            .reserve_entry(
-                &rooted,
-                PathBuf::from("nested").as_path(),
-                DirectoryEntryKind::Directory,
-            )
+            .reserve_entry(&rooted, PathBuf::from("nested").as_path())
             .unwrap()
-            .complete()
+            .complete(DirectoryEntryKind::Directory)
             .unwrap();
         assert_eq!(nested.kind(), DirectoryEntryKind::Directory);
         assert_eq!(nested.depth(), 1);
         let child_reservation = directory
-            .reserve_entry(
-                &rooted,
-                PathBuf::from("nested/agent-child.jsonl").as_path(),
-                DirectoryEntryKind::File,
-            )
+            .reserve_entry(&rooted, PathBuf::from("nested/agent-child.jsonl").as_path())
             .unwrap();
+        assert_eq!(
+            child_reservation.selection(DirectoryEntryKind::File),
+            DirectorySelection::Include
+        );
         assert_ne!(child_reservation.object_token(), nested.object_token());
         let rendered = format!("{child_reservation:?}");
         for private in ["nested", "agent-child", "jsonl", "/Users/", "alice"] {
             assert!(!rendered.contains(private));
         }
-        let child = child_reservation.complete().unwrap();
+        let child = child_reservation
+            .complete(DirectoryEntryKind::File)
+            .unwrap();
         assert_eq!(child.kind(), DirectoryEntryKind::File);
         assert_eq!(child.depth(), 2);
         assert_ne!(child.object_token(), nested.object_token());
@@ -2550,11 +2548,7 @@ pub(crate) mod tests {
         let (plan, rooted) = make_bound();
         let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
         let orphan_error = directory
-            .reserve_entry(
-                &rooted,
-                PathBuf::from("missing/private.jsonl").as_path(),
-                DirectoryEntryKind::File,
-            )
+            .reserve_entry(&rooted, PathBuf::from("missing/private.jsonl").as_path())
             .unwrap_err();
         assert_eq!(
             orphan_error.to_string(),
@@ -2584,7 +2578,6 @@ pub(crate) mod tests {
             .reserve_entry(
                 &foreign_rooted,
                 PathBuf::from("private-substitution.jsonl").as_path(),
-                DirectoryEntryKind::File,
             )
             .unwrap_err();
         assert_eq!(
@@ -2611,11 +2604,7 @@ pub(crate) mod tests {
         let (plan, rooted) = make_bound();
         let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
         let dropped = directory
-            .reserve_entry(
-                &rooted,
-                PathBuf::from("private-abandoned.jsonl").as_path(),
-                DirectoryEntryKind::File,
-            )
+            .reserve_entry(&rooted, PathBuf::from("private-abandoned.jsonl").as_path())
             .unwrap();
         drop(dropped);
         assert!(directory.is_failed());
@@ -2642,19 +2631,15 @@ pub(crate) mod tests {
         for index in 0..directory.config().max_entries {
             let relative = PathBuf::from(format!("child-{index}.jsonl"));
             let child = directory
-                .reserve_entry(&rooted, &relative, DirectoryEntryKind::File)
+                .reserve_entry(&rooted, &relative)
                 .unwrap()
-                .complete()
+                .complete(DirectoryEntryKind::File)
                 .unwrap();
             first_token.get_or_insert(child.object_token());
         }
         assert_eq!(directory.accounted_entries(), 7);
         let excess_error = directory
-            .reserve_entry(
-                &rooted,
-                PathBuf::from("child-7.jsonl").as_path(),
-                DirectoryEntryKind::File,
-            )
+            .reserve_entry(&rooted, PathBuf::from("child-7.jsonl").as_path())
             .unwrap_err();
         assert_eq!(
             excess_error.to_string(),
@@ -2678,13 +2663,9 @@ pub(crate) mod tests {
         let (plan, rooted) = make_bound();
         let mut directory = prepare_observation_directory_membership_for_test(&rooted).unwrap();
         let replayed = directory
-            .reserve_entry(
-                &rooted,
-                PathBuf::from("child-0.jsonl").as_path(),
-                DirectoryEntryKind::File,
-            )
+            .reserve_entry(&rooted, PathBuf::from("child-0.jsonl").as_path())
             .unwrap()
-            .complete()
+            .complete(DirectoryEntryKind::File)
             .unwrap();
         assert_eq!(Some(replayed.object_token()), first_token);
         rooted.complete(512, AccessOutcome::Available).unwrap();

@@ -1,9 +1,7 @@
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::fs::File;
-use std::path::Path;
-#[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use super::file::open_confined_directory;
@@ -86,6 +84,88 @@ where
 {
     fn select(&self, relative_path: &Path, kind: DirectoryEntryKind) -> DirectorySelection {
         self(relative_path, kind)
+    }
+}
+
+/// Reservation created immediately after a confined directory stream yields
+/// one name and before the driver reads that entry's metadata or opens it.
+/// Selection is precompiled without retaining the native name; completion
+/// records the verified kind, while Drop is the conservative failure path.
+pub(crate) trait DirectoryEntryAuditReservation {
+    type Error;
+
+    fn selection(&self, kind: DirectoryEntryKind) -> DirectorySelection;
+    fn complete(self, kind: DirectoryEntryKind) -> Result<(), Self::Error>;
+}
+
+/// Audit owner for descriptor-confined enumeration. The GAT prevents a second
+/// entry from being reserved until the prior entry is completed or abandoned.
+pub(crate) trait DirectoryEntryAuditor {
+    type Error;
+    type Reservation<'audit>: DirectoryEntryAuditReservation<Error = Self::Error>
+    where
+        Self: 'audit;
+
+    fn reserve_entry<'audit>(
+        &'audit mut self,
+        relative_path: &Path,
+    ) -> Result<Self::Reservation<'audit>, Self::Error>;
+}
+
+#[derive(Debug)]
+pub(crate) enum AuditedDirectoryScanError<E> {
+    Driver(SourceDriverError),
+    Audit(E),
+}
+
+impl<E> From<SourceDriverError> for AuditedDirectoryScanError<E> {
+    fn from(error: SourceDriverError) -> Self {
+        Self::Driver(error)
+    }
+}
+
+struct SelectorOnlyDirectoryAuditor<'selector, S: ?Sized> {
+    selector: &'selector S,
+}
+
+struct SelectorOnlyDirectoryReservation<'selector, S: ?Sized> {
+    selector: &'selector S,
+    relative_path: PathBuf,
+}
+
+impl<S> DirectoryEntryAuditor for SelectorOnlyDirectoryAuditor<'_, S>
+where
+    S: DirectorySelector + ?Sized,
+{
+    type Error = std::convert::Infallible;
+    type Reservation<'audit>
+        = SelectorOnlyDirectoryReservation<'audit, S>
+    where
+        Self: 'audit;
+
+    fn reserve_entry<'audit>(
+        &'audit mut self,
+        relative_path: &Path,
+    ) -> Result<Self::Reservation<'audit>, Self::Error> {
+        Ok(SelectorOnlyDirectoryReservation {
+            selector: self.selector,
+            relative_path: relative_path.to_path_buf(),
+        })
+    }
+}
+
+impl<S> DirectoryEntryAuditReservation for SelectorOnlyDirectoryReservation<'_, S>
+where
+    S: DirectorySelector + ?Sized,
+{
+    type Error = std::convert::Infallible;
+
+    fn selection(&self, kind: DirectoryEntryKind) -> DirectorySelection {
+        self.selector.select(&self.relative_path, kind)
+    }
+
+    fn complete(self, _kind: DirectoryEntryKind) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -344,6 +424,28 @@ impl DirectorySnapshot {
     where
         S: DirectorySelector + ?Sized,
     {
+        let mut auditor = SelectorOnlyDirectoryAuditor { selector };
+        match self.scan_confined_audited(access_root, relative_root, previous, &mut auditor) {
+            Ok(scan) => Ok(scan),
+            Err(AuditedDirectoryScanError::Driver(error)) => Err(error),
+            Err(AuditedDirectoryScanError::Audit(never)) => match never {},
+        }
+    }
+
+    /// Confined enumeration with a reservation that accounts for every native
+    /// name before limits, metadata, selection, or child opens can observe it.
+    /// The reservation is completed only after the entry kind and, for a
+    /// selected entry, its no-follow descriptor metadata have been verified.
+    pub(crate) fn scan_confined_audited<A>(
+        &self,
+        access_root: &Path,
+        relative_root: &Path,
+        previous: Option<&DirectoryCheckpoint>,
+        auditor: &mut A,
+    ) -> Result<DirectoryScan, AuditedDirectoryScanError<A::Error>>
+    where
+        A: DirectoryEntryAuditor + ?Sized,
+    {
         #[cfg(unix)]
         {
             let Some(root_handle) = open_confined_directory(access_root, relative_root)? else {
@@ -358,24 +460,28 @@ impl DirectorySnapshot {
                 )
             })?;
             if !root_metadata.is_dir() {
-                return Err(SourceDriverError::PathEscape(
-                    display_root.to_string_lossy().into_owned(),
+                return Err(AuditedDirectoryScanError::Driver(
+                    SourceDriverError::PathEscape(display_root.to_string_lossy().into_owned()),
                 ));
             }
             let root_before = file_stamp(&display_root, &root_metadata);
-            let enumeration =
-                match self.enumerate_confined(access_root, relative_root, root_handle, selector) {
-                    Ok(value) => value,
-                    Err(SourceDriverError::Unstable(_)) => {
-                        return Ok(DirectoryScan::RetryTransient);
-                    }
-                    Err(SourceDriverError::Io { source, .. })
-                        if source.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        return Ok(DirectoryScan::RetryTransient);
-                    }
-                    Err(error) => return Err(error),
-                };
+            let enumeration = match self.enumerate_confined_audited(
+                access_root,
+                relative_root,
+                root_handle,
+                auditor,
+            ) {
+                Ok(value) => value,
+                Err(AuditedDirectoryScanError::Driver(SourceDriverError::Unstable(_))) => {
+                    return Ok(DirectoryScan::RetryTransient);
+                }
+                Err(AuditedDirectoryScanError::Driver(SourceDriverError::Io {
+                    source, ..
+                })) if source.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(DirectoryScan::RetryTransient);
+                }
+                Err(error) => return Err(error),
+            };
             if !self.revalidate_confined_directories(access_root, &enumeration.proofs)? {
                 return Ok(DirectoryScan::RetryTransient);
             }
@@ -387,14 +493,17 @@ impl DirectorySnapshot {
                 return Ok(DirectoryScan::RetryTransient);
             }
             finish_directory_snapshot(root_before, enumeration.entries, previous)
+                .map_err(AuditedDirectoryScanError::Driver)
         }
 
         #[cfg(not(unix))]
         {
-            let _ = (access_root, relative_root, previous, selector);
-            Err(SourceDriverError::InvalidConfig(
-                "descriptor-confined directory snapshots are unavailable on this platform"
-                    .to_string(),
+            let _ = (access_root, relative_root, previous, auditor);
+            Err(AuditedDirectoryScanError::Driver(
+                SourceDriverError::InvalidConfig(
+                    "descriptor-confined directory snapshots are unavailable on this platform"
+                        .to_string(),
+                ),
             ))
         }
     }
@@ -501,15 +610,15 @@ impl DirectorySnapshot {
     }
 
     #[cfg(unix)]
-    fn enumerate_confined<S>(
+    fn enumerate_confined_audited<A>(
         &self,
         access_root: &Path,
         relative_root: &Path,
         root_handle: File,
-        selector: &S,
-    ) -> Result<ConfinedDirectoryEnumeration, SourceDriverError>
+        auditor: &mut A,
+    ) -> Result<ConfinedDirectoryEnumeration, AuditedDirectoryScanError<A::Error>>
     where
-        S: DirectorySelector + ?Sized,
+        A: DirectoryEntryAuditor + ?Sized,
     {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
@@ -531,8 +640,10 @@ impl DirectorySnapshot {
                 )
             })?;
             if !directory_metadata.is_dir() {
-                return Err(SourceDriverError::Unstable(
-                    "confined directory changed type during enumeration".to_string(),
+                return Err(AuditedDirectoryScanError::Driver(
+                    SourceDriverError::Unstable(
+                        "confined directory changed type during enumeration".to_string(),
+                    ),
                 ));
             }
             let directory_stamp = file_stamp(&display_directory, &directory_metadata);
@@ -549,28 +660,35 @@ impl DirectorySnapshot {
             });
             for (enumerated_in_directory, entry_result) in visible_entries.enumerate() {
                 let entry = entry_result.map_err(|error| {
-                    io_error(
+                    AuditedDirectoryScanError::Driver(io_error(
                         "enumerating confined directory",
                         &display_directory,
                         error.into(),
-                    )
+                    ))
                 })?;
+                let name = OsStr::from_bytes(entry.file_name().to_bytes());
+                let relative_path = directory_relative.join(name);
+                let audit_reservation = auditor
+                    .reserve_entry(&relative_path)
+                    .map_err(AuditedDirectoryScanError::Audit)?;
                 if enumerated_in_directory == self.config.max_entries_per_directory {
-                    return Err(SourceDriverError::LimitExceeded(format!(
-                        "directory snapshot exceeded {} entries in one directory",
-                        self.config.max_entries_per_directory
-                    )));
+                    return Err(AuditedDirectoryScanError::Driver(
+                        SourceDriverError::LimitExceeded(format!(
+                            "directory snapshot exceeded {} entries in one directory",
+                            self.config.max_entries_per_directory
+                        )),
+                    ));
                 }
                 if enumerated_total == self.config.max_entries {
-                    return Err(SourceDriverError::LimitExceeded(format!(
-                        "confined directory snapshot exceeded {} enumerated entries",
-                        self.config.max_entries
-                    )));
+                    return Err(AuditedDirectoryScanError::Driver(
+                        SourceDriverError::LimitExceeded(format!(
+                            "confined directory snapshot exceeded {} enumerated entries",
+                            self.config.max_entries
+                        )),
+                    ));
                 }
                 enumerated_total += 1;
 
-                let name = OsStr::from_bytes(entry.file_name().to_bytes());
-                let relative_path = directory_relative.join(name);
                 let access_relative_path = relative_root.join(&relative_path);
                 let display_path = access_root.join(&access_relative_path);
                 let stat = statat(
@@ -585,23 +703,30 @@ impl DirectorySnapshot {
                 } else if native_kind.is_dir() {
                     DirectoryEntryKind::Directory
                 } else if native_kind.is_symlink() {
-                    return Err(SourceDriverError::PathEscape(
-                        display_path.to_string_lossy().into_owned(),
+                    return Err(AuditedDirectoryScanError::Driver(
+                        SourceDriverError::PathEscape(display_path.to_string_lossy().into_owned()),
                     ));
                 } else {
-                    return Err(SourceDriverError::InvalidConfig(
-                        "confined directory contains an unsupported entry type".to_string(),
+                    return Err(AuditedDirectoryScanError::Driver(
+                        SourceDriverError::InvalidConfig(
+                            "confined directory contains an unsupported entry type".to_string(),
+                        ),
                     ));
                 };
-                let selection = selector.select(&relative_path, kind);
+                let selection = audit_reservation.selection(kind);
                 if selection == DirectorySelection::Ignore {
+                    audit_reservation
+                        .complete(kind)
+                        .map_err(AuditedDirectoryScanError::Audit)?;
                     continue;
                 }
                 if selection.includes() && entries.len() == self.config.max_entries {
-                    return Err(SourceDriverError::LimitExceeded(format!(
-                        "directory snapshot exceeded {} entries",
-                        self.config.max_entries
-                    )));
+                    return Err(AuditedDirectoryScanError::Driver(
+                        SourceDriverError::LimitExceeded(format!(
+                            "directory snapshot exceeded {} entries",
+                            self.config.max_entries
+                        )),
+                    ));
                 }
 
                 let child_handle = open_confined_child_entry(
@@ -618,29 +743,43 @@ impl DirectorySnapshot {
                     DirectoryEntryKind::Directory => metadata.is_dir(),
                 };
                 if !same_kind {
-                    return Err(SourceDriverError::Unstable(
-                        "confined directory entry changed type during enumeration".to_string(),
+                    return Err(AuditedDirectoryScanError::Driver(
+                        SourceDriverError::Unstable(
+                            "confined directory entry changed type during enumeration".to_string(),
+                        ),
                     ));
                 }
                 let stamp = file_stamp(&display_path, &metadata);
-                if selection.includes() {
+                let state = if selection.includes() {
                     let path_key = confined_relative_path_key(&relative_path)?;
                     let revision = entry_revision(kind, &stamp);
-                    let state = DirectoryEntryState {
-                        path_key: path_key.clone(),
-                        display_path: relative_path.to_string_lossy().into_owned(),
-                        kind,
-                        identity: stamp.identity.clone(),
-                        revision,
-                        size_bytes: stamp.len,
-                        modified_ns: stamp.modified_ns,
-                        generation: 1,
-                    };
-                    if entries.insert(path_key, state).is_some() {
+                    if entries.contains_key(&path_key) {
                         return Err(SourceDriverError::Unstable(
                             "confined directory repeated one path identity".to_string(),
-                        ));
+                        )
+                        .into());
                     }
+                    Some((
+                        path_key.clone(),
+                        DirectoryEntryState {
+                            path_key: path_key.clone(),
+                            display_path: relative_path.to_string_lossy().into_owned(),
+                            kind,
+                            identity: stamp.identity.clone(),
+                            revision,
+                            size_bytes: stamp.len,
+                            modified_ns: stamp.modified_ns,
+                            generation: 1,
+                        },
+                    ))
+                } else {
+                    None
+                };
+                audit_reservation
+                    .complete(kind)
+                    .map_err(AuditedDirectoryScanError::Audit)?;
+                if let Some((path_key, state)) = state {
+                    entries.insert(path_key, state);
                 }
                 if kind == DirectoryEntryKind::Directory
                     && selection.recurses()
@@ -967,6 +1106,107 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum AuditEvent {
+        Reserved(PathBuf),
+        Completed(PathBuf, DirectoryEntryKind),
+        Abandoned(PathBuf),
+    }
+
+    struct RecordingDirectoryAuditor {
+        events: Vec<AuditEvent>,
+        remove_on_reserve: Option<(PathBuf, PathBuf)>,
+    }
+
+    struct RecordingDirectoryReservation<'audit> {
+        events: &'audit mut Vec<AuditEvent>,
+        relative_path: PathBuf,
+        file_selected: bool,
+        completed: bool,
+    }
+
+    impl RecordingDirectoryAuditor {
+        fn new() -> Self {
+            Self {
+                events: Vec::new(),
+                remove_on_reserve: None,
+            }
+        }
+
+        fn removing(relative_path: &Path, native_path: &Path) -> Self {
+            Self {
+                events: Vec::new(),
+                remove_on_reserve: Some((relative_path.to_path_buf(), native_path.to_path_buf())),
+            }
+        }
+    }
+
+    impl DirectoryEntryAuditor for RecordingDirectoryAuditor {
+        type Error = &'static str;
+        type Reservation<'audit>
+            = RecordingDirectoryReservation<'audit>
+        where
+            Self: 'audit;
+
+        fn reserve_entry<'audit>(
+            &'audit mut self,
+            relative_path: &Path,
+        ) -> Result<Self::Reservation<'audit>, Self::Error> {
+            self.events
+                .push(AuditEvent::Reserved(relative_path.to_path_buf()));
+            if self
+                .remove_on_reserve
+                .as_ref()
+                .is_some_and(|(target, _)| target == relative_path)
+            {
+                let (_, native_path) = self
+                    .remove_on_reserve
+                    .take()
+                    .expect("matching mutation hook remains present");
+                std::fs::remove_file(native_path).expect("audit mutation removes fixture entry");
+            }
+            Ok(RecordingDirectoryReservation {
+                events: &mut self.events,
+                relative_path: relative_path.to_path_buf(),
+                file_selected: relative_path
+                    .extension()
+                    .is_some_and(|extension| extension == "json"),
+                completed: false,
+            })
+        }
+    }
+
+    impl DirectoryEntryAuditReservation for RecordingDirectoryReservation<'_> {
+        type Error = &'static str;
+
+        fn selection(&self, kind: DirectoryEntryKind) -> DirectorySelection {
+            match kind {
+                DirectoryEntryKind::Directory => DirectorySelection::Recurse,
+                DirectoryEntryKind::File if self.file_selected => DirectorySelection::Include,
+                DirectoryEntryKind::File => DirectorySelection::Ignore,
+            }
+        }
+
+        fn complete(
+            mut self,
+            kind: DirectoryEntryKind,
+        ) -> Result<(), <Self as DirectoryEntryAuditReservation>::Error> {
+            self.events
+                .push(AuditEvent::Completed(self.relative_path.clone(), kind));
+            self.completed = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for RecordingDirectoryReservation<'_> {
+        fn drop(&mut self) {
+            if !self.completed {
+                self.events
+                    .push(AuditEvent::Abandoned(self.relative_path.clone()));
+            }
+        }
+    }
 
     fn files(relative: &Path, kind: DirectoryEntryKind) -> DirectorySelection {
         match kind {
@@ -1353,6 +1593,165 @@ mod tests {
         assert_eq!(
             DirectoryCheckpoint::decode_for_config(&checkpoint.encode(), &config).unwrap(),
             checkpoint
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_audit_accounts_ignored_names_after_kind_verification() {
+        let approved = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("keep.json"), b"keep").unwrap();
+        std::fs::write(root.join("ignored.txt"), b"ignored").unwrap();
+        let mut auditor = RecordingDirectoryAuditor::new();
+        let (_, checkpoint, _) = snapshot(
+            DirectorySnapshot::new(DirectorySnapshotConfig {
+                max_entries: 2,
+                max_entries_per_directory: 2,
+                max_depth: 0,
+            })
+            .unwrap()
+            .scan_confined_audited(approved.path(), relative_root, None, &mut auditor)
+            .unwrap(),
+        );
+
+        assert_eq!(
+            checkpoint
+                .entries
+                .values()
+                .map(|entry| entry.display_path.as_str())
+                .collect::<Vec<_>>(),
+            ["keep.json"]
+        );
+        for path in ["keep.json", "ignored.txt"] {
+            let path = PathBuf::from(path);
+            assert!(auditor.events.contains(&AuditEvent::Reserved(path.clone())));
+            assert!(auditor
+                .events
+                .contains(&AuditEvent::Completed(path, DirectoryEntryKind::File)));
+        }
+        assert!(!auditor
+            .events
+            .iter()
+            .any(|event| matches!(event, AuditEvent::Abandoned(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_audit_reserves_before_stat_and_abandons_a_disappearing_entry() {
+        let approved = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        std::fs::create_dir_all(&root).unwrap();
+        let native_path = root.join("raced.json");
+        std::fs::write(&native_path, b"raced").unwrap();
+        let mut auditor =
+            RecordingDirectoryAuditor::removing(Path::new("raced.json"), &native_path);
+
+        let scan = DirectorySnapshot::new(DirectorySnapshotConfig {
+            max_entries: 1,
+            max_entries_per_directory: 1,
+            max_depth: 0,
+        })
+        .unwrap()
+        .scan_confined_audited(approved.path(), relative_root, None, &mut auditor)
+        .unwrap();
+
+        assert_eq!(scan, DirectoryScan::RetryTransient);
+        assert_eq!(
+            auditor.events,
+            [
+                AuditEvent::Reserved(PathBuf::from("raced.json")),
+                AuditEvent::Abandoned(PathBuf::from("raced.json")),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_audit_reserves_the_first_excess_name_before_driver_rejection() {
+        let approved = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("one.json"), b"one").unwrap();
+        std::fs::write(root.join("two.json"), b"two").unwrap();
+        let mut auditor = RecordingDirectoryAuditor::new();
+
+        let error = DirectorySnapshot::new(DirectorySnapshotConfig {
+            max_entries: 1,
+            max_entries_per_directory: 1,
+            max_depth: 0,
+        })
+        .unwrap()
+        .scan_confined_audited(approved.path(), relative_root, None, &mut auditor)
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AuditedDirectoryScanError::Driver(SourceDriverError::LimitExceeded(_))
+        ));
+        assert_eq!(
+            auditor
+                .events
+                .iter()
+                .filter(|event| matches!(event, AuditEvent::Reserved(_)))
+                .count(),
+            2
+        );
+        assert_eq!(
+            auditor
+                .events
+                .iter()
+                .filter(|event| matches!(event, AuditEvent::Completed(_, _)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            auditor
+                .events
+                .iter()
+                .filter(|event| matches!(event, AuditEvent::Abandoned(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_audit_abandons_symlink_names_before_escape_rejection() {
+        use std::os::unix::fs::symlink;
+
+        let approved = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let relative_root = Path::new("project/session/children");
+        let root = approved.path().join(relative_root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(outside.path().join("secret.json"), b"secret").unwrap();
+        symlink(outside.path().join("secret.json"), root.join("linked.json")).unwrap();
+        let mut auditor = RecordingDirectoryAuditor::new();
+
+        let error = DirectorySnapshot::new(DirectorySnapshotConfig {
+            max_entries: 1,
+            max_entries_per_directory: 1,
+            max_depth: 0,
+        })
+        .unwrap()
+        .scan_confined_audited(approved.path(), relative_root, None, &mut auditor)
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AuditedDirectoryScanError::Driver(SourceDriverError::PathEscape(_))
+        ));
+        assert_eq!(
+            auditor.events,
+            [
+                AuditEvent::Reserved(PathBuf::from("linked.json")),
+                AuditEvent::Abandoned(PathBuf::from("linked.json")),
+            ]
         );
     }
 

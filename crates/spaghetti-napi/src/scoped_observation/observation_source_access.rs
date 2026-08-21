@@ -18,8 +18,8 @@ use crate::source::{
     confined_relative_path_key, AccessBudgetError, AccessObjectToken, AccessOperation,
     AccessOutcome, AuthorizedObservationDirectoryEntryReservation,
     AuthorizedObservationDirectoryRootAuthority, AuthorizedObservationRuntimeStreamReservation,
-    DirectoryEntryKind, DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig,
-    GlobPattern, ScopeAccessRequest,
+    DirectoryEntryAuditReservation, DirectoryEntryAuditor, DirectoryEntryKind, DirectorySelection,
+    DirectorySnapshot, DirectorySnapshotConfig, GlobPattern, ScopeAccessRequest,
 };
 
 use super::{ScopedAccessRootGrant, ScopedObservationAccessPass, ScopedSourceObjectIdentity};
@@ -197,8 +197,8 @@ pub(crate) struct ScopedObservationDirectoryEntryReservation<'audit> {
     proof: &'audit mut ScopedObservationDirectoryMembershipProof,
     reservation: Option<AuthorizedObservationDirectoryEntryReservation>,
     object_token: AccessObjectToken,
-    kind: DirectoryEntryKind,
     depth: u32,
+    file_selected: bool,
 }
 
 impl fmt::Debug for ScopedObservationDirectoryMembershipContract<'_> {
@@ -240,7 +240,6 @@ impl fmt::Debug for ScopedObservationDirectoryEntryReservation<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ScopedObservationDirectoryEntryReservation")
-            .field("kind", &self.kind)
             .field("depth", &self.depth)
             .field("has_object_token", &true)
             .finish_non_exhaustive()
@@ -259,11 +258,10 @@ impl ScopedObservationDirectoryMembershipContract<'_> {
     pub(crate) fn reserve_entry(
         &mut self,
         relative_path: &Path,
-        kind: DirectoryEntryKind,
     ) -> Result<ScopedObservationDirectoryEntryReservation<'_>, ScopedObservationRuntimeSourceError>
     {
         self.proof
-            .reserve_entry(&self.reservation.binding, relative_path, kind)
+            .reserve_entry(&self.reservation.binding, relative_path)
     }
 
     pub(crate) fn fail_conservative(self) {
@@ -309,7 +307,6 @@ impl ScopedObservationDirectoryMembershipProof {
         &'audit mut self,
         binding: &ScopedObservationRuntimeSourceBinding,
         relative_path: &Path,
-        kind: DirectoryEntryKind,
     ) -> Result<
         ScopedObservationDirectoryEntryReservation<'audit>,
         ScopedObservationRuntimeSourceError,
@@ -320,6 +317,7 @@ impl ScopedObservationDirectoryMembershipProof {
         }
         let relative_path_key = confined_relative_path_key(relative_path)
             .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+        let file_selected = self.selector.matches_path(relative_path);
         let parent = relative_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty());
@@ -371,8 +369,8 @@ impl ScopedObservationDirectoryMembershipProof {
             proof: self,
             reservation: Some(reservation),
             object_token,
-            kind,
             depth,
+            file_selected,
         })
     }
 }
@@ -396,8 +394,17 @@ impl ScopedObservationDirectoryEntryReservation<'_> {
         self.object_token
     }
 
+    pub(crate) fn selection(&self, kind: DirectoryEntryKind) -> DirectorySelection {
+        match kind {
+            DirectoryEntryKind::Directory => DirectorySelection::Recurse,
+            DirectoryEntryKind::File if self.file_selected => DirectorySelection::Include,
+            DirectoryEntryKind::File => DirectorySelection::Ignore,
+        }
+    }
+
     pub(crate) fn complete(
         mut self,
+        kind: DirectoryEntryKind,
     ) -> Result<ScopedObservationDirectoryEntry, ScopedObservationRuntimeSourceError> {
         let reservation = self
             .reservation
@@ -407,20 +414,42 @@ impl ScopedObservationDirectoryEntryReservation<'_> {
             self.proof.failed = true;
             return Err(ScopedObservationRuntimeSourceError::Access(error));
         }
-        if self
-            .proof
-            .entries
-            .insert(self.object_token, self.kind)
-            .is_some()
-        {
+        if self.proof.entries.insert(self.object_token, kind).is_some() {
             self.proof.failed = true;
             return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
         }
         Ok(ScopedObservationDirectoryEntry {
             object_token: self.object_token,
-            kind: self.kind,
+            kind,
             depth: self.depth,
         })
+    }
+}
+
+impl DirectoryEntryAuditor for ScopedObservationDirectoryMembershipContract<'_> {
+    type Error = ScopedObservationRuntimeSourceError;
+    type Reservation<'audit>
+        = ScopedObservationDirectoryEntryReservation<'audit>
+    where
+        Self: 'audit;
+
+    fn reserve_entry<'audit>(
+        &'audit mut self,
+        relative_path: &Path,
+    ) -> Result<Self::Reservation<'audit>, Self::Error> {
+        ScopedObservationDirectoryMembershipContract::reserve_entry(self, relative_path)
+    }
+}
+
+impl DirectoryEntryAuditReservation for ScopedObservationDirectoryEntryReservation<'_> {
+    type Error = ScopedObservationRuntimeSourceError;
+
+    fn selection(&self, kind: DirectoryEntryKind) -> DirectorySelection {
+        ScopedObservationDirectoryEntryReservation::selection(self, kind)
+    }
+
+    fn complete(self, kind: DirectoryEntryKind) -> Result<(), Self::Error> {
+        ScopedObservationDirectoryEntryReservation::complete(self, kind).map(|_| ())
     }
 }
 

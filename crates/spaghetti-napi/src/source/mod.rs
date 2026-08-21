@@ -42,6 +42,7 @@ pub use directory_snapshot::{
     DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySelector, DirectorySnapshot,
     DirectorySnapshotConfig,
 };
+pub(crate) use directory_snapshot::{DirectoryEntryAuditReservation, DirectoryEntryAuditor};
 pub(crate) use file::confined_relative_path_key;
 pub use file::platform_path_key;
 pub(crate) use file::{read_stable_file_confined, StableRead};
