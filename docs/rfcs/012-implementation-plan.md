@@ -2574,6 +2574,22 @@ catalog-discovery result, and it performs no source open, listing, read, driver
 execution, decode, child admission, or watcher installation. The dynamic
 relation guard remains closed and Candidate support is unchanged.
 
+Commit `2870468` compiles the first dynamic relation into an exact pre-I/O
+directory-membership contract. The durable coordinator and scoped contract now
+share one component-aware byte selector, where `*` stays within one component
+and only a whole-component `**` recurses. Only an authorized
+`ChildDirectoryByNativeId` `ObjectListing` reservation may produce this
+non-serializable, pass-borrowed contract. Its `DirectorySnapshotConfig` comes
+directly from the relation's exact maximum object, fan-out, and depth bounds;
+its relative selector is the declaration-bound selector; and its path-free
+membership identity binds the adapter, program, canonical source instance, and
+opaque relation object token. Invalid primitive, operation, selector, or bound
+material fails conservatively before native access. This commit still does not
+open or enumerate a directory, read an object, mint a discovered-child access
+reservation, account an enumerated entry, admit a member, or install a watcher.
+Child access accounting and per-entry audit semantics therefore remain open,
+the dynamic-relation guard stays closed, and Candidate support is unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
