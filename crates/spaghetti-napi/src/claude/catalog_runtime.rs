@@ -1,10 +1,10 @@
-//! Test-only Claude catalog source-access/coverage producer.
+//! Crate-private Claude catalog source-access/coverage producer.
 //!
 //! Candidate declarations describe 4/8 MiB `full_only` AppendDelimited streams.
 //! This producer executes a distinct 64 KiB/idempotent catalog topology under
-//! synthetic fixture IDs and digests. It is not compiled into production and
-//! cannot mint source-access authority from a raw path. Native paths stay out
-//! of returned types, Debug, and error messages.
+//! synthetic fixture IDs and digests. It cannot mint catalog authorization or
+//! source-access from a raw path. Native paths stay out of returned types,
+//! Debug, and error messages.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -15,16 +15,19 @@ use super::adapter::ClaudeCodeAdapter;
 use crate::adapter::{
     AdapterId, AgentAdapter, CanonicalSourceInstanceKey, DecodeContext, DecodeDisposition,
     DriverSpec, Fact, FactBatch, FactSemanticContext, SessionFact, SourceInstance,
-    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamSpec,
+    SourceObjectDescriptor, StreamSpec,
 };
+#[cfg(test)]
+use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::source::catalog_composition::{
-    CatalogCompletedCoverageObject, CatalogComponentCoverageCompletion, CatalogCompositionError,
-    CatalogContribution, CatalogDecoderStateBoundary, CatalogDiscoveryBounds,
-    CatalogExecutableComposition, CatalogLibraryCoverageAssembly, CatalogMemberRef,
-    CatalogMembershipAuthorityEvidence, CatalogMembershipEntry, CatalogOverlapStrategy,
-    CatalogPromotedBinding, CatalogSourceComponent, CatalogSourceComposition,
-    CatalogSourcePrimitive, MAX_CATALOG_COVERAGE_POINTS, MAX_MEMBERSHIP_MEMBERS,
+    CatalogBoundSourceAccess, CatalogCompletedCoverageObject, CatalogComponentCoverageCompletion,
+    CatalogCompositionError, CatalogContribution, CatalogDecoderStateBoundary,
+    CatalogDiscoveryBounds, CatalogExecutableComposition, CatalogLibraryCoverageAssembly,
+    CatalogMemberRef, CatalogMembershipAuthorityEvidence, CatalogMembershipEntry,
+    CatalogOverlapStrategy, CatalogPromotedBinding, CatalogSourceComponent,
+    CatalogSourceComposition, CatalogSourcePrimitive, MAX_CATALOG_COVERAGE_POINTS,
+    MAX_MEMBERSHIP_MEMBERS,
 };
 use crate::source::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
@@ -160,6 +163,7 @@ pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {
     ]
 }
 
+#[cfg(test)]
 pub(crate) fn claude_planned_catalog_composition(
 ) -> Result<CatalogSourceComposition, CatalogCompositionError> {
     CatalogSourceComposition::new_planned(
@@ -171,6 +175,7 @@ pub(crate) fn claude_planned_catalog_composition(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn claude_conformance_promoted_composition(
 ) -> Result<CatalogSourceComposition, CatalogCompositionError> {
     CatalogSourceComposition::new_promoted(
@@ -185,69 +190,66 @@ pub(crate) fn claude_conformance_promoted_composition(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn claude_conformance_source_declaration_bytes() -> &'static [u8] {
     CONFORMANCE_SOURCE_DECLARATION
 }
 
+#[cfg(test)]
 pub(crate) fn claude_conformance_support_release_bytes() -> &'static [u8] {
     CONFORMANCE_SUPPORT_RELEASE
 }
 
+#[cfg(test)]
 pub(crate) fn claude_conformance_support_release_id() -> &'static str {
     CONFORMANCE_SUPPORT_RELEASE_ID
 }
 
+#[cfg(test)]
 pub(crate) fn claude_conformance_source_declaration_id() -> &'static str {
     CONFORMANCE_SOURCE_DECLARATION_ID
 }
 
 pub(crate) fn produce_claude_library_coverage(
-    executable: &CatalogExecutableComposition<'_, '_>,
-    catalog_root: &Path,
-    source_instance_discriminator: &[u8],
+    access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
 ) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
-    produce_claude_library_coverage_after_heads(
-        executable,
-        catalog_root,
-        source_instance_discriminator,
-        access_policy_digest,
-        |_| Ok(()),
-    )
+    produce_claude_library_coverage_after_heads(access, access_policy_digest, |_| Ok(()))
 }
 
+#[cfg(test)]
 pub(crate) fn produce_claude_library_coverage_with_post_head_mutation(
-    executable: &CatalogExecutableComposition<'_, '_>,
-    catalog_root: &Path,
-    source_instance_discriminator: &[u8],
+    access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
     mutate: impl FnOnce(&Path),
 ) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
-    produce_claude_library_coverage_after_heads(
-        executable,
-        catalog_root,
+    produce_claude_library_coverage_after_heads(access, access_policy_digest, |root| {
+        mutate(root);
+        Ok(())
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn claude_catalog_source_instance(
+    catalog_root: &Path,
+    source_instance_discriminator: &[u8],
+) -> Result<SourceInstance, CatalogCompositionError> {
+    producer_instance(
+        &catalog_root.join(PROJECTS_ROOT_ID),
         source_instance_discriminator,
-        access_policy_digest,
-        |root| {
-            mutate(root);
-            Ok(())
-        },
     )
 }
 
 fn produce_claude_library_coverage_after_heads(
-    executable: &CatalogExecutableComposition<'_, '_>,
-    catalog_root: &Path,
-    source_instance_discriminator: &[u8],
+    access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
     after_heads: impl FnOnce(&Path) -> Result<(), CatalogCompositionError>,
 ) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
+    let executable = access.executable();
     let composition = executable.composition();
     require_exact_conformance_composition(composition)?;
-    let source_instance_key = CanonicalSourceInstanceKey::derive(1, source_instance_discriminator)
-        .map_err(|_| {
-            CatalogCompositionError::invalid("Claude catalog source instance identity is invalid")
-        })?;
+    let source_instance_key = access.source_instance_key()?;
+    let instance = access.instance();
     let index_component = expect_component(composition, INDEX_COMPONENT_ID)?;
     let top_level_component = expect_component(composition, TOP_LEVEL_COMPONENT_ID)?;
     let nested_component = expect_component(composition, NESTED_COMPONENT_ID)?;
@@ -266,10 +268,10 @@ fn produce_claude_library_coverage_after_heads(
     let max_window_bytes = *max_window_bytes;
     let max_records = *max_records;
 
-    let projects_root = catalog_root.join(PROJECTS_ROOT_ID);
-    let top_level_scan = scan_membership(&projects_root, top_level_component, top_level_selection)?;
-    let nested_scan = scan_membership(&projects_root, nested_component, nested_selection)?;
-    let index_scan = scan_membership(&projects_root, index_component, index_selection)?;
+    let projects_root = access.root(PROJECTS_ROOT_ID)?;
+    let top_level_scan = scan_membership(projects_root, top_level_component, top_level_selection)?;
+    let nested_scan = scan_membership(projects_root, nested_component, nested_selection)?;
+    let index_scan = scan_membership(projects_root, index_component, index_selection)?;
 
     let mut members: BTreeMap<MemberKey, MemberState> = BTreeMap::new();
     let mut projects = BTreeSet::new();
@@ -306,9 +308,8 @@ fn produce_claude_library_coverage_after_heads(
     }
 
     let adapter = ClaudeCodeAdapter::new();
-    let instance = producer_instance(&projects_root, source_instance_discriminator)?;
     let mut coverage_points = 0_usize;
-    let streams = adapter.streams(&instance).map_err(|_| {
+    let streams = adapter.streams(instance).map_err(|_| {
         CatalogCompositionError::invalid("Claude catalog producer could not load adapter streams")
     })?;
     let index_stream = exact_stream(&streams, INDEX_STREAM_ID)?;
@@ -345,7 +346,7 @@ fn produce_claude_library_coverage_after_heads(
         projects.insert((ADAPTER_ID.to_string(), project_slug.clone()));
         let origin = object_origin(object_index, "application/json")?;
         let read = index_driver
-            .read_confined(&projects_root, &relative_path, None, &origin, false)
+            .read_confined(projects_root, &relative_path, None, &origin, false)
             .map_err(map_driver_error)?;
         let ReplaceRead::Record {
             record, checkpoint, ..
@@ -361,13 +362,13 @@ fn produce_claude_library_coverage_after_heads(
             relative_path: relative_path.clone(),
         };
         let object_context = adapter
-            .bootstrap_object(&instance, &descriptor)
+            .bootstrap_object(instance, &descriptor)
             .map_err(|_| {
                 CatalogCompositionError::invalid(
                     "Claude catalog producer could not bootstrap an index object",
                 )
             })?;
-        let semantic_context = decode_context(&index_stream, entry, source_instance_discriminator)?;
+        let semantic_context = decode_context(&index_stream, entry, instance)?;
         let mut batch =
             FactBatch::new_with_semantic_context(8, 8, semantic_context).map_err(|_| {
                 CatalogCompositionError::invalid(
@@ -449,7 +450,7 @@ fn produce_claude_library_coverage_after_heads(
     }
 
     require_stable_membership_checkpoints(
-        &projects_root,
+        projects_root,
         top_level_component,
         nested_component,
         index_component,
@@ -495,7 +496,7 @@ fn produce_claude_library_coverage_after_heads(
         let relative_path = PathBuf::from(&entry.display_path);
         let origin = object_origin(object_index, "application/x-ndjson")?;
         let read = match head_driver.read_confined_bounded(
-            &projects_root,
+            projects_root,
             &relative_path,
             None,
             &origin,
@@ -540,14 +541,13 @@ fn produce_claude_library_coverage_after_heads(
             relative_path: relative_path.clone(),
         };
         let object_context = adapter
-            .bootstrap_object(&instance, &descriptor)
+            .bootstrap_object(instance, &descriptor)
             .map_err(|_| {
                 CatalogCompositionError::invalid(
                     "Claude catalog producer could not bootstrap a transcript object",
                 )
             })?;
-        let semantic_context =
-            decode_context(&parent_stream, entry, source_instance_discriminator)?;
+        let semantic_context = decode_context(&parent_stream, entry, instance)?;
         let mut decoder_state = None;
         let mut supplied_metadata = false;
         for item in items {
@@ -624,11 +624,14 @@ fn produce_claude_library_coverage_after_heads(
         });
     }
 
+    let catalog_root = projects_root.parent().ok_or_else(|| {
+        CatalogCompositionError::invalid("Claude catalog producer is missing its catalog root")
+    })?;
     after_heads(catalog_root)?;
-    revalidate_index_revisions(&index_driver, &projects_root, &index_reads)?;
-    revalidate_head_revisions(&head_driver, &projects_root, physical_ceiling, &head_reads)?;
+    revalidate_index_revisions(&index_driver, projects_root, &index_reads)?;
+    revalidate_head_revisions(&head_driver, projects_root, physical_ceiling, &head_reads)?;
     require_stable_membership_checkpoints(
-        &projects_root,
+        projects_root,
         top_level_component,
         nested_component,
         index_component,
@@ -809,8 +812,22 @@ fn catalog_component(
 fn require_exact_conformance_composition(
     composition: &CatalogSourceComposition,
 ) -> Result<(), CatalogCompositionError> {
-    let expected = claude_conformance_promoted_composition()?;
-    if composition != &expected {
+    let expected_binding = CatalogPromotedBinding::from_digests(
+        Sha256::digest(CONFORMANCE_SOURCE_DECLARATION).into(),
+        Sha256::digest(CONFORMANCE_SUPPORT_RELEASE).into(),
+    )?;
+    let mut expected_components = claude_catalog_components();
+    expected_components = expected_components
+        .into_iter()
+        .map(CatalogSourceComponent::normalize)
+        .collect::<Result<Vec<_>, _>>()?;
+    expected_components.sort_by(|left, right| left.component_id.cmp(&right.component_id));
+    if composition.adapter_id() != ADAPTER_ID
+        || composition.support_release_id() != CONFORMANCE_SUPPORT_RELEASE_ID
+        || composition.source_declaration_id() != CONFORMANCE_SOURCE_DECLARATION_ID
+        || composition.promoted_binding() != Some(expected_binding)
+        || composition.components() != expected_components
+    {
         return Err(CatalogCompositionError::invalid(
             "Claude catalog producer cannot execute a composition that is not the exact synthetic Claude catalog conformance composition",
         ));
@@ -1308,6 +1325,7 @@ fn exact_stream(
         })
 }
 
+#[cfg(test)]
 fn producer_instance(
     projects_root: &Path,
     source_instance_discriminator: &[u8],
@@ -1338,6 +1356,7 @@ fn producer_instance(
     })
 }
 
+#[cfg(test)]
 fn named_root(name: &str, path: impl Into<PathBuf>) -> SourceRoot {
     SourceRoot {
         name: name.to_string(),
@@ -1348,14 +1367,14 @@ fn named_root(name: &str, path: impl Into<PathBuf>) -> SourceRoot {
 fn decode_context(
     stream: &StreamSpec,
     entry: &DirectoryEntryState,
-    source_instance_discriminator: &[u8],
+    instance: &SourceInstance,
 ) -> Result<FactSemanticContext, CatalogCompositionError> {
     FactSemanticContext::new(
         &AdapterId::new(ADAPTER_ID).map_err(|_| {
             CatalogCompositionError::invalid("Claude catalog producer adapter id is invalid")
         })?,
-        1,
-        source_instance_discriminator,
+        instance.spec.identity_contract_version,
+        instance.spec.stable_key.as_bytes(),
         stream.id.as_str().as_bytes(),
         &entry.path_key,
         1,

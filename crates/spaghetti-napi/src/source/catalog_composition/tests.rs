@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -6,7 +7,8 @@ use crate::adapter::{
     AuthorizedCatalogAccess, CanonicalSourceInstanceKey, CompatibilityClass,
     ContractVersionSelection, CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain,
     CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
-    CoverageSetCompleteness, CoverageStatus, Sha256Digest, CONTRACT_VERSION_SELECTION_VERSION,
+    CoverageSetCompleteness, CoverageStatus, Sha256Digest, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceRoot, CONTRACT_VERSION_SELECTION_VERSION,
 };
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 
@@ -803,6 +805,151 @@ fn only_an_exact_rust_authorization_can_execute_a_promoted_composition() {
         .is_err());
 
     assert!(CatalogPromotedBinding::from_digests([0; DIGEST_BYTES], [1; DIGEST_BYTES]).is_err());
+}
+
+fn fixture_source_instance(roots: &[(&str, &str)]) -> SourceInstance {
+    SourceInstance {
+        id: 1,
+        spec: SourceInstanceSpec {
+            identity_contract_version: 1,
+            stable_key: SourceInstanceKey::new(b"fixture-catalog-instance".to_vec()).unwrap(),
+            display_name: "fixture catalog instance".to_string(),
+            roots: roots
+                .iter()
+                .map(|(name, path)| SourceRoot {
+                    name: (*name).to_string(),
+                    path: PathBuf::from(path),
+                })
+                .collect(),
+            discovery_reason: "fixture catalog source instance".to_string(),
+        },
+    }
+}
+
+fn privacy_safe_bind_error(error: &CatalogCompositionError) {
+    let message = error.to_string();
+    assert!(!message.contains("/Users/"));
+    assert!(!message.contains("/home/"));
+    assert!(!message.contains("leaked-catalog-root"));
+    assert!(!message.contains("/tmp/"));
+    assert!(!message.contains("/var/"));
+}
+
+#[test]
+fn executable_composition_binds_source_instance_roots_before_io() {
+    const ADAPTER_ID: &str = "fixture-agent";
+    const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";
+    const SOURCE_DECLARATION_ID: &str = "fixture-catalog-sources-v1";
+    const SOURCE_DECLARATION: &[u8] = b"fixture/catalog-source-declaration/v1";
+    const SUPPORT_RELEASE: &[u8] = b"fixture/catalog-support-release/v1";
+
+    let selection = catalog_contract_selection();
+    let composition = CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
+        CatalogPromotedBinding::fixture(SOURCE_DECLARATION, SUPPORT_RELEASE),
+        claude_components(),
+    )
+    .unwrap();
+    let executable = composition
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .unwrap();
+
+    let leaked = "/Users/leaked-catalog-root";
+    let bound_instance = fixture_source_instance(&[
+        ("home", leaked),
+        ("projects", &format!("{leaked}/projects")),
+        ("teams", &format!("{leaked}/teams")),
+        ("sessions", &format!("{leaked}/sessions")),
+    ]);
+    let access = executable.bind_source_instance(&bound_instance).unwrap();
+    assert_eq!(
+        access.root("projects").unwrap(),
+        Path::new(&format!("{leaked}/projects"))
+    );
+    assert!(access.root("home").is_err());
+    let debug = format!("{access:?}");
+    assert!(!debug.contains("/Users/"));
+    assert!(!debug.contains(leaked));
+    assert!(!debug.contains("fixture catalog instance"));
+    assert!(debug.contains("projects"));
+
+    let missing = executable
+        .bind_source_instance(&fixture_source_instance(&[("home", leaked)]))
+        .expect_err("missing required composition root must fail before I/O");
+    assert!(missing
+        .to_string()
+        .contains("missing a required composition root"));
+    privacy_safe_bind_error(&missing);
+
+    let unusable = executable
+        .bind_source_instance(&fixture_source_instance(&[
+            ("projects", leaked),
+            ("scratch", ""),
+        ]))
+        .expect_err("empty extra root must fail as unusable");
+    assert!(unusable
+        .to_string()
+        .contains("declares an unusable source root"));
+    privacy_safe_bind_error(&unusable);
+
+    let parent_escape = executable
+        .bind_source_instance(&fixture_source_instance(&[("projects", "/tmp/../leaked")]))
+        .expect_err("parent-dir root must fail as unusable");
+    assert!(parent_escape
+        .to_string()
+        .contains("declares an unusable source root"));
+    privacy_safe_bind_error(&parent_escape);
+
+    let duplicate = executable
+        .bind_source_instance(&fixture_source_instance(&[
+            ("projects", leaked),
+            ("projects", "/var/other-projects"),
+        ]))
+        .expect_err("duplicate roots must fail before I/O");
+    assert!(duplicate
+        .to_string()
+        .contains("declares a duplicate source root"));
+    privacy_safe_bind_error(&duplicate);
+
+    let planned = planned_composition(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
+        claude_components(),
+    )
+    .unwrap();
+    assert!(planned
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .is_err());
+
+    let forward_access = catalog_access_with_compatibility(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION,
+        SUPPORT_RELEASE,
+        &selection,
+        CompatibilityClass::RecognizedUnverified,
+    );
+    let forward = composition.authorize_execution(forward_access).unwrap();
+    let forward_bound = forward.bind_source_instance(&bound_instance).unwrap();
+    assert_eq!(
+        forward_bound.root("projects").unwrap(),
+        Path::new(&format!("{leaked}/projects"))
+    );
 }
 
 #[test]
