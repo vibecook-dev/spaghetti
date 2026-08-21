@@ -1,0 +1,64 @@
+{
+  "experiment": "rfc012c-selected-family-durable-scoped-parity",
+  "reportContractVersion": 1,
+  "status": "pass",
+  "promotion": false,
+  "fixture": {
+    "path": "crates/spaghetti-napi/fixtures/contracts/rfc012c-runtime-v1.json",
+    "sha256": "sha256:8089c3ebe4ebad593929b43bb607b2682af7c676662e6b9764f54e7ab7d2229f"
+  },
+  "families": [
+    { "family": "runtime.actor-affiliation", "version": 1 },
+    { "family": "runtime.actor-run", "version": 1 },
+    { "family": "runtime.usage-v2", "version": 1 }
+  ],
+  "identities": {
+    "rootActorSemanticRevisionRef": "v1:UlF1MuJHLvW1bBwp4_2iIaYZntTkiRNwygjF7-tcUm0",
+    "childActorSemanticRevisionRef": "v1:QfvQQU9TXqFeBiPgpn3M80bWhCVNMlrVuc13Ot_lI6Q",
+    "childTeamPresentSemanticRevisionRef": "v1:wvyY9Df8u9XviGIsYx3wGXTtM_7MRABqp5GbwjCEumo",
+    "childWorkflowPresentSemanticRevisionRef": "v1:1aNx4nm0l7EcmdkZDQIibTdCIlhk2XK-suHMR2QYkrc",
+    "childWorkflowRemovedSemanticRevisionRef": "v1:sKxaMheJ8iN3eUk0zPIDG-wXOZ6qyBZlX9brvFkLpwc",
+    "usageASemanticRevisionRef": "v1:AEgra0VUiL60w0xoQsJTKPxH9zXJGcOgfMtoKzgvLVE",
+    "usageBSemanticRevisionRef": "v1:0sLdyP9lJ0B-MENvZVhgeyMvR-9dQiZmdY6fJtVGDeQ",
+    "usageFactIdUnchangedAcrossAToB": "v1:46A11dsTIlXUpGyRkrHEMYgnT36mVuv8ZaP_dADsXnM",
+    "workflowAffiliationKeyUnchangedAcrossPresentToRemoved": "v1:x6pC3Hk_BzeuFLvFqbmUtsRnZJpVIb_f5EWs4iTpnt4"
+  },
+  "scopedReplacementDigestsAfterUsageCorrection": {
+    "runtime.actor-affiliation": "59c791bfdc8fc4fabc0087ad3a89313b5e42e2aa1ff1a2636ca56936748ca80d",
+    "runtime.actor-run": "9663be71ec1be8afc272de79c0e85bb22572a1398415d3e46f8a60d78c481976",
+    "runtime.usage-v2": "8c2f2173f7d779b560e6d84c690216b71693d3b0bb2061617b50e68bc1ba8f67",
+    "entityCounts": {
+      "runtime.actor-affiliation": 2,
+      "runtime.actor-run": 2,
+      "runtime.usage-v2": 1
+    },
+    "partialActorRunCoverageKeepsCountsAndDigests": true
+  },
+  "durable": {
+    "rfc012cReducerRowsMatchFixtureIdentities": true,
+    "usageCorrectionKeepsFactId": true,
+    "affiliationPresentToRemovedKeepsEntityKey": true,
+    "generationResetClearsSelectedFamilyRows": true,
+    "getRuntimeUsageV2MembershipForFixtureAdapterFacts": "unbound",
+    "getRuntimeUsageV2MatchesClaudeDecodedFactBatch": true,
+    "factFamilyCoverage": {
+      "runtime.usage-v2": "not_materialized",
+      "runtime.actor-run": "not_materialized",
+      "runtime.actor-affiliation": "not_materialized"
+    }
+  },
+  "tests": [
+    "cargo test -p spaghetti-napi engine::projection::tests::rfc012c_fixture_identities_survive_durable_usage_v2_query -- --exact",
+    "cargo test -p spaghetti-napi scoped_observation::projection_tests::rfc012c_fixture_identities_survive_selected_scoped_envelopes -- --exact",
+    "cargo test -p spaghetti-napi scoped_observation::projection_tests::rfc012c_partial_coverage_cannot_prove_selected_family_absence -- --exact"
+  ],
+  "notes": [
+    "Selected-family SemanticRevisionRef and entity keys match the frozen RFC 012C v1 fixture in durable reducer rows and selected scoped envelopes.",
+    "Usage A-to-B correction keeps one usage fact id and emits a new SemanticRevisionRef. Affiliation present-to-removed keeps the affiliation entity and emits a new revision. Generation reset retracts actor, affiliation, and usage rows.",
+    "Partial selected-family coverage cannot prove absence: actor-run Partial keeps entity count 2 and the same scoped replacement digest as Complete.",
+    "Durable getFactFamilyCoverage stays not_materialized for all three families in this harness. Actor-run and affiliation coverage publication is out of C2 freeze.",
+    "getRuntimeUsageV2 project/session membership does not bind fixture-adapter runtime facts after they are committed, even when canonical_sessions exists. The query page is instead proven against a Claude-decoded FactBatch using the existing in-memory catalog harness.",
+    "Replacement-digest byte equality across topologies is not required. Scoped snapshot digests are pinned here; durable tables are compared by SemanticRevisionRef, entity keys, and counts.",
+    "Candidate remains unsupported. getUsage, getUsageActivity, and query selection are unchanged."
+  ]
+}

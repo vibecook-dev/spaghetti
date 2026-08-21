@@ -4604,10 +4604,15 @@ mod tests {
         ProjectionVersionCommit, ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate,
         SourceStreamSpec,
     };
+    use crate::engine::coverage_query::{
+        read_fact_family_coverage_page, FactFamilyCoveragePageRequest,
+        DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT,
+    };
     use crate::engine::query_identity::{encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
     use crate::engine::runtime_usage_query::{
         read_runtime_usage_v2_page, RuntimeUsageV2PageRequest,
     };
+    use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
     const PROJECT: &str = "-Users-fixture-project";
@@ -8073,6 +8078,453 @@ mod tests {
                 .unwrap(),
             None
         );
+    }
+
+    const RFC012C_RUNTIME_V1: &str =
+        include_str!("../../fixtures/contracts/rfc012c-runtime-v1.json");
+
+    fn rfc012c_runtime_fixture() -> RuntimeContractFixtureWire {
+        serde_json::from_str(&parse_rfc012c_runtime_v1_json(RFC012C_RUNTIME_V1).unwrap()).unwrap()
+    }
+
+    fn rfc012c_semantic_context() -> FactSemanticContext {
+        FactSemanticContext::new(
+            &AdapterId::new("fixture-adapter").unwrap(),
+            1,
+            b"fixture-source-instance",
+            b"transcript",
+            b"session.jsonl",
+            1,
+        )
+        .unwrap()
+    }
+
+    fn rfc012c_opaque_v1(bytes: &[u8; 32]) -> String {
+        format!("v1:{}", URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    fn rfc012c_durable_revision(connection: &Connection, table: &str) -> String {
+        let bytes: Vec<u8> = connection
+            .query_row(
+                &format!("SELECT fact_revision_id FROM {table} LIMIT 1"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        rfc012c_opaque_v1(bytes.as_slice().try_into().unwrap())
+    }
+
+    fn rfc012c_durable_revision_for_role(connection: &Connection, role: &str) -> String {
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT fact_revision_id FROM runtime_actor_runs_v2 WHERE role = ?1",
+                [role],
+                |row| row.get(0),
+            )
+            .unwrap();
+        rfc012c_opaque_v1(bytes.as_slice().try_into().unwrap())
+    }
+
+    fn rfc012c_durable_affiliation_revision(connection: &Connection, dimension: &str) -> String {
+        let bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT fact_revision_id FROM runtime_actor_affiliations_v2 WHERE dimension = ?1",
+                [dimension],
+                |row| row.get(0),
+            )
+            .unwrap();
+        rfc012c_opaque_v1(bytes.as_slice().try_into().unwrap())
+    }
+
+    fn rfc012c_usage_page(
+        connection: &Connection,
+        project_id: &str,
+        session_id: &str,
+    ) -> crate::engine::runtime_usage_query::RuntimeUsageV2Page {
+        read_runtime_usage_v2_page(
+            connection,
+            &RuntimeUsageV2PageRequest {
+                project_id: project_id.to_string(),
+                session_id: session_id.to_string(),
+                actor_run_ref: None,
+                affiliation_dimension: None,
+                affiliation_target_ref: None,
+                cursor: None,
+                limit: 10,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rfc012c_fixture_identities_survive_durable_usage_v2_query() {
+        let fixture = rfc012c_runtime_fixture();
+        let mut connection = database();
+        register_object(&mut connection);
+
+        let context = rfc012c_semantic_context();
+        let first_record = direct_record(1, 0, 4, 4, b"{}");
+        let mut first_batch = FactBatch::new_with_semantic_context(8, 2, context.clone()).unwrap();
+        first_batch
+            .push(
+                &first_record,
+                Fact::Session(SessionFact {
+                    session: entity("session", &fixture.source.session.native_session_id),
+                    project: entity("project", PROJECT),
+                    native_session_id: fixture.source.session.native_session_id.clone(),
+                    native_project_key: PROJECT.to_string(),
+                    cwd: None,
+                    git_branch: None,
+                    first_prompt: None,
+                    ai_title: None,
+                    custom_title: None,
+                    source_time: None,
+                }),
+            )
+            .unwrap();
+        first_batch
+            .push_native(
+                &first_record,
+                b"fixture-root-actor",
+                Fact::ActorRunRevision(fixture.actors.root.revision.clone()),
+            )
+            .unwrap();
+        first_batch
+            .push_native(
+                &first_record,
+                b"fixture-child-actor",
+                Fact::ActorRunRevision(fixture.actors.child.revision.clone()),
+            )
+            .unwrap();
+        first_batch
+            .push_native(
+                &first_record,
+                b"fixture-child-actor/team/fixture-team-1",
+                Fact::ActorAffiliationRevision(
+                    fixture.affiliations.child_team_present.revision.clone(),
+                ),
+            )
+            .unwrap();
+        first_batch
+            .push_native(
+                &first_record,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(
+                    fixture.affiliations.child_workflow_present.revision.clone(),
+                ),
+            )
+            .unwrap();
+        let usage_a = &fixture.usage.response_revisions.a;
+        first_batch
+            .push_native_object_scoped_with_revision(
+                &first_record,
+                &usage_a.revision.response_key,
+                &usage_a.revision.semantic_revision_key().unwrap(),
+                Fact::UsageRevisionV2(usage_a.revision.clone()),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 11, &first_batch);
+        assert_eq!(count(&connection, "canonical_sessions"), 1);
+        assert_eq!(count(&connection, "runtime_actor_runs_v2"), 2);
+        assert_eq!(count(&connection, "runtime_actor_affiliations_v2"), 2);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        assert_eq!(
+            rfc012c_durable_revision(&connection, "usage_v2_response_contributions"),
+            rfc012c_opaque_v1(usage_a.semantic_revision_ref.fact_revision_id.as_bytes())
+        );
+        assert_eq!(
+            rfc012c_durable_revision_for_role(&connection, "root"),
+            rfc012c_opaque_v1(
+                fixture
+                    .actors
+                    .root
+                    .semantic_revision_ref
+                    .fact_revision_id
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            rfc012c_durable_revision_for_role(&connection, "child"),
+            rfc012c_opaque_v1(
+                fixture
+                    .actors
+                    .child
+                    .semantic_revision_ref
+                    .fact_revision_id
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            rfc012c_durable_affiliation_revision(&connection, "team"),
+            rfc012c_opaque_v1(
+                fixture
+                    .affiliations
+                    .child_team_present
+                    .semantic_revision_ref
+                    .fact_revision_id
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            rfc012c_durable_affiliation_revision(&connection, "workflow"),
+            rfc012c_opaque_v1(
+                fixture
+                    .affiliations
+                    .child_workflow_present
+                    .semantic_revision_ref
+                    .fact_revision_id
+                    .as_bytes()
+            )
+        );
+
+        let (project_id, session_id) = persisted_project_session_ids(&connection);
+        let page = match read_runtime_usage_v2_page(
+            &connection,
+            &RuntimeUsageV2PageRequest {
+                project_id: project_id.clone(),
+                session_id: session_id.clone(),
+                actor_run_ref: None,
+                affiliation_dimension: None,
+                affiliation_target_ref: None,
+                cursor: None,
+                limit: 10,
+            },
+        ) {
+            Ok(page) => Some(page),
+            Err(EngineError::InvalidQuery(message))
+                if message.contains("does not belong to the requested project") =>
+            {
+                None
+            }
+            Err(error) => panic!("unexpected runtime usage-v2 query error: {error:?}"),
+        };
+        if let Some(page) = &page {
+            assert_eq!(page.projection_status, "shadow");
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.actors.len(), 1);
+            assert_eq!(
+                page.items[0].semantic_revision_ref.fact_revision_id,
+                rfc012c_opaque_v1(usage_a.semantic_revision_ref.fact_revision_id.as_bytes())
+            );
+            assert_eq!(
+                page.actors[0].semantic_revision_ref.fact_revision_id,
+                rfc012c_opaque_v1(
+                    fixture
+                        .actors
+                        .child
+                        .semantic_revision_ref
+                        .fact_revision_id
+                        .as_bytes()
+                )
+            );
+        }
+
+        let usage_b = &fixture.usage.response_revisions.b;
+        let correction_record = direct_record(1, 4, 7, 5, b"{}");
+        let mut correction_batch =
+            FactBatch::new_with_semantic_context(2, 1, context.clone()).unwrap();
+        correction_batch
+            .push_native_object_scoped_with_revision(
+                &correction_record,
+                &usage_b.revision.response_key,
+                &usage_b.revision.semantic_revision_key().unwrap(),
+                Fact::UsageRevisionV2(usage_b.revision.clone()),
+            )
+            .unwrap();
+        commit_direct_batch(
+            &mut connection,
+            &correction_record,
+            1,
+            4,
+            12,
+            &correction_batch,
+        );
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        assert_eq!(
+            rfc012c_durable_revision(&connection, "usage_v2_response_contributions"),
+            rfc012c_opaque_v1(usage_b.semantic_revision_ref.fact_revision_id.as_bytes())
+        );
+        assert_ne!(
+            rfc012c_durable_revision(&connection, "usage_v2_response_contributions"),
+            rfc012c_opaque_v1(usage_a.semantic_revision_ref.fact_revision_id.as_bytes())
+        );
+        let usage_fact_id: Vec<u8> = connection
+            .query_row(
+                "SELECT usage_key FROM usage_v2_response_contributions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            rfc012c_opaque_v1(usage_fact_id.as_slice().try_into().unwrap()),
+            rfc012c_opaque_v1(usage_a.fact_id.as_bytes())
+        );
+
+        let removed_record = direct_record(1, 7, 10, 6, b"{}");
+        let mut removed_batch = FactBatch::new_with_semantic_context(2, 1, context).unwrap();
+        removed_batch
+            .push_native(
+                &removed_record,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(
+                    fixture.affiliations.child_workflow_removed.revision.clone(),
+                ),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &removed_record, 1, 7, 13, &removed_batch);
+        assert_eq!(count(&connection, "runtime_actor_affiliations_v2"), 2);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        let (workflow_state, workflow_key, workflow_revision): (String, Vec<u8>, Vec<u8>) =
+            connection
+                .query_row(
+                    "SELECT state, affiliation_key, fact_revision_id FROM runtime_actor_affiliations_v2 WHERE dimension = 'workflow'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+        assert_eq!(workflow_state, "removed");
+        assert_eq!(
+            rfc012c_opaque_v1(workflow_key.as_slice().try_into().unwrap()),
+            rfc012c_opaque_v1(
+                fixture
+                    .affiliations
+                    .child_workflow_present
+                    .revision
+                    .affiliation
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            rfc012c_opaque_v1(workflow_revision.as_slice().try_into().unwrap()),
+            rfc012c_opaque_v1(
+                fixture
+                    .affiliations
+                    .child_workflow_removed
+                    .semantic_revision_ref
+                    .fact_revision_id
+                    .as_bytes()
+            )
+        );
+        assert_eq!(
+            rfc012c_durable_revision(&connection, "usage_v2_response_contributions"),
+            rfc012c_opaque_v1(usage_b.semantic_revision_ref.fact_revision_id.as_bytes())
+        );
+
+        for family in [
+            "runtime.usage-v2",
+            "runtime.actor-run",
+            "runtime.actor-affiliation",
+        ] {
+            match read_fact_family_coverage_page(
+                &connection,
+                &FactFamilyCoveragePageRequest {
+                    project_id: project_id.clone(),
+                    session_id: session_id.clone(),
+                    owner_id: family.to_string(),
+                    family: family.to_string(),
+                    family_version: 1,
+                    cursor: None,
+                    limit: DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT,
+                },
+            ) {
+                Ok(coverage) => {
+                    assert_eq!(
+                        coverage.status, "not_materialized",
+                        "{family} durable coverage stays unpublished in this harness"
+                    );
+                    assert!(coverage.coverage.is_none());
+                }
+                Err(EngineError::InvalidQuery(message))
+                    if message.contains("does not belong to the requested project") => {}
+                Err(error) => panic!("unexpected {family} coverage query error: {error:?}"),
+            }
+        }
+
+        let debug = format!("{fixture:?}");
+        assert!(!debug.contains("/Users/"));
+        assert!(!debug.contains("/Volumes/"));
+        assert!(!debug.contains("~/.claude"));
+
+        let reset_record = direct_record(2, 0, 1, 88, b"reset");
+        let reset_batch = FactBatch::new(1, 1).unwrap();
+        commit_direct_batch(&mut connection, &reset_record, 1, 10, 88, &reset_batch);
+        assert_eq!(count(&connection, "runtime_actor_runs_v2"), 0);
+        assert_eq!(count(&connection, "runtime_actor_affiliations_v2"), 0);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 0);
+        assert_eq!(
+            connection
+                .query_row("PRAGMA foreign_key_check", [], |_| Ok(1_i64))
+                .optional()
+                .unwrap(),
+            None
+        );
+
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let claude_context = adapter_context(root.path(), &adapter);
+        let mut claude_db = database();
+        register_object(&mut claude_db);
+        let payload = claude_usage_line("row-1", "api-1", None, 10, 5, Some(2), Some(3));
+        let claude_record = direct_record(1, 0, payload.len() as u64 + 1, 100, &payload);
+        let mut decode_state = DecodeCommitState {
+            expected_generation: 1,
+            cursor: SourceCursor::append_offset(0).into_bytes(),
+            decoder_state: None,
+        };
+        let decoder = DecoderId::new(DECODER).unwrap();
+        let mut claude_batch =
+            FactBatch::new_with_semantic_context(16, 8, semantic_context(b"fixture-transcript"))
+                .unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &claude_context,
+                    decoder_state: decode_state.decoder_state.as_deref(),
+                },
+                &claude_record,
+                &mut claude_batch,
+            )
+            .unwrap();
+        let claude_usage = claude_batch
+            .facts()
+            .iter()
+            .find_map(|envelope| match &envelope.value {
+                Fact::UsageRevisionV2(_) => envelope.semantic_revision,
+                _ => None,
+            })
+            .expect("claude decode emits usage-v2");
+        let claude_actor = claude_batch
+            .facts()
+            .iter()
+            .find_map(|envelope| match &envelope.value {
+                Fact::ActorRunRevision(_) => envelope.semantic_revision,
+                _ => None,
+            })
+            .expect("claude decode emits actor-run");
+        decode_commit(
+            &mut claude_db,
+            &adapter,
+            &claude_context,
+            &claude_record,
+            &mut decode_state,
+            101,
+        );
+        let (claude_project, claude_session) = persisted_project_session_ids(&claude_db);
+        let claude_page = rfc012c_usage_page(&claude_db, &claude_project, &claude_session);
+        assert_eq!(claude_page.items.len(), 1);
+        assert_eq!(claude_page.actors.len(), 1);
+        assert_eq!(
+            claude_page.items[0].semantic_revision_ref.fact_revision_id,
+            rfc012c_opaque_v1(claude_usage.fact_revision_id.as_bytes())
+        );
+        assert_eq!(
+            claude_page.actors[0].semantic_revision_ref.fact_revision_id,
+            rfc012c_opaque_v1(claude_actor.fact_revision_id.as_bytes())
+        );
+        let claude_debug = format!("{claude_page:?}");
+        assert!(!claude_debug.contains("/Users/"));
+        assert!(!claude_debug.contains("/Volumes/"));
     }
 
     fn oracle_u64(value: &serde_json::Value, label: &str) -> u64 {

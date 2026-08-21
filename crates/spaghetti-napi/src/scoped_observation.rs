@@ -22413,6 +22413,186 @@ mod projection_tests {
     }
 
     #[test]
+    fn rfc012c_partial_coverage_cannot_prove_selected_family_absence() {
+        let fixture = rfc012c_fixture();
+        let root = rfc012c_root_identity(&fixture);
+        let mut projection = multi_family_sink(8);
+        let first = rfc012c_record(0, 3, 4);
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                    &first,
+                    rfc012c_initial_batch(&fixture, &first),
+                ))
+                .unwrap()
+                .len(),
+            5
+        );
+
+        let correction = rfc012c_record(3, 6, 5);
+        let mut correction_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let usage_b = &fixture.usage.response_revisions.b;
+        correction_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_b.revision.response_key,
+                &usage_b.revision.semantic_revision_key().unwrap(),
+                Fact::UsageRevisionV2(usage_b.revision.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    2,
+                    ScopedAppendDeliveryPhase::Live,
+                    &correction,
+                    correction_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let actors = projection
+            .actor_run_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let affiliations = projection
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        let usage = projection
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(actors.entity_count, 2);
+        assert_eq!(affiliations.entity_count, 2);
+        assert_eq!(usage.entity_count, 1);
+        assert_eq!(
+            usage.events[0].semantic_revision_ref,
+            fixture.usage.response_revisions.b.semantic_revision_ref
+        );
+
+        let complete_coverage = vec![
+            empty_family_coverage_for_root(
+                &root,
+                "runtime.actor-affiliation",
+                RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
+                CoverageSetCompleteness::Complete,
+            ),
+            empty_family_coverage_for_root(
+                &root,
+                "runtime.actor-run",
+                RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+                CoverageSetCompleteness::Complete,
+            ),
+            empty_family_coverage_for_root(
+                &root,
+                "runtime.usage-v2",
+                RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+                CoverageSetCompleteness::Complete,
+            ),
+        ];
+        let complete_manifest = selected_replacement_family_manifest(
+            &multi_family_observation_contract_selection().contract_versions,
+            &usage,
+            Some(&actors),
+            Some(&affiliations),
+            &complete_coverage,
+        )
+        .unwrap();
+        let mut partial_coverage = complete_coverage;
+        partial_coverage[1] = empty_family_coverage_for_root(
+            &root,
+            "runtime.actor-run",
+            RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION,
+            CoverageSetCompleteness::Partial,
+        );
+        let partial_manifest = selected_replacement_family_manifest(
+            &multi_family_observation_contract_selection().contract_versions,
+            &usage,
+            Some(&actors),
+            Some(&affiliations),
+            &partial_coverage,
+        )
+        .unwrap();
+        assert_eq!(
+            complete_manifest
+                .iter()
+                .map(|family| (
+                    family.fact_family.as_str(),
+                    family.completeness,
+                    family.entity_or_event_count
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "runtime.actor-affiliation",
+                    CoverageSetCompleteness::Complete,
+                    2
+                ),
+                ("runtime.actor-run", CoverageSetCompleteness::Complete, 2),
+                ("runtime.usage-v2", CoverageSetCompleteness::Complete, 1),
+            ]
+        );
+        assert_eq!(
+            partial_manifest
+                .iter()
+                .map(|family| (
+                    family.fact_family.as_str(),
+                    family.completeness,
+                    family.entity_or_event_count
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "runtime.actor-affiliation",
+                    CoverageSetCompleteness::Complete,
+                    2
+                ),
+                ("runtime.actor-run", CoverageSetCompleteness::Partial, 2),
+                ("runtime.usage-v2", CoverageSetCompleteness::Complete, 1),
+            ]
+        );
+        assert_eq!(
+            complete_manifest[0].semantic_digest,
+            partial_manifest[0].semantic_digest
+        );
+        assert_eq!(
+            complete_manifest[1].semantic_digest,
+            partial_manifest[1].semantic_digest
+        );
+        assert_eq!(
+            complete_manifest[2].semantic_digest,
+            partial_manifest[2].semantic_digest
+        );
+        assert_eq!(
+            bytes_hex(actors.semantic_digest.as_bytes()),
+            bytes_hex(complete_manifest[1].semantic_digest.as_bytes())
+        );
+        assert_eq!(
+            bytes_hex(affiliations.semantic_digest.as_bytes()),
+            bytes_hex(complete_manifest[0].semantic_digest.as_bytes())
+        );
+        assert_eq!(
+            bytes_hex(usage.semantic_digest.as_bytes()),
+            bytes_hex(complete_manifest[2].semantic_digest.as_bytes())
+        );
+        assert_eq!(
+            bytes_hex(affiliations.semantic_digest.as_bytes()),
+            "59c791bfdc8fc4fabc0087ad3a89313b5e42e2aa1ff1a2636ca56936748ca80d"
+        );
+        assert_eq!(
+            bytes_hex(actors.semantic_digest.as_bytes()),
+            "9663be71ec1be8afc272de79c0e85bb22572a1398415d3e46f8a60d78c481976"
+        );
+        assert_eq!(
+            bytes_hex(usage.semantic_digest.as_bytes()),
+            "8c2f2173f7d779b560e6d84c690216b71693d3b0bb2061617b50e68bc1ba8f67"
+        );
+    }
+
+    #[test]
     fn affiliation_ambiguity_is_dimension_local_and_canonical() {
         let mut projection = sink(8);
         let usage_record = record(3, 0, 10);
