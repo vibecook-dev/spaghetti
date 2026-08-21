@@ -565,7 +565,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         found.add(f"{relative}#missing-authorized-directory-member-read")
     required_directory_member_identity_bindings = (
         "pub(crate) struct ScopedObservationDirectoryMemberIdentity",
+        "pub(crate) struct ScopedObservationDirectoryMemberBinding",
         "semantic_context: FactSemanticContext",
+        "runtime_stream: Arc<StreamSpec>",
+        "descriptor: SourceObjectDescriptor",
         "confined_relative_path_key(&relative_path)",
         "ScopedSourceObjectIdentity::from_semantic_context",
         "completed_members",

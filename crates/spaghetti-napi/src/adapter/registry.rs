@@ -2883,6 +2883,22 @@ pub(crate) mod tests {
                         )
                         .unwrap()
                     );
+                    assert_eq!(
+                        content.runtime_stream_for_test(),
+                        &fixture_descendant_runtime_stream()
+                    );
+                    assert_eq!(
+                        content.descriptor_for_test().stream_id.as_str(),
+                        "descendant-stream"
+                    );
+                    assert_eq!(
+                        content.descriptor_for_test().object_key,
+                        expected_object_key
+                    );
+                    assert_eq!(
+                        content.descriptor_for_test().relative_path,
+                        expected_relative
+                    );
                     member_bytes.push(content.bytes().to_vec());
                 }
                 other => panic!("expected a stable selected member, got {other:?}"),
@@ -2983,11 +2999,23 @@ pub(crate) mod tests {
             other => panic!("expected an oversized listing, got {other:?}"),
         };
         let Some(ScopedObservationDirectoryMemberRead::Oversized {
-            identity: _oversized_identity,
+            binding: oversized_member,
         }) = oversized_listing.read_next_member().unwrap()
         else {
             panic!("expected one stable oversized member")
         };
+        assert_eq!(
+            oversized_member.runtime_stream_for_test(),
+            &fixture_descendant_runtime_stream()
+        );
+        assert_eq!(
+            oversized_member.descriptor_for_test().relative_path,
+            std::path::Path::new("sessions/oversized-session-id/children/large.jsonl")
+        );
+        let oversized_rendered = format!("{oversized_member:?}");
+        for private in ["oversized-session-id", "large.jsonl", "descendant-stream"] {
+            assert!(!oversized_rendered.contains(private));
+        }
         assert!(oversized_listing.member_reads_complete());
         assert!(
             ScopedRelationMembershipObservation::from_directory_listing(oversized_listing).is_ok()

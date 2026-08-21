@@ -13,7 +13,8 @@ use std::sync::Arc;
 
 use crate::adapter::{
     AdapterId, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
-    FactSemanticContext, ScopeRelationPrimitive, SourceInstance, SourceInstanceKey, StreamSpec,
+    FactSemanticContext, ScopeRelationPrimitive, SourceInstance, SourceInstanceKey,
+    SourceObjectDescriptor, StreamSpec,
 };
 use crate::source::{
     confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,
@@ -253,7 +254,7 @@ struct ScopedObservationDirectoryAccountedEntry {
 }
 
 struct ScopedObservationDirectoryMemberCoordinate {
-    identity: ScopedObservationDirectoryMemberIdentity,
+    binding: ScopedObservationDirectoryMemberBinding,
     parent_token: AccessObjectToken,
     depth: u32,
     relative_path: PathBuf,
@@ -271,6 +272,16 @@ pub(crate) struct ScopedObservationDirectoryMemberIdentity {
     listing_revision: Revision,
     entry_generation: u64,
     entry_revision: Revision,
+}
+
+/// Native, non-serializable decoder coordinates for one exact selected child.
+/// The descriptor path remains private while the path-free member identity is
+/// safe to retain separately as coverage membership.
+#[derive(Clone)]
+pub(crate) struct ScopedObservationDirectoryMemberBinding {
+    identity: ScopedObservationDirectoryMemberIdentity,
+    runtime_stream: Arc<StreamSpec>,
+    descriptor: SourceObjectDescriptor,
 }
 
 /// One completed, non-serializable listing proof. Native relative names remain
@@ -304,13 +315,13 @@ pub(crate) enum ScopedObservationDirectoryScan {
 pub(crate) enum ScopedObservationDirectoryMemberRead {
     RetryTransient,
     Oversized {
-        identity: ScopedObservationDirectoryMemberIdentity,
+        binding: ScopedObservationDirectoryMemberBinding,
     },
     Stable(ScopedObservationDirectoryMemberContent),
 }
 
 pub(crate) struct ScopedObservationDirectoryMemberContent {
-    identity: ScopedObservationDirectoryMemberIdentity,
+    binding: ScopedObservationDirectoryMemberBinding,
     content_revision: Revision,
     bytes: Vec<u8>,
 }
@@ -387,6 +398,17 @@ impl fmt::Debug for ScopedObservationDirectoryMemberIdentity {
             .field("has_listing_revision", &true)
             .field("entry_generation", &self.entry_generation)
             .field("has_entry_revision", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberBinding")
+            .field("identity", &self.identity)
+            .field("has_runtime_stream", &true)
+            .field("has_source_descriptor", &true)
             .finish_non_exhaustive()
     }
 }
@@ -698,6 +720,7 @@ impl ScopedObservationDirectoryMembershipProof {
     ) -> Result<Vec<ScopedObservationDirectoryMemberCoordinate>, ScopedObservationRuntimeSourceError>
     {
         let mut members = Vec::with_capacity(checkpoint.entries.len());
+        let runtime_stream = Arc::new(binding.stream().clone());
         for state in checkpoint.entries.values() {
             if state.kind != DirectoryEntryKind::File {
                 return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
@@ -717,7 +740,7 @@ impl ScopedObservationDirectoryMembershipProof {
             let canonical_object_key = confined_relative_path_key(&relative_path)
                 .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
             let adapter_id = self.identity.source.adapter_id.clone();
-            let stream_namespace = binding.stream().id.as_str();
+            let stream_namespace = runtime_stream.id.as_str();
             let stream_key =
                 CoverageStreamKey::derive(adapter_id.as_str(), stream_namespace.as_bytes())
                     .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
@@ -730,7 +753,7 @@ impl ScopedObservationDirectoryMembershipProof {
                 binding.runtime.source_instance_key().as_bytes(),
                 stream_namespace.as_bytes(),
                 &canonical_object_key,
-                binding.stream().driver.framing_contract_version(),
+                runtime_stream.driver.framing_contract_version(),
             )
             .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
             let source = ScopedSourceObjectIdentity {
@@ -742,17 +765,26 @@ impl ScopedObservationDirectoryMembershipProof {
             if source.source_instance_key != self.identity.source.source_instance_key {
                 return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
             }
+            let identity = ScopedObservationDirectoryMemberIdentity {
+                attachment_authority: Arc::clone(&self.identity.attachment_authority),
+                relation_id: Arc::from(self.identity.relation_id.as_str()),
+                object_token,
+                source,
+                semantic_context,
+                listing_generation: checkpoint.generation,
+                listing_revision: checkpoint.revision,
+                entry_generation: state.generation,
+                entry_revision: state.revision,
+            };
             members.push(ScopedObservationDirectoryMemberCoordinate {
-                identity: ScopedObservationDirectoryMemberIdentity {
-                    attachment_authority: Arc::clone(&self.identity.attachment_authority),
-                    relation_id: Arc::from(self.identity.relation_id.as_str()),
-                    object_token,
-                    source,
-                    semantic_context,
-                    listing_generation: checkpoint.generation,
-                    listing_revision: checkpoint.revision,
-                    entry_generation: state.generation,
-                    entry_revision: state.revision,
+                binding: ScopedObservationDirectoryMemberBinding {
+                    identity,
+                    runtime_stream: Arc::clone(&runtime_stream),
+                    descriptor: SourceObjectDescriptor {
+                        stream_id: runtime_stream.id.clone(),
+                        object_key: canonical_object_key,
+                        relative_path: relative_path.clone(),
+                    },
                 },
                 parent_token: accounted.parent_token,
                 depth: accounted.depth,
@@ -848,7 +880,7 @@ impl ScopedObservationDirectoryListing {
             .as_ref()
             .ok_or(ScopedObservationRuntimeSourceError::InvalidBinding)?;
         let reservation = match authority.reserve_member_read(
-            member.identity.object_token,
+            member.binding.identity.object_token,
             member.parent_token,
             member.depth,
         ) {
@@ -893,9 +925,9 @@ impl ScopedObservationDirectoryListing {
                     return Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient));
                 }
                 reservation.complete(0, AccessOutcome::Oversized)?;
-                self.completed_members.push(member.identity.clone());
+                self.completed_members.push(member.binding.identity.clone());
                 Ok(Some(ScopedObservationDirectoryMemberRead::Oversized {
-                    identity: member.identity.clone(),
+                    binding: member.binding.clone(),
                 }))
             }
             StableRead::Stable {
@@ -909,10 +941,10 @@ impl ScopedObservationDirectoryListing {
                     return Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient));
                 }
                 reservation.complete(bytes.len() as u64, AccessOutcome::Available)?;
-                self.completed_members.push(member.identity.clone());
+                self.completed_members.push(member.binding.identity.clone());
                 Ok(Some(ScopedObservationDirectoryMemberRead::Stable(
                     ScopedObservationDirectoryMemberContent {
-                        identity: member.identity.clone(),
+                        binding: member.binding.clone(),
                         content_revision: revision,
                         bytes,
                     },
@@ -930,11 +962,11 @@ fn directory_member_stamp_matches(stamp: &FileStamp, expected: &DirectoryEntrySt
 
 impl ScopedObservationDirectoryMemberContent {
     pub(crate) fn object_token(&self) -> AccessObjectToken {
-        self.identity.object_token
+        self.binding.identity().object_token
     }
 
     pub(crate) fn listing_revision(&self) -> Revision {
-        self.identity.listing_revision
+        self.binding.identity().listing_revision
     }
 
     pub(crate) fn content_revision(&self) -> Revision {
@@ -946,7 +978,49 @@ impl ScopedObservationDirectoryMemberContent {
     }
 
     pub(crate) fn identity(&self) -> &ScopedObservationDirectoryMemberIdentity {
+        self.binding.identity()
+    }
+
+    pub(super) fn runtime_stream(&self) -> &StreamSpec {
+        self.binding.runtime_stream()
+    }
+
+    pub(super) fn descriptor(&self) -> &SourceObjectDescriptor {
+        self.binding.descriptor()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
+        self.runtime_stream()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn descriptor_for_test(&self) -> &SourceObjectDescriptor {
+        self.descriptor()
+    }
+}
+
+impl ScopedObservationDirectoryMemberBinding {
+    pub(crate) fn identity(&self) -> &ScopedObservationDirectoryMemberIdentity {
         &self.identity
+    }
+
+    pub(super) fn runtime_stream(&self) -> &StreamSpec {
+        &self.runtime_stream
+    }
+
+    pub(super) fn descriptor(&self) -> &SourceObjectDescriptor {
+        &self.descriptor
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
+        self.runtime_stream()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn descriptor_for_test(&self) -> &SourceObjectDescriptor {
+        self.descriptor()
     }
 }
 
