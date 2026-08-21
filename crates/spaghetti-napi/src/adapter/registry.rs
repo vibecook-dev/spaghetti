@@ -190,8 +190,8 @@ pub(crate) mod tests {
         AdapterSupportBinding, CanonicalEntityKey, CompatibilityClass, CoverageAbsenceKind,
         CoverageDomain, CoveragePositionKind, CoverageSetCompleteness, CoverageStatus,
         DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, ExternalEntityRef, Fact,
-        FactBatch, FactSemanticContext, RawRetentionPolicy, Sha256Digest, SourceAccess,
-        SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+        FactBatch, FactSemanticContext, RawRetentionPolicy, ScopeRelationPrimitive, Sha256Digest,
+        SourceAccess, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
         SupportBundleDocument,
     };
     use crate::observation_contract::unknown_wire::{
@@ -239,9 +239,9 @@ pub(crate) mod tests {
         ScopedSourceFailureClass, ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
     };
     use crate::source::{
-        AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile,
-        AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirtyHint,
-        DirtyReason, DirtyScope, HintEnqueue, RecordOrigin, Revision, ScopeAccessReport,
+        AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig,
+        AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan,
+        DirtyHint, DirtyReason, DirtyScope, HintEnqueue, RecordOrigin, Revision, ScopeAccessReport,
         ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool, SourceMediaType,
         SourceRecord,
     };
@@ -1682,6 +1682,169 @@ pub(crate) mod tests {
         let rendered = error.to_string();
         assert!(!rendered.contains("descendant-objects"));
         assert!(!rendered.contains("sessions/"));
+    }
+
+    #[test]
+    fn typed_scope_authorization_alone_mints_bound_observation_source_reservations() {
+        let registry = supported_fixture_registry_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+        let temp = TempDir::new().unwrap();
+        let request = scoped_access_request(temp.path().join("authorized-root"));
+        let (_, authorization) = registry
+            .authorize_typed_access(
+                &AdapterId::new("fixture").unwrap(),
+                &request.artifact_probe,
+                SupportOperation::ScopedTypedObservation,
+                &request.observation_contract_request.contract_versions,
+                &request.observation_contract_offer.contract_versions,
+            )
+            .unwrap();
+        let program = authorization
+            .select_scope_program("observe-session")
+            .unwrap();
+        let plan = AuthorizedScopeAccessPlan::from_authorized_program(program).unwrap();
+        let report = plan.report();
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"secret-session-id",
+        }];
+
+        let reservation = plan
+            .reserve_observation_source(ScopeAccessRequest {
+                relation_id: "descendant-objects",
+                operation: AccessOperation::ObjectListing,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 1_024,
+                max_rows: 0,
+            })
+            .unwrap();
+        assert_eq!(reservation.relation_id(), "descendant-objects");
+        assert_eq!(
+            reservation.primitive(),
+            ScopeRelationPrimitive::ChildDirectoryByNativeId
+        );
+        assert_eq!(reservation.access_root(), "root");
+        assert_eq!(reservation.stream_id(), "descendant-stream");
+        assert_eq!(reservation.source_pattern(), "sessions/*/children/**");
+        assert_eq!(reservation.relative_selector(), Some("**"));
+        assert_eq!(
+            reservation.locator(),
+            PathBuf::from("sessions/secret-session-id/children").as_path()
+        );
+        assert_eq!(
+            reservation.support_release_digest(),
+            report.support_release_digest()
+        );
+        assert_eq!(
+            reservation.source_declaration_digest(),
+            plan.source_declaration_digest()
+        );
+        assert_eq!(
+            reservation.scope_program_digest(),
+            report.scope_program_digest()
+        );
+        assert_eq!(
+            reservation.object_token(),
+            AccessObjectToken::derive(
+                "descendant-objects",
+                &[
+                    b"native-session-id".as_slice(),
+                    b"secret-session-id".as_slice(),
+                ],
+            )
+            .unwrap()
+        );
+        let rendered_debug = format!("{reservation:?}");
+        assert!(!rendered_debug.contains("secret-session-id"));
+        assert!(!rendered_debug.contains("descendant-stream"));
+        assert!(!rendered_debug.contains("sessions/"));
+        reservation.complete(512, AccessOutcome::Available).unwrap();
+
+        let path_shaped_identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"different/session-id",
+        }];
+        let error = plan
+            .reserve_observation_source(ScopeAccessRequest {
+                relation_id: "descendant-objects",
+                operation: AccessOperation::ObjectListing,
+                phase: AccessPhase::Revalidation,
+                parent_token: None,
+                identity_inputs: &path_shaped_identity,
+                depth: 1,
+                max_bytes: 1_024,
+                max_rows: 0,
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid access-budget configuration: scope locator template or bound identity input is invalid"
+        );
+        let rendered = error.to_string();
+        assert!(!rendered.contains("secret-session-id"));
+        assert!(!rendered.contains("different/session-id"));
+
+        let error = plan
+            .reserve_observation_source(ScopeAccessRequest {
+                relation_id: "/Users/alice/private/session.jsonl",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 128,
+                max_rows: 0,
+            })
+            .unwrap_err();
+        let rendered = error.to_string();
+        assert_eq!(
+            rendered,
+            "invalid access-budget configuration: authorized observation source reservation requires one supported bound relation"
+        );
+        assert!(!rendered.contains("/Users/"));
+        assert!(!rendered.contains("alice"));
+
+        let error = plan
+            .reserve_observation_source(ScopeAccessRequest {
+                relation_id: "root-object",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 128,
+                max_rows: 0,
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid access-budget configuration: authorized observation source reservation requires one supported bound relation"
+        );
+        assert!(!error.to_string().contains("root-object"));
+
+        let report = plan.report();
+        assert!(report.verify_digest());
+        let descendant = report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap();
+        assert_eq!(descendant.attempts, 2);
+        assert_eq!(descendant.completed, 2);
+        assert_eq!(descendant.abandoned, 0);
+        assert_eq!(descendant.trace[0].outcome, AccessOutcome::Available);
+        assert_eq!(descendant.trace[1].outcome, AccessOutcome::Failed);
+        let root = report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "root-object")
+            .unwrap();
+        assert_eq!(root.attempts, 0);
+        assert_eq!(root.completed, 0);
+        assert_eq!(root.abandoned, 0);
+        assert!(root.trace.is_empty());
     }
 
     #[test]

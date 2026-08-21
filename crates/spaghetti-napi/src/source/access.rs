@@ -6,15 +6,15 @@
 //! prevents retries, panics, and partial reads from bypassing a scope budget.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::adapter::{
-    AuthorizedScopeProgram, ScopeProgramManifest, ScopeProgramStatus, ScopeRelationDeclaration,
-    ScopeRelationPrimitive, ScopeUnavailableBehavior,
+    AuthorizedScopeProgram, ScopeObservationSourceBinding, ScopeProgramManifest,
+    ScopeProgramStatus, ScopeRelationDeclaration, ScopeRelationPrimitive, ScopeUnavailableBehavior,
 };
 
 pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
@@ -347,6 +347,59 @@ impl AuthorizedScopeAccessPlan {
             .filter(|relation| {
                 relation.primitive != ScopeRelationPrimitive::ArtifactLocatorFromEvidence
             })
+    }
+
+    /// Reserve one declaration-owned dynamic/related source coordinate from
+    /// this exact typed support authorization. Unlike [`ScopeAccessPlan`]'s
+    /// generic reservation, the returned value proves that the source stream,
+    /// pattern, and scope/source/support digests came from the verified
+    /// Promoted bundle; none is accepted from the caller.
+    pub(crate) fn reserve_observation_source(
+        &self,
+        request: ScopeAccessRequest<'_>,
+    ) -> Result<AuthorizedObservationSourceReservation, AccessBudgetError> {
+        let declaration = self
+            .inner
+            .relation(request.relation_id)
+            .ok_or_else(invalid_observation_source_reservation)?;
+        if !matches!(
+            declaration.primitive,
+            ScopeRelationPrimitive::ChildDirectoryByNativeId
+                | ScopeRelationPrimitive::SiblingObject
+                | ScopeRelationPrimitive::ReferencedObjectFromField
+        ) {
+            return Err(invalid_observation_source_reservation());
+        }
+        let binding = declaration
+            .observation_binding
+            .clone()
+            .ok_or_else(invalid_observation_source_reservation)?;
+        let reservation = self.inner.reserve(request)?;
+        let locator = match reservation.primitive() {
+            ScopeRelationPrimitive::ChildDirectoryByNativeId => {
+                reservation.render_child_directory_locator(request.identity_inputs)
+            }
+            ScopeRelationPrimitive::SiblingObject
+            | ScopeRelationPrimitive::ReferencedObjectFromField => {
+                reservation.render_related_object_locator(request.identity_inputs)
+            }
+            _ => Err(invalid_observation_source_reservation()),
+        };
+        let locator = match locator {
+            Ok(locator) => locator,
+            Err(error) => {
+                reservation.fail_conservative();
+                return Err(error);
+            }
+        };
+        Ok(AuthorizedObservationSourceReservation {
+            reservation,
+            binding,
+            locator,
+            support_release_digest: self.support_release_digest,
+            source_declaration_digest: self.source_declaration_digest,
+            scope_program_digest: self.scope_program_digest,
+        })
     }
 
     pub fn reserve(
@@ -805,6 +858,89 @@ pub struct ScopeAccessReservation {
     reservation: Option<AccessReservation>,
 }
 
+/// One non-serializable source reservation minted only from a typed scoped
+/// support authorization. The values identify reviewed declaration
+/// coordinates, not native paths, and do not themselves open a source.
+pub(crate) struct AuthorizedObservationSourceReservation {
+    reservation: ScopeAccessReservation,
+    binding: ScopeObservationSourceBinding,
+    locator: PathBuf,
+    support_release_digest: [u8; 32],
+    source_declaration_digest: [u8; 32],
+    scope_program_digest: [u8; 32],
+}
+
+impl std::fmt::Debug for AuthorizedObservationSourceReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedObservationSourceReservation")
+            .field("primitive", &self.reservation.primitive())
+            .field(
+                "has_relative_selector",
+                &self.binding.relative_selector.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthorizedObservationSourceReservation {
+    pub(crate) fn relation_id(&self) -> &str {
+        self.reservation.relation_id()
+    }
+
+    pub(crate) fn primitive(&self) -> ScopeRelationPrimitive {
+        self.reservation.primitive()
+    }
+
+    pub(crate) fn access_root(&self) -> &str {
+        self.reservation.access_root()
+    }
+
+    pub(crate) fn stream_id(&self) -> &str {
+        &self.binding.stream_id
+    }
+
+    pub(crate) fn source_pattern(&self) -> &str {
+        &self.binding.source_pattern
+    }
+
+    pub(crate) fn relative_selector(&self) -> Option<&str> {
+        self.binding.relative_selector.as_deref()
+    }
+
+    pub(crate) fn locator(&self) -> &Path {
+        &self.locator
+    }
+
+    pub(crate) fn support_release_digest(&self) -> &[u8; 32] {
+        &self.support_release_digest
+    }
+
+    pub(crate) fn source_declaration_digest(&self) -> &[u8; 32] {
+        &self.source_declaration_digest
+    }
+
+    pub(crate) fn scope_program_digest(&self) -> &[u8; 32] {
+        &self.scope_program_digest
+    }
+
+    pub(crate) fn object_token(&self) -> AccessObjectToken {
+        self.reservation.object_token()
+    }
+
+    pub(crate) fn complete(
+        self,
+        bytes_read: u64,
+        outcome: AccessOutcome,
+    ) -> Result<(), AccessBudgetError> {
+        self.reservation.complete(bytes_read, 0, outcome)
+    }
+
+    pub(crate) fn fail_conservative(self) {
+        self.reservation.fail_conservative();
+    }
+}
+
 impl ScopeAccessReservation {
     pub fn relation_id(&self) -> &str {
         &self.declaration.relation_id
@@ -1074,6 +1210,13 @@ fn locator_placeholders(locator: &str) -> Result<Vec<(usize, usize, &str)>, Acce
 fn invalid_locator_template() -> AccessBudgetError {
     AccessBudgetError::InvalidConfig(
         "scope locator template or bound identity input is invalid".to_string(),
+    )
+}
+
+fn invalid_observation_source_reservation() -> AccessBudgetError {
+    AccessBudgetError::InvalidConfig(
+        "authorized observation source reservation requires one supported bound relation"
+            .to_string(),
     )
 }
 
