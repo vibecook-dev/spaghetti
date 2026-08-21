@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::adapter::{
-    AuthorizedScopeProgram, ScopeObservationSourceBinding, ScopeProgramManifest,
-    ScopeProgramStatus, ScopeRelationDeclaration, ScopeRelationPrimitive, ScopeUnavailableBehavior,
+    AuthorizedObservationSourceContract, AuthorizedObservationSourceDriver, AuthorizedScopeProgram,
+    ScopeObservationSourceBinding, ScopeProgramManifest, ScopeProgramStatus,
+    ScopeRelationDeclaration, ScopeRelationPrimitive, ScopeUnavailableBehavior,
 };
 
 pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
@@ -258,6 +259,7 @@ pub struct AuthorizedScopeAccessPlan {
     scope_program_digest: [u8; 32],
     selection_contract_version: u32,
     observation_contract_version: u32,
+    observation_source_contracts: BTreeMap<String, AuthorizedObservationSourceContract>,
 }
 
 impl AuthorizedScopeAccessPlan {
@@ -273,6 +275,18 @@ impl AuthorizedScopeAccessPlan {
                 "authorized scope access requires a promoted declaration".to_string(),
             ));
         }
+        let mut observation_source_contracts = BTreeMap::new();
+        for relation in inner
+            .relations
+            .values()
+            .filter(|relation| relation.declaration.observation_binding.is_some())
+        {
+            let contract = authorization
+                .observation_source_contract(&relation.declaration.relation_id)
+                .cloned()
+                .ok_or_else(invalid_observation_source_reservation)?;
+            observation_source_contracts.insert(relation.declaration.relation_id.clone(), contract);
+        }
         Ok(Self {
             inner,
             support_release_id: authorization.support_release_id().to_string(),
@@ -281,6 +295,7 @@ impl AuthorizedScopeAccessPlan {
             scope_program_digest: *authorization.scope_program_digest().as_bytes(),
             selection_contract_version: authorization.selection_contract_version(),
             observation_contract_version: authorization.observation_contract_version(),
+            observation_source_contracts,
         })
     }
 
@@ -374,6 +389,15 @@ impl AuthorizedScopeAccessPlan {
             .observation_binding
             .clone()
             .ok_or_else(invalid_observation_source_reservation)?;
+        let source_contract = self
+            .observation_source_contracts
+            .get(request.relation_id)
+            .filter(|contract| {
+                contract.stream_id() == binding.stream_id
+                    && contract.root_id() == declaration.access_root
+            })
+            .cloned()
+            .ok_or_else(invalid_observation_source_reservation)?;
         let reservation = self.inner.reserve(request)?;
         let locator = match reservation.primitive() {
             ScopeRelationPrimitive::ChildDirectoryByNativeId => {
@@ -395,6 +419,7 @@ impl AuthorizedScopeAccessPlan {
         Ok(AuthorizedObservationSourceReservation {
             reservation,
             binding,
+            source_contract,
             locator,
             support_release_digest: self.support_release_digest,
             source_declaration_digest: self.source_declaration_digest,
@@ -864,6 +889,7 @@ pub struct ScopeAccessReservation {
 pub(crate) struct AuthorizedObservationSourceReservation {
     reservation: ScopeAccessReservation,
     binding: ScopeObservationSourceBinding,
+    source_contract: AuthorizedObservationSourceContract,
     locator: PathBuf,
     support_release_digest: [u8; 32],
     source_declaration_digest: [u8; 32],
@@ -897,7 +923,7 @@ impl AuthorizedObservationSourceReservation {
     }
 
     pub(crate) fn stream_id(&self) -> &str {
-        &self.binding.stream_id
+        self.source_contract.stream_id()
     }
 
     pub(crate) fn source_pattern(&self) -> &str {
@@ -906,6 +932,10 @@ impl AuthorizedObservationSourceReservation {
 
     pub(crate) fn relative_selector(&self) -> Option<&str> {
         self.binding.relative_selector.as_deref()
+    }
+
+    pub(crate) fn driver(&self) -> AuthorizedObservationSourceDriver {
+        self.source_contract.driver()
     }
 
     pub(crate) fn locator(&self) -> &Path {

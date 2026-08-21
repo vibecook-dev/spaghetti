@@ -187,12 +187,12 @@ pub(crate) mod tests {
 
     use crate::adapter::{
         verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
-        AdapterSupportBinding, CanonicalEntityKey, CompatibilityClass, CoverageAbsenceKind,
-        CoverageDomain, CoveragePositionKind, CoverageSetCompleteness, CoverageStatus,
-        DecodeContext, DecodeDisposition, DecoderId, DiscoveryContext, ExternalEntityRef, Fact,
-        FactBatch, FactSemanticContext, RawRetentionPolicy, ScopeRelationPrimitive, Sha256Digest,
-        SourceAccess, SourceInstance, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
-        SupportBundleDocument,
+        AdapterSupportBinding, AuthorizedObservationSourceDriver, CanonicalEntityKey,
+        CompatibilityClass, CoverageAbsenceKind, CoverageDomain, CoveragePositionKind,
+        CoverageSetCompleteness, CoverageStatus, DecodeContext, DecodeDisposition, DecoderId,
+        DiscoveryContext, ExternalEntityRef, Fact, FactBatch, FactSemanticContext,
+        RawRetentionPolicy, ScopeRelationPrimitive, Sha256Digest, SourceAccess, SourceInstance,
+        SourceInstanceSpec, SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
     };
     use crate::observation_contract::unknown_wire::{
         ObservationUnknownWireCapability, ObservationUnknownWireCompatibilityAxis,
@@ -1727,6 +1727,12 @@ pub(crate) mod tests {
         );
         assert_eq!(reservation.access_root(), "root");
         assert_eq!(reservation.stream_id(), "descendant-stream");
+        assert_eq!(
+            reservation.driver(),
+            AuthorizedObservationSourceDriver::ReplaceDocument {
+                max_object_bytes: 1_024,
+            }
+        );
         assert_eq!(reservation.source_pattern(), "sessions/*/children/**");
         assert_eq!(reservation.relative_selector(), Some("**"));
         assert_eq!(

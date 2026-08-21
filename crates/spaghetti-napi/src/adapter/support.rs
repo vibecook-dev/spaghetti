@@ -583,6 +583,45 @@ struct SupportSourceBoundsWire {
     max_batch_bytes: Option<u64>,
 }
 
+/// Closed common-driver contract retained from one digest-verified scoped
+/// source stream. It is deliberately non-serializable and has no public
+/// constructor: a scope reservation may carry it only after support-bundle
+/// verification and typed access authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthorizedObservationSourceDriver {
+    AppendDelimited {
+        max_record_bytes: u64,
+        max_batch_bytes: u64,
+    },
+    ReplaceDocument {
+        max_object_bytes: u64,
+    },
+    PresenceObject {
+        max_object_bytes: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthorizedObservationSourceContract {
+    stream_id: String,
+    root_id: String,
+    driver: AuthorizedObservationSourceDriver,
+}
+
+impl AuthorizedObservationSourceContract {
+    pub(crate) fn stream_id(&self) -> &str {
+        &self.stream_id
+    }
+
+    pub(crate) fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    pub(crate) fn driver(&self) -> AuthorizedObservationSourceDriver {
+        self.driver
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedSupportRelease {
     release_digest: Sha256Digest,
@@ -590,6 +629,7 @@ pub struct VerifiedSupportRelease {
     adapter_id: String,
     adapter_binding: AdapterSupportBinding,
     scope_programs: ScopeProgramManifest,
+    observation_source_contracts: BTreeMap<String, AuthorizedObservationSourceContract>,
 }
 
 impl VerifiedSupportRelease {
@@ -836,10 +876,10 @@ pub fn verify_support_release_bundle(
 
     let scope_programs =
         scope_programs.expect("support reference set always includes scope program");
-    validate_scope_source_bindings(
-        &scope_programs,
-        &source_declaration.expect("support reference set always includes source declaration"),
-    )?;
+    let source_declaration =
+        source_declaration.expect("support reference set always includes source declaration");
+    let observation_source_contracts =
+        validate_scope_source_bindings(&scope_programs, &source_declaration)?;
     let scope_status_matches = match descriptor.status {
         SupportReleaseStatus::Candidate => matches!(
             scope_programs.status,
@@ -873,14 +913,16 @@ pub fn verify_support_release_bundle(
         adapter_id: release.adapter_id,
         adapter_binding,
         scope_programs,
+        observation_source_contracts,
     })
 }
 
 fn validate_scope_source_bindings(
     scope_programs: &ScopeProgramManifest,
     source_declaration: &SupportSourceDeclarationWire,
-) -> Result<(), SupportContractError> {
+) -> Result<BTreeMap<String, AuthorizedObservationSourceContract>, SupportContractError> {
     let mut streams = BTreeMap::new();
+    let mut observation_source_contracts = BTreeMap::new();
     for stream in &source_declaration.streams {
         validate_identifier("support source stream id", &stream.stream_id)?;
         if streams.insert(stream.stream_id.as_str(), stream).is_some() {
@@ -949,9 +991,47 @@ fn validate_scope_source_bindings(
                     relation.relation_id
                 )));
             }
+            let contract = authorized_observation_source_contract(stream).ok_or_else(|| {
+                SupportContractError::invalid(format!(
+                    "scope relation {:?} observation binding has no closed common-driver contract",
+                    relation.relation_id
+                ))
+            })?;
+            if observation_source_contracts
+                .insert(binding.stream_id.clone(), contract.clone())
+                .is_some_and(|existing| existing != contract)
+            {
+                return Err(SupportContractError::invalid(format!(
+                    "observation source stream {:?} has inconsistent verified contracts",
+                    binding.stream_id
+                )));
+            }
         }
     }
-    Ok(())
+    Ok(observation_source_contracts)
+}
+
+fn authorized_observation_source_contract(
+    stream: &SupportSourceStreamWire,
+) -> Option<AuthorizedObservationSourceContract> {
+    let driver = match stream.primitive.as_str() {
+        "AppendDelimited" => AuthorizedObservationSourceDriver::AppendDelimited {
+            max_record_bytes: stream.bounds.max_record_bytes?,
+            max_batch_bytes: stream.bounds.max_batch_bytes?,
+        },
+        "ReplaceDocument" => AuthorizedObservationSourceDriver::ReplaceDocument {
+            max_object_bytes: stream.bounds.max_object_bytes?,
+        },
+        "PresenceObject" => AuthorizedObservationSourceDriver::PresenceObject {
+            max_object_bytes: stream.bounds.max_object_bytes?,
+        },
+        _ => return None,
+    };
+    Some(AuthorizedObservationSourceContract {
+        stream_id: stream.stream_id.clone(),
+        root_id: stream.root_id.clone(),
+        driver,
+    })
 }
 
 fn observation_stream_has_complete_lifecycle(
@@ -1519,6 +1599,7 @@ impl SupportCatalog {
                 source_declaration_digest: release.adapter_binding.source_declaration_digest,
                 scope_program_digest: release.adapter_binding.scope_program_digest,
                 scope_programs: release.scope_programs.clone(),
+                observation_source_contracts: release.observation_source_contracts.clone(),
                 probe,
             },
         ))
@@ -1763,6 +1844,7 @@ pub struct TypedAccessAuthorization {
     source_declaration_digest: Sha256Digest,
     scope_program_digest: Sha256Digest,
     scope_programs: ScopeProgramManifest,
+    observation_source_contracts: BTreeMap<String, AuthorizedObservationSourceContract>,
     probe: NativeArtifactProbe,
 }
 
@@ -2017,6 +2099,24 @@ impl AuthorizedScopeProgram<'_> {
 
     pub(crate) fn scope_programs(&self) -> &ScopeProgramManifest {
         &self.authorization.scope_programs
+    }
+
+    pub(crate) fn observation_source_contract(
+        &self,
+        relation_id: &str,
+    ) -> Option<&AuthorizedObservationSourceContract> {
+        let relation = self
+            .program
+            .relations
+            .iter()
+            .find(|relation| relation.relation_id == relation_id)?;
+        let binding = relation.observation_binding.as_ref()?;
+        let contract = self
+            .authorization
+            .observation_source_contracts
+            .get(&binding.stream_id)?;
+        (contract.stream_id == binding.stream_id && contract.root_id == relation.access_root)
+            .then_some(contract)
     }
 }
 
@@ -3639,6 +3739,7 @@ mod tests {
                 &descriptor.artifact_compatibility.family,
                 descriptor.status,
             ),
+            observation_source_contracts: BTreeMap::new(),
         }))
         .unwrap()
     }
@@ -4115,7 +4216,14 @@ mod tests {
             }]
         }))
         .unwrap();
-        validate_scope_source_bindings(&scope, &source).unwrap();
+        let contracts = validate_scope_source_bindings(&scope, &source).unwrap();
+        assert_eq!(
+            contracts.get("descendant-stream").unwrap().driver(),
+            AuthorizedObservationSourceDriver::AppendDelimited {
+                max_record_bytes: 4096,
+                max_batch_bytes: 8192,
+            }
+        );
 
         source.streams[0].relative_patterns[0] = "sessions/*/other/**".to_string();
         assert!(validate_scope_source_bindings(&scope, &source).is_err());
@@ -4124,6 +4232,25 @@ mod tests {
         assert!(validate_scope_source_bindings(&scope, &source).is_err());
         source.streams[0].bounds.max_record_bytes = Some(4096);
         source.streams[0].safe_decoder_state_boundary = "object_generation_revision".to_string();
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+
+        source.streams[0].primitive = "PresenceObject".to_string();
+        source.streams[0].bounds.max_object_bytes = Some(1024);
+        source.streams[0].bounds.max_record_bytes = None;
+        source.streams[0].bounds.max_batch_bytes = None;
+        source.streams[0].lifecycle = vec![
+            "replace".to_string(),
+            "delete".to_string(),
+            "recreate".to_string(),
+        ];
+        let contracts = validate_scope_source_bindings(&scope, &source).unwrap();
+        assert_eq!(
+            contracts.get("descendant-stream").unwrap().driver(),
+            AuthorizedObservationSourceDriver::PresenceObject {
+                max_object_bytes: 1024,
+            }
+        );
+        source.streams[0].primitive = "DirectoryMembership".to_string();
         assert!(validate_scope_source_bindings(&scope, &source).is_err());
     }
 
