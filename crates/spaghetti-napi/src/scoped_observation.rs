@@ -77,6 +77,7 @@ mod usage_wire;
 mod watermark_wire;
 
 use observation_source_access::ScopedObservationDirectoryListing;
+pub(crate) use observation_source_access::ScopedObservationDirectoryMemberLifecycle;
 
 pub type ScopedArtifactAvailabilityEntry = artifact_availability::ScopedArtifactAvailabilityEntry;
 pub type ScopedArtifactAvailabilityEnvelopeConsumerContext =
@@ -797,6 +798,21 @@ pub struct ScopedAdmissionFailure {
     pub decoded: ScopedDecodedAppendBatch,
 }
 
+pub(crate) struct ScopedDirectoryMemberAdmissionFailure {
+    pub error: ScopedAdmissionError,
+    pub lifecycle: ScopedObservationDirectoryMemberLifecycle,
+}
+
+impl std::fmt::Debug for ScopedDirectoryMemberAdmissionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedDirectoryMemberAdmissionFailure")
+            .field("error", &self.error)
+            .field("lifecycle", &self.lifecycle)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScopedAdmissionReceipt {
     object_token: u64,
@@ -1349,6 +1365,224 @@ impl ScopedObservationAdmissionLane {
             observation.coverage,
         );
         Ok(())
+    }
+
+    /// Admit one reserved directory child's ReplaceDocument observation.
+    /// Present files enqueue decoded facts; missing files contribute explicit
+    /// absence coverage; oversized children stay outside this seam.
+    pub(crate) fn admit_directory_member(
+        &mut self,
+        access_pass_id: u64,
+        phase: ScopedAppendDeliveryPhase,
+        lifecycle: ScopedObservationDirectoryMemberLifecycle,
+    ) -> Result<ScopedAdmissionReceipt, ScopedDirectoryMemberAdmissionFailure> {
+        let fail = |error, lifecycle| ScopedDirectoryMemberAdmissionFailure { error, lifecycle };
+        if access_pass_id == 0
+            || phase == ScopedAppendDeliveryPhase::Live
+            || matches!(
+                lifecycle,
+                ScopedObservationDirectoryMemberLifecycle::Oversized { .. }
+            )
+        {
+            return Err(fail(ScopedAdmissionError::InvalidCoverage, lifecycle));
+        }
+        let source = lifecycle.source().clone();
+        let relation_id: Arc<str> = Arc::from(lifecycle.relation_id());
+        let reserved = self
+            .dynamic_relation_members
+            .get(&relation_id)
+            .is_some_and(|members| members.contains(&source));
+        if !reserved
+            || self.relation_membership_objects.contains_key(&source)
+            || self.known_coverage_objects.contains_key(&source)
+        {
+            return Err(fail(ScopedAdmissionError::InvalidCoverage, lifecycle));
+        }
+        let membership_identity = ScopedCoverageMembershipIdentity {
+            relation_id: Arc::clone(&relation_id),
+            stream_key: Arc::from(source.stream_key.as_bytes().as_slice()),
+            object_key: Arc::from(source.object_key.as_bytes().as_slice()),
+            coverage_domains: Vec::new(),
+        };
+        let object_token = match next_scoped_object_token() {
+            Ok(token) => token,
+            Err(_) => return Err(fail(ScopedAdmissionError::CapacityExhausted, lifecycle)),
+        };
+        let admission_token = 1;
+
+        match lifecycle {
+            ScopedObservationDirectoryMemberLifecycle::Oversized { binding } => Err(fail(
+                ScopedAdmissionError::InvalidCoverage,
+                ScopedObservationDirectoryMemberLifecycle::Oversized { binding },
+            )),
+            ScopedObservationDirectoryMemberLifecycle::Absent {
+                binding,
+                generation,
+                kind,
+            } => {
+                if generation == 0 {
+                    return Err(fail(
+                        ScopedAdmissionError::InvalidCoverage,
+                        ScopedObservationDirectoryMemberLifecycle::Absent {
+                            binding,
+                            generation,
+                            kind,
+                        },
+                    ));
+                }
+                let coverage = ScopedOfferedDecodeCoverage {
+                    source: source.clone(),
+                    point: None,
+                    explicit_absence_or_deletion: Some(CoverageAbsence {
+                        stream_key: source.stream_key,
+                        object_key: source.object_key,
+                        generation,
+                        kind,
+                    }),
+                    explicit_errors: Vec::new(),
+                    completeness: CoverageSetCompleteness::Complete,
+                };
+                self.known_coverage_objects
+                    .insert(source.clone(), membership_identity);
+                self.stage_coverage_update(
+                    self.offered_lane_ordinal,
+                    access_pass_id,
+                    ScopedCoveragePassEvidence::AccessAttempt,
+                    coverage,
+                );
+                Ok(ScopedAdmissionReceipt {
+                    object_token,
+                    admission_token,
+                    through_lane_ordinal: self.offered_lane_ordinal,
+                    data_events: 0,
+                    retained_native_bytes: 0,
+                    control_items: 0,
+                })
+            }
+            ScopedObservationDirectoryMemberLifecycle::Present(snapshot) => {
+                let generation = snapshot.generation();
+                let revision = snapshot.revision();
+                let retention = snapshot.runtime_stream().retention;
+                let measurement = match snapshot.admission_measurement() {
+                    Some(measurement) => measurement,
+                    None => {
+                        return Err(fail(
+                            ScopedAdmissionError::CapacityExhausted,
+                            ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                        ));
+                    }
+                };
+                let Some(next_events) = self.queued_data_events.checked_add(measurement.0) else {
+                    return Err(fail(
+                        ScopedAdmissionError::CapacityExhausted,
+                        ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                    ));
+                };
+                if next_events > self.limits.max_data_events {
+                    return Err(fail(
+                        ScopedAdmissionError::DataQueueFull,
+                        ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                    ));
+                }
+                let Some(next_bytes) = self.queued_retained_native_bytes.checked_add(measurement.1)
+                else {
+                    return Err(fail(
+                        ScopedAdmissionError::CapacityExhausted,
+                        ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                    ));
+                };
+                if next_bytes > self.limits.max_retained_native_bytes {
+                    return Err(fail(
+                        ScopedAdmissionError::RetainedNativeQueueFull,
+                        ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                    ));
+                }
+                let Some(after_ordinal) = self.next_lane_ordinal.checked_add(1) else {
+                    return Err(fail(
+                        ScopedAdmissionError::CapacityExhausted,
+                        ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                    ));
+                };
+                let position = match CoveragePosition::derive(
+                    CoveragePositionKind::SnapshotRevision,
+                    revision.as_bytes(),
+                    None,
+                ) {
+                    Ok(position) => position,
+                    Err(_) => {
+                        return Err(fail(
+                            ScopedAdmissionError::InvalidCoverage,
+                            ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                        ));
+                    }
+                };
+                let point = match scoped_decode_coverage_point(
+                    &source,
+                    generation,
+                    Some(position),
+                    CoverageStatus::ExactSnapshot,
+                ) {
+                    Ok(point) => point,
+                    Err(()) => {
+                        return Err(fail(
+                            ScopedAdmissionError::InvalidCoverage,
+                            ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                        ));
+                    }
+                };
+                let (
+                    _binding,
+                    _object_context,
+                    _checkpoint,
+                    record,
+                    disposition,
+                    batch,
+                    _next_decoder_state,
+                    quarantined,
+                ) = snapshot.into_admission_parts();
+                let item = ScopedDecodedAppendItem::Record {
+                    evidence: Box::new(scoped_record_evidence(&record, retention)),
+                    disposition,
+                    batch,
+                    quarantined,
+                };
+                let lane_ordinal = self.next_lane_ordinal;
+                self.decoded.push_back(QueuedDecodedFrame {
+                    object_token,
+                    source: source.clone(),
+                    lane_ordinal,
+                    phase,
+                    item: Box::new(item),
+                    data_events: measurement.0,
+                    retained_native_bytes: measurement.1,
+                });
+                self.next_lane_ordinal = after_ordinal;
+                self.queued_data_events = next_events;
+                self.queued_retained_native_bytes = next_bytes;
+                self.known_coverage_objects
+                    .insert(source.clone(), membership_identity);
+                self.stage_coverage_update(
+                    lane_ordinal,
+                    access_pass_id,
+                    ScopedCoveragePassEvidence::AccessAttempt,
+                    ScopedOfferedDecodeCoverage {
+                        source,
+                        point: Some(point),
+                        explicit_absence_or_deletion: None,
+                        explicit_errors: Vec::new(),
+                        completeness: CoverageSetCompleteness::Complete,
+                    },
+                );
+                Ok(ScopedAdmissionReceipt {
+                    object_token,
+                    admission_token,
+                    through_lane_ordinal: lane_ordinal,
+                    data_events: measurement.0,
+                    retained_native_bytes: measurement.1,
+                    control_items: 0,
+                })
+            }
+        }
     }
 
     /// Test-only low-level ownership transfer for admission/order conformance.
@@ -19176,7 +19410,8 @@ pub(crate) use observation_source_access::{
     bind_observation_runtime_source_for_test, prepare_observation_directory_membership_for_test,
     scan_observation_directory_membership_for_test,
     scan_observation_directory_membership_with_foreign_attachment_for_test,
-    ScopedObservationDirectoryMemberRead, ScopedObservationDirectoryScan,
+    ScopedObservationDirectoryMemberObserveFailureKind, ScopedObservationDirectoryMemberRead,
+    ScopedObservationDirectoryScan,
 };
 
 #[cfg(test)]

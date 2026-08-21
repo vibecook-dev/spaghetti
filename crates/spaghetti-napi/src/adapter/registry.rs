@@ -227,7 +227,8 @@ pub(crate) mod tests {
         ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContextualPollResolution,
         ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationDirectoryMemberRead,
+        ScopedObservationDeliveryLimits, ScopedObservationDirectoryMemberLifecycle,
+        ScopedObservationDirectoryMemberObserveFailureKind, ScopedObservationDirectoryMemberRead,
         ScopedObservationDirectoryScan, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
@@ -1761,6 +1762,82 @@ pub(crate) mod tests {
         let rendered = error.to_string();
         assert!(!rendered.contains("descendant-objects"));
         assert!(!rendered.contains("sessions/"));
+    }
+
+    #[test]
+    fn candidate_support_cannot_authorize_a_promoted_dynamic_program() {
+        let source_document = br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"decoder_id":"fixture-descendant","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#;
+        let documents = [
+            (
+                "ads",
+                "support/ads.json",
+                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
+            ),
+            (
+                "source_declaration",
+                "support/source.json",
+                source_document.as_slice(),
+            ),
+            (
+                "scope_program",
+                "support/scope.json",
+                UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT,
+            ),
+            (
+                "evidence",
+                "support/evidence.json",
+                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
+            ),
+            (
+                "conformance",
+                "support/conformance.json",
+                br#"{"adapter_id":"fixture","support_release_id":"fixture-release"}"#.as_slice(),
+            ),
+        ];
+        let references = documents
+            .iter()
+            .map(|(kind, path, bytes)| {
+                (
+                    (*kind).to_string(),
+                    serde_json::json!({"path": path, "sha256": Sha256Digest::of(bytes).to_string()}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let release_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "support_release_id": "fixture-release",
+            "adapter_id": "fixture",
+            "status": "candidate",
+            "artifact_compatibility": {
+                "family": "fixture",
+                "platforms": ["test"],
+                "exact_versions": ["1.0.0"],
+                "ranges": [],
+                "required_markers": ["fixture.marker"],
+                "forward_catalog_only": false
+            },
+            "references": references,
+            "versions": {"adapter_package": "1.0.0", "decoder_contract": 1},
+            "capabilities": [
+                {
+                    "capability_id": "fixture-observation",
+                    "topology": "scoped",
+                    "level": "supported",
+                    "notes": null
+                }
+            ]
+        }))
+        .unwrap();
+        let bundle_documents = documents
+            .iter()
+            .map(|(_, path, bytes)| SupportBundleDocument::new(path, bytes))
+            .collect::<Vec<_>>();
+        let error = verify_support_release_bundle(&release_json, &bundle_documents).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("scope-program status is incompatible with the support-release status"));
+        assert!(!error.to_string().contains("descendant-objects"));
+        assert!(!error.to_string().contains("sessions/"));
     }
 
     #[test]
@@ -3366,6 +3443,312 @@ pub(crate) mod tests {
             .record_relation_membership(7, ScopedAppendDeliveryPhase::Correction, observation)
             .unwrap();
         assert!(ScopedRelationMembershipObservation::from_directory_listing(first).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_directory_child_jsonl_decodes_through_replace_driver() {
+        let nested_jsonl = b"{\"type\":\"nested-child\"}\n";
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+        let registry = AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![fixture_descendant_runtime_stream()])
+                    .with_stateful_decode(),
+            )
+            .build_supported(catalog)
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let native_root = temp.path().join("authorized-root");
+        let listing_root = native_root.join("sessions/secret-session-id/children");
+        std::fs::create_dir_all(listing_root.join("nested")).unwrap();
+        std::fs::write(listing_root.join("nested/child.jsonl"), nested_jsonl).unwrap();
+        let request = scoped_access_request(native_root.clone());
+        let instance = request.source_instance.clone();
+        let expected_source_instance_key = CanonicalSourceInstanceKey::derive(
+            instance.spec.identity_contract_version,
+            instance.spec.stable_key.as_bytes(),
+        )
+        .unwrap();
+        let approved_root = ScopedAccessRootGrant {
+            access_root: "root".to_string(),
+            root: native_root,
+        };
+        let adapter = registry.get(&AdapterId::new("fixture").unwrap()).unwrap();
+        let origin = RecordOrigin {
+            source_instance_id: instance.id,
+            stream_id: 41,
+            object_id: 42,
+            observed_at: 43,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+        };
+        let make_bound = |native_session_id: &[u8]| {
+            let (_, authorization) = registry
+                .authorize_typed_access(
+                    &AdapterId::new("fixture").unwrap(),
+                    &request.artifact_probe,
+                    SupportOperation::ScopedTypedObservation,
+                    &request.observation_contract_request.contract_versions,
+                    &request.observation_contract_offer.contract_versions,
+                )
+                .unwrap();
+            let plan = AuthorizedScopeAccessPlan::from_authorized_program(
+                authorization
+                    .select_scope_program("observe-session")
+                    .unwrap(),
+            )
+            .unwrap();
+            let identity = [ScopeIdentityInput {
+                name: "native-session-id",
+                value: native_session_id,
+            }];
+            let runtime = plan
+                .reserve_observation_source(ScopeAccessRequest {
+                    relation_id: "descendant-objects",
+                    operation: AccessOperation::ObjectListing,
+                    phase: AccessPhase::Initial,
+                    parent_token: None,
+                    identity_inputs: &identity,
+                    depth: 1,
+                    max_bytes: 1_024,
+                    max_rows: 0,
+                })
+                .unwrap()
+                .bind_runtime_stream(adapter.as_ref(), &instance)
+                .unwrap();
+            let rooted = bind_observation_runtime_source_for_test(
+                runtime,
+                Arc::clone(adapter),
+                Arc::new(instance.clone()),
+                &approved_root,
+                &expected_source_instance_key,
+            )
+            .unwrap();
+            (plan, rooted)
+        };
+
+        let (present_plan, present_binding) = make_bound(b"secret-session-id");
+        let mut present_listing =
+            match scan_observation_directory_membership_for_test(present_binding, None).unwrap() {
+                ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                other => panic!("expected a nested listing, got {other:?}"),
+            };
+        assert_eq!(present_listing.selected_entry_count(), 1);
+        let Some(ScopedObservationDirectoryMemberRead::Stable(content)) =
+            present_listing.read_next_member().unwrap()
+        else {
+            panic!("expected one stable nested jsonl child")
+        };
+        assert_eq!(content.bytes(), nested_jsonl);
+        assert!(present_listing.member_reads_complete());
+        let decoded_input = content.bootstrap_for_test().unwrap();
+        let wrong_origin = RecordOrigin {
+            source_instance_id: instance.id + 1,
+            ..origin.clone()
+        };
+        let observe_failure = present_listing
+            .observe_bootstrapped_member(decoded_input, &wrong_origin)
+            .unwrap_err();
+        assert_eq!(
+            observe_failure.kind_for_test(),
+            ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                ScopedSourceFailureClass::InvalidCursor
+            )
+        );
+        let observe_failure_rendered = format!("{observe_failure:?}");
+        for private in ["secret-session-id", "child.jsonl", "nested-child"] {
+            assert!(!observe_failure_rendered.contains(private));
+        }
+        let decoded_input = observe_failure.into_input_for_test();
+        let nested = present_listing
+            .observe_bootstrapped_member(decoded_input, &origin)
+            .unwrap();
+        let nested_rendered = format!("{nested:?}");
+        for private in [
+            "secret-session-id",
+            "child.jsonl",
+            "nested",
+            "nested-child",
+            "descendant-stream",
+            "authorized-root",
+        ] {
+            assert!(!nested_rendered.contains(private));
+        }
+        let snapshot = nested
+            .present_snapshot_for_test()
+            .expect("present nested jsonl must decode");
+        assert_eq!(
+            snapshot.disposition_for_test(),
+            DecodeDisposition::PreservedUnknown
+        );
+        assert_eq!(snapshot.fact_count_for_test(), 1);
+        assert_eq!(snapshot.record_payload_for_test(), nested_jsonl);
+        match &snapshot.facts_for_test()[0].value {
+            Fact::UnknownRecord {
+                native_kind,
+                raw_payload,
+                reason,
+            } => {
+                assert_eq!(native_kind.as_deref(), Some("fixture"));
+                assert!(raw_payload.is_empty());
+                assert_eq!(reason, "fixture");
+            }
+            other => panic!("expected a decoded unknown record, got {other:?}"),
+        }
+        let nested_source = nested.source().clone();
+        let observation =
+            ScopedRelationMembershipObservation::from_directory_listing(present_listing).unwrap();
+        let mut admission = admission_lane_for_objects(2);
+        admission
+            .record_relation_membership(7, ScopedAppendDeliveryPhase::Bootstrap, observation)
+            .unwrap();
+        let receipt = admission
+            .admit_directory_member(7, ScopedAppendDeliveryPhase::Bootstrap, nested)
+            .unwrap();
+        assert_eq!(receipt.data_events, 1);
+        assert_eq!(receipt.retained_native_bytes, 0);
+        match admission.pop_next() {
+            Some(ScopedQueuedObservationFrame::Decoded { item, source, .. }) => {
+                assert_eq!(source, nested_source);
+                match *item {
+                    ScopedDecodedAppendItem::Record {
+                        disposition, batch, ..
+                    } => {
+                        assert_eq!(disposition, DecodeDisposition::PreservedUnknown);
+                        assert_eq!(batch.facts().len(), 1);
+                    }
+                    ScopedDecodedAppendItem::DriverQuarantine(_) => {
+                        panic!("expected admitted decoded facts, got a driver quarantine")
+                    }
+                }
+            }
+            None => panic!("expected one admitted decoded frame"),
+            Some(_) => panic!("expected one admitted decoded frame"),
+        }
+        assert!(admission.pop_next().is_none());
+        assert!(present_plan.report().verify_digest());
+
+        let missing_root = approved_root
+            .root
+            .join("sessions/missing-child-session-id/children");
+        std::fs::create_dir_all(missing_root.join("nested")).unwrap();
+        let missing_member = missing_root.join("nested/child.jsonl");
+        std::fs::write(&missing_member, nested_jsonl).unwrap();
+        let (missing_plan, missing_binding) = make_bound(b"missing-child-session-id");
+        let mut missing_listing =
+            match scan_observation_directory_membership_for_test(missing_binding, None).unwrap() {
+                ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                other => panic!("expected a missing-child listing, got {other:?}"),
+            };
+        let Some(ScopedObservationDirectoryMemberRead::Stable(missing_content)) =
+            missing_listing.read_next_member().unwrap()
+        else {
+            panic!("expected one stable child before deletion")
+        };
+        let missing_input = missing_content.bootstrap_for_test().unwrap();
+        std::fs::remove_file(&missing_member).unwrap();
+        let missing_lifecycle = missing_listing
+            .observe_bootstrapped_member(missing_input, &origin)
+            .unwrap();
+        assert_eq!(
+            missing_lifecycle.absence_for_test(),
+            Some((1, CoverageAbsenceKind::Absent))
+        );
+        let missing_rendered = format!("{missing_lifecycle:?}");
+        for private in ["missing-child-session-id", "child.jsonl", "nested-child"] {
+            assert!(!missing_rendered.contains(private));
+        }
+        let missing_observation =
+            ScopedRelationMembershipObservation::from_directory_listing(missing_listing).unwrap();
+        let mut missing_admission = admission_lane_for_objects(2);
+        missing_admission
+            .record_relation_membership(
+                8,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                missing_observation,
+            )
+            .unwrap();
+        let missing_receipt = missing_admission
+            .admit_directory_member(8, ScopedAppendDeliveryPhase::Bootstrap, missing_lifecycle)
+            .unwrap();
+        assert_eq!(missing_receipt.data_events, 0);
+        assert!(missing_admission.pop_next().is_none());
+        assert!(missing_plan.report().verify_digest());
+
+        let oversized_root = approved_root
+            .root
+            .join("sessions/oversized-child-session-id/children");
+        std::fs::create_dir_all(&oversized_root).unwrap();
+        std::fs::write(oversized_root.join("large.jsonl"), vec![b'x'; 1_025]).unwrap();
+        let (oversized_plan, oversized_binding) = make_bound(b"oversized-child-session-id");
+        let mut oversized_listing = match scan_observation_directory_membership_for_test(
+            oversized_binding,
+            None,
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+            other => panic!("expected an oversized listing, got {other:?}"),
+        };
+        let Some(ScopedObservationDirectoryMemberRead::Oversized {
+            binding: oversized_member,
+        }) = oversized_listing.read_next_member().unwrap()
+        else {
+            panic!("expected one oversized selected child")
+        };
+        let oversized_lifecycle = oversized_member.oversized_lifecycle();
+        assert!(matches!(
+            oversized_lifecycle,
+            ScopedObservationDirectoryMemberLifecycle::Oversized { .. }
+        ));
+        let oversized_rendered = format!("{oversized_lifecycle:?}");
+        for private in ["oversized-child-session-id", "large.jsonl"] {
+            assert!(!oversized_rendered.contains(private));
+        }
+        let oversized_observation =
+            ScopedRelationMembershipObservation::from_directory_listing(oversized_listing).unwrap();
+        let mut oversized_admission = admission_lane_for_objects(2);
+        oversized_admission
+            .record_relation_membership(
+                9,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                oversized_observation,
+            )
+            .unwrap();
+        let oversized_failure = oversized_admission
+            .admit_directory_member(9, ScopedAppendDeliveryPhase::Bootstrap, oversized_lifecycle)
+            .unwrap_err();
+        assert_eq!(
+            oversized_failure.error,
+            ScopedAdmissionError::InvalidCoverage
+        );
+        assert!(oversized_admission.pop_next().is_none());
+        let mut projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            })
+            .unwrap();
+        assert!(oversized_admission
+            .project_next(&mut projection)
+            .unwrap()
+            .is_none());
+        assert!(oversized_plan.report().verify_digest());
+
+        let host_error = match ScopedObservationAccessHost::authorize(
+            &registry,
+            scoped_access_request(approved_root.root.clone()),
+        ) {
+            Ok(_) => panic!("an uncomposed dynamic relation must still fail attachment"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            host_error,
+            ScopedObservationAccessError::InvalidGrant(ref message)
+                if message == "the authorized scope program contains an uncomposed observation relation"
+        ));
     }
 
     #[test]
