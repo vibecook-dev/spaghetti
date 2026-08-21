@@ -2488,6 +2488,25 @@ still unbound. No attachment invokes a source driver, no native source is
 opened, no child access token or watcher is minted, and `9f9749b` remains
 closed.
 
+Commit `71c3f1e` adds the next authorization boundary behind that closed guard.
+Only an `AuthorizedScopeAccessPlan` selected from typed scoped-support
+authorization can mint a non-serializable observation-source reservation for
+`ChildDirectoryByNativeId`, `SiblingObject`, or
+`ReferencedObjectFromField`. The reservation retains the exact
+declaration-owned stream, pattern, optional relative selector, access-root
+label, confined rendered locator, opaque object token, and support-release,
+source-declaration, and scope-program digests. Stream and digest coordinates
+cannot be supplied by the caller; the confined locator and token are derived
+once from the exact validated identity values in the bounded request. Unknown
+and unsupported relations fail through one path-free error before touching the
+access ledger, malformed identity locator material fails before a reservation
+can escape, and Debug withholds identity, locator, and stream values. The
+existing host test still proves that the same fully bound child relation is
+rejected before attachment. This is only a pre-I/O common seam: it neither
+joins the relative locator to a host root nor calls a driver, admits a
+discovered child, installs a watcher, changes Candidate support, or relaxes
+`9f9749b`.
+
 ### D3. Identity, control, and resync
 
 Implement:
