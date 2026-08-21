@@ -2687,6 +2687,28 @@ discovered-child source identity, publishes no live transition, installs no
 watcher, and does not relax the dynamic-relation promotion guard or Candidate
 status.
 
+Commit `39cf02e` gives each completed selected read its exact topology-neutral
+source coordinate without opening a decoder. The member identity binds the
+same adapter, canonical source instance, declaration-owned stream ID, full
+access-root-relative binary object key, and framing version used by durable
+`FactSemanticContext`; it also retains the originating attachment, relation,
+opaque child token, listing generation/revision, and entry generation/revision
+behind a path-free Debug contract. Membership finalization re-derives every
+source from that semantic context, requires one unique exact source per
+completed selected child, and destroys the native root/read authority before
+returning the set. The drained admission lane reserves both the membership
+source and every selected child against its coverage-object ceiling, stopping
+before retaining the first excess source. It rejects one child reserved by two
+relations and a refreshed set that omits an already-known child, preserving the
+ordered-retraction requirement for the future live owner. The existing append
+admission path explicitly rejects these reserved document identities: a
+matching declaration-owned child driver/decoder and lifecycle state must land
+before any child can enter projection. Tests bind nested and root children to
+the durable source keys and exact entry revisions, freeze path-free identity
+Debug, and prove exact-set capacity, cross-relation exclusion, and omission
+failure. No member decode, object state, live transition, watcher, public API,
+promotion-guard relaxation, or Candidate status change is included.
+
 ### D3. Identity, control, and resync
 
 Implement:
