@@ -24,19 +24,19 @@
     },
     "source_declaration": {
       "path": "agent-support/claude-code/candidate-2026-08-15/source-declarations.json",
-      "sha256": "sha256:78a79df03f1a71fe6bb8e7b21d62719eaaff30b45e6fda7818096a73b3609496"
+      "sha256": "sha256:937b081363e511ad240b471b28aa8541aa2f023f86dbd52ba7ae0ac487158994"
     },
     "scope_program": {
       "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",
-      "sha256": "sha256:b7b6d84f08dc13fd1b13821473630d88a4609a9b7903cd449398f6ebeb81aaa1"
+      "sha256": "sha256:589a8bf80c4a538bdf7e54e366b4b537ea2ca1a1f968385415057643cad6e36d"
     },
     "evidence": {
       "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json",
-      "sha256": "sha256:3dc4b9aaf323c0f642279fd28b59f25c998b529c935095759b74fe0177424c42"
+      "sha256": "sha256:7db8bec3b76898442d306c7d6f68034c554d543473800df143f8ddc3e4ad8c14"
     },
     "conformance": {
       "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json",
-      "sha256": "sha256:2f59c7d191cce7073be178e9478d212c93dac43e45fe2b9ee0da8287ee6b35ab"
+      "sha256": "sha256:f1e3518bdd65d631000451979a6f624fc5b67f82f5ed36954bae581a9ab9db55"
     }
   },
   "versions": {
@@ -78,7 +78,7 @@
       "capability_id": "root-descendant-observation",
       "topology": "scoped",
       "level": "unsupported",
-      "notes": "ScopeProgram is incomplete and common observer delivery is pending."
+      "notes": "Concrete dynamic and related-object relations are bound to existing scoped streams and selectors, but ScopeProgram is incomplete and common observer delivery and access telemetry are pending."
     },
     {
       "capability_id": "interaction-lifecycle",
@@ -187,11 +187,11 @@
   },
   "known_limitations": [
     "Candidate entries never confer runtime support.",
-    "Catalog readiness, interaction, and scoped observation contracts are not implemented.",
+    "Catalog readiness and interaction contracts are not implemented; scoped observation execution is not implemented.",
     "The native distributable/version remains unpinned; synthetic fixture versions are not a pin.",
     "The task-artifact locator remains conceptual and cannot be executed.",
     "RFC 012D relation coverage is incomplete while the task-artifact locator is conceptual and observer execution is absent.",
-    "Declared RFC 012D relations are not wired to the common scoped observer or access telemetry.",
+    "Digest-bound RFC 012D stream and selector coordinates are not wired to the common scoped observer or access telemetry.",
     "No RFC 012A performance/benchmark report is retained; the declared-bounds worksheet is not that contract.",
     "Source-instance move/clone and identity reuse behavior lack adversarial conformance.",
     "Active-session nameSince remains opaque native metadata and cannot drive common ordering, activity, or lifecycle semantics.",

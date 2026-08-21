@@ -26,7 +26,7 @@
       "stream_id": "subagent-transcripts",
       "family_id": "subagent-transcript",
       "root_id": "projects",
-      "relative_patterns": ["*/*/subagents/**/agent-*.jsonl"],
+      "relative_patterns": ["*/*/subagents/**/agent-*.jsonl", "*/*/subagents/workflows/*/**/agent-*.jsonl"],
       "primitive": "AppendDelimited",
       "topologies": ["durable", "scoped"],
       "implementation_state": "existing",

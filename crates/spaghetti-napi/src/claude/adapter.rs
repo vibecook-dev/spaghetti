@@ -154,8 +154,8 @@ impl ClaudeCodeAdapter {
                         env!("CARGO_PKG_VERSION"),
                         22,
                         "sha256:1d8b81547812a87b71e983fede40ac7cb130bbbe7252017fd3bd4a95b9bc98fa",
-                        "sha256:78a79df03f1a71fe6bb8e7b21d62719eaaff30b45e6fda7818096a73b3609496",
-                        "sha256:b7b6d84f08dc13fd1b13821473630d88a4609a9b7903cd449398f6ebeb81aaa1",
+                        "sha256:937b081363e511ad240b471b28aa8541aa2f023f86dbd52ba7ae0ac487158994",
+                        "sha256:589a8bf80c4a538bdf7e54e366b4b537ea2ca1a1f968385415057643cad6e36d",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -279,7 +279,10 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 driver: DriverSpec::AppendDelimited(AppendDelimitedConfig::json_lines()),
                 selector: ObjectSelector {
                     root_name: "projects".to_string(),
-                    include: vec!["*/*/subagents/**/agent-*.jsonl".to_string()],
+                    include: vec![
+                        "*/*/subagents/**/agent-*.jsonl".to_string(),
+                        "*/*/subagents/workflows/*/**/agent-*.jsonl".to_string(),
+                    ],
                     exclude: Vec::new(),
                 },
                 decoder: DecoderId::new(SUBAGENT_DECODER)?,
@@ -5714,71 +5717,65 @@ mod tests {
             locator: &'static str,
             identity_inputs: &'static [&'static str],
             stream_id: &'static str,
-            stream_root: &'static str,
-            include: &'static [&'static str],
-            decoder: &'static str,
+            source_pattern: &'static str,
+            relative_selector: Option<&'static str>,
         }
 
         const BINDINGS: &[Binding] = &[
             Binding {
                 relation_id: "descendant-transcripts",
                 access_root: "projects",
-                locator: "{project}/{session}/subagents",
+                locator: "{project-key}/{native-session-id}/subagents",
                 identity_inputs: &["project-key", "native-session-id"],
                 stream_id: SUBAGENT_STREAM,
-                stream_root: "projects",
-                include: &["*/*/subagents/**/agent-*.jsonl"],
-                decoder: SUBAGENT_DECODER,
+                source_pattern: "*/*/subagents/**/agent-*.jsonl",
+                relative_selector: Some("**/agent-*.jsonl"),
             },
             Binding {
                 relation_id: "descendant-metadata",
                 access_root: "projects",
-                locator: "{actor-transcript}.meta.json",
+                locator: "{actor-transcript-object}.meta.json",
                 identity_inputs: &["actor-transcript-object"],
                 stream_id: SUBAGENT_META_STREAM,
-                stream_root: "projects",
-                include: &["*/*/subagents/**/agent-*.meta.json"],
-                decoder: SUBAGENT_META_DECODER,
+                source_pattern: "*/*/subagents/**/agent-*.meta.json",
+                relative_selector: None,
             },
             Binding {
                 relation_id: "workflow-child-transcripts",
                 access_root: "projects",
-                locator: "{project}/{session}/subagents/workflows/{observed-workflow-id}",
+                locator:
+                    "{project-key}/{native-session-id}/subagents/workflows/{observed-workflow-id}",
                 identity_inputs: &["project-key", "native-session-id", "observed-workflow-id"],
                 stream_id: SUBAGENT_STREAM,
-                stream_root: "projects",
-                include: &["*/*/subagents/**/agent-*.jsonl"],
-                decoder: SUBAGENT_DECODER,
+                source_pattern: "*/*/subagents/workflows/*/**/agent-*.jsonl",
+                relative_selector: Some("**/agent-*.jsonl"),
             },
             Binding {
                 relation_id: "team-config-from-evidence",
                 access_root: "teams",
-                locator: "{team}/config.json",
+                locator: "{observed-team-name}/config.json",
                 identity_inputs: &["observed-team-name"],
                 stream_id: TEAM_CONFIG_STREAM,
-                stream_root: "teams",
-                include: &["*/config.json"],
-                decoder: TEAM_CONFIG_DECODER,
+                source_pattern: "*/config.json",
+                relative_selector: None,
             },
             Binding {
                 relation_id: "team-inbox-from-evidence",
                 access_root: "teams",
-                locator: "{team}/inboxes/{recipient}.json",
+                locator: "{observed-team-name}/inboxes/{observed-recipient}.json",
                 identity_inputs: &["observed-team-name", "observed-recipient"],
                 stream_id: TEAM_INBOX_STREAM,
-                stream_root: "teams",
-                include: &["*/inboxes/*.json"],
-                decoder: TEAM_INBOX_DECODER,
+                source_pattern: "*/inboxes/*.json",
+                relative_selector: None,
             },
             Binding {
                 relation_id: "active-session-from-process-evidence",
                 access_root: "sessions",
-                locator: "{pid}.json",
+                locator: "{observed-pid}.json",
                 identity_inputs: &["observed-pid", "native-session-id"],
                 stream_id: ACTIVE_SESSION_STREAM,
-                stream_root: "sessions",
-                include: &["*.json"],
-                decoder: ACTIVE_SESSION_DECODER,
+                source_pattern: "*.json",
+                relative_selector: None,
             },
             Binding {
                 relation_id: "todo-snapshot-from-evidence",
@@ -5786,9 +5783,8 @@ mod tests {
                 locator: "todos/{native-session-id}-agent-{native-actor-id}.json",
                 identity_inputs: &["native-session-id", "native-actor-id"],
                 stream_id: TODO_STREAM,
-                stream_root: "home",
-                include: &["todos/*-agent-*.json"],
-                decoder: TODO_DECODER,
+                source_pattern: "todos/*-agent-*.json",
+                relative_selector: None,
             },
             Binding {
                 relation_id: "plan-document-from-evidence",
@@ -5796,9 +5792,8 @@ mod tests {
                 locator: "plans/{plan-slug}.md",
                 identity_inputs: &["plan-slug"],
                 stream_id: PLAN_STREAM,
-                stream_root: "home",
-                include: &["plans/*.md"],
-                decoder: PLAN_DECODER,
+                source_pattern: "plans/*.md",
+                relative_selector: None,
             },
             Binding {
                 relation_id: "task-item-from-evidence",
@@ -5806,30 +5801,26 @@ mod tests {
                 locator: "tasks/{collection}/{task-id}.json",
                 identity_inputs: &["collection", "task-id"],
                 stream_id: TASK_ITEM_STREAM,
-                stream_root: "home",
-                include: &["tasks/*/*.json"],
-                decoder: TASK_ITEM_DECODER,
+                source_pattern: "tasks/*/*.json",
+                relative_selector: None,
             },
             Binding {
                 relation_id: "workflow-records",
                 access_root: "projects",
-                locator: "{project}/{session}/workflows",
+                locator: "{project-key}/{native-session-id}/workflows",
                 identity_inputs: &["project-key", "native-session-id", "observed-workflow-id"],
                 stream_id: WORKFLOW_RUN_STREAM,
-                stream_root: "projects",
-                include: &["*/*/workflows/wf_*.json"],
-                decoder: WORKFLOW_RUN_DECODER,
+                source_pattern: "*/*/workflows/wf_*.json",
+                relative_selector: Some("wf_*.json"),
             },
             Binding {
                 relation_id: "workflow-journals",
                 access_root: "projects",
-                locator:
-                    "{project}/{session}/subagents/workflows/{observed-workflow-id}/journal.jsonl",
+                locator: "{project-key}/{native-session-id}/subagents/workflows/{observed-workflow-id}/journal.jsonl",
                 identity_inputs: &["project-key", "native-session-id", "observed-workflow-id"],
                 stream_id: WORKFLOW_JOURNAL_STREAM,
-                stream_root: "projects",
-                include: &["*/*/subagents/workflows/*/journal.jsonl"],
-                decoder: WORKFLOW_JOURNAL_DECODER,
+                source_pattern: "*/*/subagents/workflows/*/journal.jsonl",
+                relative_selector: None,
             },
         ];
 
@@ -5846,7 +5837,7 @@ mod tests {
                 .iter()
                 .filter(|relation| {
                     relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
-                        && relation.locator == "{project}/{session}/subagents"
+                        && relation.locator == "{project-key}/{native-session-id}/subagents"
                 })
                 .count(),
             1
@@ -5857,7 +5848,16 @@ mod tests {
             .find(|relation| relation.relation_id == "task-artifacts-from-evidence")
             .unwrap();
         assert!(task_artifact.source_binding.is_none());
+        assert!(task_artifact.observation_binding.is_none());
         assert!(validate_evidence_locator_template(task_artifact).is_err());
+        assert_eq!(
+            program
+                .relations
+                .iter()
+                .filter(|relation| relation.observation_binding.is_some())
+                .count(),
+            BINDINGS.len()
+        );
 
         let source_declaration: Value = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -5894,29 +5894,42 @@ mod tests {
             assert_eq!(relation.access_root, binding.access_root);
             assert_eq!(relation.locator, binding.locator);
             assert_eq!(relation.identity_inputs, binding.identity_inputs);
+            let observation = relation.observation_binding.as_ref().unwrap();
+            assert_eq!(observation.stream_id, binding.stream_id);
+            assert_eq!(observation.source_pattern, binding.source_pattern);
+            assert_eq!(
+                observation.relative_selector.as_deref(),
+                binding.relative_selector
+            );
             let declared = source_declaration["streams"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|stream| stream["stream_id"] == binding.stream_id)
+                .find(|stream| stream["stream_id"] == observation.stream_id)
                 .unwrap();
-            assert_eq!(declared["root_id"], binding.stream_root);
-            assert_eq!(
-                declared["relative_patterns"],
-                serde_json::json!(binding.include)
-            );
-            assert_eq!(declared["decoder_id"], binding.decoder);
+            assert_eq!(declared["root_id"].as_str().unwrap(), relation.access_root);
+            assert!(declared["relative_patterns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pattern| pattern.as_str() == Some(observation.source_pattern.as_str())));
             assert_eq!(
                 declared["topologies"],
                 serde_json::json!(["durable", "scoped"])
             );
+            assert_eq!(declared["implementation_state"], "existing");
             let runtime = streams
                 .iter()
-                .find(|stream| stream.id.as_str() == binding.stream_id)
+                .find(|stream| stream.id.as_str() == observation.stream_id)
                 .unwrap();
-            assert_eq!(runtime.selector.root_name, binding.stream_root);
-            assert_eq!(runtime.selector.include, binding.include);
-            assert_eq!(runtime.decoder.as_str(), binding.decoder);
+            let declared_patterns: Vec<String> =
+                serde_json::from_value(declared["relative_patterns"].clone()).unwrap();
+            assert_eq!(runtime.selector.root_name, relation.access_root);
+            assert_eq!(runtime.selector.include, declared_patterns);
+            assert_eq!(
+                runtime.decoder.as_str(),
+                declared["decoder_id"].as_str().unwrap()
+            );
         }
 
         let descendant = format!("project/{SESSION}/subagents/agent-worker.jsonl");
