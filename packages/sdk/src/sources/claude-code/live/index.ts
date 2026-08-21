@@ -49,3 +49,10 @@ export { createScopeAttacher, topicToScopes, type ScopeAttacher, type WatchScope
 export { createSettingsHandler, type SettingsHandler } from './settings-handler.js';
 export { watchSessionTranscript } from './session-tail.js';
 export type { SessionTranscriptTail, SessionTranscriptEvent, WatchSessionTranscriptOptions } from './session-tail.js';
+export { watchSessionObservationShadow, isSessionObservationShadowTail } from './session-observation-shadow.js';
+export type {
+  WatchSessionObservationShadowOptions,
+  SessionObservationShadow,
+  SessionObservationShadowTail,
+  ScopedUsageShadowRecord,
+} from './session-observation-shadow.js';
