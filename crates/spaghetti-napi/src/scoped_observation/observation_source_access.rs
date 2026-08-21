@@ -1,9 +1,9 @@
 //! Attachment-owned binding for authorized dynamic observation sources.
 //!
-//! This module still performs no native I/O. It joins the declaration/runtime
-//! stream proof to the exact source-instance root already approved by the
-//! scoped attachment, while retaining the access reservation and borrowing the
-//! pass that owns it.
+//! This module owns attachment-bound confined directory listing and member
+//! reads. It joins declaration/runtime stream proof to the exact source
+//! instance approved by the scoped attachment and prepares nonconstructible
+//! decoder inputs without granting adapters any additional source access.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -12,10 +12,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::adapter::{
-    AdapterId, AgentAdapter, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
-    FactSemanticContext, ScopeRelationPrimitive, SourceInstance, SourceInstanceKey,
-    SourceObjectDescriptor, StreamSpec,
+    AdapterId, AdapterObjectContext, AgentAdapter, CanonicalSourceInstanceKey, CoverageObjectKey,
+    CoverageStreamKey, DriverSpec, FactSemanticContext, ScopeRelationPrimitive, SourceInstance,
+    SourceInstanceKey, SourceObjectDescriptor, StreamSpec,
 };
+use crate::decode_runtime::bootstrap_object_without_source_access;
 use crate::source::{
     confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,
     AccessBudgetError, AccessObjectToken, AccessOperation, AccessOutcome,
@@ -28,8 +29,8 @@ use crate::source::{
 };
 
 use super::{
-    ScopedAccessRootGrant, ScopedObservationAccessPass, ScopedObservationAttachmentAuthority,
-    ScopedSourceObjectIdentity,
+    ScopedAccessRootGrant, ScopedDecodeFailureClass, ScopedObservationAccessPass,
+    ScopedObservationAttachmentAuthority, ScopedSourceObjectIdentity,
 };
 
 const MEMBERSHIP_STREAM_DOMAIN: &[u8] = b"spaghetti/rfc012d/scope-relation-membership-stream/v1\0";
@@ -343,6 +344,21 @@ pub(crate) struct ScopedObservationDirectoryMemberContent {
     bytes: Vec<u8>,
 }
 
+/// One successfully bootstrapped whole-document member. Callers cannot supply
+/// or replace its adapter object context, stream, source instance, descriptor,
+/// semantic context, revision, or payload.
+pub(crate) struct ScopedObservationDirectoryMemberDecodeInput {
+    binding: ScopedObservationDirectoryMemberBinding,
+    object_context: AdapterObjectContext,
+    content_revision: Revision,
+    bytes: Vec<u8>,
+}
+
+pub(crate) struct ScopedObservationDirectoryMemberBootstrapFailure {
+    class: ScopedDecodeFailureClass,
+    content: Box<ScopedObservationDirectoryMemberContent>,
+}
+
 /// Completed, path-free evidence that one exact native directory entry was
 /// accounted beneath the listing root before it can enter membership.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -454,6 +470,29 @@ impl fmt::Debug for ScopedObservationDirectoryMemberContent {
             .field("has_listing_revision", &true)
             .field("has_content_revision", &true)
             .field("byte_count", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberDecodeInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberDecodeInput")
+            .field("binding", &self.binding)
+            .field("object_context_version", &self.object_context.version())
+            .field("object_context_bytes", &self.object_context.payload().len())
+            .field("has_content_revision", &true)
+            .field("byte_count", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberBootstrapFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberBootstrapFailure")
+            .field("class", &self.class)
+            .field("content", &self.content)
             .finish_non_exhaustive()
     }
 }
@@ -1018,6 +1057,39 @@ impl ScopedObservationDirectoryMemberContent {
         self.binding.descriptor()
     }
 
+    pub(super) fn bootstrap(
+        self,
+    ) -> Result<
+        ScopedObservationDirectoryMemberDecodeInput,
+        ScopedObservationDirectoryMemberBootstrapFailure,
+    > {
+        if !self.binding.valid_for_dependency_free_bootstrap() {
+            return Err(ScopedObservationDirectoryMemberBootstrapFailure {
+                class: ScopedDecodeFailureClass::InvalidContract,
+                content: Box::new(self),
+            });
+        }
+        let object_context = match bootstrap_object_without_source_access(
+            self.binding.adapter().as_ref(),
+            self.binding.source_instance().as_ref(),
+            self.binding.descriptor(),
+        ) {
+            Ok(context) => context,
+            Err(error) => {
+                return Err(ScopedObservationDirectoryMemberBootstrapFailure {
+                    class: super::decode_failure_class(&error),
+                    content: Box::new(self),
+                });
+            }
+        };
+        Ok(ScopedObservationDirectoryMemberDecodeInput {
+            binding: self.binding,
+            object_context,
+            content_revision: self.content_revision,
+            bytes: self.bytes,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
         self.runtime_stream()
@@ -1036,6 +1108,16 @@ impl ScopedObservationDirectoryMemberContent {
     #[cfg(test)]
     pub(crate) fn source_instance_for_test(&self) -> &Arc<SourceInstance> {
         self.source_instance()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bootstrap_for_test(
+        self,
+    ) -> Result<
+        ScopedObservationDirectoryMemberDecodeInput,
+        ScopedObservationDirectoryMemberBootstrapFailure,
+    > {
+        self.bootstrap()
     }
 }
 
@@ -1060,6 +1142,44 @@ impl ScopedObservationDirectoryMemberBinding {
         &self.descriptor
     }
 
+    fn valid_for_dependency_free_bootstrap(&self) -> bool {
+        let identity = self.identity();
+        let stream = self.runtime_stream();
+        let instance = self.source_instance();
+        let descriptor = self.descriptor();
+        let canonical_source_instance = CanonicalSourceInstanceKey::derive(
+            instance.spec.identity_contract_version,
+            instance.spec.stable_key.as_bytes(),
+        );
+        let include_matches = stream.selector.include.iter().any(|pattern| {
+            GlobPattern::new(pattern)
+                .ok()
+                .is_some_and(|pattern| pattern.matches_path(&descriptor.relative_path))
+        });
+        let excluded = stream.selector.exclude.iter().any(|pattern| {
+            GlobPattern::new(pattern)
+                .ok()
+                .is_some_and(|pattern| pattern.matches_path(&descriptor.relative_path))
+        });
+        // Binding creation already checked the exact retained adapter manifest.
+        // Keep every later adapter invocation inside the common panic boundary.
+        instance.id != 0
+            && stream.validate(instance).is_ok()
+            && canonical_source_instance.as_ref().ok() == Some(&identity.source.source_instance_key)
+            && matches!(stream.driver, DriverSpec::ReplaceDocument(_))
+            && stream.id == descriptor.stream_id
+            && stream.id.as_str().as_bytes() == identity.semantic_context.stream_key()
+            && stream.driver.framing_contract_version()
+                == identity.semantic_context.framing_contract_version()
+            && descriptor.object_key == identity.semantic_context.object_key()
+            && confined_relative_path_key(&descriptor.relative_path)
+                .is_ok_and(|key| key == descriptor.object_key)
+            && ScopedSourceObjectIdentity::from_semantic_context(&identity.semantic_context)
+                .is_ok_and(|source| source == identity.source)
+            && include_matches
+            && !excluded
+    }
+
     #[cfg(test)]
     pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
         self.runtime_stream()
@@ -1078,6 +1198,50 @@ impl ScopedObservationDirectoryMemberBinding {
     #[cfg(test)]
     pub(crate) fn source_instance_for_test(&self) -> &Arc<SourceInstance> {
         self.source_instance()
+    }
+}
+
+impl ScopedObservationDirectoryMemberDecodeInput {
+    #[cfg(test)]
+    pub(crate) fn identity_for_test(&self) -> &ScopedObservationDirectoryMemberIdentity {
+        self.binding.identity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
+        self.binding.runtime_stream()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn descriptor_for_test(&self) -> &SourceObjectDescriptor {
+        self.binding.descriptor()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn object_context_for_test(&self) -> &AdapterObjectContext {
+        &self.object_context
+    }
+
+    #[cfg(test)]
+    pub(crate) fn content_revision_for_test(&self) -> Revision {
+        self.content_revision
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bytes_for_test(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl ScopedObservationDirectoryMemberBootstrapFailure {
+    #[cfg(test)]
+    pub(crate) fn class_for_test(&self) -> ScopedDecodeFailureClass {
+        self.class
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_content_for_test(self) -> ScopedObservationDirectoryMemberContent {
+        *self.content
     }
 }
 

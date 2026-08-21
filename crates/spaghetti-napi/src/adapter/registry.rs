@@ -329,6 +329,7 @@ pub(crate) mod tests {
         decode_statefully: bool,
         request_dependency_access: bool,
         dependency_mutation: Option<(PathBuf, Vec<u8>)>,
+        dependency_free_bootstrap_failure_suffix: Option<PathBuf>,
     }
 
     impl EmptyAdapter {
@@ -348,6 +349,7 @@ pub(crate) mod tests {
                 decode_statefully: false,
                 request_dependency_access: false,
                 dependency_mutation: None,
+                dependency_free_bootstrap_failure_suffix: None,
             }
         }
 
@@ -368,6 +370,11 @@ pub(crate) mod tests {
 
         fn with_dependency_mutation(mut self, path: PathBuf, payload: Vec<u8>) -> Self {
             self.dependency_mutation = Some((path, payload));
+            self
+        }
+
+        fn with_dependency_free_bootstrap_failure(mut self, suffix: PathBuf) -> Self {
+            self.dependency_free_bootstrap_failure_suffix = Some(suffix);
             self
         }
 
@@ -1342,6 +1349,25 @@ pub(crate) mod tests {
             _object: &SourceObjectDescriptor,
         ) -> Result<AdapterObjectContext, AdapterError> {
             Ok(AdapterObjectContext::empty())
+        }
+
+        fn bootstrap_object_without_source_access(
+            &self,
+            instance: &SourceInstance,
+            object: &SourceObjectDescriptor,
+        ) -> Result<AdapterObjectContext, AdapterError> {
+            if self
+                .dependency_free_bootstrap_failure_suffix
+                .as_deref()
+                .is_some_and(|suffix| object.relative_path.ends_with(suffix))
+            {
+                return Err(AdapterError::new(
+                    AdapterErrorClass::StreamFatal,
+                    "fixture_bootstrap_failed",
+                    "private fixture failure /Users/alice/private/session.jsonl",
+                ));
+            }
+            self.bootstrap_object(instance, object)
         }
 
         fn decode(
@@ -2691,7 +2717,8 @@ pub(crate) mod tests {
             .register(
                 EmptyAdapter::new("fixture")
                     .with_support(binding, scope_programs)
-                    .with_streams(vec![fixture_descendant_runtime_stream()]),
+                    .with_streams(vec![fixture_descendant_runtime_stream()])
+                    .with_dependency_free_bootstrap_failure(PathBuf::from("nested/child.jsonl")),
             )
             .build_supported(catalog)
             .unwrap();
@@ -2910,7 +2937,59 @@ pub(crate) mod tests {
                         content.descriptor_for_test().relative_path,
                         expected_relative
                     );
-                    member_bytes.push(content.bytes().to_vec());
+                    let expected_member_source = identity.source().clone();
+                    let content_revision = content.content_revision();
+                    if content.bytes() == b"child" {
+                        let failure = content.bootstrap_for_test().unwrap_err();
+                        assert_eq!(
+                            failure.class_for_test(),
+                            ScopedDecodeFailureClass::StreamFatal
+                        );
+                        let failure_rendered = format!("{failure:?}");
+                        for private in [
+                            "/Users/",
+                            "alice",
+                            "secret-session-id",
+                            "child.jsonl",
+                            "nested",
+                            "descendant-stream",
+                        ] {
+                            assert!(!failure_rendered.contains(private));
+                        }
+                        let retained = failure.into_content_for_test();
+                        assert_eq!(retained.content_revision(), content_revision);
+                        assert_eq!(retained.identity().source(), &expected_member_source);
+                        assert_eq!(retained.bytes(), b"child");
+                        member_bytes.push(retained.bytes().to_vec());
+                        continue;
+                    }
+                    let decoded_input = content.bootstrap_for_test().unwrap();
+                    assert_eq!(
+                        decoded_input.identity_for_test().source(),
+                        &expected_member_source
+                    );
+                    assert_eq!(
+                        decoded_input.runtime_stream_for_test(),
+                        &fixture_descendant_runtime_stream()
+                    );
+                    assert_eq!(
+                        decoded_input.descriptor_for_test().relative_path,
+                        expected_relative
+                    );
+                    assert_eq!(decoded_input.object_context_for_test().version(), 1);
+                    assert!(decoded_input.object_context_for_test().payload().is_empty());
+                    assert_eq!(decoded_input.content_revision_for_test(), content_revision);
+                    let decoded_rendered = format!("{decoded_input:?}");
+                    for private in [
+                        "secret-session-id",
+                        "root.jsonl",
+                        "child.jsonl",
+                        "nested",
+                        "descendant-stream",
+                    ] {
+                        assert!(!decoded_rendered.contains(private));
+                    }
+                    member_bytes.push(decoded_input.bytes_for_test().to_vec());
                 }
                 other => panic!("expected a stable selected member, got {other:?}"),
             }

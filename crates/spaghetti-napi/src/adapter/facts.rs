@@ -184,6 +184,10 @@ impl FactSemanticContext {
         self.object_key.as_ref()
     }
 
+    pub(crate) fn framing_contract_version(&self) -> u32 {
+        self.framing_contract_version
+    }
+
     pub fn source_record_id(&self, record: &SourceRecord) -> Result<SourceRecordId, AdapterError> {
         let logical_position = logical_record_position(record);
         SourceRecordId::derive(

@@ -571,6 +571,10 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "source_instance: Arc<SourceInstance>",
         "runtime_stream: Arc<StreamSpec>",
         "descriptor: SourceObjectDescriptor",
+        "pub(crate) struct ScopedObservationDirectoryMemberDecodeInput",
+        "pub(crate) struct ScopedObservationDirectoryMemberBootstrapFailure",
+        "valid_for_dependency_free_bootstrap(",
+        "bootstrap_object_without_source_access(",
         "confined_relative_path_key(&relative_path)",
         "ScopedSourceObjectIdentity::from_semantic_context",
         "completed_members",
@@ -953,8 +957,16 @@ def discover_rfc012_decode_runtime_boundary_violations() -> set[str]:
     """The shared decoder boundary cannot depend on a sink or concrete adapter."""
     relative = "crates/spaghetti-napi/src/decode_runtime.rs"
     path = REPO_ROOT / relative
-    if not path.exists() or RFC012_DECODE_RUNTIME_FORBIDDEN_RE.search(
-        production_rust_text(path)
+    text = production_rust_text(path) if path.exists() else ""
+    required_bindings = (
+        "pub(crate) fn bootstrap_object_without_source_access",
+        "adapter.bootstrap_object_without_source_access(instance, object)",
+        "catch_unwind(AssertUnwindSafe",
+    )
+    if (
+        not path.exists()
+        or RFC012_DECODE_RUNTIME_FORBIDDEN_RE.search(text)
+        or any(binding not in text for binding in required_bindings)
     ):
         return {relative}
     return set()

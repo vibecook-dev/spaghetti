@@ -624,6 +624,20 @@ pub trait AgentAdapter: Send + Sync + 'static {
         self.bootstrap_object(instance, object)
     }
 
+    /// Explicit opt-in for a pure object-context bootstrap that requires no
+    /// native dependency access. Scoped observation may call only this method
+    /// until an exact dependency access plan is attached; the legacy
+    /// `bootstrap_object` method is not assumed to be I/O-free.
+    fn bootstrap_object_without_source_access(
+        &self,
+        _instance: &SourceInstance,
+        _object: &SourceObjectDescriptor,
+    ) -> Result<AdapterObjectContext, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "adapter does not declare dependency-free object bootstrap",
+        ))
+    }
+
     fn decode(
         &self,
         context: DecodeContext<'_>,
@@ -676,6 +690,14 @@ where
         source_access: &dyn SourceAccess,
     ) -> Result<AdapterObjectContext, AdapterError> {
         (**self).bootstrap_object_with_access(instance, object, source_access)
+    }
+
+    fn bootstrap_object_without_source_access(
+        &self,
+        instance: &SourceInstance,
+        object: &SourceObjectDescriptor,
+    ) -> Result<AdapterObjectContext, AdapterError> {
+        (**self).bootstrap_object_without_source_access(instance, object)
     }
 
     fn decode(

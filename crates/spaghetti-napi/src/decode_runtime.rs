@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, CapabilityId,
     DecodeContext, DecodeDisposition, DecoderId, FactBatch, FactSemanticContext,
-    RawRetentionPolicy, SourceAccess,
+    RawRetentionPolicy, SourceAccess, SourceInstance, SourceObjectDescriptor,
 };
 use crate::source::SourceRecord;
 
@@ -47,6 +47,26 @@ pub(crate) struct DecodeRuntimeAttempt {
     pub result: Result<DecodedFactBatch, AdapterError>,
     pub adapter_elapsed: Duration,
     pub fact_build_time: Duration,
+}
+
+/// Invoke only the adapter's explicit dependency-free bootstrap opt-in. Panic
+/// payloads are never surfaced because object descriptors can contain private
+/// native identity material.
+pub(crate) fn bootstrap_object_without_source_access<A: AgentAdapter + ?Sized>(
+    adapter: &A,
+    instance: &SourceInstance,
+    object: &SourceObjectDescriptor,
+) -> Result<AdapterObjectContext, AdapterError> {
+    match catch_unwind(AssertUnwindSafe(|| {
+        adapter.bootstrap_object_without_source_access(instance, object)
+    })) {
+        Ok(result) => result,
+        Err(_) => Err(AdapterError::new(
+            AdapterErrorClass::AdapterFatal,
+            "adapter_panic",
+            "adapter panicked at the controlled object-bootstrap boundary",
+        )),
+    }
 }
 
 pub(crate) fn decode_record<A: AgentAdapter + ?Sized>(
@@ -231,8 +251,8 @@ fn json_value_kind(value: &serde_json::Value) -> &'static str {
 mod tests {
     use crate::adapter::{
         AdapterDiagnostic, AdapterId, AdapterManifest, DiscoveryContext, Fact, SourceInstance,
-        SourceInstanceSpec, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
-        SourceSnapshot, StreamSpec,
+        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceObjectList,
+        SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot, StreamId, StreamSpec,
     };
     use crate::source::{RecordOrigin, SourceCursor, SourceMediaType};
 
@@ -246,9 +266,17 @@ mod tests {
         Panic,
     }
 
+    #[derive(Clone, Copy)]
+    enum FixtureBootstrapMode {
+        Unsupported,
+        Empty,
+        Panic,
+    }
+
     struct FixtureAdapter {
         manifest: AdapterManifest,
         mode: FixtureMode,
+        bootstrap_mode: FixtureBootstrapMode,
     }
 
     impl FixtureAdapter {
@@ -265,7 +293,13 @@ mod tests {
                     capabilities: Vec::new(),
                 },
                 mode,
+                bootstrap_mode: FixtureBootstrapMode::Unsupported,
             }
+        }
+
+        fn with_bootstrap_mode(mut self, bootstrap_mode: FixtureBootstrapMode) -> Self {
+            self.bootstrap_mode = bootstrap_mode;
+            self
         }
     }
 
@@ -283,6 +317,22 @@ mod tests {
 
         fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
             Ok(Vec::new())
+        }
+
+        fn bootstrap_object_without_source_access(
+            &self,
+            _instance: &SourceInstance,
+            _object: &SourceObjectDescriptor,
+        ) -> Result<AdapterObjectContext, AdapterError> {
+            match self.bootstrap_mode {
+                FixtureBootstrapMode::Unsupported => Err(AdapterError::invalid_contract(
+                    "fixture does not opt in to dependency-free bootstrap",
+                )),
+                FixtureBootstrapMode::Empty => Ok(AdapterObjectContext::empty()),
+                FixtureBootstrapMode::Panic => {
+                    panic!("private bootstrap panic /Users/alice/private/session.jsonl")
+                }
+            }
         }
 
         fn decode(
@@ -397,6 +447,61 @@ mod tests {
                 max_diagnostics: 8,
             },
         })
+    }
+
+    fn bootstrap_coordinates() -> (SourceInstance, SourceObjectDescriptor) {
+        (
+            SourceInstance {
+                id: 1,
+                spec: SourceInstanceSpec {
+                    identity_contract_version: 1,
+                    stable_key: SourceInstanceKey::new(b"private-source-instance".to_vec())
+                        .unwrap(),
+                    display_name: "private source".to_string(),
+                    roots: Vec::new(),
+                    discovery_reason: "fixture".to_string(),
+                },
+            },
+            SourceObjectDescriptor {
+                stream_id: StreamId::new("private-stream").unwrap(),
+                object_key: b"private/session.jsonl".to_vec(),
+                relative_path: std::path::PathBuf::from("private/session.jsonl"),
+            },
+        )
+    }
+
+    #[test]
+    fn dependency_free_bootstrap_requires_opt_in_and_contains_private_panics() {
+        let (instance, object) = bootstrap_coordinates();
+        let unsupported = bootstrap_object_without_source_access(
+            &FixtureAdapter::new(FixtureMode::AppliedEmpty),
+            &instance,
+            &object,
+        )
+        .unwrap_err();
+        assert_eq!(unsupported.class, AdapterErrorClass::InvalidContract);
+
+        let opted_in = bootstrap_object_without_source_access(
+            &FixtureAdapter::new(FixtureMode::AppliedEmpty)
+                .with_bootstrap_mode(FixtureBootstrapMode::Empty),
+            &instance,
+            &object,
+        )
+        .unwrap();
+        assert_eq!(opted_in, AdapterObjectContext::empty());
+
+        let panic = bootstrap_object_without_source_access(
+            &FixtureAdapter::new(FixtureMode::AppliedEmpty)
+                .with_bootstrap_mode(FixtureBootstrapMode::Panic),
+            &instance,
+            &object,
+        )
+        .unwrap_err();
+        assert_eq!(panic.class, AdapterErrorClass::AdapterFatal);
+        assert_eq!(panic.code, "adapter_panic");
+        for private in ["/Users/", "alice", "private", "session.jsonl"] {
+            assert!(!panic.message.contains(private));
+        }
     }
 
     #[test]

@@ -634,6 +634,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
         AdapterObjectContext::new(OBJECT_CONTEXT_VERSION, payload)
     }
 
+    fn bootstrap_object_without_source_access(
+        &self,
+        instance: &SourceInstance,
+        object: &SourceObjectDescriptor,
+    ) -> Result<AdapterObjectContext, AdapterError> {
+        self.bootstrap_object(instance, object)
+    }
+
     fn decode(
         &self,
         context: DecodeContext<'_>,
@@ -5954,12 +5962,17 @@ mod tests {
             (WORKFLOW_JOURNAL_STREAM, workflow_journal.as_str()),
         ];
         for (stream, relative) in passing {
-            assert!(
-                adapter
-                    .bootstrap_object(&instance(root.path()), &object(stream, relative))
-                    .is_ok(),
-                "expected {stream} {relative} to bootstrap"
-            );
+            let source_instance = instance(root.path());
+            let descriptor = object(stream, relative);
+            let ordinary = adapter
+                .bootstrap_object(&source_instance, &descriptor)
+                .unwrap_or_else(|_| panic!("expected {stream} {relative} to bootstrap"));
+            let dependency_free = adapter
+                .bootstrap_object_without_source_access(&source_instance, &descriptor)
+                .unwrap_or_else(|_| {
+                    panic!("expected {stream} {relative} dependency-free bootstrap")
+                });
+            assert_eq!(dependency_free, ordinary);
         }
         let invalid_journal = format!("project/{SESSION}/subagents/workflows/wf_/journal.jsonl");
         let invalid_run_empty = format!("project/{SESSION}/workflows/wf_.json");
@@ -5970,11 +5983,19 @@ mod tests {
             (WORKFLOW_RUN_STREAM, invalid_run_missing.as_str()),
             (WORKFLOW_JOURNAL_STREAM, invalid_journal.as_str()),
         ] {
+            let source_instance = instance(root.path());
+            let descriptor = object(stream, relative);
             assert!(
                 adapter
-                    .bootstrap_object(&instance(root.path()), &object(stream, relative))
+                    .bootstrap_object(&source_instance, &descriptor)
                     .is_err(),
                 "expected {stream} {relative} to fail"
+            );
+            assert!(
+                adapter
+                    .bootstrap_object_without_source_access(&source_instance, &descriptor)
+                    .is_err(),
+                "expected {stream} {relative} dependency-free bootstrap to fail"
             );
         }
     }
