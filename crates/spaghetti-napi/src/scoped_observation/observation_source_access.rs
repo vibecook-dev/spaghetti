@@ -25,12 +25,13 @@ use crate::source::{
     AuthorizedObservationRuntimeStreamReservation, DirectoryChange, DirectoryCheckpoint,
     DirectoryEntryAuditReservation, DirectoryEntryAuditor, DirectoryEntryKind, DirectoryEntryState,
     DirectoryScan, DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, FileStamp,
-    GlobPattern, Revision, ScopeAccessRequest, StableRead,
+    GlobPattern, RecordOrigin, ReplaceCheckpoint, ReplaceDocument, ReplaceRead, Revision,
+    ScopeAccessRequest, SourceRecord, StableRead,
 };
 
 use super::{
     ScopedAccessRootGrant, ScopedDecodeFailureClass, ScopedObservationAccessPass,
-    ScopedObservationAttachmentAuthority, ScopedSourceObjectIdentity,
+    ScopedObservationAttachmentAuthority, ScopedSourceFailureClass, ScopedSourceObjectIdentity,
 };
 
 const MEMBERSHIP_STREAM_DOMAIN: &[u8] = b"spaghetti/rfc012d/scope-relation-membership-stream/v1\0";
@@ -340,6 +341,7 @@ pub(crate) enum ScopedObservationDirectoryMemberRead {
 
 pub(crate) struct ScopedObservationDirectoryMemberContent {
     binding: ScopedObservationDirectoryMemberBinding,
+    stamp: FileStamp,
     content_revision: Revision,
     bytes: Vec<u8>,
 }
@@ -350,6 +352,7 @@ pub(crate) struct ScopedObservationDirectoryMemberContent {
 pub(crate) struct ScopedObservationDirectoryMemberDecodeInput {
     binding: ScopedObservationDirectoryMemberBinding,
     object_context: AdapterObjectContext,
+    stamp: FileStamp,
     content_revision: Revision,
     bytes: Vec<u8>,
 }
@@ -357,6 +360,21 @@ pub(crate) struct ScopedObservationDirectoryMemberDecodeInput {
 pub(crate) struct ScopedObservationDirectoryMemberBootstrapFailure {
     class: ScopedDecodeFailureClass,
     content: Box<ScopedObservationDirectoryMemberContent>,
+}
+
+/// Initial `ReplaceDocument` framing of one exact retained member. The record
+/// remains paired with the same nonconstructible decoder binding and object
+/// context; numeric origin coordinates cannot replace semantic identity.
+pub(crate) struct ScopedObservationDirectoryMemberRecordInput {
+    binding: ScopedObservationDirectoryMemberBinding,
+    object_context: AdapterObjectContext,
+    checkpoint: ReplaceCheckpoint,
+    record: SourceRecord,
+}
+
+pub(crate) struct ScopedObservationDirectoryMemberFrameFailure {
+    class: ScopedSourceFailureClass,
+    input: Box<ScopedObservationDirectoryMemberDecodeInput>,
 }
 
 /// Completed, path-free evidence that one exact native directory entry was
@@ -493,6 +511,31 @@ impl fmt::Debug for ScopedObservationDirectoryMemberBootstrapFailure {
             .debug_struct("ScopedObservationDirectoryMemberBootstrapFailure")
             .field("class", &self.class)
             .field("content", &self.content)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberRecordInput {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberRecordInput")
+            .field("binding", &self.binding)
+            .field("object_context_version", &self.object_context.version())
+            .field("object_context_bytes", &self.object_context.payload().len())
+            .field("generation", &self.checkpoint.generation)
+            .field("has_checkpoint_revision", &true)
+            .field("record_state", &self.record.state)
+            .field("record_bytes", &self.record.payload.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberFrameFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberFrameFailure")
+            .field("class", &self.class)
+            .field("input", &self.input)
             .finish_non_exhaustive()
     }
 }
@@ -1005,6 +1048,7 @@ impl ScopedObservationDirectoryListing {
                 Ok(Some(ScopedObservationDirectoryMemberRead::Stable(
                     ScopedObservationDirectoryMemberContent {
                         binding: member.binding.clone(),
+                        stamp,
                         content_revision: revision,
                         bytes,
                     },
@@ -1085,6 +1129,7 @@ impl ScopedObservationDirectoryMemberContent {
         Ok(ScopedObservationDirectoryMemberDecodeInput {
             binding: self.binding,
             object_context,
+            stamp: self.stamp,
             content_revision: self.content_revision,
             bytes: self.bytes,
         })
@@ -1202,6 +1247,76 @@ impl ScopedObservationDirectoryMemberBinding {
 }
 
 impl ScopedObservationDirectoryMemberDecodeInput {
+    pub(super) fn frame_initial_replace(
+        self,
+        origin: RecordOrigin,
+    ) -> Result<
+        ScopedObservationDirectoryMemberRecordInput,
+        ScopedObservationDirectoryMemberFrameFailure,
+    > {
+        if !self.binding.valid_for_dependency_free_bootstrap()
+            || origin.source_instance_id != self.binding.source_instance().id
+        {
+            return Err(ScopedObservationDirectoryMemberFrameFailure {
+                class: ScopedSourceFailureClass::InvalidCursor,
+                input: Box::new(self),
+            });
+        }
+        let DriverSpec::ReplaceDocument(config) = &self.binding.runtime_stream().driver else {
+            return Err(ScopedObservationDirectoryMemberFrameFailure {
+                class: ScopedSourceFailureClass::InvalidConfiguration,
+                input: Box::new(self),
+            });
+        };
+        let driver = match ReplaceDocument::new(config.clone()) {
+            Ok(driver) => driver,
+            Err(error) => {
+                return Err(ScopedObservationDirectoryMemberFrameFailure {
+                    class: super::source_failure_class(&error),
+                    input: Box::new(self),
+                });
+            }
+        };
+        let read = match driver.frame_retained_stable(
+            &self.stamp,
+            &self.bytes,
+            self.content_revision,
+            None,
+            &origin,
+            false,
+        ) {
+            Ok(read) => read,
+            Err(error) => {
+                return Err(ScopedObservationDirectoryMemberFrameFailure {
+                    class: super::source_failure_class(&error),
+                    input: Box::new(self),
+                });
+            }
+        };
+        let ReplaceRead::Record {
+            record,
+            checkpoint,
+            generation_changed: true,
+        } = read
+        else {
+            return Err(ScopedObservationDirectoryMemberFrameFailure {
+                class: ScopedSourceFailureClass::InvalidCursor,
+                input: Box::new(self),
+            });
+        };
+        let Self {
+            binding,
+            object_context,
+            ..
+        } = self;
+        Ok(ScopedObservationDirectoryMemberRecordInput {
+            binding,
+            object_context,
+            checkpoint,
+            record,
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn identity_for_test(&self) -> &ScopedObservationDirectoryMemberIdentity {
         self.binding.identity()
@@ -1231,6 +1346,17 @@ impl ScopedObservationDirectoryMemberDecodeInput {
     pub(crate) fn bytes_for_test(&self) -> &[u8] {
         &self.bytes
     }
+
+    #[cfg(test)]
+    pub(crate) fn frame_initial_replace_for_test(
+        self,
+        origin: RecordOrigin,
+    ) -> Result<
+        ScopedObservationDirectoryMemberRecordInput,
+        ScopedObservationDirectoryMemberFrameFailure,
+    > {
+        self.frame_initial_replace(origin)
+    }
 }
 
 impl ScopedObservationDirectoryMemberBootstrapFailure {
@@ -1242,6 +1368,50 @@ impl ScopedObservationDirectoryMemberBootstrapFailure {
     #[cfg(test)]
     pub(crate) fn into_content_for_test(self) -> ScopedObservationDirectoryMemberContent {
         *self.content
+    }
+}
+
+impl ScopedObservationDirectoryMemberRecordInput {
+    #[cfg(test)]
+    pub(crate) fn identity_for_test(&self) -> &ScopedObservationDirectoryMemberIdentity {
+        self.binding.identity()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
+        self.binding.runtime_stream()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn descriptor_for_test(&self) -> &SourceObjectDescriptor {
+        self.binding.descriptor()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn object_context_for_test(&self) -> &AdapterObjectContext {
+        &self.object_context
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_for_test(&self) -> &ReplaceCheckpoint {
+        &self.checkpoint
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_for_test(&self) -> &SourceRecord {
+        &self.record
+    }
+}
+
+impl ScopedObservationDirectoryMemberFrameFailure {
+    #[cfg(test)]
+    pub(crate) fn class_for_test(&self) -> ScopedSourceFailureClass {
+        self.class
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_input_for_test(self) -> ScopedObservationDirectoryMemberDecodeInput {
+        *self.input
     }
 }
 

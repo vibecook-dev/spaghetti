@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use super::file::{read_stable_file, read_stable_file_confined, stamp_revision, StableRead};
+use super::file::{
+    read_stable_file, read_stable_file_confined, stamp_revision, FileStamp, StableRead,
+};
 use super::model::CursorReader;
 use super::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
@@ -184,6 +186,38 @@ impl ReplaceDocument {
     ) -> Result<ReplaceRead, SourceDriverError> {
         self.interpret_read(
             read_stable_file_confined(root, relative_path, self.config.max_document_bytes)?,
+            previous,
+            origin,
+            incompatible_replacement,
+        )
+    }
+
+    /// Frame content already obtained through a confined stable read. The
+    /// caller keeps ownership until every retained byte/stamp/revision bound
+    /// has passed, so another topology can fail without losing retry input.
+    pub(crate) fn frame_retained_stable(
+        &self,
+        stamp: &FileStamp,
+        bytes: &[u8],
+        revision: Revision,
+        previous: Option<&ReplaceCheckpoint>,
+        origin: &RecordOrigin,
+        incompatible_replacement: bool,
+    ) -> Result<ReplaceRead, SourceDriverError> {
+        if bytes.len() > self.config.max_document_bytes
+            || u64::try_from(bytes.len()).ok() != Some(stamp.len)
+            || Revision::digest(bytes) != revision
+        {
+            return Err(SourceDriverError::InvalidCursor(
+                "retained stable document does not match its bounded read evidence".to_string(),
+            ));
+        }
+        self.interpret_read(
+            StableRead::Stable {
+                stamp: stamp.clone(),
+                bytes: bytes.to_vec(),
+                revision,
+            },
             previous,
             origin,
             incompatible_replacement,
@@ -488,6 +522,64 @@ mod tests {
 
     fn driver(max_document_bytes: usize) -> ReplaceDocument {
         ReplaceDocument::new(ReplaceDocumentConfig { max_document_bytes }).unwrap()
+    }
+
+    #[test]
+    fn retained_stable_content_is_revalidated_before_driver_framing() {
+        let retained_driver = driver(8);
+        let bytes = b"document";
+        let revision = Revision::digest(bytes);
+        let stamp = FileStamp {
+            identity: FileIdentity::ConfinedPath(b"document.json".to_vec()),
+            len: bytes.len() as u64,
+            modified_ns: 7,
+        };
+        let ReplaceRead::Record {
+            record,
+            checkpoint,
+            generation_changed,
+        } = retained_driver
+            .frame_retained_stable(&stamp, bytes, revision, None, &origin(), false)
+            .unwrap()
+        else {
+            panic!("an initial stable document must frame as one record");
+        };
+        assert!(generation_changed);
+        assert_eq!(checkpoint.generation, 1);
+        assert_eq!(checkpoint.revision, revision);
+        assert_eq!(record.payload, bytes);
+
+        let wrong_revision = Revision::digest(b"tampered");
+        assert!(matches!(
+            retained_driver.frame_retained_stable(
+                &stamp,
+                bytes,
+                wrong_revision,
+                None,
+                &origin(),
+                false,
+            ),
+            Err(SourceDriverError::InvalidCursor(_))
+        ));
+        let wrong_length = FileStamp {
+            len: stamp.len + 1,
+            ..stamp.clone()
+        };
+        assert!(matches!(
+            retained_driver.frame_retained_stable(
+                &wrong_length,
+                bytes,
+                revision,
+                None,
+                &origin(),
+                false,
+            ),
+            Err(SourceDriverError::InvalidCursor(_))
+        ));
+        assert!(matches!(
+            driver(7).frame_retained_stable(&stamp, bytes, revision, None, &origin(), false,),
+            Err(SourceDriverError::InvalidCursor(_))
+        ));
     }
 
     #[test]

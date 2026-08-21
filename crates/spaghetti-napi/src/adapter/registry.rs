@@ -253,7 +253,7 @@ pub(crate) mod tests {
         AuthorizedScopeAccessPlan, DirectoryEntryKind, DirectorySelection, DirtyHint, DirtyReason,
         DirtyScope, HintEnqueue, IngestPriority, RecordOrigin, ReplaceDocumentConfig, Revision,
         ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool,
-        SourceMediaType, SourceRecord,
+        SourceCursor, SourceMediaType, SourceRecord,
     };
 
     use super::*;
@@ -2989,7 +2989,70 @@ pub(crate) mod tests {
                     ] {
                         assert!(!decoded_rendered.contains(private));
                     }
-                    member_bytes.push(decoded_input.bytes_for_test().to_vec());
+                    let origin = RecordOrigin {
+                        source_instance_id: instance.id,
+                        stream_id: 41,
+                        object_id: 42,
+                        observed_at: 43,
+                        source_timestamp_hint: None,
+                        media_type: SourceMediaType::new("application/json").unwrap(),
+                    };
+                    let wrong_origin = RecordOrigin {
+                        source_instance_id: instance.id + 1,
+                        ..origin.clone()
+                    };
+                    let frame_failure = decoded_input
+                        .frame_initial_replace_for_test(wrong_origin)
+                        .unwrap_err();
+                    assert_eq!(
+                        frame_failure.class_for_test(),
+                        ScopedSourceFailureClass::InvalidCursor
+                    );
+                    let frame_failure_rendered = format!("{frame_failure:?}");
+                    for private in [
+                        "secret-session-id",
+                        "root.jsonl",
+                        "nested",
+                        "descendant-stream",
+                        "root-expanded",
+                    ] {
+                        assert!(!frame_failure_rendered.contains(private));
+                    }
+                    let decoded_input = frame_failure.into_input_for_test();
+                    assert_eq!(decoded_input.bytes_for_test(), b"root-expanded");
+                    let framed = decoded_input
+                        .frame_initial_replace_for_test(origin)
+                        .unwrap();
+                    assert_eq!(framed.identity_for_test().source(), &expected_member_source);
+                    assert_eq!(
+                        framed.runtime_stream_for_test(),
+                        &fixture_descendant_runtime_stream()
+                    );
+                    assert_eq!(
+                        framed.descriptor_for_test().relative_path,
+                        expected_relative
+                    );
+                    assert_eq!(framed.object_context_for_test().version(), 1);
+                    let checkpoint = framed.checkpoint_for_test();
+                    assert_eq!(checkpoint.generation, 1);
+                    assert!(checkpoint.present);
+                    assert_eq!(checkpoint.revision, content_revision);
+                    let record = framed.record_for_test();
+                    assert_eq!(record.generation, 1);
+                    assert_eq!(record.cursor_start, SourceCursor::snapshot(Revision::ZERO));
+                    assert_eq!(record.cursor_end, checkpoint.cursor());
+                    assert_eq!(record.payload, b"root-expanded");
+                    let framed_rendered = format!("{framed:?}");
+                    for private in [
+                        "secret-session-id",
+                        "root.jsonl",
+                        "nested",
+                        "descendant-stream",
+                        "root-expanded",
+                    ] {
+                        assert!(!framed_rendered.contains(private));
+                    }
+                    member_bytes.push(record.payload.clone());
                 }
                 other => panic!("expected a stable selected member, got {other:?}"),
             }
