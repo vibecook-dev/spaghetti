@@ -13,7 +13,7 @@
         "settings.schema-shape",
         "transcript.type"
       ],
-      "artifact_digest": "sha256:2121212121212121212121212121212121212121212121212121212121212121"
+      "artifact_digest": null
     },
     "platforms": [
       "darwin"

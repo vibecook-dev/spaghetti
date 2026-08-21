@@ -32,9 +32,8 @@ def main() -> None:
         "Claude Code 2.1.223; RFC-review known-good native pin for the durable product path"
     )
     ads["native_artifact"]["identification"]["state"] = "pinned"
-    ads["native_artifact"]["identification"]["artifact_digest"] = (
-        "sha256:" + "21" * 32
-    )
+    # Version pin is exact_versions 2.1.223. No placeholder blob digest.
+    ads["native_artifact"]["identification"]["artifact_digest"] = None
     ads["native_artifact"]["claim_refs"] = ["claude-artifact-target-pinned"]
     ads["scope_program_manifest"] = (
         "agent-support/claude-code/promoted-2026-08-21/scope-programs.json"
