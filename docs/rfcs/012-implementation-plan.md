@@ -2443,6 +2443,16 @@ fail closed. The ordinary catalog driver remains behaviorally unchanged. No
 scoped access pass calls this method yet, so this commit does not authorize a
 listing, interpret a Claude selector, admit a child object, or relax `9f9749b`.
 
+Commit `f343497` closes the same pre-I/O locator rule for `SiblingObject` and
+`ReferencedObjectFromField`. A reservation for either primitive may render its
+fixed locator only from the exact ordered identity values that minted the
+reservation token; value substitution, another primitive, traversal,
+separators, controls, non-UTF-8 bytes, and unconfined output fail with the same
+privacy-safe contract error used by the other locator authorities. The result
+is still only a relative path. There is no source-stream/decoder binding for
+these relations yet, and neither this seam nor the confined directory driver
+is called by an attachment.
+
 ### D3. Identity, control, and resync
 
 Implement:
