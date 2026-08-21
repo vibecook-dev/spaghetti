@@ -1,0 +1,43 @@
+{
+  "adapter_id": "fixture-adapter",
+  "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+  "family": "runtime.user-input-request",
+  "family_version": 1,
+  "fixture_contract_version": 1,
+  "kind": "choice",
+  "native_tool_use_id": "toolu_fixture_question_1",
+  "open": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "result_reference": null,
+    "state": "open"
+  },
+  "questions": [
+    {
+      "header": "Choose a path",
+      "multi_select": false,
+      "options": [
+        {
+          "description": "Keep the current plan",
+          "label": "Continue",
+          "preview": null
+        },
+        {
+          "description": "Stop the current plan",
+          "label": "Abort",
+          "preview": "Abort the in-flight plan"
+        }
+      ],
+      "prompt": "Which option should we take?"
+    }
+  ],
+  "resolved": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "result_reference": "continue",
+    "state": "resolved"
+  },
+  "runtime_semantic_contract_version": 1,
+  "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+  "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM"
+}
