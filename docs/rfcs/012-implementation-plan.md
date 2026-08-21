@@ -2559,6 +2559,21 @@ for the source instance and evidence-owned identity inputs for later locator
 execution remain open, the dynamic-relation guard stays closed, and Candidate
 documents, capability status, and promotion state remain unchanged.
 
+Commit `eddecc2` removes the remaining per-pass source-instance substitution
+from that join. The trusted attachment request now supplies one exact
+`SourceInstance`, and authorization retains it only when its nonzero runtime
+ID, identity-contract version, raw stable discriminator, derived canonical
+source-instance key, unique root-name set, and every root path equal the root
+identity and host-approved access-root grants. Each later pass borrows that
+same retained instance; the runtime-source reservation no longer accepts an
+instance argument. Identity, version, root, duplicate-root, and path-shaped
+drift fail through one stable non-disclosing error, and the attachment request's
+Debug implementation exposes counts and presence flags rather than source keys
+or native roots. This is still a trusted composition input rather than a wired
+catalog-discovery result, and it performs no source open, listing, read, driver
+execution, decode, child admission, or watcher installation. The dynamic
+relation guard remains closed and Candidate support is unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
