@@ -189,12 +189,13 @@ pub(crate) mod tests {
         verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, AuthorizedObservationSourceDriver, CanonicalEntityKey,
         CanonicalSourceInstanceKey, CompatibilityClass, ConsistencyPolicy, CoverageAbsenceKind,
-        CoverageDomain, CoveragePositionKind, CoverageSetCompleteness, CoverageStatus,
-        DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
-        EntityScope, ExternalEntityRef, Fact, FactBatch, FactSemanticContext, ObjectSelector,
-        RawRetentionPolicy, ScopeRelationPrimitive, Sha256Digest, SourceAccess, SourceInstance,
-        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
-        StreamId, StreamSpec, SupportBundleDocument,
+        CoverageDomain, CoverageObjectKey, CoveragePositionKind, CoverageSetCompleteness,
+        CoverageStatus, CoverageStreamKey, DecodeContext, DecodeDisposition, DecoderId,
+        DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope, ExternalEntityRef, Fact,
+        FactBatch, FactSemanticContext, ObjectSelector, RawRetentionPolicy, ScopeRelationPrimitive,
+        Sha256Digest, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+        SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
+        SupportBundleDocument,
     };
     use crate::observation_contract::unknown_wire::{
         ObservationUnknownWireCapability, ObservationUnknownWireCompatibilityAxis,
@@ -247,12 +248,12 @@ pub(crate) mod tests {
         ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
     };
     use crate::source::{
-        AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig,
-        AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan,
-        DirectoryEntryKind, DirectorySelection, DirtyHint, DirtyReason, DirtyScope, HintEnqueue,
-        IngestPriority, RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport,
-        ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool, SourceMediaType,
-        SourceRecord,
+        confined_relative_path_key, AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase,
+        AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead, AppendTransition,
+        AuthorizedScopeAccessPlan, DirectoryEntryKind, DirectorySelection, DirtyHint, DirtyReason,
+        DirtyScope, HintEnqueue, IngestPriority, RecordOrigin, ReplaceDocumentConfig, Revision,
+        ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool,
+        SourceMediaType, SourceRecord,
     };
 
     use super::*;
@@ -2803,6 +2804,8 @@ pub(crate) mod tests {
         assert!(!refreshed.root_moved());
         assert_ne!(refreshed.checkpoint().revision, first_revision);
         assert_eq!(refreshed.checkpoint().generation, 1);
+        let refreshed_membership_revision = refreshed.checkpoint().revision;
+        let refreshed_entries = refreshed.checkpoint().entries.clone();
         assert!(!refreshed.member_reads_complete());
         let mut member_bytes = Vec::new();
         while let Some(read) = refreshed.read_next_member().unwrap() {
@@ -2811,6 +2814,75 @@ pub(crate) mod tests {
                     assert_ne!(content.listing_revision(), content.content_revision());
                     assert!(!format!("{content:?}").contains("root-expanded"));
                     let _object_token = content.object_token();
+                    let expected_relative = if content.bytes() == b"child" {
+                        std::path::Path::new(
+                            "sessions/secret-session-id/children/nested/child.jsonl",
+                        )
+                    } else {
+                        std::path::Path::new("sessions/secret-session-id/children/root.jsonl")
+                    };
+                    let expected_member_relative = if content.bytes() == b"child" {
+                        std::path::Path::new("nested/child.jsonl")
+                    } else {
+                        std::path::Path::new("root.jsonl")
+                    };
+                    let expected_entry = refreshed_entries
+                        .get(&confined_relative_path_key(expected_member_relative).unwrap())
+                        .unwrap();
+                    let expected_object_key =
+                        confined_relative_path_key(expected_relative).unwrap();
+                    let expected_stream_key =
+                        CoverageStreamKey::derive("fixture", b"descendant-stream").unwrap();
+                    let expected_coverage_object =
+                        CoverageObjectKey::derive("descendant-stream", &expected_object_key)
+                            .unwrap();
+                    let identity = content.identity();
+                    let identity_rendered = format!("{identity:?}");
+                    for private in [
+                        "secret-session-id",
+                        "root.jsonl",
+                        "child.jsonl",
+                        "nested",
+                        "descendant-objects",
+                    ] {
+                        assert!(!identity_rendered.contains(private));
+                    }
+                    assert_eq!(identity.relation_id(), "descendant-objects");
+                    assert_eq!(identity.listing_generation(), 1);
+                    assert_eq!(identity.listing_revision(), refreshed_membership_revision);
+                    assert_eq!(identity.entry_generation(), expected_entry.generation);
+                    assert_eq!(identity.entry_revision(), expected_entry.revision);
+                    assert_eq!(identity.source().adapter_id.as_str(), "fixture");
+                    assert_eq!(
+                        identity.source().source_instance_key,
+                        expected_source_instance_key
+                    );
+                    assert_eq!(identity.source().stream_key, expected_stream_key);
+                    assert_eq!(identity.source().object_key, expected_coverage_object);
+                    assert_eq!(
+                        identity.semantic_context().source_instance_key(),
+                        expected_source_instance_key
+                    );
+                    assert_eq!(
+                        identity.semantic_context().stream_key(),
+                        b"descendant-stream"
+                    );
+                    assert_eq!(
+                        identity.semantic_context().object_key(),
+                        expected_object_key
+                    );
+                    assert_eq!(
+                        identity.semantic_context(),
+                        &FactSemanticContext::new(
+                            &AdapterId::new("fixture").unwrap(),
+                            instance.spec.identity_contract_version,
+                            instance.spec.stable_key.as_bytes(),
+                            b"descendant-stream",
+                            &expected_object_key,
+                            1,
+                        )
+                        .unwrap()
+                    );
                     member_bytes.push(content.bytes().to_vec());
                 }
                 other => panic!("expected a stable selected member, got {other:?}"),
@@ -2839,6 +2911,27 @@ pub(crate) mod tests {
             .all(|entry| entry.operation == AccessOperation::ObjectRead
                 && entry.reserved_bytes == 1_024
                 && entry.outcome == AccessOutcome::Available));
+
+        let (capacity_plan, capacity_binding) = make_bound(b"secret-session-id");
+        let mut capacity_listing =
+            match scan_observation_directory_membership_for_test(capacity_binding, None).unwrap() {
+                ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                other => panic!("expected an exact capacity listing, got {other:?}"),
+            };
+        while capacity_listing.read_next_member().unwrap().is_some() {}
+        assert!(capacity_listing.member_reads_complete());
+        let capacity_observation =
+            ScopedRelationMembershipObservation::from_directory_listing(capacity_listing).unwrap();
+        let mut undersized_admission = admission_lane_for_objects(2);
+        assert_eq!(
+            undersized_admission.record_relation_membership(
+                7,
+                ScopedAppendDeliveryPhase::Correction,
+                capacity_observation,
+            ),
+            Err(ScopedAdmissionError::CoverageObjectCapacityFull)
+        );
+        assert!(capacity_plan.report().verify_digest());
 
         let race_root = approved_root.root.join("sessions/race-session-id/children");
         std::fs::create_dir_all(&race_root).unwrap();
@@ -2890,8 +2983,7 @@ pub(crate) mod tests {
             other => panic!("expected an oversized listing, got {other:?}"),
         };
         let Some(ScopedObservationDirectoryMemberRead::Oversized {
-            object_token: _oversized_token,
-            listing_revision: _oversized_revision,
+            identity: _oversized_identity,
         }) = oversized_listing.read_next_member().unwrap()
         else {
             panic!("expected one stable oversized member")
@@ -3086,7 +3178,7 @@ pub(crate) mod tests {
 
         let observation =
             ScopedRelationMembershipObservation::from_directory_listing(refreshed).unwrap();
-        let mut admission = admission_lane_for_objects(1);
+        let mut admission = admission_lane_for_objects(3);
         admission
             .record_relation_membership(7, ScopedAppendDeliveryPhase::Correction, observation)
             .unwrap();

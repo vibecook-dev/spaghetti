@@ -5,7 +5,7 @@
 //! scoped attachment, while retaining the access reservation and borrowing the
 //! pass that owns it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use crate::adapter::{
     AdapterId, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
-    ScopeRelationPrimitive, SourceInstance, SourceInstanceKey, StreamSpec,
+    FactSemanticContext, ScopeRelationPrimitive, SourceInstance, SourceInstanceKey, StreamSpec,
 };
 use crate::source::{
     confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,
@@ -253,11 +253,24 @@ struct ScopedObservationDirectoryAccountedEntry {
 }
 
 struct ScopedObservationDirectoryMemberCoordinate {
-    object_token: AccessObjectToken,
+    identity: ScopedObservationDirectoryMemberIdentity,
     parent_token: AccessObjectToken,
     depth: u32,
     relative_path: PathBuf,
     expected: DirectoryEntryState,
+}
+
+#[derive(Clone)]
+pub(crate) struct ScopedObservationDirectoryMemberIdentity {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    relation_id: Arc<str>,
+    object_token: AccessObjectToken,
+    source: ScopedSourceObjectIdentity,
+    semantic_context: FactSemanticContext,
+    listing_generation: u64,
+    listing_revision: Revision,
+    entry_generation: u64,
+    entry_revision: Revision,
 }
 
 /// One completed, non-serializable listing proof. Native relative names remain
@@ -272,6 +285,7 @@ pub(crate) struct ScopedObservationDirectoryListing {
     read_authority: Option<AuthorizedObservationDirectoryReadAuthority>,
     root: PathBuf,
     members: Vec<ScopedObservationDirectoryMemberCoordinate>,
+    completed_members: Vec<ScopedObservationDirectoryMemberIdentity>,
     next_member_read: usize,
     member_read_failed: bool,
 }
@@ -290,15 +304,13 @@ pub(crate) enum ScopedObservationDirectoryScan {
 pub(crate) enum ScopedObservationDirectoryMemberRead {
     RetryTransient,
     Oversized {
-        object_token: AccessObjectToken,
-        listing_revision: Revision,
+        identity: ScopedObservationDirectoryMemberIdentity,
     },
     Stable(ScopedObservationDirectoryMemberContent),
 }
 
 pub(crate) struct ScopedObservationDirectoryMemberContent {
-    object_token: AccessObjectToken,
-    listing_revision: Revision,
+    identity: ScopedObservationDirectoryMemberIdentity,
     content_revision: Revision,
     bytes: Vec<u8>,
 }
@@ -356,8 +368,25 @@ impl fmt::Debug for ScopedObservationDirectoryListing {
             .field("root_moved", &self.root_moved)
             .field("member_reads", &self.next_member_read)
             .field("member_read_count", &self.members.len())
+            .field("completed_member_reads", &self.completed_members.len())
             .field("member_read_failed", &self.member_read_failed)
             .field("has_membership_source", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationDirectoryMemberIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryMemberIdentity")
+            .field("has_attachment_authority", &true)
+            .field("has_relation", &true)
+            .field("has_object_token", &true)
+            .field("has_source_identity", &true)
+            .field("listing_generation", &self.listing_generation)
+            .field("has_listing_revision", &true)
+            .field("entry_generation", &self.entry_generation)
+            .field("has_entry_revision", &true)
             .finish_non_exhaustive()
     }
 }
@@ -521,6 +550,7 @@ impl ScopedObservationDirectoryScanAuthority {
                         read_authority: Some(read_authority),
                         root,
                         members,
+                        completed_members: Vec::new(),
                         next_member_read: 0,
                         member_read_failed: false,
                     },
@@ -684,10 +714,46 @@ impl ScopedObservationDirectoryMembershipProof {
             let member_path = confined_relative_path_from_key(&state.path_key)
                 .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
             let relative_path = locator.join(member_path);
-            confined_relative_path_key(&relative_path)
+            let canonical_object_key = confined_relative_path_key(&relative_path)
                 .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+            let adapter_id = self.identity.source.adapter_id.clone();
+            let stream_namespace = binding.stream().id.as_str();
+            let stream_key =
+                CoverageStreamKey::derive(adapter_id.as_str(), stream_namespace.as_bytes())
+                    .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+            let coverage_object_key =
+                CoverageObjectKey::derive(stream_namespace, &canonical_object_key)
+                    .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+            let semantic_context = FactSemanticContext::new(
+                &adapter_id,
+                binding.runtime.source_instance_identity_contract_version(),
+                binding.runtime.source_instance_key().as_bytes(),
+                stream_namespace.as_bytes(),
+                &canonical_object_key,
+                binding.stream().driver.framing_contract_version(),
+            )
+            .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+            let source = ScopedSourceObjectIdentity {
+                adapter_id,
+                source_instance_key: semantic_context.source_instance_key(),
+                stream_key,
+                object_key: coverage_object_key,
+            };
+            if source.source_instance_key != self.identity.source.source_instance_key {
+                return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+            }
             members.push(ScopedObservationDirectoryMemberCoordinate {
-                object_token,
+                identity: ScopedObservationDirectoryMemberIdentity {
+                    attachment_authority: Arc::clone(&self.identity.attachment_authority),
+                    relation_id: Arc::from(self.identity.relation_id.as_str()),
+                    object_token,
+                    source,
+                    semantic_context,
+                    listing_generation: checkpoint.generation,
+                    listing_revision: checkpoint.revision,
+                    entry_generation: state.generation,
+                    entry_revision: state.revision,
+                },
                 parent_token: accounted.parent_token,
                 depth: accounted.depth,
                 relative_path,
@@ -728,18 +794,39 @@ impl ScopedObservationDirectoryListing {
     }
 
     pub(crate) fn member_reads_complete(&self) -> bool {
-        !self.member_read_failed && self.next_member_read == self.members.len()
+        !self.member_read_failed
+            && self.next_member_read == self.members.len()
+            && self.completed_members.len() == self.members.len()
     }
 
-    pub(super) fn retire_member_read_authority(&mut self) -> bool {
+    pub(super) fn finalize_for_membership(
+        &mut self,
+    ) -> Option<BTreeSet<ScopedSourceObjectIdentity>> {
         if !self.member_reads_complete() {
-            return false;
+            return None;
+        }
+        let mut sources = BTreeSet::new();
+        for identity in &self.completed_members {
+            let expected_source =
+                ScopedSourceObjectIdentity::from_semantic_context(&identity.semantic_context)
+                    .ok()?;
+            if !identity.matches_attachment(&self.identity.attachment_authority)
+                || identity.relation_id.as_ref() != self.identity.relation_id
+                || identity.listing_generation != self.checkpoint.generation
+                || identity.listing_revision != self.checkpoint.revision
+                || identity.source != expected_source
+                || identity.source.adapter_id != self.identity.source.adapter_id
+                || identity.source.source_instance_key != self.identity.source.source_instance_key
+                || !sources.insert(identity.source.clone())
+            {
+                return None;
+            }
         }
         self.read_authority = None;
         self.root = PathBuf::new();
         self.members.clear();
         self.next_member_read = 0;
-        true
+        Some(sources)
     }
 
     /// Read the next selected member in canonical checkpoint order. No caller
@@ -761,7 +848,7 @@ impl ScopedObservationDirectoryListing {
             .as_ref()
             .ok_or(ScopedObservationRuntimeSourceError::InvalidBinding)?;
         let reservation = match authority.reserve_member_read(
-            member.object_token,
+            member.identity.object_token,
             member.parent_token,
             member.depth,
         ) {
@@ -806,9 +893,9 @@ impl ScopedObservationDirectoryListing {
                     return Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient));
                 }
                 reservation.complete(0, AccessOutcome::Oversized)?;
+                self.completed_members.push(member.identity.clone());
                 Ok(Some(ScopedObservationDirectoryMemberRead::Oversized {
-                    object_token: member.object_token,
-                    listing_revision: member.expected.revision,
+                    identity: member.identity.clone(),
                 }))
             }
             StableRead::Stable {
@@ -822,10 +909,10 @@ impl ScopedObservationDirectoryListing {
                     return Ok(Some(ScopedObservationDirectoryMemberRead::RetryTransient));
                 }
                 reservation.complete(bytes.len() as u64, AccessOutcome::Available)?;
+                self.completed_members.push(member.identity.clone());
                 Ok(Some(ScopedObservationDirectoryMemberRead::Stable(
                     ScopedObservationDirectoryMemberContent {
-                        object_token: member.object_token,
-                        listing_revision: member.expected.revision,
+                        identity: member.identity.clone(),
                         content_revision: revision,
                         bytes,
                     },
@@ -843,11 +930,11 @@ fn directory_member_stamp_matches(stamp: &FileStamp, expected: &DirectoryEntrySt
 
 impl ScopedObservationDirectoryMemberContent {
     pub(crate) fn object_token(&self) -> AccessObjectToken {
-        self.object_token
+        self.identity.object_token
     }
 
     pub(crate) fn listing_revision(&self) -> Revision {
-        self.listing_revision
+        self.identity.listing_revision
     }
 
     pub(crate) fn content_revision(&self) -> Revision {
@@ -856,6 +943,47 @@ impl ScopedObservationDirectoryMemberContent {
 
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    pub(crate) fn identity(&self) -> &ScopedObservationDirectoryMemberIdentity {
+        &self.identity
+    }
+}
+
+impl ScopedObservationDirectoryMemberIdentity {
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub(crate) fn source(&self) -> &ScopedSourceObjectIdentity {
+        &self.source
+    }
+
+    pub(crate) fn semantic_context(&self) -> &FactSemanticContext {
+        &self.semantic_context
+    }
+
+    pub(crate) fn listing_generation(&self) -> u64 {
+        self.listing_generation
+    }
+
+    pub(crate) fn listing_revision(&self) -> Revision {
+        self.listing_revision
+    }
+
+    pub(crate) fn entry_generation(&self) -> u64 {
+        self.entry_generation
+    }
+
+    pub(crate) fn entry_revision(&self) -> Revision {
+        self.entry_revision
+    }
+
+    pub(super) fn matches_attachment(
+        &self,
+        authority: &Arc<ScopedObservationAttachmentAuthority>,
+    ) -> bool {
+        Arc::ptr_eq(&self.attachment_authority, authority)
     }
 }
 
@@ -1163,6 +1291,7 @@ impl ScopedObservationDirectoryListing {
             read_authority: None,
             root: PathBuf::new(),
             members: Vec::new(),
+            completed_members: Vec::new(),
             next_member_read: 0,
             member_read_failed: false,
         }

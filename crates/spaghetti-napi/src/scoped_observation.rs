@@ -905,6 +905,7 @@ struct ScopedCoverageMembershipIdentity {
 /// coordinates when the D2 orchestrator admits them later.
 pub(crate) struct ScopedRelationMembershipObservation {
     membership: ScopedCoverageMembershipIdentity,
+    member_sources: BTreeSet<ScopedSourceObjectIdentity>,
     coverage: ScopedOfferedDecodeCoverage,
     _listing_authority: ScopedObservationDirectoryListing,
 }
@@ -913,9 +914,9 @@ impl ScopedRelationMembershipObservation {
     pub(crate) fn from_directory_listing(
         mut listing: ScopedObservationDirectoryListing,
     ) -> Result<Self, ScopedAdmissionError> {
-        if !listing.retire_member_read_authority() {
-            return Err(ScopedAdmissionError::InvalidCoverage);
-        }
+        let member_sources = listing
+            .finalize_for_membership()
+            .ok_or(ScopedAdmissionError::InvalidCoverage)?;
         let relation_id = listing.relation_id().to_string();
         let source = listing.source().clone();
         let checkpoint = listing.checkpoint();
@@ -943,6 +944,7 @@ impl ScopedRelationMembershipObservation {
                 object_key: Arc::from(source.object_key.as_bytes().as_slice()),
                 coverage_domains: Vec::new(),
             },
+            member_sources,
             coverage: ScopedOfferedDecodeCoverage {
                 source,
                 point: Some(point),
@@ -956,9 +958,10 @@ impl ScopedRelationMembershipObservation {
 }
 
 /// Two bounded internal capacity domains multiplexed by one admission ordinal.
-/// Coverage membership accounts separately for exact host-authorized objects
-/// and complete dynamic-relation membership sources. No two sources may claim
-/// one declared relation.
+/// Coverage membership accounts separately for exact host-authorized objects,
+/// complete dynamic-relation membership sources, and each exact child reserved
+/// by those sources. A static object cannot share a relation, and a dynamic
+/// child cannot be reserved by two relations.
 /// The ordinal is not an RFC 012D `observer_sequence`; public sequencing begins
 /// only after canonical semantic projection is available.
 pub struct ScopedObservationAdmissionLane {
@@ -972,10 +975,28 @@ pub struct ScopedObservationAdmissionLane {
     known_coverage_objects: BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
     relation_membership_objects:
         BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
+    dynamic_relation_members: BTreeMap<Arc<str>, BTreeSet<ScopedSourceObjectIdentity>>,
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
     offered_access_pass_ids: BTreeMap<ScopedSourceObjectIdentity, u64>,
     offered_pass_evidence: BTreeMap<ScopedSourceObjectIdentity, ScopedCoveragePassEvidence>,
+}
+
+fn extend_coverage_sources_bounded<'source>(
+    retained: &mut BTreeSet<ScopedSourceObjectIdentity>,
+    candidates: impl IntoIterator<Item = &'source ScopedSourceObjectIdentity>,
+    limit: usize,
+) -> bool {
+    for candidate in candidates {
+        if retained.contains(candidate) {
+            continue;
+        }
+        if retained.len() >= limit {
+            return false;
+        }
+        retained.insert(candidate.clone());
+    }
+    true
 }
 
 impl ScopedObservationAdmissionLane {
@@ -996,6 +1017,7 @@ impl ScopedObservationAdmissionLane {
             offered_lane_ordinal: 0,
             known_coverage_objects: BTreeMap::new(),
             relation_membership_objects: BTreeMap::new(),
+            dynamic_relation_members: BTreeMap::new(),
             pending_coverage_updates: VecDeque::new(),
             offered_decode_coverage: BTreeMap::new(),
             offered_access_pass_ids: BTreeMap::new(),
@@ -1029,6 +1051,10 @@ impl ScopedObservationAdmissionLane {
         };
         let membership_identity = object.coverage_membership_identity();
         let source_is_new = !self.known_coverage_objects.contains_key(&object.source);
+        let source_reserved_for_dynamic_relation = self
+            .dynamic_relation_members
+            .values()
+            .any(|members| members.contains(&object.source));
         if self
             .known_coverage_objects
             .get(&object.source)
@@ -1036,6 +1062,7 @@ impl ScopedObservationAdmissionLane {
             || self
                 .relation_membership_objects
                 .contains_key(&object.source)
+            || source_reserved_for_dynamic_relation
         {
             return Err(ScopedAdmissionFailure {
                 error: ScopedAdmissionError::InvalidCoverage,
@@ -1054,17 +1081,28 @@ impl ScopedObservationAdmissionLane {
                 decoded,
             });
         }
-        if source_is_new
-            && self
+        if source_is_new {
+            let mut prospective_sources = BTreeSet::new();
+            let candidates = self
                 .known_coverage_objects
-                .len()
-                .saturating_add(self.relation_membership_objects.len())
-                >= self.limits.max_coverage_objects
-        {
-            return Err(ScopedAdmissionFailure {
-                error: ScopedAdmissionError::CoverageObjectCapacityFull,
-                decoded,
-            });
+                .keys()
+                .chain(self.relation_membership_objects.keys())
+                .chain(
+                    self.dynamic_relation_members
+                        .values()
+                        .flat_map(BTreeSet::iter),
+                )
+                .chain(std::iter::once(&object.source));
+            if !extend_coverage_sources_bounded(
+                &mut prospective_sources,
+                candidates,
+                self.limits.max_coverage_objects,
+            ) {
+                return Err(ScopedAdmissionFailure {
+                    error: ScopedAdmissionError::CoverageObjectCapacityFull,
+                    decoded,
+                });
+            }
         }
 
         let mut measurements = Vec::with_capacity(decoded.items.len());
@@ -1231,13 +1269,35 @@ impl ScopedObservationAdmissionLane {
         }
         let source = observation.coverage.source.clone();
         let membership = observation.membership;
+        let member_sources = observation.member_sources;
         if source.stream_key.as_bytes() != membership.stream_key.as_ref()
             || source.object_key.as_bytes() != membership.object_key.as_ref()
             || self.known_coverage_objects.contains_key(&source)
-            || self
-                .known_coverage_objects
-                .values()
-                .any(|known| known.relation_id == membership.relation_id)
+        {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        if member_sources.iter().any(|member| {
+            member == &source
+                || member.adapter_id != source.adapter_id
+                || member.source_instance_key != source.source_instance_key
+                || self
+                    .known_coverage_objects
+                    .get(member)
+                    .is_some_and(|known| known.relation_id != membership.relation_id)
+                || self.relation_membership_objects.contains_key(member)
+                || self
+                    .dynamic_relation_members
+                    .iter()
+                    .any(|(relation, members)| {
+                        relation != &membership.relation_id && members.contains(member)
+                    })
+        }) || self
+            .known_coverage_objects
+            .iter()
+            .any(|(known_source, known)| {
+                known.relation_id == membership.relation_id
+                    && !member_sources.contains(known_source)
+            })
         {
             return Err(ScopedAdmissionError::InvalidCoverage);
         }
@@ -1255,19 +1315,33 @@ impl ScopedObservationAdmissionLane {
         {
             return Err(ScopedAdmissionError::InvalidCoverage);
         }
-        if source_is_new
-            && self
-                .known_coverage_objects
-                .len()
-                .saturating_add(self.relation_membership_objects.len())
-                >= self.limits.max_coverage_objects
-        {
+        let mut prospective_sources = BTreeSet::new();
+        let candidates = self
+            .known_coverage_objects
+            .keys()
+            .chain(self.relation_membership_objects.keys())
+            .chain(
+                self.dynamic_relation_members
+                    .iter()
+                    .filter(|(relation, _)| *relation != &membership.relation_id)
+                    .flat_map(|(_, members)| members.iter()),
+            )
+            .chain(std::iter::once(&source))
+            .chain(member_sources.iter());
+        if !extend_coverage_sources_bounded(
+            &mut prospective_sources,
+            candidates,
+            self.limits.max_coverage_objects,
+        ) {
             return Err(ScopedAdmissionError::CoverageObjectCapacityFull);
         }
 
         if source_is_new {
-            self.relation_membership_objects.insert(source, membership);
+            self.relation_membership_objects
+                .insert(source, membership.clone());
         }
+        self.dynamic_relation_members
+            .insert(membership.relation_id.clone(), member_sources);
         self.stage_coverage_update(
             self.offered_lane_ordinal,
             access_pass_id,
@@ -19847,6 +19921,16 @@ mod projection_tests {
         }
     }
 
+    fn dynamic_relation_member_source(stable_object_key: &[u8]) -> ScopedSourceObjectIdentity {
+        let root_source = source_identity();
+        ScopedSourceObjectIdentity {
+            adapter_id: root_source.adapter_id,
+            source_instance_key: root_source.source_instance_key,
+            stream_key: CoverageStreamKey::derive("fixture", b"descendant-stream").unwrap(),
+            object_key: CoverageObjectKey::derive("descendant-stream", stable_object_key).unwrap(),
+        }
+    }
+
     fn relation_directory_checkpoint(generation: u64, revision_seed: &[u8]) -> DirectoryCheckpoint {
         DirectoryCheckpoint {
             root_identity: FileIdentity::ConfinedPath(b"scope-membership-root".to_vec()),
@@ -20015,6 +20099,105 @@ mod projection_tests {
         );
         assert_eq!(lane.relation_membership_objects.len(), 1);
         assert_eq!(lane.offered_decode_coverage.len(), 1);
+    }
+
+    #[test]
+    fn dynamic_relation_membership_reserves_exact_members_before_object_admission() {
+        let relation_id = "descendant-transcripts";
+        let membership_source = relation_membership_source(b"reserved-descendants");
+        let member_source = dynamic_relation_member_source(b"selected-child.jsonl");
+        let unlisted_source = dynamic_relation_member_source(b"unlisted-child.jsonl");
+        let checkpoint = relation_directory_checkpoint(1, b"reserved-descendants-a");
+        let observation = || {
+            let mut observation = ScopedRelationMembershipObservation::from_directory_listing(
+                ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                    relation_id,
+                    membership_source.clone(),
+                    checkpoint.clone(),
+                ),
+            )
+            .unwrap();
+            assert!(observation.member_sources.insert(member_source.clone()));
+            observation
+        };
+
+        let mut too_small = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 1,
+            max_retained_native_bytes: 0,
+            max_control_items: 1,
+            max_coverage_objects: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            too_small.record_relation_membership(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                observation(),
+            ),
+            Err(ScopedAdmissionError::CoverageObjectCapacityFull)
+        );
+        assert!(too_small.relation_membership_objects.is_empty());
+        assert!(too_small.dynamic_relation_members.is_empty());
+        assert!(too_small.offered_decode_coverage.is_empty());
+
+        let mut lane = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 1,
+            max_retained_native_bytes: 0,
+            max_control_items: 1,
+            max_coverage_objects: 2,
+        })
+        .unwrap();
+        lane.record_relation_membership(1, ScopedAppendDeliveryPhase::Bootstrap, observation())
+            .unwrap();
+        assert_eq!(
+            lane.dynamic_relation_members.get(relation_id),
+            Some(&BTreeSet::from([member_source.clone()]))
+        );
+        assert!(!lane
+            .dynamic_relation_members
+            .get(relation_id)
+            .unwrap()
+            .contains(&unlisted_source));
+
+        let mut conflicting = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "workflow-records",
+                relation_membership_source(b"reserved-workflows"),
+                relation_directory_checkpoint(1, b"reserved-workflows-a"),
+            ),
+        )
+        .unwrap();
+        assert!(conflicting.member_sources.insert(member_source.clone()));
+        assert_eq!(
+            lane.record_relation_membership(2, ScopedAppendDeliveryPhase::Correction, conflicting,),
+            Err(ScopedAdmissionError::InvalidCoverage)
+        );
+
+        lane.known_coverage_objects.insert(
+            member_source.clone(),
+            ScopedCoverageMembershipIdentity {
+                relation_id: Arc::from(relation_id),
+                stream_key: Arc::from(member_source.stream_key.as_bytes().as_slice()),
+                object_key: Arc::from(member_source.object_key.as_bytes().as_slice()),
+                coverage_domains: Vec::new(),
+            },
+        );
+        let omitted = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                relation_id,
+                membership_source,
+                relation_directory_checkpoint(2, b"reserved-descendants-b"),
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            lane.record_relation_membership(2, ScopedAppendDeliveryPhase::Correction, omitted,),
+            Err(ScopedAdmissionError::InvalidCoverage)
+        );
+        assert_eq!(
+            lane.dynamic_relation_members.get(relation_id),
+            Some(&BTreeSet::from([member_source]))
+        );
     }
 
     fn assembled_dynamic_scope_coverage(

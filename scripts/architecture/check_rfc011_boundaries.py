@@ -556,13 +556,29 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "confined_relative_path_from_key(",
         "read_stable_file_confined(",
         "directory_member_stamp_matches(",
-        "if !listing.retire_member_read_authority()",
+        ".finalize_for_membership()",
     )
     if any(
         binding not in combined_directory_membership_text
         for binding in required_directory_member_read_bindings
     ):
         found.add(f"{relative}#missing-authorized-directory-member-read")
+    required_directory_member_identity_bindings = (
+        "pub(crate) struct ScopedObservationDirectoryMemberIdentity",
+        "semantic_context: FactSemanticContext",
+        "confined_relative_path_key(&relative_path)",
+        "ScopedSourceObjectIdentity::from_semantic_context",
+        "completed_members",
+        "dynamic_relation_members",
+        "source_reserved_for_dynamic_relation",
+        "extend_coverage_sources_bounded(",
+        ".chain(member_sources.iter())",
+    )
+    if any(
+        binding not in combined_directory_membership_text
+        for binding in required_directory_member_identity_bindings
+    ):
+        found.add(f"{relative}#missing-authorized-directory-member-identity")
     continuity_wire = scoped_dir / "continuity_wire.rs"
     continuity_wire_text = (
         production_rust_text(continuity_wire)
