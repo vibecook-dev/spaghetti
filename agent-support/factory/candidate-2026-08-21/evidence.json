@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "manifest_id": "factory-evidence-2026-08-21-candidate",
+  "adapter_id": "factory",
+  "ads_id": "factory-ads-2026-08-21-candidate",
+  "sanitizer": { "version": 2, "prohibited_scan": "pass", "raw_capture_committed": false },
+  "claims": [
+    {
+      "claim_id": "factory-artifact-target-open",
+      "statement": "The jsonl-plus-session.json family is recognizable, but the current Factory.ai artifact and version range have not been pinned for support promotion.",
+      "state": "open",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/factory/adapter.rs", "sha256": null, "locator": "FactoryAdapter::new manifest" }
+      ]
+    },
+    {
+      "claim_id": "factory-source-observed",
+      "statement": "The Rust adapter declares bounded membership, append jsonl, and optional session.json replace streams on existing common source primitives.",
+      "state": "observed",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/factory/adapter.rs", "sha256": null, "locator": "AgentAdapter::discover and AgentAdapter::streams" }
+      ]
+    },
+    {
+      "claim_id": "factory-identity-open",
+      "statement": "Session identity is taken from native sessionId, but move, clone, reuse, and missing-sidecar claims lack independent fixtures.",
+      "state": "degraded",
+      "sources": [
+        { "kind": "code_reference", "path": "crates/spaghetti-napi/src/factory/adapter.rs", "sha256": null, "locator": "decode_session_record" }
+      ]
+    },
+    {
+      "claim_id": "factory-semantic-fixtures-open",
+      "statement": "Independent sanitized fixtures for clocks, usage, unknown records, and message bodies remain to be authored.",
+      "state": "open",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Standard adaptation workflow" }
+      ]
+    },
+    {
+      "claim_id": "factory-scope-open",
+      "statement": "Known transcripts plus optional session.json are declared but not connected to the common observer or catalog.",
+      "state": "unsupported",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012d-session-scoped-observation.md", "sha256": null, "locator": "Common scoped observation contract" }
+      ]
+    },
+    {
+      "claim_id": "factory-privacy-policy",
+      "statement": "Raw captures are private and any future committed Factory fixtures must be deterministic synthetic or sanitized evidence.",
+      "state": "observed",
+      "sources": [
+        { "kind": "design_record", "path": "docs/rfcs/012a-agent-adaptation-and-engine-boundaries.md", "sha256": null, "locator": "Security and privacy" }
+      ]
+    }
+  ]
+}
