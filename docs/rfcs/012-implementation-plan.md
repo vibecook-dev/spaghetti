@@ -1,7 +1,8 @@
 # RFC 012 implementation and validation program
 
-- **Status:** Active non-normative roadmap; remaining-gate Wave III plus X4
-  durable Claude 2.1.223 promotion/rollback are on Exit evidence.
+- **Status:** Active non-normative roadmap. D5/X1/X2 stay In progress until
+  their experiments time real observer attach, emit a real FTS ingest trace,
+  and aggregate engine-produced `source_record_errors`.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -135,9 +136,9 @@ prerequisite for early vertical slices.
 | D2. Claude scope composition             | 012D                | Gate met    | root/current/future actor and sidecar conformance              |
 | D3. Control lane and epoch replacement   | 012D                | Gate met    | overflow/disappearance/duplicate/fairness matrix               |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
-| D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
-| X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
-| X2. Diagnostic disposition/aggregation   | 012A implementation | Gate met    | bounded rows with count/provenance parity                      |
+| D5. Observer performance calibration     | 012D                | In progress | reproducible latency/memory/access report                      |
+| X1. Search/finalization separation       | 012B integration    | In progress | complete-only FTS and maintenance experiment                   |
+| X2. Diagnostic disposition/aggregation   | 012A implementation | In progress | bounded rows with count/provenance parity                      |
 | X3. Physical extraction                  | Implementation      | Gate met    | workspace boundaries mirror dependency checks                  |
 | X4. Default promotion/drift lane         | Umbrella            | Gate met    | child gates, telemetry, rollback, promoted support releases    |
 
@@ -2397,8 +2398,12 @@ primitives.
 Hooks remain in Chopsticks as root lifecycle and immediate-poll signals during
 this package.
 
-Current landing status (2026-08-20): D2 remains `Not started` as an executable
-Claude composition. The promotion guard in `9f9749b` closes one unsafe interim
+Current landing status (2026-08-21): D2 Gate met for decoder-executed Claude
+composition. `claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records`
+drives the real Claude decoder for root, child, workflow, and team facts
+(`Fact::UnknownRecord` is not Exit evidence). Promoted support is durable-only
+with a KnownObject root-transcript program; candidate still holds the full
+RFC 012D relation set. The promotion guard in `9f9749b` closes one unsafe interim
 state: after typed support authorization selects a Promoted scope program, the
 scoped host now rejects attachment if that program contains any observation
 relation primitive whose membership is not represented by the current exact
