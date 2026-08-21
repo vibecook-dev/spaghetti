@@ -5,9 +5,10 @@
   Gate met. D2 now composes Promoted `ChildDirectoryByNativeId` membership
   before bootstrap; D3 query workers share the observer pass pool; scoped
   `runtime.user-input-request` replacement is live. C1 now also freezes
-  `runtime.message`, `runtime.task`, `runtime.effective-state`, and
-  `runtime.plan` fixtures; D3 projects those families as current-generation-log,
-  owned-set, and revisioned-entity replacement. D2/D3 remain In progress
+  `runtime.message`, `runtime.task`, `runtime.effective-state`,
+  `runtime.plan`, and `runtime.tool` fixtures; D3 projects those families as
+  current-generation-log, owned-set, revisioned-entity, and correlated-lifecycle
+  replacement. D2/D3 remain In progress
   against Claude Candidate promotion. Default-on (`Rolled out`) and child-RFC
   012B/C/D ratification remain later product decisions.
 - **Created:** 2026-08-15
@@ -135,13 +136,13 @@ prerequisite for early vertical slices.
 | B3. Durable catalog/query snapshots      | 012B                | Gate met    | atomic pack plus snapshot pagination conformance               |
 | B4. Progressive host and UX              | 012B                | Gate met    | cold/warm UI topology and migration tests                      |
 | B5. Catalog performance calibration      | 012B                | Gate met    | reproducible gate-amendment report                             |
-| C1. Runtime semantic contracts           | 012C                | Gate met    | actor/usage/state/interaction/message/task/effective-state/plan serialization fixtures |
+| C1. Runtime semantic contracts           | 012C                | Gate met    | actor/usage/state/interaction/message/task/effective-state/plan/tool serialization fixtures |
 | C2. Usage-v2 shadow projection           | 012C                | Gate met    | frozen/private corpus plus native affiliation parity           |
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
 | C4. Runtime semantic downstream suite    | 012C                | Gate met    | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | Gate met    | attach/bootstrap/poll/close/deps; no store/global scan         |
 | D2. Claude scope composition             | 012D                | In progress | Promoted directory membership; Candidate promotion later       |
-| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input/message/task/effective-state/plan replacement; no Gate met |
+| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input/message/task/effective-state/plan/tool replacement; no Gate met |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
 | D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
 | X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
@@ -2869,8 +2870,14 @@ retract law: a partial step list cannot drop a previously known key, a complete
 step snapshot replaces prior steps, complete retract removes the entity,
 partial retract does not, and a complete owned-set listing only the peer
 native id retracts the omitted current plan while keeping the peer.
-Bootstrap/correction replacement digests match at the same current set. D3
-remains In progress; this slice does not stamp Gate met. Native-derived
+Bootstrap/correction replacement digests match at the same current set.
+`rfc012d_tool_replaces_correlated_lifecycle_without_rekeying_or_dropping_unmatched`
+projects C1 `runtime.tool` as `CorrelatedLifecycleCurrent`: call and unmatched
+result are separate entities, later correlation updates the relationship
+without changing either fact identity, complete retract removes only the
+named entity, and a partial upsert cannot drop a previously known
+correlation. Bootstrap/correction replacement digests match at the same
+current set. D3 remains In progress; this slice does not stamp Gate met. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have

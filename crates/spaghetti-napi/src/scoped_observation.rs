@@ -29,9 +29,9 @@ use crate::adapter::{
     Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
     SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
     SourceSnapshot, SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality,
-    TypedAccessAuthorization, UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState,
-    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
-    EXTERNAL_ENTITY_REFERENCE_VERSION,
+    ToolRevisionFact, ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact,
+    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
+    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -1994,6 +1994,7 @@ const RUNTIME_EFFECTIVE_STATE_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 const RUNTIME_MESSAGE_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 const RUNTIME_PLAN_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 const RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
+const RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_INITIAL_SCOPE_EPOCH: u64 = 1;
 const SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES: &[(&str, u32)] = &[
     (
@@ -2014,6 +2015,7 @@ const SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES: &[(&str, u32)] = &[
     ),
     ("runtime.plan", RUNTIME_PLAN_FACT_FAMILY_CONTRACT_VERSION),
     ("runtime.task", RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION),
+    ("runtime.tool", RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION),
     (
         "runtime.usage-v2",
         RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
@@ -2407,6 +2409,19 @@ pub struct ScopedTaskEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedToolEvent {
+    pub event_id: ScopedObservationEventId,
+    pub semantic_revision_ref: SemanticRevisionRef,
+    pub fact_id: CanonicalFactId,
+    pub operation: ScopedRevisionedEntityOperation,
+    pub phase: ScopedAppendDeliveryPhase,
+    pub observed_at: i64,
+    pub source: ScopedUsageV2Source,
+    pub retraction: Option<ScopedRevisionedEntityRetractionCause>,
+    pub revision: ToolRevisionFact,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScopedEffectiveStateEvent {
     pub event_id: ScopedObservationEventId,
     pub semantic_revision_ref: SemanticRevisionRef,
@@ -2670,6 +2685,43 @@ impl std::fmt::Debug for ScopedTaskReplacementSnapshot {
 }
 
 #[derive(Clone, PartialEq, Eq)]
+struct ScopedToolReplacementEntity {
+    semantic: FactSemanticRevision,
+    generation: u64,
+    source: ScopedUsageV2Source,
+    revision: ToolRevisionFact,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedToolReplacementSnapshot {
+    fact_family_contract_version: u32,
+    replacement_digest_contract_version: u32,
+    phase: ScopedAppendDeliveryPhase,
+    entity_count: u64,
+    semantic_digest: ScopedReplacementSemanticDigest,
+    entities: Vec<ScopedToolReplacementEntity>,
+}
+
+impl std::fmt::Debug for ScopedToolReplacementSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedToolReplacementSnapshot")
+            .field(
+                "fact_family_contract_version",
+                &self.fact_family_contract_version,
+            )
+            .field(
+                "replacement_digest_contract_version",
+                &self.replacement_digest_contract_version,
+            )
+            .field("phase", &self.phase)
+            .field("entity_count", &self.entity_count)
+            .field("semantic_digest", &self.semantic_digest)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 struct ScopedEffectiveStateReplacementEntity {
     semantic: FactSemanticRevision,
     generation: u64,
@@ -2910,6 +2962,10 @@ pub enum ScopedProjectedObservation {
         lane_ordinal: u64,
         event: Box<ScopedTaskEvent>,
     },
+    Tool {
+        lane_ordinal: u64,
+        event: Box<ScopedToolEvent>,
+    },
     EffectiveState {
         lane_ordinal: u64,
         event: Box<ScopedEffectiveStateEvent>,
@@ -2968,6 +3024,7 @@ impl ScopedProjectedObservation {
             Self::Message { event, .. } => event.event_id,
             Self::Plan { event, .. } => event.event_id,
             Self::Task { event, .. } => event.event_id,
+            Self::Tool { event, .. } => event.event_id,
             Self::EffectiveState { event, .. } => event.event_id,
             Self::ArtifactAvailability { event_id, .. } => *event_id,
             Self::UnknownWire { event } => event.prepared.event_id,
@@ -2988,6 +3045,7 @@ impl ScopedProjectedObservation {
             Self::Message { event, .. } => Some(event.semantic_revision_ref),
             Self::Plan { event, .. } => Some(event.semantic_revision_ref),
             Self::Task { event, .. } => Some(event.semantic_revision_ref),
+            Self::Tool { event, .. } => Some(event.semantic_revision_ref),
             Self::EffectiveState { event, .. } => Some(event.semantic_revision_ref),
             Self::ArtifactAvailability { .. } => None,
             Self::UnknownWire { event } => event.prepared.semantic_revision_ref,
@@ -3013,6 +3071,7 @@ impl ScopedProjectedObservation {
             Self::Message { event, .. } => event.phase,
             Self::Plan { event, .. } => event.phase,
             Self::Task { event, .. } => event.phase,
+            Self::Tool { event, .. } => event.phase,
             Self::EffectiveState { event, .. } => event.phase,
             Self::ArtifactAvailability { phase, .. } => *phase,
             Self::UnknownWire { event } => event.prepared.phase,
@@ -3036,6 +3095,7 @@ impl ScopedProjectedObservation {
             Self::Message { event, .. } => &event.source.object,
             Self::Plan { event, .. } => &event.source.object,
             Self::Task { event, .. } => &event.source.object,
+            Self::Tool { event, .. } => &event.source.object,
             Self::EffectiveState { event, .. } => &event.source.object,
             Self::ArtifactAvailability { occurrence, .. } => occurrence.source(),
             Self::UnknownWire { event } => &event.prepared.source,
@@ -3060,6 +3120,7 @@ impl ScopedProjectedObservation {
             Self::Message { event, .. } => event.observed_at,
             Self::Plan { event, .. } => event.observed_at,
             Self::Task { event, .. } => event.observed_at,
+            Self::Tool { event, .. } => event.observed_at,
             Self::EffectiveState { event, .. } => event.observed_at,
             Self::ArtifactAvailability { observed_at, .. } => *observed_at,
             Self::UnknownWire { event } => event.prepared.observed_at,
@@ -3309,6 +3370,12 @@ pub enum ScopedObservationEvent {
         operation: ScopedRevisionedEntityOperation,
         retraction: Option<ScopedRevisionedEntityRetractionCause>,
         revision: Box<TaskRevisionFact>,
+    },
+    Tool {
+        fact_id: CanonicalFactId,
+        operation: ScopedRevisionedEntityOperation,
+        retraction: Option<ScopedRevisionedEntityRetractionCause>,
+        revision: Box<ToolRevisionFact>,
     },
     EffectiveState {
         fact_id: CanonicalFactId,
@@ -4335,6 +4402,7 @@ impl ScopedObservationConsumerDrain {
             | ScopedObservationEvent::Message { .. }
             | ScopedObservationEvent::Plan { .. }
             | ScopedObservationEvent::Task { .. }
+            | ScopedObservationEvent::Tool { .. }
             | ScopedObservationEvent::EffectiveState { .. }
             | ScopedObservationEvent::ArtifactAvailability { .. }
             | ScopedObservationEvent::UnknownWire { .. }
@@ -9060,6 +9128,67 @@ impl ScopedObservationEnvelopeMapper {
                     },
                 }
             }
+            ScopedProjectedObservation::Tool { event, .. } => {
+                if self
+                    .contract_selection
+                    .contract_versions
+                    .fact_family_versions
+                    .get("runtime.tool")
+                    != Some(&RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION)
+                {
+                    return Err(ScopedEnvelopeError::EventFamilyNotSelected);
+                }
+                if semantic_revision_ref != Some(event.semantic_revision_ref)
+                    || event
+                        .semantic_revision_ref
+                        .semantic_reference_contract_version
+                        != self
+                            .contract_selection
+                            .contract_versions
+                            .semantic_revision_reference_version
+                    || event.revision.session != self.root.session_key
+                    || (event.operation == ScopedRevisionedEntityOperation::Upsert
+                        && event.retraction.is_some())
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                let source = scoped_usage_envelope_source(&event.source)?;
+                let (authority, quality) = match event.operation {
+                    ScopedRevisionedEntityOperation::Upsert => (
+                        ScopedEnvelopeEvidenceAuthority::NativeRecord,
+                        QualifiedValueQuality::Exact,
+                    ),
+                    ScopedRevisionedEntityOperation::Retract => (
+                        ScopedEnvelopeEvidenceAuthority::CommonReducer,
+                        QualifiedValueQuality::Derived,
+                    ),
+                };
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: event.revision.actor_run,
+                    actor_attribution: ScopedActorAttribution::DerivedExact,
+                    source,
+                    native_time: None,
+                    observed_at: event.observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority,
+                        quality,
+                        effective_at: None,
+                        completeness: event.revision.completeness,
+                    },
+                    event: ScopedObservationEvent::Tool {
+                        fact_id: event.fact_id,
+                        operation: event.operation,
+                        retraction: event.retraction,
+                        revision: Box::new(event.revision),
+                    },
+                    native_evidence: ScopedNativeEvidence::Withheld {
+                        media_type: event.source.media_type,
+                        state: event.source.state,
+                        payload_hash: event.source.payload_hash,
+                        reason: ScopedNativeEvidenceWithheldReason::ProjectionBoundary,
+                    },
+                }
+            }
             ScopedProjectedObservation::EffectiveState { event, .. } => {
                 if self
                     .contract_selection
@@ -10918,6 +11047,7 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
         | ScopedProjectedObservation::Message { .. }
         | ScopedProjectedObservation::Plan { .. }
         | ScopedProjectedObservation::Task { .. }
+        | ScopedProjectedObservation::Tool { .. }
         | ScopedProjectedObservation::EffectiveState { .. }
         | ScopedProjectedObservation::ArtifactAvailability { .. } => (true, 0),
         ScopedProjectedObservation::UnknownWire { event } => {
@@ -10962,6 +11092,8 @@ pub enum ScopedProjectionError {
     PlanCapacityFull,
     #[error("scoped task projection entity capacity is full")]
     TaskCapacityFull,
+    #[error("scoped tool projection entity capacity is full")]
+    ToolCapacityFull,
     #[error("scoped effective-state projection entity capacity is full")]
     EffectiveStateCapacityFull,
     #[error("scoped artifact evidence capacity is full")]
@@ -11008,6 +11140,7 @@ struct ScopedProjectionFamilies {
     message: bool,
     plan: bool,
     task: bool,
+    tool: bool,
     effective_state: bool,
 }
 
@@ -11021,6 +11154,7 @@ impl ScopedProjectionFamilies {
             message: false,
             plan: false,
             task: false,
+            tool: false,
             effective_state: false,
         }
     }
@@ -11052,6 +11186,7 @@ impl ScopedProjectionFamilies {
                 == Some(&RUNTIME_MESSAGE_FACT_FAMILY_CONTRACT_VERSION),
             plan: versions.get("runtime.plan") == Some(&RUNTIME_PLAN_FACT_FAMILY_CONTRACT_VERSION),
             task: versions.get("runtime.task") == Some(&RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION),
+            tool: versions.get("runtime.tool") == Some(&RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION),
             effective_state: versions.get("runtime.effective-state")
                 == Some(&RUNTIME_EFFECTIVE_STATE_FACT_FAMILY_CONTRACT_VERSION),
         })
@@ -11086,6 +11221,9 @@ impl ScopedProjectionFamilies {
                 }
                 "runtime.task" => {
                     self.task && *version == RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION
+                }
+                "runtime.tool" => {
+                    self.tool && *version == RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION
                 }
                 "runtime.effective-state" => {
                     self.effective_state
@@ -11162,6 +11300,15 @@ struct ScopedTaskProjectionState {
 }
 
 #[derive(Clone)]
+struct ScopedToolProjectionState {
+    object_token: u64,
+    generation: u64,
+    semantic: FactSemanticRevision,
+    source: ScopedUsageV2Source,
+    revision: ToolRevisionFact,
+}
+
+#[derive(Clone)]
 struct ScopedEffectiveStateProjectionState {
     object_token: u64,
     generation: u64,
@@ -11220,6 +11367,8 @@ struct ScopedProjectionMutation {
     plan_retractions: Vec<CanonicalFactId>,
     task_upserts: BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
     task_retractions: Vec<CanonicalFactId>,
+    tool_upserts: BTreeMap<CanonicalFactId, ScopedToolProjectionState>,
+    tool_retractions: Vec<CanonicalFactId>,
     effective_state_upserts: BTreeMap<CanonicalFactId, ScopedEffectiveStateProjectionState>,
     effective_state_retractions: Vec<CanonicalFactId>,
     artifact_evidence: artifact_evidence::ScopedArtifactEvidenceMutation,
@@ -11256,6 +11405,7 @@ pub struct ScopedObservationProjectionSink {
     messages: BTreeMap<CanonicalFactId, ScopedMessageProjectionState>,
     plans: BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     tasks: BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
+    tools: BTreeMap<CanonicalFactId, ScopedToolProjectionState>,
     effective_states: BTreeMap<CanonicalFactId, ScopedEffectiveStateProjectionState>,
     artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer,
 }
@@ -11307,6 +11457,7 @@ impl ScopedObservationProjectionSink {
             messages: BTreeMap::new(),
             plans: BTreeMap::new(),
             tasks: BTreeMap::new(),
+            tools: BTreeMap::new(),
             effective_states: BTreeMap::new(),
             artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer::new(root_session),
         })
@@ -11424,6 +11575,10 @@ impl ScopedObservationProjectionSink {
             let removed = self.tasks.remove(&fact_id);
             debug_assert!(removed.is_some(), "prepared task retraction must exist");
         }
+        for fact_id in mutation.tool_retractions {
+            let removed = self.tools.remove(&fact_id);
+            debug_assert!(removed.is_some(), "prepared tool retraction must exist");
+        }
         for fact_id in mutation.effective_state_retractions {
             let removed = self.effective_states.remove(&fact_id);
             debug_assert!(
@@ -11434,6 +11589,7 @@ impl ScopedObservationProjectionSink {
         self.messages.extend(mutation.message_upserts);
         self.plans.extend(mutation.plan_upserts);
         self.tasks.extend(mutation.task_upserts);
+        self.tools.extend(mutation.tool_upserts);
         self.effective_states
             .extend(mutation.effective_state_upserts);
     }
@@ -11467,6 +11623,8 @@ impl ScopedObservationProjectionSink {
         self.plans
             .retain(|_, state| state.object_token != object_token);
         self.tasks
+            .retain(|_, state| state.object_token != object_token);
+        self.tools
             .retain(|_, state| state.object_token != object_token);
         self.effective_states
             .retain(|_, state| state.object_token != object_token);
@@ -11752,6 +11910,36 @@ impl ScopedObservationProjectionSink {
         })
     }
 
+    fn tool_replacement_snapshot(
+        &self,
+        phase: ScopedAppendDeliveryPhase,
+    ) -> Result<ScopedToolReplacementSnapshot, ScopedProjectionError> {
+        if phase == ScopedAppendDeliveryPhase::Live {
+            return Err(ScopedProjectionError::InvalidReplacementPhase);
+        }
+        let entities = self
+            .tools
+            .values()
+            .map(|state| ScopedToolReplacementEntity {
+                semantic: state.semantic,
+                generation: state.generation,
+                source: state.source.clone(),
+                revision: state.revision.clone(),
+            })
+            .collect::<Vec<_>>();
+        let entity_count = u64::try_from(entities.len())
+            .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+        let semantic_digest = tool_replacement_digest(&entities)?;
+        Ok(ScopedToolReplacementSnapshot {
+            fact_family_contract_version: RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION,
+            replacement_digest_contract_version: SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
+            phase,
+            entity_count,
+            semantic_digest,
+            entities,
+        })
+    }
+
     fn effective_state_replacement_snapshot(
         &self,
         phase: ScopedAppendDeliveryPhase,
@@ -11862,6 +12050,17 @@ impl ScopedObservationProjectionSink {
             ScopedRevisionedEntityRetractionCause::Reset(reset),
             ScopedProjectionError::InvalidResetState,
         )?;
+        let (tool_projected, tool_retractions) = self.prepare_tool_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedRetractionDelivery {
+                lane_ordinal,
+                observed_at,
+                phase: ScopedAppendDeliveryPhase::Correction,
+            },
+            ScopedRevisionedEntityRetractionCause::Reset(reset),
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let (effective_state_projected, effective_state_retractions) = self
             .prepare_effective_state_retractions(
                 object_token,
@@ -11882,6 +12081,7 @@ impl ScopedObservationProjectionSink {
                 .saturating_add(message_projected.len())
                 .saturating_add(plan_projected.len())
                 .saturating_add(task_projected.len())
+                .saturating_add(tool_projected.len())
                 .saturating_add(effective_state_projected.len())
                 .saturating_add(1),
         );
@@ -11900,6 +12100,7 @@ impl ScopedObservationProjectionSink {
         projected.extend(message_projected);
         projected.extend(plan_projected);
         projected.extend(task_projected);
+        projected.extend(tool_projected);
         projected.extend(effective_state_projected);
         Ok(ScopedProjectionPlan {
             projected,
@@ -11911,6 +12112,7 @@ impl ScopedObservationProjectionSink {
                 message_retractions,
                 plan_retractions,
                 task_retractions,
+                tool_retractions,
                 effective_state_retractions,
                 artifact_evidence,
                 ..ScopedProjectionMutation::default()
@@ -11955,6 +12157,10 @@ impl ScopedObservationProjectionSink {
                         .any(|state| state.object_token == object_token)
                     || self
                         .tasks
+                        .values()
+                        .any(|state| state.object_token == object_token)
+                    || self
+                        .tools
                         .values()
                         .any(|state| state.object_token == object_token)
                     || self
@@ -12069,6 +12275,20 @@ impl ScopedObservationProjectionSink {
                 ScopedProjectionError::InvalidPresenceState,
             )?,
         };
+        let (tool_projected, tool_retractions) = match change {
+            ScopedAppendPresenceChange::Created { .. } => (Vec::new(), Vec::new()),
+            ScopedAppendPresenceChange::Deleted { generation } => self.prepare_tool_retractions(
+                object_token,
+                generation,
+                ScopedRetractionDelivery {
+                    lane_ordinal,
+                    observed_at,
+                    phase,
+                },
+                ScopedRevisionedEntityRetractionCause::SourceDeleted { generation },
+                ScopedProjectionError::InvalidPresenceState,
+            )?,
+        };
         let (effective_state_projected, effective_state_retractions) = match change {
             ScopedAppendPresenceChange::Created { .. } => (Vec::new(), Vec::new()),
             ScopedAppendPresenceChange::Deleted { generation } => self
@@ -12092,6 +12312,7 @@ impl ScopedObservationProjectionSink {
                 .saturating_add(message_projected.len())
                 .saturating_add(plan_projected.len())
                 .saturating_add(task_projected.len())
+                .saturating_add(tool_projected.len())
                 .saturating_add(effective_state_projected.len())
                 .saturating_add(1),
         );
@@ -12110,6 +12331,7 @@ impl ScopedObservationProjectionSink {
         projected.extend(message_projected);
         projected.extend(plan_projected);
         projected.extend(task_projected);
+        projected.extend(tool_projected);
         projected.extend(effective_state_projected);
         Ok(ScopedProjectionPlan {
             projected,
@@ -12121,6 +12343,7 @@ impl ScopedObservationProjectionSink {
                 message_retractions,
                 plan_retractions,
                 task_retractions,
+                tool_retractions,
                 effective_state_retractions,
                 artifact_evidence,
                 ..ScopedProjectionMutation::default()
@@ -12522,6 +12745,61 @@ impl ScopedObservationProjectionSink {
         Ok((projected, fact_ids))
     }
 
+    fn prepare_tool_retractions(
+        &self,
+        object_token: u64,
+        generation: u64,
+        delivery: ScopedRetractionDelivery,
+        cause: ScopedRevisionedEntityRetractionCause,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<(Vec<ScopedProjectedObservation>, Vec<CanonicalFactId>), ScopedProjectionError>
+    {
+        if self
+            .tools
+            .values()
+            .any(|state| state.object_token == object_token && state.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        let fact_ids = self
+            .tools
+            .iter()
+            .filter_map(|(fact_id, state)| {
+                (state.object_token == object_token && state.generation == generation)
+                    .then_some(*fact_id)
+            })
+            .collect::<Vec<_>>();
+        let mut projected = Vec::with_capacity(fact_ids.len());
+        if self.families.tool {
+            for fact_id in &fact_ids {
+                let state = self
+                    .tools
+                    .get(fact_id)
+                    .expect("retraction keys came from the same tool reducer map");
+                projected.push(ScopedProjectedObservation::Tool {
+                    lane_ordinal: delivery.lane_ordinal,
+                    event: Box::new(ScopedToolEvent {
+                        event_id: revisioned_entity_event_id(
+                            b"runtime.tool",
+                            ScopedRevisionedEntityOperation::Retract,
+                            &state.semantic,
+                            Some(cause),
+                        ),
+                        semantic_revision_ref: state.semantic.semantic_revision_ref,
+                        fact_id: state.semantic.fact_id,
+                        operation: ScopedRevisionedEntityOperation::Retract,
+                        phase: delivery.phase,
+                        observed_at: delivery.observed_at,
+                        source: state.source.clone(),
+                        retraction: Some(cause),
+                        revision: state.revision.clone(),
+                    }),
+                });
+            }
+        }
+        Ok((projected, fact_ids))
+    }
+
     fn prepare_effective_state_retractions(
         &self,
         object_token: u64,
@@ -12600,6 +12878,7 @@ impl ScopedObservationProjectionSink {
         let mut message_events = Vec::new();
         let mut plan_events = Vec::new();
         let mut task_events = Vec::new();
+        let mut tool_events = Vec::new();
         let mut effective_state_events = Vec::new();
         for envelope in batch.facts() {
             match &envelope.value {
@@ -13022,6 +13301,72 @@ impl ScopedObservationProjectionSink {
                     }
                     mutation.task_upserts.insert(key, state);
                 }
+                Fact::ToolRevision(revision) => {
+                    let mut state =
+                        scoped_tool_state(object_token, source, evidence, envelope, revision)?;
+                    let key = state.semantic.fact_id;
+                    let current = mutation
+                        .tool_upserts
+                        .get(&key)
+                        .or_else(|| self.tools.get(&key));
+                    if let Some(current) = current {
+                        validate_actor_revision_progress(
+                            (
+                                current.object_token,
+                                current.generation,
+                                &current.semantic,
+                                &current.source,
+                                &current.revision,
+                            ),
+                            (
+                                state.object_token,
+                                state.generation,
+                                &state.semantic,
+                                &state.source,
+                                &state.revision,
+                            ),
+                        )?;
+                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
+                            continue;
+                        }
+                        if state.revision.operation == UserInputOperation::Retract
+                            && state.revision.completeness != ContractCompleteness::Complete
+                        {
+                            continue;
+                        }
+                        if state.revision.completeness == ContractCompleteness::Partial
+                            && state.revision.operation == UserInputOperation::Upsert
+                            && state.revision.correlated_native_id.is_none()
+                        {
+                            state.revision.correlated_native_id =
+                                current.revision.correlated_native_id.clone();
+                        }
+                    } else if state.revision.operation == UserInputOperation::Retract
+                        && state.revision.completeness != ContractCompleteness::Complete
+                    {
+                        continue;
+                    }
+                    if state.revision.operation == UserInputOperation::Retract {
+                        if self.tools.contains_key(&key)
+                            && !mutation.tool_upserts.contains_key(&key)
+                        {
+                            mutation.tool_retractions.push(key);
+                        }
+                        mutation.tool_upserts.remove(&key);
+                        if self.families.tool {
+                            tool_events.push(ScopedProjectedObservation::Tool {
+                                lane_ordinal,
+                                event: Box::new(tool_event(
+                                    &state,
+                                    ScopedRevisionedEntityOperation::Retract,
+                                    phase,
+                                )),
+                            });
+                        }
+                        continue;
+                    }
+                    mutation.tool_upserts.insert(key, state);
+                }
                 Fact::EffectiveStateRevision(revision) => {
                     let state = scoped_effective_state_state(
                         object_token,
@@ -13179,6 +13524,19 @@ impl ScopedObservationProjectionSink {
         {
             return Err(ScopedProjectionError::TaskCapacityFull);
         }
+        let new_tools = mutation
+            .tool_upserts
+            .keys()
+            .filter(|fact_id| !self.tools.contains_key(fact_id))
+            .count();
+        if self
+            .tools
+            .len()
+            .checked_add(new_tools)
+            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        {
+            return Err(ScopedProjectionError::ToolCapacityFull);
+        }
         let new_effective_states = mutation
             .effective_state_upserts
             .keys()
@@ -13325,6 +13683,19 @@ impl ScopedObservationProjectionSink {
             }
         }
         projected.extend(task_events);
+        if self.families.tool {
+            for state in mutation.tool_upserts.values() {
+                projected.push(ScopedProjectedObservation::Tool {
+                    lane_ordinal,
+                    event: Box::new(tool_event(
+                        state,
+                        ScopedRevisionedEntityOperation::Upsert,
+                        phase,
+                    )),
+                });
+            }
+        }
+        projected.extend(tool_events);
         if self.families.effective_state {
             for state in mutation.effective_state_upserts.values() {
                 projected.push(ScopedProjectedObservation::EffectiveState {
@@ -13458,6 +13829,7 @@ struct ScopedPreparedReplacementSnapshot {
     message: ScopedMessageReplacementSnapshot,
     plan: ScopedPlanReplacementSnapshot,
     task: ScopedTaskReplacementSnapshot,
+    tool: ScopedToolReplacementSnapshot,
     effective_state: ScopedEffectiveStateReplacementSnapshot,
     next_actor_run: usize,
     next_actor_affiliation: usize,
@@ -13465,6 +13837,7 @@ struct ScopedPreparedReplacementSnapshot {
     next_message: usize,
     next_plan: usize,
     next_task: usize,
+    next_tool: usize,
     next_effective_state: usize,
     next_usage_event: usize,
 }
@@ -13596,6 +13969,10 @@ impl ScopedObservationReplacementStage {
             .projection
             .task_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .map_err(ScopedReplacementStageError::Projection)?;
+        let tool = self
+            .projection
+            .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .map_err(ScopedReplacementStageError::Projection)?;
         let effective_state = self
             .projection
             .effective_state_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
@@ -13608,6 +13985,7 @@ impl ScopedObservationReplacementStage {
             message,
             plan,
             task,
+            tool,
             effective_state,
             next_actor_run: 0,
             next_actor_affiliation: 0,
@@ -13615,6 +13993,7 @@ impl ScopedObservationReplacementStage {
             next_message: 0,
             next_plan: 0,
             next_task: 0,
+            next_tool: 0,
             next_effective_state: 0,
             next_usage_event: 0,
         });
@@ -13867,6 +14246,47 @@ impl ScopedObservationReplacementStage {
         } else {
             0
         };
+        if self.projection.families.tool {
+            if let Some(entity) = prepared.tool.entities.get(prepared.next_tool) {
+                let offset = actor_count
+                    .checked_add(affiliation_count)
+                    .and_then(|count| count.checked_add(user_input_count))
+                    .and_then(|count| count.checked_add(message_count))
+                    .and_then(|count| count.checked_add(plan_count))
+                    .and_then(|count| count.checked_add(task_count))
+                    .ok_or(ScopedReplacementStageError::CapacityExhausted)?;
+                let lane_ordinal = replacement_lane_ordinal(offset, prepared.next_tool)?;
+                let event = ScopedToolEvent {
+                    event_id: revisioned_entity_event_id(
+                        b"runtime.tool",
+                        ScopedRevisionedEntityOperation::Upsert,
+                        &entity.semantic,
+                        None,
+                    ),
+                    semantic_revision_ref: entity.semantic.semantic_revision_ref,
+                    fact_id: entity.semantic.fact_id,
+                    operation: ScopedRevisionedEntityOperation::Upsert,
+                    phase: prepared.tool.phase,
+                    observed_at: entity.source.provenance.observed_at,
+                    source: entity.source.clone(),
+                    retraction: None,
+                    revision: entity.revision.clone(),
+                };
+                let receipt = delivery
+                    .offer_projected(vec![ScopedProjectedObservation::Tool {
+                        lane_ordinal,
+                        event: Box::new(event),
+                    }])
+                    .map_err(|failure| ScopedReplacementStageError::Delivery(failure.error))?;
+                prepared.next_tool += 1;
+                return Ok(Some(receipt));
+            }
+        }
+        let tool_count = if self.projection.families.tool {
+            prepared.tool.entities.len()
+        } else {
+            0
+        };
         if self.projection.families.effective_state {
             if let Some(entity) = prepared
                 .effective_state
@@ -13879,6 +14299,7 @@ impl ScopedObservationReplacementStage {
                     .and_then(|count| count.checked_add(message_count))
                     .and_then(|count| count.checked_add(plan_count))
                     .and_then(|count| count.checked_add(task_count))
+                    .and_then(|count| count.checked_add(tool_count))
                     .ok_or(ScopedReplacementStageError::CapacityExhausted)?;
                 let lane_ordinal = replacement_lane_ordinal(offset, prepared.next_effective_state)?;
                 let event = ScopedEffectiveStateEvent {
@@ -13924,6 +14345,7 @@ impl ScopedObservationReplacementStage {
             .and_then(|count| count.checked_add(message_count))
             .and_then(|count| count.checked_add(plan_count))
             .and_then(|count| count.checked_add(task_count))
+            .and_then(|count| count.checked_add(tool_count))
             .and_then(|count| count.checked_add(effective_state_count))
             .ok_or(ScopedReplacementStageError::CapacityExhausted)?;
         let lane_ordinal = replacement_lane_ordinal(usage_offset, prepared.next_usage_event)?;
@@ -13952,6 +14374,8 @@ impl ScopedObservationReplacementStage {
                     || prepared.next_plan == prepared.plan.entities.len())
                 && (!self.projection.families.task
                     || prepared.next_task == prepared.task.entities.len())
+                && (!self.projection.families.tool
+                    || prepared.next_tool == prepared.tool.entities.len())
                 && (!self.projection.families.effective_state
                     || prepared.next_effective_state == prepared.effective_state.entities.len())
                 && (!self.projection.families.usage_v2
@@ -13981,6 +14405,7 @@ impl ScopedObservationReplacementStage {
             Some(&prepared.message),
             Some(&prepared.plan),
             Some(&prepared.task),
+            Some(&prepared.tool),
             Some(&prepared.effective_state),
             source_coverage,
         )
@@ -14241,6 +14666,7 @@ fn replacement_family_manifest(
         None,
         None,
         None,
+        None,
         source_coverage,
     )
 }
@@ -14254,6 +14680,7 @@ fn selected_replacement_family_manifest(
     message: Option<&ScopedMessageReplacementSnapshot>,
     plan: Option<&ScopedPlanReplacementSnapshot>,
     task: Option<&ScopedTaskReplacementSnapshot>,
+    tool: Option<&ScopedToolReplacementSnapshot>,
     effective_state: Option<&ScopedEffectiveStateReplacementSnapshot>,
     source_coverage: &[SourceCoverageSet],
 ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
@@ -14294,6 +14721,10 @@ fn selected_replacement_family_manifest(
         || (families.task
             && task.is_none_or(|snapshot| {
                 !task_replacement_snapshot_is_valid(snapshot, semantic_reference_contract_version)
+            }))
+        || (families.tool
+            && tool.is_none_or(|snapshot| {
+                !tool_replacement_snapshot_is_valid(snapshot, semantic_reference_contract_version)
             }))
         || (families.effective_state
             && effective_state.is_none_or(|snapshot| {
@@ -14386,6 +14817,19 @@ fn selected_replacement_family_manifest(
             semantic_digest: snapshot.semantic_digest,
         });
     }
+    if families.tool {
+        let snapshot = tool.expect("selected tool snapshot was validated");
+        manifest.push(ScopedReplacementFamilyManifest {
+            fact_family: "runtime.tool".to_owned(),
+            contract_version: snapshot.fact_family_contract_version,
+            replacement_representation: ScopedReplacementRepresentation::CorrelatedLifecycleCurrent,
+            completeness: completeness
+                .remove("runtime.tool")
+                .ok_or(ScopedReplacementStageError::InvalidManifest)?,
+            entity_or_event_count: snapshot.entity_count,
+            semantic_digest: snapshot.semantic_digest,
+        });
+    }
     if families.usage_v2 {
         manifest.push(ScopedReplacementFamilyManifest {
             fact_family: "runtime.usage-v2".to_owned(),
@@ -14469,6 +14913,12 @@ fn selected_replacement_coverage_completeness(
                             && *version == RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION =>
                     {
                         "runtime.task"
+                    }
+                    "runtime.tool"
+                        if families.tool
+                            && *version == RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION =>
+                    {
+                        "runtime.tool"
                     }
                     "runtime.usage-v2"
                         if families.usage_v2
@@ -14932,6 +15382,24 @@ fn task_event(
     }
 }
 
+fn tool_event(
+    state: &ScopedToolProjectionState,
+    operation: ScopedRevisionedEntityOperation,
+    phase: ScopedAppendDeliveryPhase,
+) -> ScopedToolEvent {
+    ScopedToolEvent {
+        event_id: revisioned_entity_event_id(b"runtime.tool", operation, &state.semantic, None),
+        semantic_revision_ref: state.semantic.semantic_revision_ref,
+        fact_id: state.semantic.fact_id,
+        operation,
+        phase,
+        observed_at: state.source.provenance.observed_at,
+        source: state.source.clone(),
+        retraction: None,
+        revision: state.revision.clone(),
+    }
+}
+
 fn effective_state_event(
     state: &ScopedEffectiveStateProjectionState,
     operation: ScopedRevisionedEntityOperation,
@@ -15284,6 +15752,84 @@ fn task_replacement_snapshot_is_valid(
         && task_replacement_digest(&snapshot.entities).ok() == Some(snapshot.semantic_digest)
 }
 
+fn tool_replacement_digest(
+    entities: &[ScopedToolReplacementEntity],
+) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+    let mut hasher = replacement_family_digest(
+        b"runtime.tool",
+        RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION,
+        entity_count,
+    );
+    for entity in entities {
+        validate_and_hash_replacement_source(
+            &mut hasher,
+            &entity.semantic,
+            entity.generation,
+            &entity.source,
+        )?;
+        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
+        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_event_component(&mut hasher, entity.revision.native_tool_id.as_bytes());
+        hasher.update(&[match entity.revision.kind {
+            ToolRevisionKind::Call => 1,
+            ToolRevisionKind::Result => 2,
+        }]);
+        hash_event_component(&mut hasher, entity.revision.tool_name.as_bytes());
+        match &entity.revision.correlated_native_id {
+            Some(correlated) => {
+                hasher.update(&[1]);
+                hash_event_component(&mut hasher, correlated.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&[match entity.revision.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        }]);
+        hasher.update(&[match entity.revision.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        }]);
+    }
+    Ok(ScopedReplacementSemanticDigest(
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
+fn tool_replacement_snapshot_is_valid(
+    snapshot: &ScopedToolReplacementSnapshot,
+    semantic_reference_contract_version: u32,
+) -> bool {
+    snapshot.fact_family_contract_version == RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION
+        && snapshot.replacement_digest_contract_version
+            == SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION
+        && snapshot.phase != ScopedAppendDeliveryPhase::Live
+        && usize::try_from(snapshot.entity_count).ok() == Some(snapshot.entities.len())
+        && !snapshot
+            .entities
+            .windows(2)
+            .any(|entities| entities[0].semantic.fact_id >= entities[1].semantic.fact_id)
+        && snapshot.entities.iter().all(|entity| {
+            entity
+                .semantic
+                .semantic_revision_ref
+                .semantic_reference_contract_version
+                == semantic_reference_contract_version
+                && entity
+                    .revision
+                    .semantic_revision_key()
+                    .ok()
+                    .and_then(|key| FactRevisionId::derive(&entity.semantic.fact_id, 1, &key).ok())
+                    == Some(entity.semantic.fact_revision_id)
+        })
+        && tool_replacement_digest(&snapshot.entities).ok() == Some(snapshot.semantic_digest)
+}
+
 fn effective_state_replacement_digest(
     entities: &[ScopedEffectiveStateReplacementEntity],
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
@@ -15439,6 +15985,35 @@ fn scoped_task_state(
         return Err(ScopedProjectionError::InvalidSemanticRevision);
     }
     Ok(ScopedTaskProjectionState {
+        object_token,
+        generation: evidence.generation,
+        semantic,
+        source,
+        revision: revision.clone(),
+    })
+}
+
+fn scoped_tool_state(
+    object_token: u64,
+    source: &ScopedSourceObjectIdentity,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+    revision: &ToolRevisionFact,
+) -> Result<ScopedToolProjectionState, ScopedProjectionError> {
+    revision
+        .validate()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    if FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+        != semantic.fact_revision_id
+    {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    Ok(ScopedToolProjectionState {
         object_token,
         generation: evidence.generation,
         semantic,
@@ -19556,6 +20131,9 @@ impl ScopedObservationAccessHost {
         let task = projection
             .task_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
+        let tool = projection
+            .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
         let effective_state = projection
             .effective_state_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
@@ -19568,6 +20146,7 @@ impl ScopedObservationAccessHost {
             Some(&message),
             Some(&plan),
             Some(&task),
+            Some(&tool),
             Some(&effective_state),
             &watermark.source_coverage,
         )
@@ -19688,6 +20267,9 @@ impl ScopedObservationAccessHost {
         let task = projection
             .task_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(ScopedReplacementStageError::Projection)?;
+        let tool = projection
+            .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .map_err(ScopedReplacementStageError::Projection)?;
         let effective_state = projection
             .effective_state_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(ScopedReplacementStageError::Projection)?;
@@ -19700,6 +20282,7 @@ impl ScopedObservationAccessHost {
             Some(&message),
             Some(&plan),
             Some(&task),
+            Some(&tool),
             Some(&effective_state),
             &watermark.source_coverage,
         )?;
@@ -22893,7 +23476,7 @@ mod projection_tests {
                         "runtime.usage-v2" => {
                             ScopedReplacementRepresentation::UsageLatestContributionPerResponse
                         }
-                        "runtime.user-input-request" => {
+                        "runtime.user-input-request" | "runtime.tool" => {
                             ScopedReplacementRepresentation::CorrelatedLifecycleCurrent
                         }
                         "runtime.message" => ScopedReplacementRepresentation::CurrentGenerationLog,
@@ -24142,6 +24725,7 @@ mod projection_tests {
             None,
             None,
             None,
+            None,
             &coverage,
         )
         .unwrap();
@@ -24180,6 +24764,7 @@ mod projection_tests {
             None,
             None,
             None,
+            None,
             &coverage[..2],
         )
         .is_err());
@@ -24188,6 +24773,7 @@ mod projection_tests {
             &usage,
             None,
             Some(&affiliations),
+            None,
             None,
             None,
             None,
@@ -24210,6 +24796,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             None,
             None,
             None,
@@ -25026,6 +25613,7 @@ mod projection_tests {
                 ),
                 ("runtime.plan", RUNTIME_PLAN_FACT_FAMILY_CONTRACT_VERSION,),
                 ("runtime.task", RUNTIME_TASK_FACT_FAMILY_CONTRACT_VERSION,),
+                ("runtime.tool", RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION,),
                 (
                     "runtime.usage-v2",
                     RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
@@ -25856,6 +26444,7 @@ mod projection_tests {
             None,
             None,
             None,
+            None,
             &complete_coverage,
         )
         .unwrap();
@@ -25883,6 +26472,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             None,
             None,
             None,
@@ -26072,6 +26662,7 @@ mod projection_tests {
             None,
             None,
             None,
+            None,
             &complete_coverage,
         )
         .unwrap();
@@ -26087,6 +26678,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             None,
             None,
             None,
@@ -27340,6 +27932,303 @@ mod projection_tests {
                 .unwrap()
                 .entity_count,
             1
+        );
+    }
+
+    #[test]
+    fn rfc012d_tool_replaces_correlated_lifecycle_without_rekeying_or_dropping_unmatched() {
+        let fixture = crate::semantic_contract::decode_rfc012c_tool_v1(include_str!(
+            "../fixtures/contracts/rfc012c-tool-v1.json"
+        ))
+        .unwrap();
+        let selection = observation_contract_selection_for("runtime.tool");
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let fact_for =
+            |batch: &FactBatch,
+             native_tool_id: &str,
+             slot: &crate::semantic_contract::ToolRevisionSlotWire| {
+                ToolRevisionFact {
+                    session: batch
+                        .canonical_entity_key("session", b"native-session")
+                        .unwrap(),
+                    actor_run: batch
+                        .canonical_entity_key("actor-run", b"native-run")
+                        .unwrap(),
+                    native_tool_id: native_tool_id.to_owned(),
+                    kind: slot.kind,
+                    tool_name: fixture.tool_name.clone(),
+                    correlated_native_id: slot.correlated_native_id.clone(),
+                    completeness: slot.completeness,
+                    operation: slot.operation,
+                }
+            };
+
+        let call_record = rfc012c_record(0, 1, 10);
+        let mut call_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let call = fact_for(&call_batch, &fixture.native_call_id, &fixture.call);
+        call_batch
+            .push_native(
+                &call_record,
+                fixture.native_call_id.as_bytes(),
+                Fact::ToolRevision(call.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                    &call_record,
+                    call_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(projection.tools.len(), 1);
+        assert_eq!(
+            projection.tools.values().next().unwrap().revision.kind,
+            ToolRevisionKind::Call
+        );
+        assert_eq!(
+            projection
+                .tools
+                .values()
+                .next()
+                .unwrap()
+                .revision
+                .correlated_native_id,
+            None
+        );
+
+        let unmatched_record = rfc012c_record(1, 2, 11);
+        let mut unmatched_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        unmatched_batch
+            .push_native(
+                &unmatched_record,
+                fixture.native_result_id.as_bytes(),
+                Fact::ToolRevision(fact_for(
+                    &unmatched_batch,
+                    &fixture.native_result_id,
+                    &fixture.unmatched_result,
+                )),
+            )
+            .unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &unmatched_record,
+                unmatched_batch,
+            ))
+            .unwrap();
+        assert_eq!(projection.tools.len(), 2);
+        assert!(projection.tools.values().any(|state| {
+            state.revision.kind == ToolRevisionKind::Result
+                && state.revision.correlated_native_id.is_none()
+        }));
+
+        let correlated_call_record = rfc012c_record(2, 3, 12);
+        let mut correlated_call_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        correlated_call_batch
+            .push_native(
+                &correlated_call_record,
+                fixture.native_call_id.as_bytes(),
+                Fact::ToolRevision(fact_for(
+                    &correlated_call_batch,
+                    &fixture.native_call_id,
+                    &fixture.correlated_call,
+                )),
+            )
+            .unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                3,
+                ScopedAppendDeliveryPhase::Live,
+                &correlated_call_record,
+                correlated_call_batch,
+            ))
+            .unwrap();
+        let correlated_result_record = rfc012c_record(3, 4, 13);
+        let mut correlated_result_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        correlated_result_batch
+            .push_native(
+                &correlated_result_record,
+                fixture.native_result_id.as_bytes(),
+                Fact::ToolRevision(fact_for(
+                    &correlated_result_batch,
+                    &fixture.native_result_id,
+                    &fixture.correlated_result,
+                )),
+            )
+            .unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                4,
+                ScopedAppendDeliveryPhase::Live,
+                &correlated_result_record,
+                correlated_result_batch,
+            ))
+            .unwrap();
+        assert_eq!(projection.tools.len(), 2);
+        let call_state = projection
+            .tools
+            .values()
+            .find(|state| state.revision.kind == ToolRevisionKind::Call)
+            .unwrap();
+        let result_state = projection
+            .tools
+            .values()
+            .find(|state| state.revision.kind == ToolRevisionKind::Result)
+            .unwrap();
+        assert_eq!(call_state.revision.native_tool_id, fixture.native_call_id);
+        assert_eq!(
+            result_state.revision.native_tool_id,
+            fixture.native_result_id
+        );
+        assert_eq!(
+            call_state.revision.correlated_native_id.as_deref(),
+            Some(fixture.native_result_id.as_str())
+        );
+        assert_eq!(
+            result_state.revision.correlated_native_id.as_deref(),
+            Some(fixture.native_call_id.as_str())
+        );
+
+        let bootstrap = projection
+            .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let resync = projection
+            .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(bootstrap.entity_count, 2);
+        assert_eq!(bootstrap.semantic_digest, resync.semantic_digest);
+
+        let retract_record = rfc012c_record(4, 5, 14);
+        let mut retract_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        retract_batch
+            .push_native(
+                &retract_record,
+                fixture.native_call_id.as_bytes(),
+                Fact::ToolRevision(fact_for(
+                    &retract_batch,
+                    &fixture.native_call_id,
+                    &fixture.retract,
+                )),
+            )
+            .unwrap();
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    5,
+                    ScopedAppendDeliveryPhase::Live,
+                    &retract_record,
+                    retract_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(projection.tools.len(), 1);
+        assert_eq!(
+            projection.tools.values().next().unwrap().revision.kind,
+            ToolRevisionKind::Result
+        );
+
+        let restored_record = rfc012c_record(5, 6, 15);
+        let mut restored_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        restored_batch
+            .push_native(
+                &restored_record,
+                fixture.native_call_id.as_bytes(),
+                Fact::ToolRevision(call),
+            )
+            .unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                6,
+                ScopedAppendDeliveryPhase::Live,
+                &restored_record,
+                restored_batch,
+            ))
+            .unwrap();
+        let mut partial = fact_for(
+            &FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap(),
+            &fixture.native_call_id,
+            &fixture.partial,
+        );
+        partial.completeness = ContractCompleteness::Partial;
+        let correlated_again = fact_for(
+            &FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap(),
+            &fixture.native_call_id,
+            &fixture.correlated_call,
+        );
+        projection
+            .project(&rfc012c_decoded_frame(
+                7,
+                ScopedAppendDeliveryPhase::Live,
+                &rfc012c_record(6, 7, 16),
+                {
+                    let mut batch =
+                        FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context())
+                            .unwrap();
+                    batch
+                        .push_native(
+                            &rfc012c_record(6, 7, 16),
+                            fixture.native_call_id.as_bytes(),
+                            Fact::ToolRevision(correlated_again),
+                        )
+                        .unwrap();
+                    batch
+                },
+            ))
+            .unwrap();
+        let partial_record = rfc012c_record(7, 8, 17);
+        let mut partial_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        partial_batch
+            .push_native(
+                &partial_record,
+                fixture.native_call_id.as_bytes(),
+                Fact::ToolRevision(partial),
+            )
+            .unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                8,
+                ScopedAppendDeliveryPhase::Live,
+                &partial_record,
+                partial_batch,
+            ))
+            .unwrap();
+        let call_after_partial = projection
+            .tools
+            .values()
+            .find(|state| state.revision.kind == ToolRevisionKind::Call)
+            .unwrap();
+        assert_eq!(
+            call_after_partial.revision.correlated_native_id.as_deref(),
+            Some(fixture.native_result_id.as_str())
+        );
+        assert_eq!(projection.tools.len(), 2);
+        assert_eq!(
+            projection
+                .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap()
+                .entity_count,
+            2
         );
     }
 

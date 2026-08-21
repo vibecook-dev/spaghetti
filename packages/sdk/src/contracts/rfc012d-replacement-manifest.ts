@@ -28,6 +28,8 @@ import {
   PLAN_FAMILY_VERSION,
   TASK_FAMILY,
   TASK_FAMILY_VERSION,
+  TOOL_FAMILY,
+  TOOL_FAMILY_VERSION,
   USAGE_V2_FAMILY,
   USAGE_V2_FAMILY_VERSION,
   USER_INPUT_FAMILY,
@@ -39,7 +41,7 @@ export const SCOPED_REPLACEMENT_MANIFEST_CONTRACT_VERSION = 1 as const;
 export const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION = 1 as const;
 
 const MAX_CONTEXT_COVERAGE_SETS = 64;
-const MAX_MANIFEST_FAMILIES = 8;
+const MAX_MANIFEST_FAMILIES = 9;
 type UnknownRecord = Record<string, unknown>;
 
 export type ScopedReplacementRepresentation =
@@ -161,6 +163,8 @@ function familyContract(family: unknown): {
       return { family, version: PLAN_FAMILY_VERSION, representation: 'revisioned_entity_current' };
     case TASK_FAMILY:
       return { family, version: TASK_FAMILY_VERSION, representation: 'owned_set_snapshot_current' };
+    case TOOL_FAMILY:
+      return { family, version: TOOL_FAMILY_VERSION, representation: 'correlated_lifecycle_current' };
     case USAGE_V2_FAMILY:
       return {
         family,

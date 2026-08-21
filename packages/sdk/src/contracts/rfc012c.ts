@@ -34,11 +34,13 @@ export const USER_INPUT_FAMILY = 'runtime.user-input-request' as const;
 export const MESSAGE_FAMILY = 'runtime.message' as const;
 export const PLAN_FAMILY = 'runtime.plan' as const;
 export const TASK_FAMILY = 'runtime.task' as const;
+export const TOOL_FAMILY = 'runtime.tool' as const;
 export const EFFECTIVE_STATE_FAMILY_VERSION = 1 as const;
 export const USER_INPUT_FAMILY_VERSION = 1 as const;
 export const MESSAGE_FAMILY_VERSION = 1 as const;
 export const PLAN_FAMILY_VERSION = 1 as const;
 export const TASK_FAMILY_VERSION = 1 as const;
+export const TOOL_FAMILY_VERSION = 1 as const;
 export const ACTOR_RUN_FAMILY_VERSION = 1 as const;
 export const ACTOR_AFFILIATION_FAMILY_VERSION = 1 as const;
 export const USAGE_V2_FAMILY_VERSION = 1 as const;
@@ -1885,4 +1887,197 @@ export function parsePlanFixture(value: unknown, expectedContextInput: unknown):
 
 export function parseRfc012cPlanV1Json(json: string, expectedContextInput: unknown): PlanFixture {
   return parsePlanFixture(preflightSemanticFixtureJson(json), expectedContextInput);
+}
+
+export type ToolRevisionKind = 'call' | 'result';
+
+export interface ToolRevisionSlot {
+  completeness: ContractCompleteness;
+  correlated_native_id: string | null;
+  kind: ToolRevisionKind;
+  operation: UserInputOperation;
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+}
+
+export interface ToolFixture {
+  adapter_id: string;
+  actor_run: OpaqueContractReference;
+  family: typeof TOOL_FAMILY;
+  family_version: typeof TOOL_FAMILY_VERSION;
+  fixture_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  native_call_id: string;
+  native_result_id: string;
+  fact_id: OpaqueContractReference;
+  result_fact_id: OpaqueContractReference;
+  source_record_id: OpaqueContractReference;
+  tool_name: string;
+  call: ToolRevisionSlot;
+  unmatched_result: ToolRevisionSlot;
+  correlated_call: ToolRevisionSlot;
+  correlated_result: ToolRevisionSlot;
+  retract: ToolRevisionSlot;
+  partial: ToolRevisionSlot;
+  runtime_semantic_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  session: OpaqueContractReference;
+  source_instance_key: OpaqueContractReference;
+}
+
+const TOOL_SLOT_FIELDS = [
+  'completeness',
+  'correlated_native_id',
+  'kind',
+  'operation',
+  'semantic_revision_key_hex',
+  'semantic_revision_ref',
+] as const;
+
+function parseToolSlot(
+  value: unknown,
+  label: string,
+  kind: ToolRevisionKind,
+  operation: UserInputOperation,
+  completeness: ContractCompleteness,
+  correlatedNativeId: string | null,
+): ToolRevisionSlot {
+  const input = record(value, label);
+  assertKnownFields(input, TOOL_SLOT_FIELDS, label);
+  if (input.kind !== kind) {
+    throw new ContractValidationError(`${label} kind does not match its fixture slot`);
+  }
+  if (input.operation !== operation) {
+    throw new ContractValidationError(`${label} operation does not match its fixture slot`);
+  }
+  if (input.completeness !== completeness) {
+    throw new ContractValidationError(`${label} completeness does not match its fixture slot`);
+  }
+  let parsedCorrelated: string | null = null;
+  if (input.correlated_native_id !== null) {
+    parsedCorrelated = boundedText(
+      input.correlated_native_id,
+      `${label} correlated_native_id`,
+      MAX_RUNTIME_SEMANTIC_TEXT_BYTES,
+    );
+  }
+  if (parsedCorrelated !== correlatedNativeId) {
+    throw new ContractValidationError(`${label} correlation does not match the declared snapshot`);
+  }
+  return {
+    completeness: parseContractCompleteness(input.completeness, `${label} completeness`),
+    correlated_native_id: parsedCorrelated,
+    kind,
+    operation,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+  };
+}
+
+function parseToolFixtureShape(value: unknown): ToolFixture {
+  const input = record(value, 'tool fixture');
+  assertKnownFields(
+    input,
+    [
+      'adapter_id',
+      'actor_run',
+      'family',
+      'family_version',
+      'fixture_contract_version',
+      'native_call_id',
+      'native_result_id',
+      'fact_id',
+      'result_fact_id',
+      'source_record_id',
+      'tool_name',
+      'call',
+      'unmatched_result',
+      'correlated_call',
+      'correlated_result',
+      'retract',
+      'partial',
+      'runtime_semantic_contract_version',
+      'session',
+      'source_instance_key',
+    ],
+    'tool fixture',
+  );
+  if (input.family !== TOOL_FAMILY || input.family_version !== TOOL_FAMILY_VERSION) {
+    throw new ContractValidationError('tool fixture family must be runtime.tool@1');
+  }
+  const nativeCallId = boundedText(input.native_call_id, 'native_call_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
+  const nativeResultId = boundedText(input.native_result_id, 'native_result_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
+  if (nativeCallId === nativeResultId) {
+    throw new ContractValidationError('tool fixture call and result must be distinct identities');
+  }
+  const toolName = boundedText(input.tool_name, 'tool_name', MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
+  if (toolName !== 'read') {
+    throw new ContractValidationError('tool fixture tool_name must be the declared bounded name');
+  }
+  const call = parseToolSlot(input.call, 'call', 'call', 'upsert', 'complete', null);
+  const unmatchedResult = parseToolSlot(
+    input.unmatched_result,
+    'unmatched_result',
+    'result',
+    'upsert',
+    'complete',
+    null,
+  );
+  const correlatedCall = parseToolSlot(
+    input.correlated_call,
+    'correlated_call',
+    'call',
+    'upsert',
+    'complete',
+    nativeResultId,
+  );
+  const correlatedResult = parseToolSlot(
+    input.correlated_result,
+    'correlated_result',
+    'result',
+    'upsert',
+    'complete',
+    nativeCallId,
+  );
+  const retract = parseToolSlot(input.retract, 'retract', 'call', 'retract', 'complete', null);
+  const partial = parseToolSlot(input.partial, 'partial', 'call', 'upsert', 'partial', null);
+  return {
+    adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
+    actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
+    family: TOOL_FAMILY,
+    family_version: TOOL_FAMILY_VERSION,
+    fixture_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    native_call_id: nativeCallId,
+    native_result_id: nativeResultId,
+    fact_id: parseOpaqueContractReference(input.fact_id, 'tool call fact id'),
+    result_fact_id: parseOpaqueContractReference(input.result_fact_id, 'tool result fact id'),
+    source_record_id: parseOpaqueContractReference(input.source_record_id, 'tool source record id'),
+    tool_name: toolName,
+    call,
+    unmatched_result: unmatchedResult,
+    correlated_call: correlatedCall,
+    correlated_result: correlatedResult,
+    retract,
+    partial,
+    runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    session: parseOpaqueContractReference(input.session, 'session'),
+    source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
+  };
+}
+
+export function parseToolFixture(value: unknown, expectedContextInput: unknown): ToolFixture {
+  const expected = parseToolFixtureShape(expectedContextInput);
+  const parsed = parseToolFixtureShape(value);
+  if (parsed.fact_id !== expected.fact_id || parsed.result_fact_id !== expected.result_fact_id) {
+    throw new ContractValidationError('tool identity does not match the caller-held revision identity');
+  }
+  bindSlotIdentity('call', parsed.call, expected.call);
+  bindSlotIdentity('unmatched_result', parsed.unmatched_result, expected.unmatched_result);
+  bindSlotIdentity('correlated_call', parsed.correlated_call, expected.correlated_call);
+  bindSlotIdentity('correlated_result', parsed.correlated_result, expected.correlated_result);
+  bindSlotIdentity('retract', parsed.retract, expected.retract);
+  bindSlotIdentity('partial', parsed.partial, expected.partial);
+  return parsed;
+}
+
+export function parseRfc012cToolV1Json(json: string, expectedContextInput: unknown): ToolFixture {
+  return parseToolFixture(preflightSemanticFixtureJson(json), expectedContextInput);
 }

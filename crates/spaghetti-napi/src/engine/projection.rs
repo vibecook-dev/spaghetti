@@ -441,6 +441,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::MessageRevision(_)
                 | Fact::TaskRevision(_)
                 | Fact::PlanRevision(_)
+                | Fact::ToolRevision(_)
                 | Fact::EffectiveStateRevision(_) => {}
             }
         }

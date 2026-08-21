@@ -14,8 +14,8 @@ use serde_json::Value as JsonValue;
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
     CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
-    ExternalEntityRef, MessageRevisionRole, NativeIdentityClaim, TaskLifecycleState, UserInputKind,
-    UserInputLifecycleState, UserInputQuestion,
+    ExternalEntityRef, MessageRevisionRole, NativeIdentityClaim, TaskLifecycleState,
+    ToolRevisionKind, UserInputKind, UserInputLifecycleState, UserInputQuestion,
 };
 use crate::observation_contract::unknown_wire::ObservationUnknownWireContractSelection;
 use crate::observation_contract::ObservationContractSelection;
@@ -91,6 +91,19 @@ struct TaskEnvelopeWire {
     state: TaskLifecycleState,
     completeness: ContractCompleteness,
     owned_set: Option<Vec<String>>,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct ToolEnvelopeWire {
+    fact_family: &'static str,
+    fact_id: CanonicalFactId,
+    operation: &'static str,
+    native_tool_id: String,
+    kind: ToolRevisionKind,
+    tool_name: String,
+    correlated_native_id: Option<String>,
+    completeness: ContractCompleteness,
 }
 
 #[derive(Serialize)]
@@ -342,6 +355,31 @@ impl ScopedObservationKnownEnvelope {
                         state: revision.state,
                         completeness: revision.completeness,
                         owned_set: revision.owned_set.clone(),
+                    })?,
+                    common_context()?,
+                )
+            }
+            ScopedObservationEvent::Tool {
+                fact_id,
+                operation,
+                revision,
+                ..
+            } => {
+                require_no_specialized_contexts(&contexts)?;
+                (
+                    ScopedObservationKnownEventFamily::Interaction,
+                    serialize_wire(ToolEnvelopeWire {
+                        fact_family: "runtime.tool",
+                        fact_id: *fact_id,
+                        operation: match operation {
+                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
+                            super::ScopedRevisionedEntityOperation::Retract => "retract",
+                        },
+                        native_tool_id: revision.native_tool_id.clone(),
+                        kind: revision.kind,
+                        tool_name: revision.tool_name.clone(),
+                        correlated_native_id: revision.correlated_native_id.clone(),
+                        completeness: revision.completeness,
                     })?,
                     common_context()?,
                 )

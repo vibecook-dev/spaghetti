@@ -3,7 +3,12 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { ContractValidationError } from '../rfc012a.js';
-import { parseRfc012cMessageV1Json, parseRfc012cPlanV1Json, parseRfc012cTaskV1Json } from '../rfc012c.js';
+import {
+  parseRfc012cMessageV1Json,
+  parseRfc012cPlanV1Json,
+  parseRfc012cTaskV1Json,
+  parseRfc012cToolV1Json,
+} from '../rfc012c.js';
 
 const messageJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-message-v1.json', import.meta.url),
@@ -17,9 +22,14 @@ const planJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-plan-v1.json', import.meta.url),
   'utf8',
 );
+const toolJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-tool-v1.json', import.meta.url),
+  'utf8',
+);
 const messageContext = JSON.parse(messageJson) as unknown;
 const taskContext = JSON.parse(taskJson) as unknown;
 const planContext = JSON.parse(planJson) as unknown;
+const toolContext = JSON.parse(toolJson) as unknown;
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -66,6 +76,20 @@ test('RFC 012C plan fixture validates step replacement and complete owned-set om
   assert.doesNotMatch(JSON.stringify(fixture), /\/Users\/|~\/|\.db\b|claude-code|codex|grok/);
 });
 
+test('RFC 012C tool fixture validates unmatched result and correlation without rekeying', () => {
+  const fixture = parseRfc012cToolV1Json(toolJson, toolContext);
+  assert.equal(fixture.family, 'runtime.tool');
+  assert.equal(fixture.call.kind, 'call');
+  assert.equal(fixture.unmatched_result.kind, 'result');
+  assert.equal(fixture.unmatched_result.correlated_native_id, null);
+  assert.equal(fixture.correlated_call.correlated_native_id, 'fixture-result-1');
+  assert.equal(fixture.correlated_result.correlated_native_id, 'fixture-call-1');
+  assert.equal(fixture.retract.operation, 'retract');
+  assert.equal(fixture.partial.completeness, 'partial');
+  assert.notEqual(fixture.fact_id, fixture.result_fact_id);
+  assert.doesNotMatch(JSON.stringify(fixture), /\/Users\/|~\/|\.db\b|claude-code|codex|grok/);
+});
+
 test('message and task fixtures reject identity and snapshot drift', () => {
   const drifted = clone(messageContext) as { fact_id: string; session: string };
   drifted.fact_id = drifted.session;
@@ -78,4 +102,8 @@ test('message and task fixtures reject identity and snapshot drift', () => {
   const planDrifted = clone(planContext) as { fact_id: string; session: string };
   planDrifted.fact_id = planDrifted.session;
   assert.throws(() => parseRfc012cPlanV1Json(JSON.stringify(planDrifted), planContext), ContractValidationError);
+
+  const toolDrifted = clone(toolContext) as { fact_id: string; session: string };
+  toolDrifted.fact_id = toolDrifted.session;
+  assert.throws(() => parseRfc012cToolV1Json(JSON.stringify(toolDrifted), toolContext), ContractValidationError);
 });

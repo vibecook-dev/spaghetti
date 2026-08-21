@@ -1150,6 +1150,76 @@ impl PlanRevisionFact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ToolRevisionKind {
+    Call,
+    Result,
+}
+
+/// RFC 012C tool call or result. Calls and results are separate correlated
+/// lifecycle entities; unmatched results are retained, and correlation updates
+/// the relationship without changing either entity key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub native_tool_id: String,
+    pub kind: ToolRevisionKind,
+    pub tool_name: String,
+    pub correlated_native_id: Option<String>,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+}
+
+impl ToolRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        validate_runtime_semantic_text("native_tool_id", Some(self.native_tool_id.as_str()))?;
+        validate_runtime_semantic_text("tool_name", Some(self.tool_name.as_str()))?;
+        if let Some(correlated) = &self.correlated_native_id {
+            validate_runtime_semantic_text("correlated_native_id", Some(correlated.as_str()))?;
+            if correlated == &self.native_tool_id {
+                return Err(AdapterError::invalid_contract(
+                    "tool correlation must name the other call or result identity",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.tool/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.native_tool_id.as_bytes());
+        encoded.push(match self.kind {
+            ToolRevisionKind::Call => 1,
+            ToolRevisionKind::Result => 2,
+        });
+        push_component(&mut encoded, self.tool_name.as_bytes());
+        match &self.correlated_native_id {
+            Some(correlated) => {
+                encoded.push(1);
+                push_component(&mut encoded, correlated.as_bytes());
+            }
+            None => encoded.push(0),
+        }
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EffectiveStateDimension {
     Model,
     Effort,
@@ -2147,6 +2217,7 @@ pub enum Fact {
     MessageRevision(MessageRevisionFact),
     TaskRevision(TaskRevisionFact),
     PlanRevision(PlanRevisionFact),
+    ToolRevision(ToolRevisionFact),
     EffectiveStateRevision(EffectiveStateRevisionFact),
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
@@ -2186,6 +2257,7 @@ impl Fact {
             Self::MessageRevision(_) => "runtime.message",
             Self::TaskRevision(_) => "runtime.task",
             Self::PlanRevision(_) => "runtime.plan",
+            Self::ToolRevision(_) => "runtime.tool",
             Self::EffectiveStateRevision(_) => "runtime.effective-state",
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
@@ -2221,6 +2293,7 @@ impl Fact {
             | Self::MessageRevision(_)
             | Self::TaskRevision(_)
             | Self::PlanRevision(_)
+            | Self::ToolRevision(_)
             | Self::EffectiveStateRevision(_) => None,
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
@@ -2251,6 +2324,7 @@ impl Fact {
             Self::MessageRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::TaskRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::PlanRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::ToolRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::EffectiveStateRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ArtifactMetadataSnapshot(revision) => revision.semantic_revision_key(),
             Self::ArtifactContent(revision) => revision.semantic_revision_key(),
@@ -2813,6 +2887,7 @@ impl FactBatch {
                             | (Fact::MessageRevision(_), Fact::MessageRevision(_))
                             | (Fact::TaskRevision(_), Fact::TaskRevision(_))
                             | (Fact::PlanRevision(_), Fact::PlanRevision(_))
+                            | (Fact::ToolRevision(_), Fact::ToolRevision(_))
                             | (
                                 Fact::EffectiveStateRevision(_),
                                 Fact::EffectiveStateRevision(_)

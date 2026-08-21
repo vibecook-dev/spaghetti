@@ -33,6 +33,7 @@ const USER_INPUT_FAMILY: &str = "runtime.user-input-request";
 const MESSAGE_FAMILY: &str = "runtime.message";
 const PLAN_FAMILY: &str = "runtime.plan";
 const TASK_FAMILY: &str = "runtime.task";
+const TOOL_FAMILY: &str = "runtime.tool";
 const MAX_INTERACTION_QUESTIONS: usize = 32;
 const MAX_INTERACTION_OPTIONS: usize = 32;
 const MAX_MESSAGE_CONTENT_BLOCKS: usize = 32;
@@ -243,7 +244,7 @@ pub(crate) struct EffectiveStateFixtureWire {
 }
 
 pub(crate) use crate::adapter::{
-    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
+    ToolRevisionKind, UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -400,6 +401,42 @@ pub(crate) struct PlanFixtureWire {
     pub retract: PlanRevisionSlotWire,
     pub partial: PlanRevisionSlotWire,
     pub collection_omit: PlanRevisionSlotWire,
+    pub runtime_semantic_contract_version: u32,
+    pub session: CanonicalEntityKey,
+    pub source_instance_key: CanonicalSourceInstanceKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToolRevisionSlotWire {
+    pub completeness: ContractCompleteness,
+    pub correlated_native_id: Option<String>,
+    pub kind: ToolRevisionKind,
+    pub operation: UserInputOperation,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToolFixtureWire {
+    pub adapter_id: String,
+    pub actor_run: CanonicalEntityKey,
+    pub family: String,
+    pub family_version: u32,
+    pub fixture_contract_version: u32,
+    pub native_call_id: String,
+    pub native_result_id: String,
+    pub fact_id: CanonicalFactId,
+    pub result_fact_id: CanonicalFactId,
+    pub source_record_id: SourceRecordId,
+    pub tool_name: String,
+    pub call: ToolRevisionSlotWire,
+    pub unmatched_result: ToolRevisionSlotWire,
+    pub correlated_call: ToolRevisionSlotWire,
+    pub correlated_result: ToolRevisionSlotWire,
+    pub retract: ToolRevisionSlotWire,
+    pub partial: ToolRevisionSlotWire,
     pub runtime_semantic_contract_version: u32,
     pub session: CanonicalEntityKey,
     pub source_instance_key: CanonicalSourceInstanceKey,
@@ -1972,6 +2009,186 @@ pub(crate) fn parse_rfc012c_plan_v1_json(json: &str) -> Result<String, SemanticF
     encode_json(&decode_rfc012c_plan_v1(json)?)
 }
 
+fn tool_slot_native_id<'a>(fixture: &'a ToolFixtureWire, slot: &ToolRevisionSlotWire) -> &'a str {
+    match slot.kind {
+        ToolRevisionKind::Call => fixture.native_call_id.as_str(),
+        ToolRevisionKind::Result => fixture.native_result_id.as_str(),
+    }
+}
+
+fn validate_tool_slot(
+    fixture: &ToolFixtureWire,
+    slot_name: &str,
+    slot: &ToolRevisionSlotWire,
+    expected_kind: ToolRevisionKind,
+    expected_operation: UserInputOperation,
+    expected_completeness: ContractCompleteness,
+    expected_correlated: Option<&str>,
+) -> Result<(), SemanticFixtureError> {
+    if slot.kind != expected_kind {
+        return Err(SemanticFixtureError::invalid(format!(
+            "tool {slot_name} kind does not match its fixture slot"
+        )));
+    }
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "tool {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != expected_completeness {
+        return Err(SemanticFixtureError::invalid(format!(
+            "tool {slot_name} completeness does not match its fixture slot"
+        )));
+    }
+    match (expected_correlated, slot.correlated_native_id.as_deref()) {
+        (None, None) => {}
+        (Some(expected), Some(actual)) if actual == expected => {
+            validate_canonical_runtime_text("correlated_native_id", actual)?;
+        }
+        _ => {
+            return Err(SemanticFixtureError::invalid(format!(
+                "tool {slot_name} correlation does not match the declared snapshot"
+            )));
+        }
+    }
+    verify_slot_identity(
+        TOOL_FAMILY,
+        tool_slot_native_id(fixture, slot).as_bytes(),
+        slot_name,
+        match slot.kind {
+            ToolRevisionKind::Call => &fixture.fact_id,
+            ToolRevisionKind::Result => &fixture.result_fact_id,
+        },
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+    )
+}
+
+fn validate_rfc012c_tool_fixture(fixture: &ToolFixtureWire) -> Result<(), SemanticFixtureError> {
+    if fixture.fixture_contract_version != RFC012C_FIXTURE_CONTRACT_VERSION
+        || fixture.runtime_semantic_contract_version != RUNTIME_SEMANTIC_CONTRACT_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "unsupported tool fixture contract version",
+        ));
+    }
+    if fixture.family != TOOL_FAMILY || fixture.family_version != FAMILY_VERSION {
+        return Err(SemanticFixtureError::invalid(
+            "tool fixture family must be runtime.tool@1",
+        ));
+    }
+    validate_canonical_source_string("adapter_id", &fixture.adapter_id, MAX_ADAPTER_ID_BYTES)?;
+    validate_canonical_runtime_text("native_call_id", &fixture.native_call_id)?;
+    validate_canonical_runtime_text("native_result_id", &fixture.native_result_id)?;
+    validate_canonical_runtime_text("tool_name", &fixture.tool_name)?;
+    if fixture.native_call_id == fixture.native_result_id {
+        return Err(SemanticFixtureError::invalid(
+            "tool fixture call and result must be distinct identities",
+        ));
+    }
+    if fixture.tool_name != "read" {
+        return Err(SemanticFixtureError::invalid(
+            "tool fixture tool_name must be the declared bounded name",
+        ));
+    }
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        TOOL_FAMILY,
+        fixture.native_call_id.as_bytes(),
+        &fixture.fact_id,
+    )?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        TOOL_FAMILY,
+        fixture.native_result_id.as_bytes(),
+        &fixture.result_fact_id,
+    )?;
+    validate_tool_slot(
+        fixture,
+        "call",
+        &fixture.call,
+        ToolRevisionKind::Call,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        None,
+    )?;
+    validate_tool_slot(
+        fixture,
+        "unmatched_result",
+        &fixture.unmatched_result,
+        ToolRevisionKind::Result,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        None,
+    )?;
+    validate_tool_slot(
+        fixture,
+        "correlated_call",
+        &fixture.correlated_call,
+        ToolRevisionKind::Call,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        Some(&fixture.native_result_id),
+    )?;
+    validate_tool_slot(
+        fixture,
+        "correlated_result",
+        &fixture.correlated_result,
+        ToolRevisionKind::Result,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        Some(&fixture.native_call_id),
+    )?;
+    validate_tool_slot(
+        fixture,
+        "retract",
+        &fixture.retract,
+        ToolRevisionKind::Call,
+        UserInputOperation::Retract,
+        ContractCompleteness::Complete,
+        None,
+    )?;
+    validate_tool_slot(
+        fixture,
+        "partial",
+        &fixture.partial,
+        ToolRevisionKind::Call,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+        None,
+    )?;
+    let refs = [
+        &fixture.call.semantic_revision_ref,
+        &fixture.unmatched_result.semantic_revision_ref,
+        &fixture.correlated_call.semantic_revision_ref,
+        &fixture.correlated_result.semantic_revision_ref,
+        &fixture.retract.semantic_revision_ref,
+        &fixture.partial.semantic_revision_ref,
+    ];
+    for (index, left) in refs.iter().enumerate() {
+        for right in refs.iter().skip(index + 1) {
+            if left == right {
+                return Err(SemanticFixtureError::invalid(
+                    "tool revision slots must have distinct semantic identity",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_rfc012c_tool_v1(json: &str) -> Result<ToolFixtureWire, SemanticFixtureError> {
+    let fixture: ToolFixtureWire = decode_json(json)?;
+    validate_rfc012c_tool_fixture(&fixture)?;
+    Ok(fixture)
+}
+
+pub(crate) fn parse_rfc012c_tool_v1_json(json: &str) -> Result<String, SemanticFixtureError> {
+    encode_json(&decode_rfc012c_tool_v1(json)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1986,6 +2203,7 @@ mod tests {
         include_str!("../fixtures/contracts/rfc012c-message-v1.json");
     const RFC012C_TASK_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-task-v1.json");
     const RFC012C_PLAN_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-plan-v1.json");
+    const RFC012C_TOOL_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-tool-v1.json");
 
     fn assert_privacy_safe(json: &str) {
         assert!(!json.contains("/Users/"));
@@ -2539,6 +2757,34 @@ mod tests {
         assert_ne!(
             fixture.current.semantic_revision_ref,
             fixture.complete_steps.semantic_revision_ref
+        );
+    }
+
+    #[test]
+    fn rfc012c_tool_fixture_parses_correlation_and_unmatched_result() {
+        let parsed = parse_rfc012c_tool_v1_json(RFC012C_TOOL_FIXTURE).unwrap();
+        assert_privacy_safe(&parsed);
+        let original: serde_json::Value = serde_json::from_str(RFC012C_TOOL_FIXTURE).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(round_trip, original);
+        let fixture: ToolFixtureWire = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(fixture.call.kind, ToolRevisionKind::Call);
+        assert_eq!(fixture.unmatched_result.kind, ToolRevisionKind::Result);
+        assert_eq!(fixture.unmatched_result.correlated_native_id, None);
+        assert_eq!(
+            fixture.correlated_call.correlated_native_id.as_deref(),
+            Some("fixture-result-1")
+        );
+        assert_eq!(
+            fixture.correlated_result.correlated_native_id.as_deref(),
+            Some("fixture-call-1")
+        );
+        assert_eq!(fixture.retract.operation, UserInputOperation::Retract);
+        assert_eq!(fixture.partial.completeness, ContractCompleteness::Partial);
+        assert_ne!(fixture.fact_id, fixture.result_fact_id);
+        assert_ne!(
+            fixture.call.semantic_revision_ref,
+            fixture.correlated_call.semantic_revision_ref
         );
     }
 }
