@@ -2523,6 +2523,25 @@ Unrecognized driver kinds and lifecycle/boundary drift fail bundle
 verification. This still selects no adapter decoder, joins no native root,
 opens no source, and changes no Candidate capability or promotion guard.
 
+Commit `b8f308e` binds that closed declaration contract to one actual adapter
+runtime stream without opening the source. Digest verification now also
+retains the declaration's exact ordered pattern set, decoder ID, fact
+authority, and append per-batch record ceiling. A source reservation can be
+consumed into a non-serializable runtime-stream reservation only when the
+adapter manifest still carries the same support release, source declaration,
+and scope-program binding; the supplied source instance has one unambiguous
+declared access-root label; and exactly one returned `StreamSpec` matches the
+declared stream, root, full include set, empty exclude set, decoder, authority,
+common-driver bounds, consistency policy, and mirror-source deletion policy.
+Missing or duplicate streams and any package, instance, selector, decoder,
+authority, lifecycle, or bound drift fail through one path-free error and
+consume the access reservation conservatively. The retained binding carries
+the opaque source-instance key and its identity-contract version for later
+topology-neutral source identity, but it still carries no approved native root
+and invokes no listing, object driver, decoder, or watcher. The attachment does
+not call this seam while the dynamic-relation guard is closed; Candidate
+documents, capability status, and promotion state remain unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
