@@ -117,6 +117,8 @@ export interface SubagentMeta {
   color?: string;
   planModeRequired?: boolean;
   permissionMode?: string;
+  /** Whether the parent explicitly stopped this subagent. */
+  stoppedByUser?: boolean;
   /**
    * `tool_use` id of the Agent call that spawned this subagent — the join
    * back to the assistant message that launched it.

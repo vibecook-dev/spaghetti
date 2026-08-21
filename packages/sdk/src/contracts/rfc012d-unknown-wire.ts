@@ -395,12 +395,20 @@ function utf8BytesBounded(value: string, maxBytes: number, label: string): numbe
   return bytes;
 }
 
+function hasAsciiControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 0x1f || codeUnit === 0x7f) return true;
+  }
+  return false;
+}
+
 function validateObjectKey(value: string): string {
   if (
     value.length === 0 ||
     value.length > MAX_UNKNOWN_WIRE_OBJECT_KEY_BYTES ||
     value.trim() !== value ||
-    /[\u0000-\u001f\u007f]/.test(value) ||
+    hasAsciiControl(value) ||
     value === '__proto__' ||
     value === 'prototype' ||
     value === 'constructor' ||

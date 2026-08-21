@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::{
@@ -8,14 +9,19 @@ use super::{
     SupportOperation, TypedAccessAuthorization,
 };
 
+type NativeSupportProbeDriver =
+    dyn Fn(&[PathBuf]) -> Result<NativeArtifactProbe, AdapterError> + Send + Sync + 'static;
+
 pub struct AdapterRegistryBuilder {
     adapters: Vec<Arc<dyn AgentAdapter>>,
+    native_support_probe_drivers: Vec<(String, Arc<NativeSupportProbeDriver>)>,
 }
 
 impl AdapterRegistryBuilder {
     pub fn new() -> Self {
         Self {
             adapters: Vec::new(),
+            native_support_probe_drivers: Vec::new(),
         }
     }
 
@@ -27,29 +33,56 @@ impl AdapterRegistryBuilder {
         self
     }
 
+    /// Register one trusted-host probe driver without granting the adapter
+    /// filesystem authority. The driver is resolved by adapter ID only after
+    /// the adapter registry and support catalog have both been verified.
+    pub(crate) fn register_native_support_probe<F>(mut self, adapter_id: &str, driver: F) -> Self
+    where
+        F: Fn(&[PathBuf]) -> Result<NativeArtifactProbe, AdapterError> + Send + Sync + 'static,
+    {
+        self.native_support_probe_drivers
+            .push((adapter_id.to_string(), Arc::new(driver)));
+        self
+    }
+
     pub fn build(self) -> Result<AdapterRegistry, AdapterError> {
-        self.build_inner(None)
+        self.build_inner(None, false)
     }
 
     /// Explicit compatibility path for hosts that predate promoted RFC 012A
     /// support packages. This registry cannot mint typed-access authority.
     pub fn build_legacy(self) -> Result<AdapterRegistry, AdapterError> {
-        self.build_inner(None)
+        self.build_inner(None, false)
+    }
+
+    /// Verify every registered adapter against a compiled support bundle while
+    /// retaining candidate adapters on the explicit non-authorizing legacy
+    /// path. Typed access still selects promoted releases only.
+    pub(crate) fn build_verified(
+        self,
+        support_catalog: Arc<SupportCatalog>,
+    ) -> Result<AdapterRegistry, AdapterError> {
+        self.build_inner(Some(support_catalog), false)
     }
 
     pub fn build_supported(
         self,
         support_catalog: Arc<SupportCatalog>,
     ) -> Result<AdapterRegistry, AdapterError> {
-        self.build_inner(Some(support_catalog))
+        self.build_inner(Some(support_catalog), true)
     }
 
     fn build_inner(
         self,
         support_catalog: Option<Arc<SupportCatalog>>,
+        require_promoted_registrations: bool,
     ) -> Result<AdapterRegistry, AdapterError> {
+        let Self {
+            adapters: registered_adapters,
+            native_support_probe_drivers: registered_probe_drivers,
+        } = self;
         let mut adapters = BTreeMap::new();
-        for adapter in self.adapters {
+        for adapter in registered_adapters {
             let manifest =
                 catch_unwind(AssertUnwindSafe(|| adapter.manifest().clone())).map_err(|_| {
                     AdapterError::new(
@@ -79,7 +112,7 @@ impl AdapterRegistryBuilder {
                             binding,
                             scope_programs,
                         ),
-                        true,
+                        require_promoted_registrations,
                     )
                     .map_err(|error| AdapterError::invalid_contract(error.to_string()))?;
             }
@@ -90,9 +123,28 @@ impl AdapterRegistryBuilder {
                 )));
             }
         }
+        let mut native_support_probe_drivers = BTreeMap::new();
+        for (raw_adapter_id, driver) in registered_probe_drivers {
+            let adapter_id = AdapterId::new(raw_adapter_id)?;
+            if !adapters.contains_key(&adapter_id) {
+                return Err(AdapterError::invalid_contract(format!(
+                    "native support probe references unregistered adapter {adapter_id}"
+                )));
+            }
+            if native_support_probe_drivers
+                .insert(adapter_id.clone(), driver)
+                .is_some()
+            {
+                return Err(AdapterError::invalid_contract(format!(
+                    "duplicate native support probe for adapter {adapter_id}"
+                )));
+            }
+        }
         Ok(AdapterRegistry {
             adapters,
+            native_support_probe_drivers,
             support_catalog,
+            require_promoted_registrations,
         })
     }
 }
@@ -105,7 +157,9 @@ impl Default for AdapterRegistryBuilder {
 
 pub struct AdapterRegistry {
     adapters: BTreeMap<AdapterId, Arc<dyn AgentAdapter>>,
+    native_support_probe_drivers: BTreeMap<AdapterId, Arc<NativeSupportProbeDriver>>,
     support_catalog: Option<Arc<SupportCatalog>>,
+    require_promoted_registrations: bool,
 }
 
 impl AdapterRegistry {
@@ -133,7 +187,93 @@ impl AdapterRegistry {
     }
 
     pub fn enforces_promoted_support(&self) -> bool {
+        self.require_promoted_registrations
+    }
+
+    pub(crate) fn has_verified_support_catalog(&self) -> bool {
         self.support_catalog.is_some()
+    }
+
+    /// Run a host-registered, bounded native probe under panic containment.
+    /// The adapter never receives the roots or performs this artifact read.
+    pub(crate) fn probe_native_support(
+        &self,
+        adapter_id: &AdapterId,
+        roots: &[PathBuf],
+    ) -> Result<Option<NativeArtifactProbe>, AdapterError> {
+        if !self.adapters.contains_key(adapter_id) {
+            return Err(AdapterError::invalid_contract(
+                "native support probe references an unregistered adapter",
+            ));
+        }
+        let Some(driver) = self.native_support_probe_drivers.get(adapter_id) else {
+            return Ok(None);
+        };
+        catch_unwind(AssertUnwindSafe(|| driver(roots)))
+            .map_err(|_| {
+                AdapterError::new(
+                    super::AdapterErrorClass::AdapterFatal,
+                    "native_support_probe_panic",
+                    "trusted host native support probe panicked",
+                )
+            })?
+            .map(Some)
+    }
+
+    /// Select the promoted durable contract for a native artifact when the
+    /// compiled catalog recognizes it. Recognized-but-unverified and
+    /// candidate artifacts stay on the caller's explicit legacy path and do
+    /// not receive a typed authorization.
+    pub(crate) fn authorize_durable_if_supported(
+        &self,
+        adapter_id: &AdapterId,
+        probe: &NativeArtifactProbe,
+    ) -> Result<Option<TypedAccessAuthorization>, AdapterError> {
+        let Some(catalog) = self.support_catalog.as_ref() else {
+            return Ok(None);
+        };
+        let decision = catalog
+            .classify(probe)
+            .map_err(|error| AdapterError::invalid_contract(error.to_string()))?;
+        if !decision.permissions().durable {
+            return Ok(None);
+        }
+        let mut fact_family_versions = BTreeMap::new();
+        for family in [
+            "runtime.actor-run",
+            "runtime.actor-affiliation",
+            "runtime.usage-v2",
+        ] {
+            fact_family_versions.insert(family.to_string(), vec![1]);
+        }
+        let request = ContractVersionRequest {
+            selection_contract_version: 1,
+            model_major: 1,
+            external_entity_reference_version: 1,
+            semantic_revision_reference_version: 1,
+            coverage_contract_versions: vec![1],
+            fact_family_versions: fact_family_versions.clone(),
+            query_pack_versions: Some(vec![1]),
+            observation_contract_versions: None,
+        };
+        let offer = ContractVersionOffer {
+            selection_contract_version: 1,
+            model_major: 1,
+            external_entity_reference_versions: vec![1],
+            semantic_revision_reference_versions: vec![1],
+            coverage_contract_versions: vec![1],
+            fact_family_versions,
+            query_pack_versions: vec![1],
+            observation_contract_versions: Vec::new(),
+        };
+        self.authorize_typed_access(
+            adapter_id,
+            probe,
+            SupportOperation::DurableHistoryRuntime,
+            &request,
+            &offer,
+        )
+        .map(|(_, authorization)| Some(authorization))
     }
 
     pub fn authorize_typed_access(
@@ -193,10 +333,10 @@ pub(crate) mod tests {
         CoverageDomain, CoverageObjectKey, CoveragePositionKind, CoverageSetCompleteness,
         CoverageStatus, CoverageStreamKey, DecodeContext, DecodeDisposition, DecoderId,
         DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope, ExternalEntityRef, Fact,
-        FactBatch, FactSemanticContext, ObjectSelector, RawRetentionPolicy, ScopeRelationPrimitive,
-        Sha256Digest, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-        SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
-        SupportBundleDocument,
+        FactBatch, FactSemanticContext, NativeArtifactProbe, ObjectSelector, RawRetentionPolicy,
+        ScopeRelationPrimitive, Sha256Digest, SourceAccess, SourceInstance, SourceInstanceKey,
+        SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId,
+        StreamSpec, SupportBundleDocument,
     };
     use crate::observation_contract::unknown_wire::{
         ObservationUnknownWireCapability, ObservationUnknownWireCompatibilityAxis,
@@ -1280,41 +1420,40 @@ pub(crate) mod tests {
         let observation = reconcile_named_relation(
             host,
             lease.access_pass(),
-            relation_id,
             object,
             admission,
-            identity_inputs,
-            origin,
-            AccessPhase::Initial,
+            named_relation_request(relation_id, identity_inputs, origin, AccessPhase::Initial),
         );
         assert!(!observation.object_present);
+    }
+
+    fn named_relation_request<'a>(
+        relation_id: &'a str,
+        identity_inputs: &'a [ScopeIdentityInput<'a>],
+        origin: &'a RecordOrigin,
+        access_phase: AccessPhase,
+    ) -> ScopedAppendReconcileRequest<'a> {
+        ScopedAppendReconcileRequest {
+            relation_id,
+            identity_inputs,
+            access_phase,
+            parent_token: None,
+            depth: 1,
+            max_bytes: 64,
+            origin,
+            force_contract_replay: false,
+        }
     }
 
     fn reconcile_named_relation(
         host: &ScopedObservationAccessHost,
         pass: &ScopedObservationAccessPass,
-        relation_id: &str,
         object: &mut ScopedKnownAppendObject,
         admission: &mut ScopedObservationAdmissionLane,
-        identity_inputs: &[ScopeIdentityInput<'_>],
-        origin: &RecordOrigin,
-        access_phase: AccessPhase,
+        request: ScopedAppendReconcileRequest<'_>,
     ) -> ScopedAppendObservation {
-        let observation = object
-            .reconcile(
-                pass,
-                ScopedAppendReconcileRequest {
-                    relation_id,
-                    identity_inputs,
-                    access_phase,
-                    parent_token: None,
-                    depth: 1,
-                    max_bytes: 64,
-                    origin,
-                    force_contract_replay: false,
-                },
-            )
-            .unwrap();
+        let relation_id = request.relation_id;
+        let observation = object.reconcile(pass, request).unwrap();
         let ScopedAppendDecodeOutcome::Ready(decoded) = decode_scoped(host, object, &observation)
         else {
             panic!("{relation_id} must produce a complete decoded observation");
@@ -1535,6 +1674,57 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(registry.len(), 2);
         assert!(registry.get(&AdapterId::new("two").unwrap()).is_some());
+    }
+
+    #[test]
+    fn native_support_probe_is_host_registered_exact_and_panic_contained() {
+        let unregistered = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("one"))
+            .register_native_support_probe("missing", |_| unreachable!())
+            .build();
+        assert!(unregistered.is_err());
+
+        let duplicate = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("one"))
+            .register_native_support_probe("one", |_| unreachable!())
+            .register_native_support_probe("one", |_| unreachable!())
+            .build();
+        assert!(duplicate.is_err());
+
+        let registry = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("one"))
+            .register(EmptyAdapter::new("two"))
+            .register_native_support_probe("one", |_| {
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build()
+            .unwrap();
+        let probe = registry
+            .probe_native_support(&AdapterId::new("one").unwrap(), &[])
+            .unwrap()
+            .unwrap();
+        assert_eq!(probe.family, "fixture");
+        assert!(registry
+            .probe_native_support(&AdapterId::new("two").unwrap(), &[])
+            .unwrap()
+            .is_none());
+
+        let panicking = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("one"))
+            .register_native_support_probe("one", |_| panic!("private probe detail"))
+            .build()
+            .unwrap();
+        let error = panicking
+            .probe_native_support(&AdapterId::new("one").unwrap(), &[])
+            .unwrap_err();
+        assert_eq!(error.code, "native_support_probe_panic");
+        assert!(!error.to_string().contains("private probe detail"));
     }
 
     #[test]
@@ -1899,12 +2089,9 @@ pub(crate) mod tests {
         reconcile_named_relation(
             &host,
             lease.access_pass(),
-            "root-object",
             &mut root_object,
             &mut admission,
-            &identity,
-            &origin,
-            AccessPhase::Initial,
+            named_relation_request("root-object", &identity, &origin, AccessPhase::Initial),
         );
         let binding = host
             .bind_directory_relation_source("descendant-objects", &identity, AccessPhase::Initial)
@@ -12674,42 +12861,50 @@ pub(crate) mod tests {
         let root_obs = reconcile_named_relation(
             handle.host(),
             bootstrap_lease.access_pass(),
-            "root-transcript",
             &mut objects[0],
             &mut admission,
-            &identity,
-            &root_origin,
-            AccessPhase::Initial,
+            named_relation_request(
+                "root-transcript",
+                &identity,
+                &root_origin,
+                AccessPhase::Initial,
+            ),
         );
         let current_obs = reconcile_named_relation(
             handle.host(),
             bootstrap_lease.access_pass(),
-            "current-child",
             &mut objects[1],
             &mut admission,
-            &identity,
-            &current_origin,
-            AccessPhase::Initial,
+            named_relation_request(
+                "current-child",
+                &identity,
+                &current_origin,
+                AccessPhase::Initial,
+            ),
         );
         let future_obs = reconcile_named_relation(
             handle.host(),
             bootstrap_lease.access_pass(),
-            "future-child",
             &mut objects[2],
             &mut admission,
-            &identity,
-            &future_origin,
-            AccessPhase::Initial,
+            named_relation_request(
+                "future-child",
+                &identity,
+                &future_origin,
+                AccessPhase::Initial,
+            ),
         );
         let sidecar_obs = reconcile_named_relation(
             handle.host(),
             bootstrap_lease.access_pass(),
-            "team-inbox-sidecar",
             &mut objects[3],
             &mut admission,
-            &identity,
-            &sidecar_origin,
-            AccessPhase::Initial,
+            named_relation_request(
+                "team-inbox-sidecar",
+                &identity,
+                &sidecar_origin,
+                AccessPhase::Initial,
+            ),
         );
         assert!(!root_obs.object_present);
         assert!(!current_obs.object_present);
@@ -13043,14 +13238,12 @@ pub(crate) mod tests {
                 { "label": "three-scope-attach", "t_ms": multi_scope_ms, "t_us": multi_scope_us, "scopes": 3 }
             ]
         });
-        let default_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/rfc012_experiments/fixtures/observer-kernel-report.json");
-        let path =
-            std::env::var_os("RFC012_D5_REPORT").map_or(default_path, std::path::PathBuf::from);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+        if let Some(path) = std::env::var_os("RFC012_D5_REPORT").map(std::path::PathBuf::from) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         }
-        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
 
         let close = runtime.request_close();
         drop(handoff);

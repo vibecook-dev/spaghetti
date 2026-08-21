@@ -263,7 +263,7 @@ macro_rules! opaque_digest_type {
                 &self.0
             }
 
-            fn from_digest(value: [u8; DIGEST_BYTES]) -> Self {
+            pub(crate) fn from_digest(value: [u8; DIGEST_BYTES]) -> Self {
                 Self(value)
             }
         }

@@ -46,9 +46,57 @@ use crate::source::{
 };
 
 const ADAPTER_ID: &str = "claude-code";
+
+pub(crate) fn verified_support_release(
+) -> Result<crate::adapter::VerifiedSupportRelease, crate::adapter::SupportContractError> {
+    crate::adapter::verify_support_release_bundle(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/claude-code/candidate-2026-08-21/support-release.json"
+        )),
+        &[
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/claude-code/candidate-2026-08-21/ads.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/claude-code/candidate-2026-08-21/ads.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/claude-code/candidate-2026-08-21/source-declarations.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/claude-code/candidate-2026-08-21/source-declarations.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/claude-code/candidate-2026-08-21/scope-programs.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/claude-code/candidate-2026-08-21/evidence.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/claude-code/candidate-2026-08-21/evidence.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/claude-code/candidate-2026-08-21/conformance.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/claude-code/candidate-2026-08-21/conformance.json"
+                )),
+            ),
+        ],
+    )
+}
+
 const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../agent-support/claude-code/promoted-2026-08-21/scope-programs.json"
+    "/../../agent-support/claude-code/candidate-2026-08-21/scope-programs.json"
 ));
 const PARENT_STREAM: &str = "session-transcripts";
 const SUBAGENT_STREAM: &str = "subagent-transcripts";
@@ -79,7 +127,7 @@ const ARTIFACT_CONTENT_DECODER: &str = "claude-file-history-blob";
 const WORKFLOW_RUN_DECODER: &str = "claude-workflow-run";
 const WORKFLOW_JOURNAL_DECODER: &str = "claude-workflow-journal";
 const SESSION_INDEX_DECODER: &str = "claude-session-index";
-const PROJECT_MEMORY_DECODER: &str = "claude-project-memory-document";
+const PROJECT_MEMORY_DECODER: &str = "claude-project-memory";
 const PERSISTED_TOOL_RESULT_DECODER: &str = "claude-persisted-tool-result";
 const INTERPRETATION_SETTINGS_DECODER: &str = "claude-interpretation-settings";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
@@ -150,12 +198,12 @@ impl ClaudeCodeAdapter {
                 contract_version: 22,
                 support_binding: Some(
                     AdapterSupportBinding::new(
-                        "claude-code-support-2026-08-21-promoted",
+                        "claude-code-support-2026-08-21-candidate",
                         env!("CARGO_PKG_VERSION"),
                         22,
-                        "sha256:3da1667fc89602d1cf95e59017219fedb9e796404c4332eff4677ac1e39507bc",
-                        "sha256:36f0dfc5d55a0d6e52d8034aaa0a45a35e70caf2c48e6d3f3e50f05351f27ec6",
-                        "sha256:9e354d1cc2b17465f5de7a7c286ea7d6be18e303a53eddc467db1c5f4e69316e",
+                        "sha256:d88b3e31bb3b8d7ebe7e3147a30adf774801301f164ccdfa8518545b98cb34ab",
+                        "sha256:a1da27b6370c89e6d8bbc8b8fe671ab3cee4544758699729970617b29fd4ae0d",
+                        "sha256:b28608dcf0f0a5d6d55475b121cd4162b592c4f6a5e47e7284d3ba2b2a4434a8",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -5573,7 +5621,7 @@ mod tests {
         );
         let source_declaration_document = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/promoted-2026-08-21/source-declarations.json"
+            "/../../agent-support/claude-code/candidate-2026-08-21/source-declarations.json"
         ));
         assert_eq!(
             support.source_declaration_digest(),
@@ -5601,9 +5649,9 @@ mod tests {
             declared_stream["bounds"]["max_object_bytes"],
             ARTIFACT_CONTENT_MAX_BYTES
         );
-        let promoted_scope = manifest.scope_programs.as_ref().unwrap();
-        assert_eq!(promoted_scope.status, ScopeProgramStatus::Promoted);
-        assert!(promoted_scope.program("observe-root-transcript").is_some());
+        let candidate_scope = manifest.scope_programs.as_ref().unwrap();
+        assert_eq!(candidate_scope.status, ScopeProgramStatus::Candidate);
+        assert!(candidate_scope.program("observe-root-transcript").is_some());
         let scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"

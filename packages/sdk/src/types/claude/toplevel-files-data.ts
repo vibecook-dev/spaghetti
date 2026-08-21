@@ -181,6 +181,8 @@ export interface ActiveSessionFile {
   procStart?: string;
   version?: string;
   peerProtocol?: number;
+  /** Opaque bridge capabilities advertised by the active peer. */
+  peerFeatures?: string[];
   nameSource?: string;
   bridgeSessionId?: string;
   messagingSocketPath?: string;

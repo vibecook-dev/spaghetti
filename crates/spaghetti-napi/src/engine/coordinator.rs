@@ -16,15 +16,17 @@ use walkdir::WalkDir;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterManifest, AdapterObjectContext, AgentAdapter,
-    Availability, CanonicalSourceInstanceKey, CapabilityGranularity, CapabilityId, CoverageAbsence,
-    CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
-    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
-    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DeletionPolicy,
-    DependencyRevision, DiscoveryContext, DriverSpec, FactBatch, FactSemanticContext,
-    RawRetentionPolicy, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
+    AuthorizedDurableAccess, AuthorizedObservationSourceAuthority,
+    AuthorizedObservationSourceDriver, Availability, CanonicalSourceInstanceKey,
+    CapabilityGranularity, CapabilityId, CoverageAbsence, CoverageAbsenceKind,
+    CoverageDeclarationDigest, CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition,
+    CoveragePositionKind, CoverageProvenance, CoverageScope, CoverageSetCompleteness,
+    CoverageStatus, CoverageStreamKey, DecodeDisposition, DeletionPolicy, DependencyRevision,
+    DiscoveryContext, DriverSpec, FactBatch, FactSemanticContext, RawRetentionPolicy, SourceAccess,
+    SourceCoveragePoint, SourceCoverageSet, SourceInstance,
     SourceInstanceSpec as AdapterSourceInstanceSpec, SourceListedObject, SourceObjectDescriptor,
     SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot,
-    StreamAuthority, StreamSpec, SupportLevel,
+    StreamAuthority, StreamSpec, SupportLevel, TypedAccessAuthorization,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -69,6 +71,9 @@ const FACT_BATCH_LIMIT: usize = 8_192;
 const DIAGNOSTIC_LIMIT: usize = 256;
 const DISCOVERY_MAX_DEPTH: usize = 64;
 const DISCOVERY_MAX_ENTRIES: usize = 250_000;
+const MAX_CONFIGURED_ROOTS: usize = 16;
+const MAX_CONFIGURED_ROOT_BYTES: usize = 8 * 1024;
+const MAX_RECONCILE_REASON_BYTES: usize = 1024;
 const MAX_APPEND_RECORDS_PER_RECONCILE: usize = 4_096;
 const MAX_APPEND_RECORDS_PER_COMMIT: usize = 1_024;
 const SCHEDULER_CAPACITY: usize = 1_024;
@@ -77,6 +82,8 @@ const MAX_UNACKED_COMMITS: usize = 256;
 const USAGE_V2_REPLAY_PENDING_DETAIL: &str =
     "runtime.usage-v2 explicit replay in progress; replacement coverage not established";
 const USAGE_V2_REPLAY_COMMIT_REASON: &str = "projection.runtime.usage-v2.explicit_replay";
+const PROMOTED_DURABLE_AUTHORIZATION_UNAVAILABLE: &str =
+    "promoted durable support authorization unavailable";
 
 struct CommitLane {
     engine: Arc<SpaghettiEngineCore>,
@@ -535,6 +542,11 @@ pub struct ObservationCoordinator {
     engine: Arc<SpaghettiEngineCore>,
     cancellations: Vec<QueryCancellationToken>,
     max_append_records_per_reconcile: usize,
+}
+
+struct ReconcileInstanceAuthority<'authorization> {
+    requested_replay: Option<FactFamilyReplayContext>,
+    durable_authorization: Option<&'authorization TypedAccessAuthorization>,
 }
 
 #[derive(Debug, Clone)]
@@ -999,6 +1011,9 @@ impl ObservationCoordinator {
         manifest
             .validate()
             .map_err(|error| adapter_error("validate adapter manifest", error))?;
+        let durable_authorization = self
+            .engine
+            .durable_authorization_for_roots(manifest.id.as_str(), &request.configured_roots)?;
         let started_at = now_unix_ms()?;
         let lease = self
             .engine
@@ -1033,7 +1048,10 @@ impl ObservationCoordinator {
                     &request.reason,
                     started_at,
                     &mut outcome,
-                    None,
+                    ReconcileInstanceAuthority {
+                        requested_replay: None,
+                        durable_authorization: durable_authorization.as_ref(),
+                    },
                 )?;
             }
             Ok(outcome)
@@ -1055,10 +1073,14 @@ impl ObservationCoordinator {
         manifest
             .validate()
             .map_err(|error| adapter_error("validate adapter manifest", error))?;
+        let probe_roots = durable_probe_roots(&spec);
+        let durable_authorization = self
+            .engine
+            .durable_authorization_for_roots(manifest.id.as_str(), &probe_roots)?;
         let reason = reason.into();
-        if reason.trim().is_empty() {
+        if !valid_reconcile_reason(&reason) {
             return Err(EngineError::InvalidConfig(
-                "instance reconcile requires a reason".to_string(),
+                "instance reconcile requires a bounded reason".to_string(),
             ));
         }
         let started_at = now_unix_ms()?;
@@ -1073,7 +1095,17 @@ impl ObservationCoordinator {
                 instances_discovered: 1,
                 ..ReconcileOutcome::default()
             };
-            self.reconcile_instance(adapter, spec, &reason, started_at, &mut outcome, None)?;
+            self.reconcile_instance(
+                adapter,
+                spec,
+                &reason,
+                started_at,
+                &mut outcome,
+                ReconcileInstanceAuthority {
+                    requested_replay: None,
+                    durable_authorization: durable_authorization.as_ref(),
+                },
+            )?;
             Ok(outcome)
         })();
         self.finish_reconcile(lease, result, started_at)
@@ -1100,6 +1132,14 @@ impl ObservationCoordinator {
         manifest
             .validate()
             .map_err(|error| adapter_error("validate adapter manifest", error))?;
+        let durable_authorization = self
+            .engine
+            .durable_authorization_for_roots(manifest.id.as_str(), &configured_roots)?;
+        if self.engine.uses_verified_support_catalog() && durable_authorization.is_none() {
+            return Err(EngineError::InvalidConfig(
+                "fact-family replay requires promoted durable support authorization".to_string(),
+            ));
+        }
         let observed_at = now_unix_ms()?;
         let instances = catch_adapter_panic("discover replay source instance", || {
             adapter.discover(&DiscoveryContext {
@@ -1144,6 +1184,15 @@ impl ObservationCoordinator {
             .map_err(|error| adapter_error("validate adapter manifest", error))?;
         spec.validate()
             .map_err(|error| adapter_error("validate source instance identity", error))?;
+        let probe_roots = durable_probe_roots(&spec);
+        let durable_authorization = self
+            .engine
+            .durable_authorization_for_roots(manifest.id.as_str(), &probe_roots)?;
+        if self.engine.uses_verified_support_catalog() && durable_authorization.is_none() {
+            return Err(EngineError::InvalidConfig(
+                "fact-family replay requires promoted durable support authorization".to_string(),
+            ));
+        }
         if request.owner_id != USAGE_V2_PROJECTION_ID
             || request.family != USAGE_V2_PROJECTION_ID
             || request.version != USAGE_V2_PROJECTION_VERSION
@@ -1215,7 +1264,10 @@ impl ObservationCoordinator {
                 USAGE_V2_REPLAY_COMMIT_REASON,
                 started_at,
                 &mut outcome,
-                Some(replay),
+                ReconcileInstanceAuthority {
+                    requested_replay: Some(replay),
+                    durable_authorization: durable_authorization.as_ref(),
+                },
             )?;
             Ok(outcome)
         })();
@@ -1239,10 +1291,14 @@ impl ObservationCoordinator {
                 "retry target does not belong to the declared source instance".to_string(),
             ));
         }
+        let probe_roots = durable_probe_roots(&spec);
+        let durable_authorization = self
+            .engine
+            .durable_authorization_for_roots(manifest.id.as_str(), &probe_roots)?;
         let reason = reason.into();
-        if reason.trim().is_empty() {
+        if !valid_reconcile_reason(&reason) {
             return Err(EngineError::InvalidConfig(
-                "object reconcile requires a reason".to_string(),
+                "object reconcile requires a bounded reason".to_string(),
             ));
         }
         let started_at = now_unix_ms()?;
@@ -1287,6 +1343,12 @@ impl ObservationCoordinator {
             stream
                 .validate(&instance)
                 .map_err(|error| adapter_error("validate retry source stream", error))?;
+            if let Some(authorization) = durable_authorization.as_ref() {
+                let authorized_access = authorization.select_durable_access().map_err(|error| {
+                    observation_error("authorize retry source access", error.to_string())
+                })?;
+                validate_authorized_durable_stream(&authorized_access, &stream)?;
+            }
             if matches!(stream.driver, DriverSpec::DirectorySnapshot(_)) {
                 return Err(observation_error(
                     "resume retry object",
@@ -1371,6 +1433,7 @@ impl ObservationCoordinator {
                     usage_v2_coverage,
                     &mut outcome,
                     replay.as_ref(),
+                    durable_authorization.as_ref(),
                 )?;
             }
             Ok(outcome)
@@ -1471,8 +1534,12 @@ impl ObservationCoordinator {
         reason: &str,
         started_at: i64,
         outcome: &mut ReconcileOutcome,
-        requested_replay: Option<FactFamilyReplayContext>,
+        authority: ReconcileInstanceAuthority<'_>,
     ) -> Result<(), EngineError> {
+        let ReconcileInstanceAuthority {
+            requested_replay,
+            durable_authorization,
+        } = authority;
         self.check_cancelled()?;
         spec.validate()
             .map_err(|error| adapter_error("validate source instance identity", error))?;
@@ -1519,11 +1586,14 @@ impl ObservationCoordinator {
         let mut discovery = DiscoveryIndex::default();
         let streams = catch_adapter_panic("declare source streams", || adapter.streams(&instance))?
             .map_err(|error| adapter_error("declare source streams", error))?;
-        discovery.preload(&instance, &streams, &self.cancellations)?;
+        let authorized_access = durable_authorization
+            .map(TypedAccessAuthorization::select_durable_access)
+            .transpose()
+            .map_err(|error| {
+                observation_error("authorize durable source access", error.to_string())
+            })?;
         let mut stream_ids = BTreeSet::new();
-        let mut scheduled_objects = Vec::new();
-        for stream in streams {
-            self.check_cancelled()?;
+        for stream in &streams {
             stream
                 .validate(&instance)
                 .map_err(|error| adapter_error("validate source stream", error))?;
@@ -1533,6 +1603,22 @@ impl ObservationCoordinator {
                     format!("adapter declared stream {} more than once", stream.id),
                 ));
             }
+            if let Some(authorization) = &authorized_access {
+                if authorization.adapter_id() != manifest.id.as_str() {
+                    return Err(observation_error(
+                        "authorize durable source access",
+                        "typed durable authorization belongs to another adapter",
+                    ));
+                }
+                validate_authorized_durable_stream(authorization, stream)?;
+            }
+        }
+        // No native tree walk occurs until every exact-supported runtime
+        // stream has matched its digest-verified declaration and byte bounds.
+        discovery.preload(&instance, &streams, &self.cancellations)?;
+        let mut scheduled_objects = Vec::new();
+        for stream in streams {
+            self.check_cancelled()?;
             let usage_v2_stream = declares_usage_v2_projection(manifest)
                 && stream_declares_usage_v2_projection(&stream);
             if usage_v2_stream {
@@ -1577,6 +1663,7 @@ impl ObservationCoordinator {
             usage_v2_coverage,
             outcome,
             replay.as_ref(),
+            durable_authorization,
         )?;
         Ok(())
     }
@@ -1591,9 +1678,51 @@ impl ObservationCoordinator {
         mut coverage: ProjectionCoverageAttempt,
         outcome: &mut ReconcileOutcome,
         replay: Option<&FactFamilyReplayContext>,
+        durable_authorization: Option<&TypedAccessAuthorization>,
     ) -> Result<(), EngineError> {
         if !declares_usage_v2_projection(manifest) {
             return Ok(());
+        }
+        let authorized_access = durable_authorization
+            .map(TypedAccessAuthorization::select_durable_access)
+            .transpose()
+            .map_err(|error| observation_error("authorize usage-v2 coverage", error.to_string()))?;
+        if self.engine.uses_verified_support_catalog() && authorized_access.is_none() {
+            let committed_at = now_unix_ms()?.max(started_at);
+            let commit_seq = self
+                .engine
+                .commit_projection_versions(ProjectionVersionCommit {
+                    source_instance_id: instance.id,
+                    reason: format!("projection.{USAGE_V2_PROJECTION_ID}.support_unavailable"),
+                    started_at,
+                    committed_at,
+                    projection_versions: vec![usage_v2_projection_update(
+                        instance,
+                        ProjectionReadiness::Unavailable,
+                        Some(PROMOTED_DURABLE_AUTHORIZATION_UNAVAILABLE),
+                    )],
+                    coverage_sets: Vec::new(),
+                    coverage_preconditions: Vec::new(),
+                    query_pack_selections: Vec::new(),
+                })?;
+            if let Some(commit_seq) = commit_seq {
+                outcome.commits = outcome.commits.saturating_add(1);
+                outcome.last_commit_seq = Some(commit_seq);
+            }
+            return Ok(());
+        }
+        if let Some(authorization) = &authorized_access {
+            let contracts = authorization.contracts();
+            if authorization.adapter_id() != manifest.id.as_str()
+                || contracts.coverage_contract_version != 1
+                || contracts.query_pack_version != Some(1)
+                || contracts.fact_family_versions.get(USAGE_V2_PROJECTION_ID) != Some(&1)
+            {
+                return Err(observation_error(
+                    "authorize usage-v2 coverage",
+                    "typed durable authorization did not select the required usage-v2 contracts",
+                ));
+            }
         }
         let current_catalog = self
             .engine
@@ -1694,6 +1823,7 @@ impl ObservationCoordinator {
             &current_catalog,
             &coverage,
             detail.as_deref(),
+            authorized_access.as_ref(),
         )?;
         let commit_seq = self
             .engine
@@ -4662,13 +4792,26 @@ fn usage_v2_coverage_set_update(
     catalog: &SourceCatalogSnapshot,
     attempt: &ProjectionCoverageAttempt,
     incomplete_detail: Option<&str>,
+    authorized_access: Option<&AuthorizedDurableAccess<'_>>,
 ) -> Result<DurableCoverageSetUpdate, EngineError> {
-    let support = manifest.support_binding.as_ref().ok_or_else(|| {
-        observation_error(
-            "build usage-v2 coverage",
-            "a typed fact-family coverage set requires a digest-bound support release",
-        )
-    })?;
+    let legacy_support = if authorized_access.is_none() {
+        Some(manifest.support_binding.as_ref().ok_or_else(|| {
+            observation_error(
+                "build usage-v2 coverage",
+                "a typed fact-family coverage set requires a digest-bound support release",
+            )
+        })?)
+    } else {
+        None
+    };
+    let support_release_id = authorized_access
+        .map(AuthorizedDurableAccess::support_release_id)
+        .or_else(|| legacy_support.map(|support| support.support_release_id()))
+        .expect("verified or legacy support coordinates were selected above");
+    let source_declaration_digest = authorized_access
+        .map(AuthorizedDurableAccess::source_declaration_digest)
+        .or_else(|| legacy_support.map(|support| support.source_declaration_digest()))
+        .expect("verified or legacy support coordinates were selected above");
     let source_instance_key = CanonicalSourceInstanceKey::derive(
         instance.spec.identity_contract_version,
         instance.spec.stable_key.as_bytes(),
@@ -4678,7 +4821,7 @@ fn usage_v2_coverage_set_update(
     // not a second copy of the declaration bytes. RFC 012A's opaque coverage
     // digest therefore binds that verified digest as its stable input.
     let declaration_digest =
-        CoverageDeclarationDigest::derive(support.source_declaration_digest().as_bytes())
+        CoverageDeclarationDigest::derive(source_declaration_digest.as_bytes())
             .map_err(|error| observation_error("build usage-v2 coverage", error.to_string()))?;
 
     let domain = CoverageDomain::FactFamily {
@@ -4835,7 +4978,7 @@ fn usage_v2_coverage_set_update(
             adapter_id: manifest.id.as_str().to_string(),
             source_instance_key,
             root_entity_key: None,
-            support_release_id: support.support_release_id().to_string(),
+            support_release_id: support_release_id.to_string(),
             source_or_scope_declaration_digest: declaration_digest,
         },
         membership_revision,
@@ -5363,13 +5506,111 @@ fn adapter_error_class(class: AdapterErrorClass) -> &'static str {
     }
 }
 
-fn validate_request(request: &ReconcileRequest) -> Result<(), EngineError> {
-    if request.configured_roots.is_empty() || request.reason.trim().is_empty() {
-        return Err(EngineError::InvalidConfig(
-            "reconcile requires at least one configured root and a reason".to_string(),
+fn validate_authorized_durable_stream(
+    authorization: &AuthorizedDurableAccess<'_>,
+    stream: &StreamSpec,
+) -> Result<(), EngineError> {
+    let contract = authorization
+        .source_contract(stream.id.as_str())
+        .ok_or_else(|| {
+            observation_error(
+                "authorize durable source stream",
+                "runtime stream is absent from the authorized source declaration",
+            )
+        })?;
+    validate_durable_stream_contract(contract, stream)
+}
+
+fn validate_durable_stream_contract(
+    contract: &crate::adapter::AuthorizedObservationSourceContract,
+    stream: &StreamSpec,
+) -> Result<(), EngineError> {
+    let authority = match stream.authority {
+        StreamAuthority::Canonical => AuthorizedObservationSourceAuthority::Canonical,
+        StreamAuthority::Supplemental => AuthorizedObservationSourceAuthority::Supplemental,
+        StreamAuthority::Diagnostic => AuthorizedObservationSourceAuthority::Diagnostic,
+        StreamAuthority::IgnoredDerived => AuthorizedObservationSourceAuthority::IgnoredDerived,
+    };
+    let driver_matches = match (&stream.driver, contract.driver()) {
+        (
+            DriverSpec::AppendDelimited(runtime),
+            AuthorizedObservationSourceDriver::AppendDelimited {
+                max_record_bytes,
+                max_batch_bytes,
+                max_records_per_batch,
+            },
+        ) => {
+            runtime.delimiter == b'\n'
+                && runtime.normalize_crlf
+                && runtime.max_record_bytes as u64 == max_record_bytes
+                && runtime.max_batch_bytes as u64 == max_batch_bytes
+                && runtime.max_records_per_batch as u64 == max_records_per_batch
+        }
+        (
+            DriverSpec::ReplaceDocument(runtime),
+            AuthorizedObservationSourceDriver::ReplaceDocument { max_object_bytes },
+        ) => runtime.max_document_bytes as u64 == max_object_bytes,
+        (
+            DriverSpec::Presence(runtime),
+            AuthorizedObservationSourceDriver::PresenceObject { max_object_bytes },
+        ) => runtime.max_content_bytes as u64 == max_object_bytes,
+        _ => false,
+    };
+    if contract.stream_id() != stream.id.as_str()
+        || contract.root_id() != stream.selector.root_name.as_str()
+        || contract.relative_patterns() != stream.selector.include.as_slice()
+        || !stream.selector.exclude.is_empty()
+        || contract.decoder_id() != stream.decoder.as_str()
+        || contract.authority() != authority
+        || contract.max_entries() != Some(DISCOVERY_MAX_ENTRIES as u64)
+        || contract.max_depth() != Some(DISCOVERY_MAX_DEPTH as u64)
+        || !driver_matches
+        || stream.retention == RawRetentionPolicy::Full
+    {
+        return Err(observation_error(
+            "authorize durable source stream",
+            "runtime stream differs from its authorized source declaration",
         ));
     }
     Ok(())
+}
+
+fn durable_probe_roots(spec: &AdapterSourceInstanceSpec) -> Vec<PathBuf> {
+    let home_roots = spec
+        .roots
+        .iter()
+        .filter(|root| root.name == "home")
+        .map(|root| root.path.clone())
+        .collect::<Vec<_>>();
+    if home_roots.is_empty() {
+        spec.roots.iter().map(|root| root.path.clone()).collect()
+    } else {
+        home_roots
+    }
+}
+
+fn validate_request(request: &ReconcileRequest) -> Result<(), EngineError> {
+    if request.configured_roots.is_empty()
+        || request.configured_roots.len() > MAX_CONFIGURED_ROOTS
+        || !valid_reconcile_reason(&request.reason)
+    {
+        return Err(EngineError::InvalidConfig(
+            "reconcile requires a bounded nonempty root set and reason".to_string(),
+        ));
+    }
+    if request.configured_roots.iter().any(|root| {
+        root.as_os_str().is_empty()
+            || root.as_os_str().as_encoded_bytes().len() > MAX_CONFIGURED_ROOT_BYTES
+    }) {
+        return Err(EngineError::InvalidConfig(
+            "reconcile configured root is outside its byte bound".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn valid_reconcile_reason(reason: &str) -> bool {
+    !reason.trim().is_empty() && reason.len() <= MAX_RECONCILE_REASON_BYTES
 }
 
 fn validate_fact_family_replay_request(
@@ -5380,8 +5621,7 @@ fn validate_fact_family_replay_request(
         || request.family.trim().is_empty()
         || request.family.len() > 256
         || request.version == 0
-        || request.reason.trim().is_empty()
-        || request.reason.len() > 4 * 1024
+        || !valid_reconcile_reason(&request.reason)
     {
         return Err(EngineError::InvalidConfig(
             "fact-family replay requires a bounded owner/family, positive version, and bounded reason"
@@ -5735,6 +5975,83 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_request_preflights_root_and_reason_bounds() {
+        let exact = ReconcileRequest {
+            configured_roots: (0..MAX_CONFIGURED_ROOTS)
+                .map(|index| PathBuf::from(format!("root-{index}")))
+                .collect(),
+            reason: "r".repeat(MAX_RECONCILE_REASON_BYTES),
+        };
+        assert!(validate_request(&exact).is_ok());
+
+        let mut excess_roots = exact.clone();
+        excess_roots
+            .configured_roots
+            .push(PathBuf::from("one-too-many"));
+        assert!(validate_request(&excess_roots).is_err());
+
+        let mut excess_root_bytes = exact.clone();
+        excess_root_bytes.configured_roots[0] =
+            PathBuf::from("x".repeat(MAX_CONFIGURED_ROOT_BYTES + 1));
+        assert!(validate_request(&excess_root_bytes).is_err());
+
+        let mut excess_reason = exact;
+        excess_reason.reason.push('r');
+        assert!(validate_request(&excess_reason).is_err());
+    }
+
+    #[test]
+    fn candidate_claude_declaration_matches_every_runtime_stream_without_authorizing_io() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("settings.json"), b"{}").unwrap();
+        std::fs::create_dir(root.path().join("sessions")).unwrap();
+        std::fs::write(
+            root.path().join("sessions/123.json"),
+            br#"{"version":"2.1.223"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.path().join("projects/project")).unwrap();
+        std::fs::write(
+            root.path().join("projects/project/session.jsonl"),
+            b"{\"type\":\"user\"}\n",
+        )
+        .unwrap();
+
+        let adapter = ClaudeCodeAdapter::new();
+        let candidate = crate::adapter::verified_claude_candidate_for_test().unwrap();
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![root.path().to_path_buf()],
+                observed_at: 1,
+            })
+            .unwrap()
+            .pop()
+            .unwrap();
+        let instance = SourceInstance { id: 1, spec };
+        let mut streams = adapter.streams(&instance).unwrap();
+        for stream in &streams {
+            let contract = candidate
+                .source_contract_for_test(stream.id.as_str())
+                .unwrap_or_else(|| panic!("candidate omits runtime stream {}", stream.id));
+            validate_durable_stream_contract(contract, stream)
+                .unwrap_or_else(|error| panic!("{} failed candidate binding: {error}", stream.id));
+        }
+
+        let transcript = streams
+            .iter_mut()
+            .find(|stream| stream.id.as_str() == "session-transcripts")
+            .unwrap();
+        let DriverSpec::AppendDelimited(config) = &mut transcript.driver else {
+            panic!("session transcript must use append-delimited framing");
+        };
+        config.max_record_bytes += 1;
+        let contract = candidate
+            .source_contract_for_test(transcript.id.as_str())
+            .unwrap();
+        assert!(validate_durable_stream_contract(contract, transcript).is_err());
+    }
+
+    #[test]
     fn diagnostic_retention_is_bounded_and_never_copies_secret_keys_or_values() {
         let payload = br#"{"authorization":"Bearer private-token","nested":{"password":"hunter2"},"count":7}"#;
         let excerpt = retained_diagnostic_payload(RawRetentionPolicy::DiagnosticExcerpt, payload)
@@ -5925,6 +6242,72 @@ mod tests {
     }
 
     #[test]
+    fn verified_public_path_withholds_usage_v2_authority_from_unsupported_claude() {
+        let fixture = ClaudeFixture::new();
+        std::fs::write(
+            fixture.transcript_path(),
+            transcript_line("m1", "legacy remains available"),
+        )
+        .unwrap();
+        std::fs::write(fixture.root.join("settings.json"), b"{}").unwrap();
+        std::fs::create_dir(fixture.root.join("sessions")).unwrap();
+        std::fs::write(
+            fixture.root.join("sessions/123.json"),
+            br#"{"version":"2.1.238"}"#,
+        )
+        .unwrap();
+
+        let engine = fixture.open_verified_engine();
+        let outcome = fixture.reconcile(&engine);
+        assert!(
+            outcome.records_decoded >= 1,
+            "legacy facts must still ingest"
+        );
+        let projection = projection_version_state(&fixture.database, USAGE_V2_PROJECTION_ID);
+        assert_eq!(projection.0, 1);
+        assert_eq!(projection.1, None);
+        assert_eq!(projection.2, "unavailable");
+        assert_eq!(
+            projection.4.as_deref(),
+            Some(PROMOTED_DURABLE_AUTHORIZATION_UNAVAILABLE)
+        );
+        assert_eq!(count_rows(&fixture.database, "source_coverage_sets"), 0);
+    }
+
+    #[test]
+    fn verified_public_path_withholds_candidate_exact_claude_authority() {
+        let fixture = ClaudeFixture::new();
+        std::fs::write(
+            fixture.transcript_path(),
+            transcript_line("m1", "exact candidate runtime"),
+        )
+        .unwrap();
+        std::fs::write(fixture.root.join("settings.json"), b"{}").unwrap();
+        std::fs::create_dir(fixture.root.join("sessions")).unwrap();
+        std::fs::write(
+            fixture.root.join("sessions/123.json"),
+            br#"{"version":"2.1.223"}"#,
+        )
+        .unwrap();
+
+        let engine = fixture.open_verified_engine();
+        let outcome = fixture.reconcile(&engine);
+        assert!(
+            outcome.records_decoded >= 1,
+            "legacy facts must still ingest"
+        );
+        let projection = projection_version_state(&fixture.database, USAGE_V2_PROJECTION_ID);
+        assert_eq!(projection.0, 1);
+        assert_eq!(projection.1, None);
+        assert_eq!(projection.2, "unavailable");
+        assert_eq!(
+            projection.4.as_deref(),
+            Some(PROMOTED_DURABLE_AUTHORIZATION_UNAVAILABLE)
+        );
+        assert_eq!(count_rows(&fixture.database, "source_coverage_sets"), 0);
+    }
+
+    #[test]
     fn append_backfill_commits_multiple_records_as_one_bounded_batch() {
         let fixture = ClaudeFixture::new();
         let transcript = fixture.transcript_path();
@@ -5962,7 +6345,7 @@ mod tests {
         assert_eq!(covered.adapter_id, "claude-code");
         assert_eq!(
             covered.support_release_id,
-            "claude-code-support-2026-08-21-promoted"
+            "claude-code-support-2026-08-21-candidate"
         );
         assert_eq!(covered.completeness, "complete");
         assert_eq!(covered.last_commit_seq, 2);
@@ -6376,14 +6759,12 @@ mod tests {
                 }
             ]
         });
-        let default_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/rfc012_experiments/fixtures/fts-strategy-report.json");
-        let path =
-            std::env::var_os("RFC012_X1_STRATEGIES").map_or(default_path, std::path::PathBuf::from);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+        if let Some(path) = std::env::var_os("RFC012_X1_STRATEGIES").map(std::path::PathBuf::from) {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
         }
-        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 
     #[test]
@@ -7728,6 +8109,25 @@ mod tests {
             .unwrap()
         }
 
+        fn open_verified_engine(&self) -> Arc<SpaghettiEngineCore> {
+            SpaghettiEngineCore::open_with_registry(
+                EngineOptions {
+                    database_path: self.database.clone(),
+                    query_workers: Some(1),
+                    owner_label: Some("verified-coordinator-test".to_string()),
+                    defer_query_structures: false,
+                    source_pass_pool: None,
+                },
+                AdapterRegistry::builder()
+                    .register(ClaudeCodeAdapter::new())
+                    .build_verified(Arc::new(
+                        crate::adapter::verified_builtin_support_catalog().unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+
         fn reconcile(&self, engine: &Arc<SpaghettiEngineCore>) -> ReconcileOutcome {
             ObservationCoordinator::new(Arc::clone(engine))
                 .reconcile(
@@ -7787,6 +8187,7 @@ mod tests {
             "usage_v2_response_contributions" => {
                 "SELECT COUNT(*) FROM usage_v2_response_contributions"
             }
+            "source_coverage_sets" => "SELECT COUNT(*) FROM source_coverage_sets",
             _ => panic!("unsupported coordinator test table"),
         };
         connection.query_row(sql, [], |row| row.get(0)).unwrap()

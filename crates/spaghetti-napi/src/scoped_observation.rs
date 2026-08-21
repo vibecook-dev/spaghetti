@@ -807,7 +807,7 @@ pub struct ScopedAdmissionFailure {
 
 pub(crate) struct ScopedDirectoryMemberAdmissionFailure {
     pub error: ScopedAdmissionError,
-    pub lifecycle: ScopedObservationDirectoryMemberLifecycle,
+    pub lifecycle: Box<ScopedObservationDirectoryMemberLifecycle>,
 }
 
 impl std::fmt::Debug for ScopedDirectoryMemberAdmissionFailure {
@@ -1383,7 +1383,10 @@ impl ScopedObservationAdmissionLane {
         phase: ScopedAppendDeliveryPhase,
         lifecycle: ScopedObservationDirectoryMemberLifecycle,
     ) -> Result<ScopedAdmissionReceipt, ScopedDirectoryMemberAdmissionFailure> {
-        let fail = |error, lifecycle| ScopedDirectoryMemberAdmissionFailure { error, lifecycle };
+        let fail = |error, lifecycle| ScopedDirectoryMemberAdmissionFailure {
+            error,
+            lifecycle: Box::new(lifecycle),
+        };
         if access_pass_id == 0
             || phase == ScopedAppendDeliveryPhase::Live
             || matches!(
@@ -1546,7 +1549,7 @@ impl ScopedObservationAdmissionLane {
                     batch,
                     _next_decoder_state,
                     quarantined,
-                ) = snapshot.into_admission_parts();
+                ) = (*snapshot).into_admission_parts();
                 let item = ScopedDecodedAppendItem::Record {
                     evidence: Box::new(scoped_record_evidence(&record, retention)),
                     disposition,
@@ -11351,6 +11354,39 @@ struct ScopedProjectionPlan {
     mutation: ScopedProjectionMutation,
 }
 
+fn projected_entity_count<K: Ord, Current, Upsert>(
+    current: &BTreeMap<K, Current>,
+    upserts: &BTreeMap<K, Upsert>,
+    retractions: &[K],
+) -> Option<usize> {
+    let mut unique_retractions = BTreeSet::new();
+    let removed = retractions
+        .iter()
+        .filter(|key| {
+            unique_retractions.insert(*key)
+                && current.contains_key(*key)
+                && !upserts.contains_key(*key)
+        })
+        .count();
+    let added = upserts
+        .keys()
+        .filter(|key| !current.contains_key(*key))
+        .count();
+    current.len().checked_sub(removed)?.checked_add(added)
+}
+
+fn queue_projection_retraction<K: Ord + Copy, Current, Upsert>(
+    current: &BTreeMap<K, Current>,
+    upserts: &mut BTreeMap<K, Upsert>,
+    retractions: &mut Vec<K>,
+    key: K,
+) {
+    if current.contains_key(&key) && !retractions.contains(&key) {
+        retractions.push(key);
+    }
+    upserts.remove(&key);
+}
+
 #[derive(Default)]
 struct ScopedProjectionMutation {
     usage_upserts: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
@@ -12994,19 +13030,30 @@ impl ScopedObservationProjectionSink {
                                 &current.revision.questions,
                                 &state.revision.questions,
                             );
+                            rebind_reduced_semantic_revision(
+                                &mut state.semantic,
+                                state
+                                    .revision
+                                    .semantic_revision_key()
+                                    .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
+                            )?;
+                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
+                            {
+                                continue;
+                            }
                         }
-                    } else if state.revision.operation == UserInputOperation::Retract {
-                        if state.revision.completeness != ContractCompleteness::Complete {
-                            continue;
-                        }
+                    } else if state.revision.operation == UserInputOperation::Retract
+                        && state.revision.completeness != ContractCompleteness::Complete
+                    {
+                        continue;
                     }
                     if state.revision.operation == UserInputOperation::Retract {
-                        if self.user_input_requests.contains_key(&key)
-                            && !mutation.user_input_upserts.contains_key(&key)
-                        {
-                            mutation.user_input_retractions.push(key);
-                        }
-                        mutation.user_input_upserts.remove(&key);
+                        queue_projection_retraction(
+                            &self.user_input_requests,
+                            &mut mutation.user_input_upserts,
+                            &mut mutation.user_input_retractions,
+                            key,
+                        );
                         if self.families.user_input_request {
                             user_input_events.push(ScopedProjectedObservation::UserInputRequest {
                                 lane_ordinal,
@@ -13072,6 +13119,17 @@ impl ScopedObservationProjectionSink {
                                 &current.revision.ordered_content_block_keys,
                                 &state.revision.ordered_content_block_keys,
                             );
+                            rebind_reduced_semantic_revision(
+                                &mut state.semantic,
+                                state
+                                    .revision
+                                    .semantic_revision_key()
+                                    .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
+                            )?;
+                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
+                            {
+                                continue;
+                            }
                         }
                     } else if state.revision.operation == UserInputOperation::Retract
                         && state.revision.completeness != ContractCompleteness::Complete
@@ -13079,12 +13137,12 @@ impl ScopedObservationProjectionSink {
                         continue;
                     }
                     if state.revision.operation == UserInputOperation::Retract {
-                        if self.messages.contains_key(&key)
-                            && !mutation.message_upserts.contains_key(&key)
-                        {
-                            mutation.message_retractions.push(key);
-                        }
-                        mutation.message_upserts.remove(&key);
+                        queue_projection_retraction(
+                            &self.messages,
+                            &mut mutation.message_upserts,
+                            &mut mutation.message_retractions,
+                            key,
+                        );
                         if self.families.message {
                             message_events.push(ScopedProjectedObservation::Message {
                                 lane_ordinal,
@@ -13139,6 +13197,17 @@ impl ScopedObservationProjectionSink {
                                 &current.revision.ordered_step_keys,
                                 &state.revision.ordered_step_keys,
                             );
+                            rebind_reduced_semantic_revision(
+                                &mut state.semantic,
+                                state
+                                    .revision
+                                    .semantic_revision_key()
+                                    .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
+                            )?;
+                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
+                            {
+                                continue;
+                            }
                         }
                     } else if state.revision.operation == UserInputOperation::Retract
                         && state.revision.completeness != ContractCompleteness::Complete
@@ -13150,11 +13219,13 @@ impl ScopedObservationProjectionSink {
                             &self.plans,
                             &mut mutation,
                             &mut plan_events,
-                            self.families.plan,
                             key,
                             &state,
-                            lane_ordinal,
-                            phase,
+                            ScopedSelectedRetractionDelivery {
+                                selected: self.families.plan,
+                                lane_ordinal,
+                                phase,
+                            },
                         );
                         continue;
                     }
@@ -13180,11 +13251,13 @@ impl ScopedObservationProjectionSink {
                                     &self.plans,
                                     &mut mutation,
                                     &mut plan_events,
-                                    self.families.plan,
                                     omitted_key,
                                     &omitted_state,
-                                    lane_ordinal,
-                                    phase,
+                                    ScopedSelectedRetractionDelivery {
+                                        selected: self.families.plan,
+                                        lane_ordinal,
+                                        phase,
+                                    },
                                 );
                             }
                             if !owned.contains(&state.revision.native_plan_id) {
@@ -13192,11 +13265,13 @@ impl ScopedObservationProjectionSink {
                                     &self.plans,
                                     &mut mutation,
                                     &mut plan_events,
-                                    self.families.plan,
                                     key,
                                     &state,
-                                    lane_ordinal,
-                                    phase,
+                                    ScopedSelectedRetractionDelivery {
+                                        selected: self.families.plan,
+                                        lane_ordinal,
+                                        phase,
+                                    },
                                 );
                                 continue;
                             }
@@ -13247,11 +13322,13 @@ impl ScopedObservationProjectionSink {
                             &self.tasks,
                             &mut mutation,
                             &mut task_events,
-                            self.families.task,
                             key,
                             &state,
-                            lane_ordinal,
-                            phase,
+                            ScopedSelectedRetractionDelivery {
+                                selected: self.families.task,
+                                lane_ordinal,
+                                phase,
+                            },
                         );
                         continue;
                     }
@@ -13277,11 +13354,13 @@ impl ScopedObservationProjectionSink {
                                     &self.tasks,
                                     &mut mutation,
                                     &mut task_events,
-                                    self.families.task,
                                     omitted_key,
                                     &omitted_state,
-                                    lane_ordinal,
-                                    phase,
+                                    ScopedSelectedRetractionDelivery {
+                                        selected: self.families.task,
+                                        lane_ordinal,
+                                        phase,
+                                    },
                                 );
                             }
                             if !owned.contains(&state.revision.native_task_id) {
@@ -13289,11 +13368,13 @@ impl ScopedObservationProjectionSink {
                                     &self.tasks,
                                     &mut mutation,
                                     &mut task_events,
-                                    self.families.task,
                                     key,
                                     &state,
-                                    lane_ordinal,
-                                    phase,
+                                    ScopedSelectedRetractionDelivery {
+                                        selected: self.families.task,
+                                        lane_ordinal,
+                                        phase,
+                                    },
                                 );
                                 continue;
                             }
@@ -13340,6 +13421,17 @@ impl ScopedObservationProjectionSink {
                         {
                             state.revision.correlated_native_id =
                                 current.revision.correlated_native_id.clone();
+                            rebind_reduced_semantic_revision(
+                                &mut state.semantic,
+                                state
+                                    .revision
+                                    .semantic_revision_key()
+                                    .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
+                            )?;
+                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
+                            {
+                                continue;
+                            }
                         }
                     } else if state.revision.operation == UserInputOperation::Retract
                         && state.revision.completeness != ContractCompleteness::Complete
@@ -13347,12 +13439,12 @@ impl ScopedObservationProjectionSink {
                         continue;
                     }
                     if state.revision.operation == UserInputOperation::Retract {
-                        if self.tools.contains_key(&key)
-                            && !mutation.tool_upserts.contains_key(&key)
-                        {
-                            mutation.tool_retractions.push(key);
-                        }
-                        mutation.tool_upserts.remove(&key);
+                        queue_projection_retraction(
+                            &self.tools,
+                            &mut mutation.tool_upserts,
+                            &mut mutation.tool_retractions,
+                            key,
+                        );
                         if self.families.tool {
                             tool_events.push(ScopedProjectedObservation::Tool {
                                 lane_ordinal,
@@ -13411,12 +13503,12 @@ impl ScopedObservationProjectionSink {
                         continue;
                     }
                     if state.revision.operation == UserInputOperation::Retract {
-                        if self.effective_states.contains_key(&key)
-                            && !mutation.effective_state_upserts.contains_key(&key)
-                        {
-                            mutation.effective_state_retractions.push(key);
-                        }
-                        mutation.effective_state_upserts.remove(&key);
+                        queue_projection_retraction(
+                            &self.effective_states,
+                            &mut mutation.effective_state_upserts,
+                            &mut mutation.effective_state_retractions,
+                            key,
+                        );
                         if self.families.effective_state {
                             effective_state_events.push(
                                 ScopedProjectedObservation::EffectiveState {
@@ -13446,107 +13538,75 @@ impl ScopedObservationProjectionSink {
                 _ => {}
             }
         }
-        let new_actors = mutation
-            .actor_upserts
-            .keys()
-            .filter(|key| !self.actor_runs.contains_key(key))
-            .count();
-        if self
-            .actor_runs
-            .len()
-            .checked_add(new_actors)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.actor_runs,
+            &mutation.actor_upserts,
+            &mutation.actor_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::ActorRunCapacityFull);
         }
-        let new_affiliations = mutation
-            .affiliation_upserts
-            .keys()
-            .filter(|key| !self.actor_affiliations.contains_key(key))
-            .count();
-        if self
-            .actor_affiliations
-            .len()
-            .checked_add(new_affiliations)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.actor_affiliations,
+            &mutation.affiliation_upserts,
+            &mutation.affiliation_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::ActorAffiliationCapacityFull);
         }
-        let new_user_inputs = mutation
-            .user_input_upserts
-            .keys()
-            .filter(|fact_id| !self.user_input_requests.contains_key(fact_id))
-            .count();
-        if self
-            .user_input_requests
-            .len()
-            .checked_add(new_user_inputs)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.user_input_requests,
+            &mutation.user_input_upserts,
+            &mutation.user_input_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::UserInputCapacityFull);
         }
-        let new_messages = mutation
-            .message_upserts
-            .keys()
-            .filter(|fact_id| !self.messages.contains_key(fact_id))
-            .count();
-        if self
-            .messages
-            .len()
-            .checked_add(new_messages)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.messages,
+            &mutation.message_upserts,
+            &mutation.message_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::MessageCapacityFull);
         }
-        let new_plans = mutation
-            .plan_upserts
-            .keys()
-            .filter(|fact_id| !self.plans.contains_key(fact_id))
-            .count();
-        if self
-            .plans
-            .len()
-            .checked_add(new_plans)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.plans,
+            &mutation.plan_upserts,
+            &mutation.plan_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::PlanCapacityFull);
         }
-        let new_tasks = mutation
-            .task_upserts
-            .keys()
-            .filter(|fact_id| !self.tasks.contains_key(fact_id))
-            .count();
-        if self
-            .tasks
-            .len()
-            .checked_add(new_tasks)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.tasks,
+            &mutation.task_upserts,
+            &mutation.task_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::TaskCapacityFull);
         }
-        let new_tools = mutation
-            .tool_upserts
-            .keys()
-            .filter(|fact_id| !self.tools.contains_key(fact_id))
-            .count();
-        if self
-            .tools
-            .len()
-            .checked_add(new_tools)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.tools,
+            &mutation.tool_upserts,
+            &mutation.tool_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::ToolCapacityFull);
         }
-        let new_effective_states = mutation
-            .effective_state_upserts
-            .keys()
-            .filter(|fact_id| !self.effective_states.contains_key(fact_id))
-            .count();
-        if self
-            .effective_states
-            .len()
-            .checked_add(new_effective_states)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.effective_states,
+            &mutation.effective_state_upserts,
+            &mutation.effective_state_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::EffectiveStateCapacityFull);
         }
@@ -13759,16 +13819,12 @@ impl ScopedObservationProjectionSink {
             mutation.usage_upserts.insert(state.semantic.fact_id, state);
         }
 
-        let new_entities = mutation
-            .usage_upserts
-            .keys()
-            .filter(|fact_id| !self.usage_v2.contains_key(fact_id))
-            .count();
-        if self
-            .usage_v2
-            .len()
-            .checked_add(new_entities)
-            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        if projected_entity_count(
+            &self.usage_v2,
+            &mutation.usage_upserts,
+            &mutation.usage_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::UsageV2CapacityFull);
         }
@@ -14398,15 +14454,17 @@ impl ScopedObservationReplacementStage {
             .ok_or(ScopedReplacementStageError::SnapshotNotPrepared)?;
         selected_replacement_family_manifest(
             contracts,
-            &prepared.usage_v2,
-            Some(&prepared.actor_runs),
-            Some(&prepared.actor_affiliations),
-            Some(&prepared.user_input),
-            Some(&prepared.message),
-            Some(&prepared.plan),
-            Some(&prepared.task),
-            Some(&prepared.tool),
-            Some(&prepared.effective_state),
+            SelectedReplacementFamilySnapshots {
+                usage_v2: &prepared.usage_v2,
+                actor_runs: Some(&prepared.actor_runs),
+                actor_affiliations: Some(&prepared.actor_affiliations),
+                user_input: Some(&prepared.user_input),
+                message: Some(&prepared.message),
+                plan: Some(&prepared.plan),
+                task: Some(&prepared.task),
+                tool: Some(&prepared.tool),
+                effective_state: Some(&prepared.effective_state),
+            },
             source_coverage,
         )
     }
@@ -14658,32 +14716,55 @@ fn replacement_family_manifest(
 ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
     selected_replacement_family_manifest(
         contracts,
-        usage_v2,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
+        SelectedReplacementFamilySnapshots::usage_only(usage_v2),
         source_coverage,
     )
 }
 
+struct SelectedReplacementFamilySnapshots<'a> {
+    usage_v2: &'a ScopedUsageV2ReplacementSnapshot,
+    actor_runs: Option<&'a ScopedActorRunReplacementSnapshot>,
+    actor_affiliations: Option<&'a ScopedActorAffiliationReplacementSnapshot>,
+    user_input: Option<&'a ScopedUserInputReplacementSnapshot>,
+    message: Option<&'a ScopedMessageReplacementSnapshot>,
+    plan: Option<&'a ScopedPlanReplacementSnapshot>,
+    task: Option<&'a ScopedTaskReplacementSnapshot>,
+    tool: Option<&'a ScopedToolReplacementSnapshot>,
+    effective_state: Option<&'a ScopedEffectiveStateReplacementSnapshot>,
+}
+
+impl<'a> SelectedReplacementFamilySnapshots<'a> {
+    fn usage_only(usage_v2: &'a ScopedUsageV2ReplacementSnapshot) -> Self {
+        Self {
+            usage_v2,
+            actor_runs: None,
+            actor_affiliations: None,
+            user_input: None,
+            message: None,
+            plan: None,
+            task: None,
+            tool: None,
+            effective_state: None,
+        }
+    }
+}
+
 fn selected_replacement_family_manifest(
     contracts: &crate::adapter::ContractVersionSelection,
-    usage_v2: &ScopedUsageV2ReplacementSnapshot,
-    actor_runs: Option<&ScopedActorRunReplacementSnapshot>,
-    actor_affiliations: Option<&ScopedActorAffiliationReplacementSnapshot>,
-    user_input: Option<&ScopedUserInputReplacementSnapshot>,
-    message: Option<&ScopedMessageReplacementSnapshot>,
-    plan: Option<&ScopedPlanReplacementSnapshot>,
-    task: Option<&ScopedTaskReplacementSnapshot>,
-    tool: Option<&ScopedToolReplacementSnapshot>,
-    effective_state: Option<&ScopedEffectiveStateReplacementSnapshot>,
+    snapshots: SelectedReplacementFamilySnapshots<'_>,
     source_coverage: &[SourceCoverageSet],
 ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
+    let SelectedReplacementFamilySnapshots {
+        usage_v2,
+        actor_runs,
+        actor_affiliations,
+        user_input,
+        message,
+        plan,
+        task,
+        tool,
+        effective_state,
+    } = snapshots;
     let families = ScopedProjectionFamilies::from_contracts(contracts)
         .map_err(|_| ScopedReplacementStageError::InvalidManifest)?;
     let semantic_reference_contract_version = contracts.semantic_revision_reference_version;
@@ -15183,6 +15264,23 @@ fn scoped_user_input_state(
     })
 }
 
+/// Bind reducer-enriched state to the semantic payload it actually carries.
+///
+/// The incoming FactEnvelope identifies the decoder-emitted partial revision.
+/// Once the common reducer monotonically enriches that payload with prior
+/// evidence, the resulting state is a distinct semantic revision and must not
+/// retain the incoming revision reference.
+fn rebind_reduced_semantic_revision(
+    semantic: &mut FactSemanticRevision,
+    semantic_revision_key: [u8; 32],
+) -> Result<(), ScopedProjectionError> {
+    let fact_revision_id = FactRevisionId::derive(&semantic.fact_id, 1, &semantic_revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    semantic.fact_revision_id = fact_revision_id;
+    semantic.semantic_revision_ref = SemanticRevisionRef::new(fact_revision_id);
+    Ok(())
+}
+
 fn merge_user_input_questions(
     current: &[UserInputQuestion],
     incoming: &[UserInputQuestion],
@@ -15423,27 +15521,34 @@ fn effective_state_event(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ScopedSelectedRetractionDelivery {
+    selected: bool,
+    lane_ordinal: u64,
+    phase: ScopedAppendDeliveryPhase,
+}
+
 fn queue_plan_retraction(
     stored: &BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     mutation: &mut ScopedProjectionMutation,
     events: &mut Vec<ScopedProjectedObservation>,
-    selected: bool,
     key: CanonicalFactId,
     state: &ScopedPlanProjectionState,
-    lane_ordinal: u64,
-    phase: ScopedAppendDeliveryPhase,
+    delivery: ScopedSelectedRetractionDelivery,
 ) {
-    if stored.contains_key(&key) && !mutation.plan_upserts.contains_key(&key) {
-        mutation.plan_retractions.push(key);
-    }
-    mutation.plan_upserts.remove(&key);
-    if selected {
+    queue_projection_retraction(
+        stored,
+        &mut mutation.plan_upserts,
+        &mut mutation.plan_retractions,
+        key,
+    );
+    if delivery.selected {
         events.push(ScopedProjectedObservation::Plan {
-            lane_ordinal,
+            lane_ordinal: delivery.lane_ordinal,
             event: Box::new(plan_event(
                 state,
                 ScopedRevisionedEntityOperation::Retract,
-                phase,
+                delivery.phase,
             )),
         });
     }
@@ -15472,23 +15577,23 @@ fn queue_task_retraction(
     stored: &BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
     mutation: &mut ScopedProjectionMutation,
     events: &mut Vec<ScopedProjectedObservation>,
-    selected: bool,
     key: CanonicalFactId,
     state: &ScopedTaskProjectionState,
-    lane_ordinal: u64,
-    phase: ScopedAppendDeliveryPhase,
+    delivery: ScopedSelectedRetractionDelivery,
 ) {
-    if stored.contains_key(&key) && !mutation.task_upserts.contains_key(&key) {
-        mutation.task_retractions.push(key);
-    }
-    mutation.task_upserts.remove(&key);
-    if selected {
+    queue_projection_retraction(
+        stored,
+        &mut mutation.task_upserts,
+        &mut mutation.task_retractions,
+        key,
+    );
+    if delivery.selected {
         events.push(ScopedProjectedObservation::Task {
-            lane_ordinal,
+            lane_ordinal: delivery.lane_ordinal,
             event: Box::new(task_event(
                 state,
                 ScopedRevisionedEntityOperation::Retract,
-                phase,
+                delivery.phase,
             )),
         });
     }
@@ -20139,15 +20244,17 @@ impl ScopedObservationAccessHost {
             .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
         let family_manifest = selected_replacement_family_manifest(
             &self.observation_contract.contract_versions,
-            &replacement,
-            Some(&actor_runs),
-            Some(&actor_affiliations),
-            Some(&user_input),
-            Some(&message),
-            Some(&plan),
-            Some(&task),
-            Some(&tool),
-            Some(&effective_state),
+            SelectedReplacementFamilySnapshots {
+                usage_v2: &replacement,
+                actor_runs: Some(&actor_runs),
+                actor_affiliations: Some(&actor_affiliations),
+                user_input: Some(&user_input),
+                message: Some(&message),
+                plan: Some(&plan),
+                task: Some(&task),
+                tool: Some(&tool),
+                effective_state: Some(&effective_state),
+            },
             &watermark.source_coverage,
         )
         .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
@@ -20275,15 +20382,17 @@ impl ScopedObservationAccessHost {
             .map_err(ScopedReplacementStageError::Projection)?;
         let family_manifest = selected_replacement_family_manifest(
             &self.observation_contract.contract_versions,
-            &replacement,
-            Some(&actor_runs),
-            Some(&actor_affiliations),
-            Some(&user_input),
-            Some(&message),
-            Some(&plan),
-            Some(&task),
-            Some(&tool),
-            Some(&effective_state),
+            SelectedReplacementFamilySnapshots {
+                usage_v2: &replacement,
+                actor_runs: Some(&actor_runs),
+                actor_affiliations: Some(&actor_affiliations),
+                user_input: Some(&user_input),
+                message: Some(&message),
+                plan: Some(&plan),
+                task: Some(&task),
+                tool: Some(&tool),
+                effective_state: Some(&effective_state),
+            },
             &watermark.source_coverage,
         )?;
         let replacement_digest = replacement_snapshot_digest(ScopedCompletionSnapshotComponents {
@@ -23316,6 +23425,32 @@ mod projection_tests {
 
     const OBJECT_TOKEN: u64 = 41;
 
+    #[test]
+    fn projection_capacity_uses_final_cardinality_and_retractions_override_staged_upserts() {
+        let current = BTreeMap::from([(1_u64, "current")]);
+        let replacement = BTreeMap::from([(2_u64, "replacement")]);
+        assert_eq!(
+            projected_entity_count(&current, &replacement, &[1]),
+            Some(1)
+        );
+        assert_eq!(
+            projected_entity_count(&current, &replacement, &[1, 1]),
+            Some(1)
+        );
+        assert_eq!(projected_entity_count(&current, &replacement, &[]), Some(2));
+
+        let mut staged = BTreeMap::from([(1_u64, "staged")]);
+        let mut retractions = Vec::new();
+        queue_projection_retraction(&current, &mut staged, &mut retractions, 1);
+        queue_projection_retraction(&current, &mut staged, &mut retractions, 1);
+        assert!(staged.is_empty());
+        assert_eq!(retractions, [1]);
+        assert_eq!(
+            projected_entity_count(&current, &staged, &retractions),
+            Some(0)
+        );
+    }
+
     fn observation_contract_selection_for(fact_family: &str) -> ObservationContractSelection {
         observation_contract_selection_for_families(&[fact_family])
     }
@@ -24689,6 +24824,24 @@ mod projection_tests {
         .is_err());
     }
 
+    fn selected_actor_family_snapshots<'a>(
+        usage_v2: &'a ScopedUsageV2ReplacementSnapshot,
+        actor_runs: Option<&'a ScopedActorRunReplacementSnapshot>,
+        actor_affiliations: Option<&'a ScopedActorAffiliationReplacementSnapshot>,
+    ) -> SelectedReplacementFamilySnapshots<'a> {
+        SelectedReplacementFamilySnapshots {
+            usage_v2,
+            actor_runs,
+            actor_affiliations,
+            user_input: None,
+            message: None,
+            plan: None,
+            task: None,
+            tool: None,
+            effective_state: None,
+        }
+    }
+
     #[test]
     fn multi_family_manifest_is_exact_canonical_and_coverage_bound() {
         let selection = multi_family_observation_contract_selection();
@@ -24717,15 +24870,7 @@ mod projection_tests {
         ];
         let manifest = selected_replacement_family_manifest(
             &selection.contract_versions,
-            &usage,
-            Some(&actors),
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, Some(&actors), Some(&affiliations)),
             &coverage,
         )
         .unwrap();
@@ -24756,29 +24901,13 @@ mod projection_tests {
 
         assert!(selected_replacement_family_manifest(
             &selection.contract_versions,
-            &usage,
-            Some(&actors),
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, Some(&actors), Some(&affiliations)),
             &coverage[..2],
         )
         .is_err());
         assert!(selected_replacement_family_manifest(
             &selection.contract_versions,
-            &usage,
-            None,
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, None, Some(&affiliations)),
             &coverage,
         )
         .is_err());
@@ -24793,15 +24922,7 @@ mod projection_tests {
         );
         assert!(selected_replacement_family_manifest(
             &wrong_version,
-            &usage,
-            Some(&actors),
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, Some(&actors), Some(&affiliations)),
             &coverage,
         )
         .is_err());
@@ -26436,15 +26557,7 @@ mod projection_tests {
         ];
         let complete_manifest = selected_replacement_family_manifest(
             &multi_family_observation_contract_selection().contract_versions,
-            &usage,
-            Some(&actors),
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, Some(&actors), Some(&affiliations)),
             &complete_coverage,
         )
         .unwrap();
@@ -26469,15 +26582,7 @@ mod projection_tests {
         );
         let partial_manifest = selected_replacement_family_manifest(
             &multi_family_observation_contract_selection().contract_versions,
-            &usage,
-            Some(&actors),
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, Some(&actors), Some(&affiliations)),
             &partial_coverage,
         )
         .unwrap();
@@ -26654,15 +26759,7 @@ mod projection_tests {
         ];
         let complete_manifest = selected_replacement_family_manifest(
             &multi_family_observation_contract_selection().contract_versions,
-            &usage,
-            Some(&actors),
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, Some(&actors), Some(&affiliations)),
             &complete_coverage,
         )
         .unwrap();
@@ -26675,15 +26772,7 @@ mod projection_tests {
         );
         let partial_manifest = selected_replacement_family_manifest(
             &multi_family_observation_contract_selection().contract_versions,
-            &usage,
-            Some(&actors),
-            Some(&affiliations),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
+            selected_actor_family_snapshots(&usage, Some(&actors), Some(&affiliations)),
             &partial_coverage,
         )
         .unwrap();
@@ -26934,7 +27023,7 @@ mod projection_tests {
             .push_native(
                 &restored_record,
                 wire.native_tool_use_id.as_bytes(),
-                Fact::UserInputRequestRevision(pending),
+                Fact::UserInputRequestRevision(pending.clone()),
             )
             .unwrap();
         projection
@@ -26945,7 +27034,43 @@ mod projection_tests {
                 restored_batch,
             ))
             .unwrap();
-        let partial_record = rfc012c_record(4, 5, 14);
+
+        let mut partial_upsert = pending.clone();
+        partial_upsert.completeness = ContractCompleteness::Partial;
+        partial_upsert.questions[0].header = None;
+        partial_upsert.questions[0].options.truncate(1);
+        let partial_upsert_record = rfc012c_record(4, 5, 14);
+        let mut partial_upsert_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        partial_upsert_batch
+            .push_native(
+                &partial_upsert_record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(partial_upsert),
+            )
+            .unwrap();
+        let partial_events = projection
+            .project(&rfc012c_decoded_frame(
+                5,
+                ScopedAppendDeliveryPhase::Live,
+                &partial_upsert_record,
+                partial_upsert_batch,
+            ))
+            .unwrap();
+        assert_eq!(partial_events.len(), 1);
+        let partial_snapshot = projection
+            .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert!(user_input_replacement_snapshot_is_valid(
+            &partial_snapshot,
+            1
+        ));
+        assert_eq!(
+            partial_snapshot.entities[0].revision.questions,
+            pending.questions
+        );
+
+        let partial_record = rfc012c_record(5, 6, 15);
         let mut partial_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
         let partial = fact_for(
@@ -26964,7 +27089,7 @@ mod projection_tests {
             .unwrap();
         assert!(projection
             .project(&rfc012c_decoded_frame(
-                5,
+                6,
                 ScopedAppendDeliveryPhase::Live,
                 &partial_record,
                 partial_batch,
@@ -27036,7 +27161,6 @@ mod projection_tests {
                 .ordered_content_block_keys,
             ["block-a", "block-b"]
         );
-
         let partial_blocks_record = rfc012c_record(1, 2, 11);
         let mut partial_blocks_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
@@ -27065,6 +27189,10 @@ mod projection_tests {
                 .ordered_content_block_keys,
             ["block-a", "block-b"]
         );
+        let partial_snapshot = projection
+            .message_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert!(message_replacement_snapshot_is_valid(&partial_snapshot, 1));
 
         let complete_blocks_record = rfc012c_record(3, 4, 13);
         let mut complete_blocks_batch =
@@ -27184,6 +27312,95 @@ mod projection_tests {
             .unwrap()
             .is_empty());
         assert_eq!(projection.messages.len(), 1);
+    }
+
+    #[test]
+    fn partial_message_enrichment_rejects_cumulative_content_overflow_atomically() {
+        let selection = observation_contract_selection_for("runtime.message");
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+
+        let current_record = rfc012c_record(0, 1, 10);
+        let mut current_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let current = MessageRevisionFact {
+            session: current_batch
+                .canonical_entity_key("session", b"native-session")
+                .unwrap(),
+            actor_run: current_batch
+                .canonical_entity_key("actor-run", b"native-run")
+                .unwrap(),
+            native_message_id: "message-cap".to_string(),
+            role: MessageRevisionRole::Assistant,
+            ordered_content_block_keys: (0..32).map(|index| format!("block-{index:02}")).collect(),
+            completeness: ContractCompleteness::Partial,
+            operation: UserInputOperation::Upsert,
+        };
+        current_batch
+            .push_native(
+                &current_record,
+                b"message-cap",
+                Fact::MessageRevision(current),
+            )
+            .unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &current_record,
+                current_batch,
+            ))
+            .unwrap();
+
+        let overflow_record = rfc012c_record(1, 2, 11);
+        let mut overflow_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let overflow = MessageRevisionFact {
+            session: overflow_batch
+                .canonical_entity_key("session", b"native-session")
+                .unwrap(),
+            actor_run: overflow_batch
+                .canonical_entity_key("actor-run", b"native-run")
+                .unwrap(),
+            native_message_id: "message-cap".to_string(),
+            role: MessageRevisionRole::Assistant,
+            ordered_content_block_keys: vec!["block-overflow".to_string()],
+            completeness: ContractCompleteness::Partial,
+            operation: UserInputOperation::Upsert,
+        };
+        overflow_batch
+            .push_native(
+                &overflow_record,
+                b"message-cap",
+                Fact::MessageRevision(overflow),
+            )
+            .unwrap();
+
+        let error = projection
+            .project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &overflow_record,
+                overflow_batch,
+            ))
+            .unwrap_err();
+        assert_eq!(error, ScopedProjectionError::InvalidSemanticRevision);
+        assert_eq!(
+            projection
+                .messages
+                .values()
+                .next()
+                .unwrap()
+                .revision
+                .ordered_content_block_keys
+                .len(),
+            32
+        );
     }
 
     #[test]
@@ -27710,7 +27927,6 @@ mod projection_tests {
                 .ordered_step_keys,
             ["step-a", "step-b"]
         );
-
         let partial_steps_record = rfc012c_record(1, 2, 11);
         let mut partial_steps_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
@@ -27743,6 +27959,10 @@ mod projection_tests {
                 .ordered_step_keys,
             ["step-a", "step-b"]
         );
+        let partial_snapshot = projection
+            .plan_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert!(plan_replacement_snapshot_is_valid(&partial_snapshot, 1));
 
         let complete_steps_record = rfc012c_record(3, 4, 13);
         let mut complete_steps_batch =
@@ -28223,6 +28443,10 @@ mod projection_tests {
             Some(fixture.native_result_id.as_str())
         );
         assert_eq!(projection.tools.len(), 2);
+        let partial_snapshot = projection
+            .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert!(tool_replacement_snapshot_is_valid(&partial_snapshot, 1));
         assert_eq!(
             projection
                 .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)

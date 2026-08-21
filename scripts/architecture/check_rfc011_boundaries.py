@@ -49,6 +49,9 @@ ADAPTER_STORAGE_FORBIDDEN_RE = re.compile(
 RFC012_ADAPTER_ACCESS_AUTHORITY_RE = re.compile(
     r"\b(?:AccessBudget|AccessReservation|AccessReservationRequest|AccessObjectToken)\b"
 )
+RFC012_ADAPTER_ARTIFACT_PROBE_RE = re.compile(
+    r"\bfn\s+native_support_probe\b|\bsupport_probe::|\bprobe_[a-z0-9_]*native_artifact\b"
+)
 RFC012_SEMANTIC_FORBIDDEN_RE = re.compile(
     r"(?:\bcrate::|\bsuper::(?:contract|facts|registry)(?:::|\b)"
     r"|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
@@ -367,19 +370,25 @@ def discover_rust_adapter_storage_boundary_violations() -> set[str]:
 
 
 def discover_rfc012_adapter_access_authority_violations() -> set[str]:
-    """Adapters may declare bounds but cannot reserve or mint native access."""
+    """Adapters may declare bounds but cannot probe, reserve, or mint native access."""
     root = REPO_ROOT / "crates/spaghetti-napi/src"
     paths = list((root / "adapter").rglob("*.rs"))
-    paths.extend(
+    concrete_adapters = [
         path
         for adapter in ("claude", "codex", "factory", "grok")
         if (path := root / adapter / "adapter.rs").exists()
-    )
-    return {
+    ]
+    paths.extend(concrete_adapters)
+    found = {
         repo_path(path)
         for path in sorted(paths)
         if RFC012_ADAPTER_ACCESS_AUTHORITY_RE.search(production_rust_text(path))
     }
+    contract = root / "adapter" / "contract.rs"
+    for path in [contract, *concrete_adapters]:
+        if RFC012_ADAPTER_ARTIFACT_PROBE_RE.search(production_rust_text(path)):
+            found.add(repo_path(path))
+    return found
 
 
 def discover_rfc012_semantic_boundary_violations() -> set[str]:
@@ -1014,6 +1023,22 @@ def discover_rfc012_semantic_contract_boundary_violations() -> set[str]:
     required_helpers = {
         ("parse_rfc012a_v1_json", "json: Utf16String", "Result<String>"),
         ("parse_rfc012c_runtime_v1_json", "json: Utf16String", "Result<String>"),
+        ("parse_rfc012c_effective_state_v1_json", "json: Utf16String", "Result<String>"),
+        ("parse_rfc012c_interaction_v1_json", "json: Utf16String", "Result<String>"),
+        ("parse_rfc012c_message_v1_json", "json: Utf16String", "Result<String>"),
+        ("parse_rfc012c_task_v1_json", "json: Utf16String", "Result<String>"),
+        ("parse_rfc012c_plan_v1_json", "json: Utf16String", "Result<String>"),
+        ("parse_rfc012c_tool_v1_json", "json: Utf16String", "Result<String>"),
+    }
+    required_js_names = {
+        "parseRfc012aV1Json",
+        "parseRfc012cRuntimeV1Json",
+        "parseRfc012cEffectiveStateV1Json",
+        "parseRfc012cInteractionV1Json",
+        "parseRfc012cMessageV1Json",
+        "parseRfc012cTaskV1Json",
+        "parseRfc012cPlanV1Json",
+        "parseRfc012cToolV1Json",
     }
     napi_attr_count = len(re.findall(r"^#\[napi", napi_text, re.MULTILINE))
     declarations = REPO_ROOT / "crates/spaghetti-napi/index.d.ts"
@@ -1029,13 +1054,18 @@ def discover_rfc012_semantic_contract_boundary_violations() -> set[str]:
     required_declared_helpers = {
         ("parseRfc012aV1Json", "json: string", "string"),
         ("parseRfc012cRuntimeV1Json", "json: string", "string"),
+        ("parseRfc012cEffectiveStateV1Json", "json: string", "string"),
+        ("parseRfc012cInteractionV1Json", "json: string", "string"),
+        ("parseRfc012cMessageV1Json", "json: string", "string"),
+        ("parseRfc012cTaskV1Json", "json: string", "string"),
+        ("parseRfc012cPlanV1Json", "json: string", "string"),
+        ("parseRfc012cToolV1Json", "json: string", "string"),
     }
     if (
         not napi_path.exists()
         or RFC012_SEMANTIC_CONTRACT_NAPI_FORBIDDEN_RE.search(napi_text)
         or re.search(r"^#\[napi\(object\)\]", napi_text, re.MULTILINE)
-        or "js_name = \"parseRfc012aV1Json\"" not in napi_text
-        or "js_name = \"parseRfc012cRuntimeV1Json\"" not in napi_text
+        or any(f'js_name = "{name}"' not in napi_text for name in required_js_names)
         or "pub fn parse_rfc012a_v1_json(json: Utf16String) -> Result<String>"
         not in napi_normalized
         or "pub fn parse_rfc012c_runtime_v1_json(json: Utf16String) -> Result<String>"
@@ -1045,7 +1075,7 @@ def discover_rfc012_semantic_contract_boundary_violations() -> set[str]:
         or "json.len() > MAX_SEMANTIC_FIXTURE_JSON_BYTES" not in napi_normalized
         or napi_text.find("json.len()") > napi_text.find("String::from_utf16")
         or "invalid semantic fixture: unknown field" not in napi_text
-        or napi_attr_count != 2
+        or napi_attr_count != len(required_helpers)
         or set(napi_helpers) != required_helpers
         or set(declared_helpers) != required_declared_helpers
     ):
@@ -1183,7 +1213,7 @@ def discover_rfc012_coverage_crate_boundary_violations() -> set[str]:
         found.add("crates/spaghetti-coverage/Cargo.toml")
     wrapper = REPO_ROOT / "crates/spaghetti-napi/src/coverage_runtime.rs"
     wrapper_text = production_rust_text(wrapper) if wrapper.exists() else ""
-    if "spaghetti_coverage::encode_membership" not in wrapper_text:
+    if "spaghetti_coverage::membership_digest" not in wrapper_text:
         found.add("crates/spaghetti-napi/src/coverage_runtime.rs#missing-coverage-crate")
     if "CoverageMembershipRevision::begin_streaming" in wrapper_text:
         found.add("crates/spaghetti-napi/src/coverage_runtime.rs#reimplemented-membership-encoder")

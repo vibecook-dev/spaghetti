@@ -11,7 +11,7 @@ const rfc012a = JSON.parse(
     new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-v1.json', import.meta.url),
     'utf8',
   ),
-) as { coverage: { baseline: unknown } };
+) as { coverage: { baseline: unknown; dominant: unknown } };
 
 const rfc012cJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-runtime-v1.json', import.meta.url),
@@ -119,4 +119,65 @@ test('complete comparable observer coverage retires the overlay', () => {
   );
   assert.equal(merged.overlay, 'retired');
   assert.equal(merged.contributions[0]?.origin, 'durable');
+});
+
+test('newer complete observer coverage remains live until durable coverage subsumes it', () => {
+  const runtime = parseRfc012cRuntimeV1Json(rfc012cJson, JSON.parse(rfc012cJson));
+  const durableExample = runtime.usage.native_message;
+  const liveExample = runtime.usage.source_record_fallback;
+  const baseline = coverage(rfc012a.coverage.baseline);
+  const dominant = coverage(rfc012a.coverage.dominant);
+
+  const merged = mergeDurableAndScopedUsage(
+    [
+      {
+        factId: durableExample.fact_id,
+        semanticRevisionRef: durableExample.semantic_revision_ref,
+      },
+    ],
+    baseline,
+    [
+      {
+        eventId: 'evt-current-overlay',
+        factId: liveExample.fact_id,
+        semanticRevisionRef: liveExample.semantic_revision_ref,
+        operation: 'upsert',
+      },
+    ],
+    dominant,
+  );
+
+  assert.deepEqual(merged.overlay, { retained: { stale: false } });
+  assert.equal(merged.contributions.length, 2);
+  assert.ok(merged.contributions.some((item) => item.factId === liveExample.fact_id && item.origin === 'overlay'));
+});
+
+test('incomplete durable coverage cannot retire an equal complete observer overlay', () => {
+  const runtime = parseRfc012cRuntimeV1Json(rfc012cJson, JSON.parse(rfc012cJson));
+  const durableExample = runtime.usage.native_message;
+  const liveExample = runtime.usage.source_record_fallback;
+  const baseline = coverage(rfc012a.coverage.baseline);
+  const incompleteDurable: SourceCoverageSet = { ...baseline, completeness: 'partial' };
+
+  const merged = mergeDurableAndScopedUsage(
+    [
+      {
+        factId: durableExample.fact_id,
+        semanticRevisionRef: durableExample.semantic_revision_ref,
+      },
+    ],
+    incompleteDurable,
+    [
+      {
+        eventId: 'evt-incomplete-durable',
+        factId: liveExample.fact_id,
+        semanticRevisionRef: liveExample.semantic_revision_ref,
+        operation: 'upsert',
+      },
+    ],
+    baseline,
+  );
+
+  assert.deepEqual(merged.overlay, { retained: { stale: false } });
+  assert.equal(merged.contributions.length, 2);
 });

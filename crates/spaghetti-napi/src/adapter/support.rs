@@ -580,6 +580,10 @@ struct SupportSourceStreamWire {
 #[derive(Debug, Deserialize)]
 struct SupportSourceBoundsWire {
     #[serde(default)]
+    max_entries: Option<u64>,
+    #[serde(default)]
+    max_depth: Option<u64>,
+    #[serde(default)]
     max_object_bytes: Option<u64>,
     #[serde(default)]
     max_record_bytes: Option<u64>,
@@ -627,6 +631,8 @@ pub(crate) struct AuthorizedObservationSourceContract {
     decoder_id: String,
     authority: AuthorizedObservationSourceAuthority,
     driver: AuthorizedObservationSourceDriver,
+    max_entries: Option<u64>,
+    max_depth: Option<u64>,
 }
 
 impl AuthorizedObservationSourceContract {
@@ -652,6 +658,14 @@ impl AuthorizedObservationSourceContract {
 
     pub(crate) fn driver(&self) -> AuthorizedObservationSourceDriver {
         self.driver
+    }
+
+    pub(crate) fn max_entries(&self) -> Option<u64> {
+        self.max_entries
+    }
+
+    pub(crate) fn max_depth(&self) -> Option<u64> {
+        self.max_depth
     }
 }
 
@@ -718,6 +732,18 @@ impl VerifiedSupportRelease {
             )));
         }
         Ok(())
+    }
+
+    /// Candidate declarations may be compared with runtime stream coordinates
+    /// in conformance tests, but this accessor is deliberately unavailable to
+    /// production source access. A verified candidate is still not an access
+    /// authorization.
+    #[cfg(test)]
+    pub(crate) fn source_contract_for_test(
+        &self,
+        stream_id: &str,
+    ) -> Option<&AuthorizedObservationSourceContract> {
+        self.observation_source_contracts.get(stream_id)
     }
 }
 
@@ -911,8 +937,13 @@ pub fn verify_support_release_bundle(
         scope_programs.expect("support reference set always includes scope program");
     let source_declaration =
         source_declaration.expect("support reference set always includes source declaration");
-    let observation_source_contracts =
-        validate_scope_source_bindings(&scope_programs, &source_declaration)?;
+    let durable_access_supported = descriptor.status == SupportReleaseStatus::Promoted
+        && descriptor.declared_operation_permissions().durable;
+    let observation_source_contracts = validate_scope_source_bindings(
+        &scope_programs,
+        &source_declaration,
+        durable_access_supported,
+    )?;
     let scope_status_matches = match descriptor.status {
         SupportReleaseStatus::Candidate => matches!(
             scope_programs.status,
@@ -953,6 +984,7 @@ pub fn verify_support_release_bundle(
 fn validate_scope_source_bindings(
     scope_programs: &ScopeProgramManifest,
     source_declaration: &SupportSourceDeclarationWire,
+    require_complete_durable_contracts: bool,
 ) -> Result<BTreeMap<String, AuthorizedObservationSourceContract>, SupportContractError> {
     let mut streams = BTreeMap::new();
     let mut observation_source_contracts = BTreeMap::new();
@@ -966,6 +998,25 @@ fn validate_scope_source_bindings(
                 "support source declaration repeats stream {:?}",
                 stream.stream_id
             )));
+        }
+        if stream
+            .topologies
+            .iter()
+            .any(|topology| topology == "durable")
+            && stream.implementation_state == "existing"
+        {
+            match authorized_observation_source_contract(stream) {
+                Some(contract) => {
+                    observation_source_contracts.insert(stream.stream_id.clone(), contract);
+                }
+                None if require_complete_durable_contracts => {
+                    return Err(SupportContractError::invalid(format!(
+                        "supported durable source stream {:?} has no closed common-driver contract",
+                        stream.stream_id
+                    )));
+                }
+                None => {}
+            }
         }
     }
     for relation in scope_programs.relations() {
@@ -1081,6 +1132,8 @@ fn authorized_observation_source_contract(
         decoder_id,
         authority,
         driver,
+        max_entries: stream.bounds.max_entries,
+        max_depth: stream.bounds.max_depth,
     })
 }
 
@@ -1969,6 +2022,33 @@ impl TypedAccessAuthorization {
         })
     }
 
+    /// Select the exact verified durable-source authorization carried by this
+    /// token. Unlike the portable compatibility decision, this borrowed proof
+    /// retains the digest-verified source contracts used to gate native I/O.
+    pub(crate) fn select_durable_access(
+        &self,
+    ) -> Result<AuthorizedDurableAccess<'_>, SupportContractError> {
+        if self.operation.operation != SupportOperation::DurableHistoryRuntime {
+            return Err(SupportContractError::invalid(
+                "typed authorization does not permit durable history/runtime access",
+            ));
+        }
+        let support_release_id = self.operation.support_release_id().ok_or_else(|| {
+            SupportContractError::invalid(
+                "durable authorization does not select a promoted support release",
+            )
+        })?;
+        if self.observation_source_contracts.is_empty() {
+            return Err(SupportContractError::invalid(
+                "durable authorization contains no verified source contracts",
+            ));
+        }
+        Ok(AuthorizedDurableAccess {
+            authorization: self,
+            support_release_id,
+        })
+    }
+
     pub fn select_scope_program(
         &self,
         program_id: &str,
@@ -1994,6 +2074,55 @@ impl TypedAccessAuthorization {
             authorization: self,
             program,
         })
+    }
+}
+
+/// Borrowed, non-serializable proof for one promoted durable runtime. Source
+/// drivers can only obtain stream contracts through this value after native
+/// probe classification and bundle verification have both succeeded.
+pub(crate) struct AuthorizedDurableAccess<'a> {
+    authorization: &'a TypedAccessAuthorization,
+    support_release_id: &'a str,
+}
+
+impl std::fmt::Debug for AuthorizedDurableAccess<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedDurableAccess")
+            .field("adapter_id", &self.adapter_id())
+            .field("support_release_id", &self.support_release_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AuthorizedDurableAccess<'_> {
+    pub(crate) fn adapter_id(&self) -> &str {
+        &self.authorization.adapter_id
+    }
+
+    pub(crate) fn support_release_id(&self) -> &str {
+        self.support_release_id
+    }
+
+    pub(crate) fn support_release_digest(&self) -> Sha256Digest {
+        self.authorization.support_release_digest
+    }
+
+    pub(crate) fn source_declaration_digest(&self) -> Sha256Digest {
+        self.authorization.source_declaration_digest
+    }
+
+    pub(crate) fn contracts(&self) -> &ContractVersionSelection {
+        &self.authorization.contracts
+    }
+
+    pub(crate) fn source_contract(
+        &self,
+        stream_id: &str,
+    ) -> Option<&AuthorizedObservationSourceContract> {
+        self.authorization
+            .observation_source_contracts
+            .get(stream_id)
     }
 }
 
@@ -4200,16 +4329,16 @@ mod tests {
             }]
         }))
         .unwrap();
-        validate_scope_source_bindings(&scope, &source).unwrap();
+        validate_scope_source_bindings(&scope, &source, false).unwrap();
 
         source.streams[0].bounds.max_object_bytes = Some(2048);
-        assert!(validate_scope_source_bindings(&scope, &source)
+        assert!(validate_scope_source_bindings(&scope, &source, false)
             .unwrap_err()
             .to_string()
             .contains("does not match"));
         source.streams[0].bounds.max_object_bytes = Some(1024);
         source.streams[0].topologies = vec!["durable".to_string()];
-        assert!(validate_scope_source_bindings(&scope, &source)
+        assert!(validate_scope_source_bindings(&scope, &source, false)
             .unwrap_err()
             .to_string()
             .contains("does not match"));
@@ -4273,7 +4402,7 @@ mod tests {
             }]
         }))
         .unwrap();
-        let contracts = validate_scope_source_bindings(&scope, &source).unwrap();
+        let contracts = validate_scope_source_bindings(&scope, &source, false).unwrap();
         assert_eq!(
             contracts.get("descendant-stream").unwrap().driver(),
             AuthorizedObservationSourceDriver::AppendDelimited {
@@ -4294,27 +4423,27 @@ mod tests {
         );
 
         source.streams[0].relative_patterns[0] = "sessions/*/other/**".to_string();
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
         source.streams[0].relative_patterns[0] = "sessions/*/children/**/entry-*.jsonl".to_string();
         source.streams[0]
             .relative_patterns
             .push("sessions/*/children/**/entry-*.jsonl".to_string());
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
         source.streams[0].relative_patterns.pop();
         source.streams[0].decoder_id = None;
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
         source.streams[0].decoder_id = Some("fixture-descendant".to_string());
         source.streams[0].authority = Some("private".to_string());
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
         source.streams[0].authority = Some("canonical".to_string());
         source.streams[0].bounds.max_records_per_batch = None;
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
         source.streams[0].bounds.max_records_per_batch = Some(64);
         source.streams[0].bounds.max_record_bytes = Some(16_384);
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
         source.streams[0].bounds.max_record_bytes = Some(4096);
         source.streams[0].safe_decoder_state_boundary = "object_generation_revision".to_string();
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
 
         source.streams[0].primitive = "PresenceObject".to_string();
         source.streams[0].bounds.max_object_bytes = Some(1024);
@@ -4325,7 +4454,7 @@ mod tests {
             "delete".to_string(),
             "recreate".to_string(),
         ];
-        let contracts = validate_scope_source_bindings(&scope, &source).unwrap();
+        let contracts = validate_scope_source_bindings(&scope, &source, false).unwrap();
         assert_eq!(
             contracts.get("descendant-stream").unwrap().driver(),
             AuthorizedObservationSourceDriver::PresenceObject {
@@ -4333,7 +4462,7 @@ mod tests {
             }
         );
         source.streams[0].primitive = "DirectoryMembership".to_string();
-        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
     }
 
     #[test]

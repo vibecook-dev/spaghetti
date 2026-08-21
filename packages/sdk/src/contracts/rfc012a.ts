@@ -1857,7 +1857,6 @@ function nativeProbeGrantRequestDigest(request: NativeProbeGrantRequest): string
 }
 
 function encodeNativeProbeGrantRequest(request: NativeProbeGrantRequest): Uint8Array {
-  const sink = new ContractByteSink();
   const domain = UTF8_ENCODER.encode('spaghetti/rfc012a/native-probe-grant-request/v1\0');
   const body = new ContractByteSink();
   encodeAccessRequestCoordinates(body, request.access_request_contract_version, request);

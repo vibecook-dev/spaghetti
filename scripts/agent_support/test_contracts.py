@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,13 @@ from scripts.agent_support.contracts import (
     verify_scope_access_report_digest,
 )
 from scripts.agent_support.sanitize_fixture import sanitize_document, scan_prohibited
+from scripts.agent_support.promote_claude_durable import (
+    PromotionPreflightError,
+    _load_object,
+    validate_compatible_cycle_telemetry,
+    validate_performance_report,
+    validate_sanitizer_approval,
+)
 from scripts.agent_support.validate import (
     REPO_ROOT,
     SCHEMA_ROOT,
@@ -648,6 +656,56 @@ class AccessBudgetTests(unittest.TestCase):
 
 
 class SchemaAndRepositoryTests(unittest.TestCase):
+    def test_promotion_preflight_rejects_symlinked_review_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "approval-target.json"
+            target.write_text("{}", encoding="utf-8")
+            link = root / "approval.json"
+            link.symlink_to(target)
+
+            with self.assertRaisesRegex(
+                PromotionPreflightError,
+                "regular non-symlink file",
+            ):
+                _load_object(link, "sanitizer approval")
+
+    def test_promotion_preflight_rejects_self_approval_and_stub_reports(self) -> None:
+        support_release_id = "claude-code-support-2026-08-21-candidate"
+        with self.assertRaises(PromotionPreflightError):
+            validate_sanitizer_approval(
+                {
+                    "status": "approved",
+                    "reviewer": "rfc012-integrator",
+                    "reviewed_at": "2026-08-21",
+                    "support_release_id": support_release_id,
+                    "candidate_bundle_sha256": "sha256:" + "0" * 64,
+                    "prohibited_scan": "pass",
+                    "reviewed_fixture_digests": ["sha256:" + "1" * 64],
+                },
+                support_release_id=support_release_id,
+                candidate_digest="sha256:" + "0" * 64,
+            )
+
+        report_root = REPO_ROOT / "agent-support/claude-code/candidate-2026-08-21/reports"
+        performance = json.loads(
+            (report_root / "performance-v1.json").read_text(encoding="utf-8")
+        )
+        with self.assertRaises(PromotionPreflightError):
+            validate_performance_report(
+                performance,
+                support_release_id=support_release_id,
+            )
+
+        telemetry = json.loads(
+            (report_root / "promotion-telemetry-v1.json").read_text(encoding="utf-8")
+        )
+        with self.assertRaises(PromotionPreflightError):
+            validate_compatible_cycle_telemetry(
+                telemetry,
+                support_release_id=support_release_id,
+            )
+
     def test_promoted_scope_requires_a_declared_known_object_root(self) -> None:
         class FixtureBundle:
             label = "fixture"
@@ -909,26 +967,28 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         self.assertTrue(any("additional property" in error for error in errors))
         self.assertTrue(any("fewer than" in error for error in errors))
 
-    def test_promoted_claude_durable_path_classifies_and_keeps_catalog_scoped_closed(self) -> None:
+    def test_review_blocked_claude_candidate_is_not_selectable(self) -> None:
         bundles, errors = validate_repository()
         self.assertEqual(errors, [])
         releases = [bundle.document("support-release.json") for bundle in bundles]
-        claude_promoted = [
+        claude_candidate = [
             release
             for release in releases
-            if release["support_release_id"] == "claude-code-support-2026-08-21-promoted"
+            if release["support_release_id"] == "claude-code-support-2026-08-21-candidate"
         ]
-        self.assertEqual(len(claude_promoted), 1)
-        self.assertEqual(claude_promoted[0]["status"], "promoted")
-        self.assertEqual(claude_promoted[0]["artifact_compatibility"]["exact_versions"], ["2.1.223"])
-        markers = frozenset(claude_promoted[0]["artifact_compatibility"]["required_markers"])
+        self.assertEqual(len(claude_candidate), 1)
+        self.assertEqual(claude_candidate[0]["status"], "candidate")
+        self.assertEqual(claude_candidate[0]["sanitizer_review"]["status"], "pending")
+        self.assertIsNone(claude_candidate[0]["reports"]["performance_sha256"])
+        self.assertEqual(claude_candidate[0]["artifact_compatibility"]["exact_versions"], ["2.1.223"])
+        markers = frozenset(claude_candidate[0]["artifact_compatibility"]["required_markers"])
         selected = classify_runtime(
             RuntimeProbe("claude-code", "darwin", "2.1.223", markers),
             releases,
         )
-        self.assertEqual(selected.compatibility_class, CompatibilityClass.EXACT_SUPPORTED)
-        self.assertEqual(selected.support_release_id, "claude-code-support-2026-08-21-promoted")
-        self.assertTrue(selected.permissions["durable"])
+        self.assertEqual(selected.compatibility_class, CompatibilityClass.RECOGNIZED_UNVERIFIED)
+        self.assertIsNone(selected.support_release_id)
+        self.assertFalse(selected.permissions["durable"])
         self.assertFalse(selected.permissions["catalog"])
         self.assertFalse(selected.permissions["scoped_observation"])
 
@@ -943,12 +1003,14 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         telemetry = json.loads(
             (
                 REPO_ROOT
-                / "agent-support/claude-code/promoted-2026-08-21/reports/promotion-telemetry-v1.json"
+                / "agent-support/claude-code/candidate-2026-08-21/reports/promotion-telemetry-v1.json"
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(telemetry["rollback"]["query_id"], "legacy.usage")
-        self.assertTrue(telemetry["rollback"]["compatible_cycle"])
-        self.assertEqual(telemetry["classification"]["compatibility_class"], "ExactSupported")
+        self.assertFalse(telemetry["rollback"]["compatible_cycle"])
+        self.assertEqual(
+            telemetry["classification"]["compatibility_class"], "RecognizedUnverified"
+        )
 
     def test_repository_bundles_are_valid_and_candidates_are_nonselectable(self) -> None:
         bundles, errors = validate_repository()
@@ -964,7 +1026,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         )
         self.assertEqual(
             {release["status"] for release in releases if release["adapter_id"] == "claude-code"},
-            {"candidate", "promoted"},
+            {"candidate"},
         )
         for release in releases:
             probe = RuntimeProbe(

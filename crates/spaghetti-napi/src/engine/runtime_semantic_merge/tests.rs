@@ -189,7 +189,7 @@ fn overlay_replaces_one_fact_identity_while_preserving_semantic_revision_refs() 
 }
 
 #[test]
-fn complete_equal_or_dominating_coverage_retires_overlay() {
+fn complete_equal_or_durable_dominating_coverage_retires_overlay() {
     let fixture = runtime_fixture();
     let durable = vec![contribution(&fixture.usage.native_message)];
     let overlay_event = upsert_event("evt-fallback", &fixture.usage.source_record_fallback);
@@ -225,15 +225,66 @@ fn complete_equal_or_dominating_coverage_retires_overlay() {
         .iter()
         .any(|item| item.fact_id == fixture.usage.source_record_fallback.fact_id));
 
-    let dominating =
-        merge_durable_and_scoped_usage(&durable, &baseline, &[overlay_event], &dominant)
-            .expect("dominating merge");
-    assert_eq!(dominating.overlay, OverlayDisposition::Retired);
-    assert_eq!(dominating.contributions.len(), 1);
     assert_eq!(
-        dominating.contributions[0].origin,
+        compare_coverage(&baseline, &dominant).unwrap(),
+        CoverageComparison::Behind
+    );
+    let durable_dominating =
+        merge_durable_and_scoped_usage(&durable, &dominant, &[overlay_event], &baseline)
+            .expect("durable-dominating merge");
+    assert_eq!(durable_dominating.overlay, OverlayDisposition::Retired);
+    assert_eq!(durable_dominating.contributions.len(), 1);
+    assert_eq!(
+        durable_dominating.contributions[0].origin,
         MergedContributionOrigin::Durable
     );
+}
+
+#[test]
+fn complete_observer_dominating_coverage_retains_current_overlay() {
+    let fixture = runtime_fixture();
+    let durable = vec![contribution(&fixture.usage.native_message)];
+    let overlay_event = upsert_event("evt-current", &fixture.usage.source_record_fallback);
+    let (baseline, dominant, _) = coverage_sets();
+
+    assert_eq!(
+        compare_coverage(&dominant, &baseline).unwrap(),
+        CoverageComparison::Dominates
+    );
+    let merged = merge_durable_and_scoped_usage(&durable, &baseline, &[overlay_event], &dominant)
+        .expect("observer-dominating merge");
+
+    assert_eq!(
+        merged.overlay,
+        OverlayDisposition::Retained { stale: false }
+    );
+    assert_eq!(merged.contributions.len(), 2);
+    assert!(merged.contributions.iter().any(|item| {
+        item.fact_id == fixture.usage.source_record_fallback.fact_id
+            && item.origin == MergedContributionOrigin::Overlay
+    }));
+}
+
+#[test]
+fn incomplete_durable_coverage_cannot_retire_an_equal_overlay() {
+    let fixture = runtime_fixture();
+    let durable = vec![contribution(&fixture.usage.native_message)];
+    let overlay_event = upsert_event(
+        "evt-equal-incomplete",
+        &fixture.usage.source_record_fallback,
+    );
+    let (baseline, _, _) = coverage_sets();
+    let incomplete_durable = with_completeness(&baseline, "partial");
+
+    let merged =
+        merge_durable_and_scoped_usage(&durable, &incomplete_durable, &[overlay_event], &baseline)
+            .expect("incomplete-durable merge");
+
+    assert_eq!(
+        merged.overlay,
+        OverlayDisposition::Retained { stale: false }
+    );
+    assert_eq!(merged.contributions.len(), 2);
 }
 
 #[test]

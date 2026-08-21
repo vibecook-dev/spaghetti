@@ -15,6 +15,7 @@ pub mod message_extractor;
 #[cfg(feature = "legacy-oracle")]
 pub mod reader;
 
+pub(crate) use adapter::verified_support_release;
 pub use adapter::CodexAdapter;
 
 #[cfg(feature = "legacy-oracle")]

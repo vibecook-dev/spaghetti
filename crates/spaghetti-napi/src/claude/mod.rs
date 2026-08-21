@@ -8,6 +8,7 @@
 pub mod adapter;
 #[cfg(test)]
 mod catalog_conformance;
+#[cfg(test)]
 pub(crate) mod catalog_runtime;
 /// On-disk fingerprint discovery + `source_files` store helpers.
 ///
@@ -22,8 +23,10 @@ pub mod message_extractor;
 #[cfg(feature = "legacy-oracle")]
 pub mod project_parser;
 pub mod session_metadata;
+pub(crate) mod support_probe;
 pub mod types;
 
+pub(crate) use adapter::verified_support_release;
 pub use adapter::ClaudeCodeAdapter;
 pub use message_extractor::{project_jsonl_line, MessageProjection};
 #[cfg(feature = "legacy-oracle")]

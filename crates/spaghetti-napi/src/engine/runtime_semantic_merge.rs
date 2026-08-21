@@ -192,14 +192,19 @@ fn overlay_disposition(
 ) -> Result<OverlayDisposition, SemanticMergeError> {
     let comparison = compare_coverage(observer_coverage, durable_coverage)?;
     if observer_coverage.completeness == CoverageSetCompleteness::Complete
+        && durable_coverage.completeness == CoverageSetCompleteness::Complete
         && matches!(
             comparison,
-            CoverageComparison::Equal | CoverageComparison::Dominates | CoverageComparison::Behind
+            CoverageComparison::Equal | CoverageComparison::Behind
         )
     {
         return Ok(OverlayDisposition::Retired);
     }
-    Ok(OverlayDisposition::Retained { stale: true })
+    Ok(OverlayDisposition::Retained {
+        stale: observer_coverage.completeness != CoverageSetCompleteness::Complete
+            || durable_coverage.completeness == CoverageSetCompleteness::Complete
+                && comparison != CoverageComparison::Dominates,
+    })
 }
 
 fn assemble_contributions(

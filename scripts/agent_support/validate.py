@@ -165,6 +165,26 @@ def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _report_matching_digest(bundle: "Bundle", digest: str) -> Path | None:
+    reports = bundle.directory / "reports"
+    if reports.is_symlink() or not reports.is_dir():
+        return None
+    matches: list[Path] = []
+    for path in reports.glob("*.json"):
+        try:
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size > 4 * 1024 * 1024
+                or _sha256(path) != digest
+            ):
+                continue
+        except OSError:
+            continue
+        matches.append(path)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _safe_repo_path(raw_path: str) -> tuple[Path | None, str | None]:
     posix = PurePosixPath(raw_path)
     if posix.is_absolute() or ".." in posix.parts or "\\" in raw_path:
@@ -646,6 +666,10 @@ def _validate_release(bundle: Bundle) -> list[str]:
         errors.append(f"{bundle.label}/conformance.json: duplicate check {duplicate}")
 
     status = release["status"]
+    if not bundle.directory.name.startswith(f"{status}-"):
+        errors.append(
+            f"{bundle.label}: directory prefix does not match release status {status}"
+        )
     if status == "candidate":
         if not release["promotion_blockers"]:
             errors.append(f"{bundle.label}: candidate support release must name promotion blockers")
@@ -660,6 +684,85 @@ def _validate_release(bundle: Bundle) -> list[str]:
             errors.append(f"{bundle.label}: promoted support release needs a passing prohibited scan")
         if release["reports"]["conformance_sha256"] is None or release["reports"]["performance_sha256"] is None:
             errors.append(f"{bundle.label}: promoted support release needs conformance and performance reports")
+        else:
+            conformance_report = _report_matching_digest(
+                bundle, release["reports"]["conformance_sha256"]
+            )
+            performance_report = _report_matching_digest(
+                bundle, release["reports"]["performance_sha256"]
+            )
+            if conformance_report is None:
+                errors.append(
+                    f"{bundle.label}: conformance report digest does not uniquely bind a retained report"
+                )
+            elif release["adapter_id"] != "fixture-agent":
+                try:
+                    report = _load_json(conformance_report)
+                except (OSError, json.JSONDecodeError):
+                    report = None
+                if (
+                    not isinstance(report, dict)
+                    or report.get("adapter_id") != release["adapter_id"]
+                    or report.get("support_release_id") != release["support_release_id"]
+                    or not isinstance(report.get("checks"), list)
+                    or not report["checks"]
+                ):
+                    errors.append(
+                        f"{bundle.label}: promoted conformance report does not bind the release and retained checks"
+                    )
+            if performance_report is None:
+                errors.append(
+                    f"{bundle.label}: performance report digest does not uniquely bind a retained report"
+                )
+            elif release["adapter_id"] != "fixture-agent":
+                try:
+                    report = _load_json(performance_report)
+                except (OSError, json.JSONDecodeError):
+                    report = None
+                required_performance_fields = {
+                    "support_release_id",
+                    "source_fixture_digests",
+                    "environment",
+                    "cache_method",
+                    "repetitions",
+                    "measurements",
+                    "statistics",
+                    "semantic_digests",
+                    "coverage",
+                    "observer",
+                    "usage",
+                    "timestamps",
+                    "query_distributions",
+                    "resources",
+                    "contract_versions",
+                }
+                if not isinstance(report, dict) or not required_performance_fields.issubset(report):
+                    errors.append(
+                        f"{bundle.label}: promoted performance report does not satisfy the RFC 012 benchmark-report shape"
+                    )
+                elif report["support_release_id"] != release["support_release_id"]:
+                    errors.append(
+                        f"{bundle.label}: promoted performance report names a different support release"
+                    )
+                elif not isinstance(report["repetitions"], int) or isinstance(
+                    report["repetitions"], bool
+                ) or report["repetitions"] < 3:
+                    errors.append(
+                        f"{bundle.label}: promoted performance report needs at least three repetitions"
+                    )
+        reviewer = release["sanitizer_review"]["reviewer"]
+        reviewed_at = release["sanitizer_review"]["reviewed_at"]
+        if release["adapter_id"] != "fixture-agent" and (
+            not isinstance(reviewer, str)
+            or not reviewer.strip()
+            or reviewer.strip().lower()
+            in {"rfc012-integrator", "automation", "unknown", "pending"}
+            or not isinstance(reviewed_at, str)
+            or not reviewed_at.strip()
+        ):
+            errors.append(
+                f"{bundle.label}: promoted support release needs a named independent sanitizer reviewer and date"
+            )
         if any(item["status"] not in {"pass", "not_applicable"} for item in conformance["checks"]):
             errors.append(f"{bundle.label}: promoted support release has unfinished conformance checks")
         if any(claim["state"] in {"open", "degraded"} for claim in evidence["claims"]):

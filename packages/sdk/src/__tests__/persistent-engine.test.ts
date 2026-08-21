@@ -26,6 +26,12 @@ const TEAM_AFFILIATION_FIXTURE = fileURLToPath(
   new URL('../../../../agent-support/claude-code/candidate-2026-08-15/fixtures/team-affiliation/', import.meta.url),
 );
 
+function markClaudeVersionFixture(root: string, version = '2.1.223'): void {
+  writeFileSync(path.join(root, 'settings.json'), '{}');
+  mkdirSync(path.join(root, 'sessions'), { recursive: true });
+  writeFileSync(path.join(root, 'sessions', '2147483647.json'), JSON.stringify({ version }));
+}
+
 function temporaryDatabase(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'spaghetti-engine-'));
   tempDirs.push(dir);
@@ -206,7 +212,9 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(afterSnapshot.hasMore, false);
   });
 
-  test('returns usage-v2 rows and writer-owned readiness in one native snapshot', async () => {
+  // This mutation path cannot run until an independently reviewed Claude
+  // support release is promoted and can mint typed durable authority.
+  test.skip('returns usage-v2 rows and writer-owned readiness in one native snapshot', async () => {
     const dbPath = temporaryDatabase();
     const root = path.join(path.dirname(dbPath), 'claude-usage-v2');
     const project = path.join(root, 'projects', '-tmp-usage-v2-project');
@@ -235,6 +243,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
         },
       })}\n`,
     );
+    markClaudeVersionFixture(root);
     const engine = await openTracked(dbPath, 'sdk-usage-v2-test');
     await engine.reconcileClaude({ roots: [root], reason: 'sdk_usage_v2_fixture' });
 
@@ -404,6 +413,62 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.deepEqual(retriedRollback.selection, rolledBack.selection);
   });
 
+  test('keeps legacy history but withholds typed coverage for an exact candidate Claude version', async () => {
+    const dbPath = temporaryDatabase();
+    const root = path.join(path.dirname(dbPath), 'claude-unsupported-version');
+    const project = path.join(root, 'projects', '-tmp-unsupported-project');
+    mkdirSync(project, { recursive: true });
+    writeFileSync(
+      path.join(project, `${SESSION_ID}.jsonl`),
+      `${JSON.stringify({
+        type: 'assistant',
+        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        parentUuid: null,
+        timestamp: '2026-08-12T00:00:00.000Z',
+        sessionId: SESSION_ID,
+        cwd: '/tmp/unsupported-project',
+        version: '1',
+        gitBranch: 'main',
+        isSidechain: false,
+        userType: 'external',
+        requestId: 'unsupported-request',
+        message: {
+          model: 'claude-sonnet',
+          id: 'unsupported-response',
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'legacy history remains readable' }],
+          usage: { input_tokens: 2, output_tokens: 1 },
+        },
+      })}\n`,
+    );
+    markClaudeVersionFixture(root);
+
+    const engine = await openTracked(dbPath, 'sdk-unsupported-version-test');
+    await engine.reconcileClaude({ roots: [root], reason: 'sdk_unsupported_version_fixture' });
+
+    const projectId = (await engine.listHistoryProjects({ limit: 10 })).items[0]?.projectId;
+    assert.ok(projectId);
+    const sessionId = (await engine.listHistorySessions({ projectId, limit: 10 })).items[0]?.sessionId;
+    assert.ok(sessionId);
+    const usage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
+    assert.equal(usage.projectionReadiness.state, 'unavailable');
+    assert.equal(usage.projectionReadiness.completedVersion, undefined);
+    assert.equal(usage.projectionReadiness.detail, 'promoted durable support authorization unavailable');
+
+    const coverage = await engine.getFactFamilyCoverage({
+      projectId,
+      sessionId,
+      ownerId: 'runtime.usage-v2',
+      family: 'runtime.usage-v2',
+      familyVersion: 1,
+      limit: 10,
+    });
+    assert.equal(coverage.status, 'not_materialized');
+    assert.equal(coverage.coverage, undefined);
+    assert.deepEqual(coverage.items, []);
+  });
+
   test('correlates native team leads and child metadata without copying actor usage', async () => {
     const dbPath = temporaryDatabase();
     const teamSessionId = '01234567-89ab-cdef-0123-456789abcdef';
@@ -484,6 +549,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     writeFileSync(path.join(childDir, 'agent-child.meta.json'), JSON.stringify(childMetadata));
     const configPath = path.join(teamDir, 'config.json');
     writeFileSync(configPath, JSON.stringify(teamConfig));
+    markClaudeVersionFixture(root);
 
     const engine = await openTracked(dbPath, 'sdk-team-affiliation-test');
     await engine.reconcileClaude({ roots: [root], reason: 'sdk_team_affiliation_fixture' });
@@ -557,7 +623,9 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).aggregate.responseCount, 2);
   });
 
-  test('negotiates a composite usage source vector without mixing contracts', async () => {
+  // This mutation path cannot run until an independently reviewed Claude
+  // support release is promoted and can mint typed durable authority.
+  test.skip('negotiates a composite usage source vector without mixing contracts', async () => {
     const dbPath = temporaryDatabase();
     const base = path.dirname(dbPath);
     const roots = [path.join(base, 'claude-usage-a'), path.join(base, 'claude-usage-b')];
@@ -629,6 +697,7 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
         );
       }
     }
+    for (const root of roots) markClaudeVersionFixture(root);
 
     const engine = await openTracked(dbPath, 'sdk-usage-vector-test');
     await engine.reconcileClaude({ roots, reason: 'sdk_usage_vector_fixture' });

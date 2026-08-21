@@ -6,13 +6,11 @@
 
 import {
   ContractValidationError,
-  EXTERNAL_ENTITY_REFERENCE_VERSION,
   parseExternalEntityRef,
   parseOpaqueContractReference,
   parseQualifiedValue,
   parseSemanticRevisionRef,
   parseSourceCoverageSet,
-  SEMANTIC_REFERENCE_CONTRACT_VERSION,
   type ContractCompleteness,
   type ExternalEntityRef,
   type NativeIdentity,
@@ -708,26 +706,6 @@ export function parseCatalogPortableCoveragePlan(value: unknown): CatalogPortabl
     required_sources: requiredSources,
     optional_sources: optionalSources,
   };
-}
-
-function plansEqual(left: CatalogPortableCoveragePlan, right: CatalogPortableCoveragePlan): boolean {
-  const sourcesEqual = (a: CatalogPortableCoveragePlanSource[], b: CatalogPortableCoveragePlanSource[]) =>
-    a.length === b.length &&
-    a.every(
-      (source, index) =>
-        source.adapter_id === b[index]!.adapter_id &&
-        source.source_instance_key === b[index]!.source_instance_key &&
-        source.support_release_id === b[index]!.support_release_id &&
-        source.catalog_declaration_digest === b[index]!.catalog_declaration_digest &&
-        source.access_policy_digest === b[index]!.access_policy_digest &&
-        source.catalog_coverage_binding_digest === b[index]!.catalog_coverage_binding_digest,
-    );
-  return (
-    left.coverage_plan_id === right.coverage_plan_id &&
-    scopesEqual(left.scope, right.scope) &&
-    sourcesEqual(left.required_sources, right.required_sources) &&
-    sourcesEqual(left.optional_sources, right.optional_sources)
-  );
 }
 
 function parseReadinessReason(value: unknown): CatalogReadinessReason {

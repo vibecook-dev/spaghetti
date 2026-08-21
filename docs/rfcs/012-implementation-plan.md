@@ -1,16 +1,14 @@
 # RFC 012 implementation and validation program
 
-- **Status:** Active non-normative roadmap. Catalog-first host and complete-only
-  search are on the engine path. C1 actor/usage/state/interaction fixtures are
-  Gate met. D2 now composes Promoted `ChildDirectoryByNativeId` membership
-  before bootstrap; D3 query workers share the observer pass pool; scoped
-  `runtime.user-input-request` replacement is live. C1 now also freezes
-  `runtime.message`, `runtime.task`, `runtime.effective-state`,
-  `runtime.plan`, and `runtime.tool` fixtures; D3 projects those families as
-  current-generation-log, owned-set, revisioned-entity, and correlated-lifecycle
-  replacement. D2/D3 remain In progress
-  against Claude Candidate promotion. Default-on (`Rolled out`) and child-RFC
-  012B/C/D ratification remain later product decisions.
+- **Status:** Active non-normative roadmap. C3's durable usage-v2 migration and
+  A4's new-adapter proof have met their package gates. The public native host
+  now verifies every compiled built-in support package, but all current-agent
+  releases remain candidates and therefore grant no typed RFC 012 authority.
+  The retained RFC 011 compatibility path cannot publish promoted RFC 012
+  coverage, replay it, or select its query pack. Catalog, remaining runtime
+  families, the public scoped-observer transport, complete performance reports,
+  and default-on rollout are still in progress. Child-RFC 012B/C/D ratification
+  remains a later product decision.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -123,32 +121,32 @@ prerequisite for early vertical slices.
 
 ## 4. Program status
 
-| Work package                             | Owner               | Status      | Exit evidence                                                  |
-| ---------------------------------------- | ------------------- | ----------- | -------------------------------------------------------------- |
-| E0. Phase 0A/0B evidence                 | Umbrella            | Gate met    | catalog, diagnostic, topology, usage census reports/tests      |
-| X0. RFC 011 delta/compatibility gate     | Umbrella            | Gate met    | retained/amended/superseded contract and migration fixtures    |
-| A1. Logical dependency/model seam        | 012A                | Gate met    | architecture checks and contract fixtures                      |
-| A2. ADS/scope/support tooling            | 012A                | Gate met    | schemas, sanitizer, ledger checker, access tracer              |
-| A3. Current-agent support candidates     | 012A                | Gate met    | Claude/Codex/Grok ADS and candidate entries                    |
-| A4. New-agent adaptation proof           | 012A/umbrella       | Gate met    | fourth adapter without common-runtime/query/observer change    |
-| B1. Catalog identity/readiness contracts | 012B                | Gate met    | Rust/N-API/TS fixtures and transition table tests              |
-| B2. Bounded catalog source compositions  | 012B                | Gate met    | three adapter catalog identity digest parity                   |
-| B3. Durable catalog/query snapshots      | 012B                | Gate met    | atomic pack plus snapshot pagination conformance               |
-| B4. Progressive host and UX              | 012B                | Gate met    | cold/warm UI topology and migration tests                      |
-| B5. Catalog performance calibration      | 012B                | Gate met    | reproducible gate-amendment report                             |
-| C1. Runtime semantic contracts           | 012C                | Gate met    | actor/usage/state/interaction/message/task/effective-state/plan/tool serialization fixtures |
-| C2. Usage-v2 shadow projection           | 012C                | Gate met    | frozen/private corpus plus native affiliation parity           |
-| C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof |
-| C4. Runtime semantic downstream suite    | 012C                | Gate met    | typed consumers plus durable/live merge without native parsing |
-| D1. Store-free observer kernel           | 012D                | Gate met    | attach/bootstrap/poll/close/deps; no store/global scan         |
-| D2. Claude scope composition             | 012D                | In progress | Promoted directory membership; Candidate promotion later       |
+| Work package                             | Owner               | Status      | Exit evidence                                                                           |
+| ---------------------------------------- | ------------------- | ----------- | --------------------------------------------------------------------------------------- |
+| E0. Phase 0A/0B evidence                 | Umbrella            | Gate met    | catalog, diagnostic, topology, usage census reports/tests                               |
+| X0. RFC 011 delta/compatibility gate     | Umbrella            | Gate met    | retained/amended/superseded contract and migration fixtures                             |
+| A1. Logical dependency/model seam        | 012A                | In progress | architecture checks and partial contract-family fixtures                                |
+| A2. ADS/scope/support tooling            | 012A                | In progress | internal strict authority; remaining public catalog/scoped lifecycle                    |
+| A3. Current-agent support candidates     | 012A                | In progress | Claude 2.1.223 review-blocked candidate; Codex/Grok remain candidate                    |
+| A4. New-agent adaptation proof           | 012A/umbrella       | Gate met    | fourth adapter without common-runtime/query/observer change                             |
+| B1. Catalog identity/readiness contracts | 012B                | In progress | contract fixtures complete; authorized public transport open                            |
+| B2. Bounded catalog source compositions  | 012B                | In progress | candidate conformance; runtime producers incomplete                                     |
+| B3. Durable catalog/query snapshots      | 012B                | In progress | private pack/pagination; public policy/query lifecycle open                             |
+| B4. Progressive host and UX              | 012B                | In progress | partial host readiness; selected hydration and UI flow open                             |
+| B5. Catalog performance calibration      | 012B                | In progress | partial experiment; complete report and ratification open                               |
+| C1. Runtime semantic contracts           | 012C                | In progress | broad fixture set; remaining families/reducer parity open                               |
+| C2. Usage-v2 shadow projection           | 012C                | In progress | private parity; complete coverage/topology gate open                                    |
+| C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof                          |
+| C4. Runtime semantic downstream suite    | 012C                | In progress | usage merge landed; all-family reducer/digest suite open                                |
+| D1. Store-free observer kernel           | 012D                | In progress | substantial internal kernel; public/multi-object surface open                           |
+| D2. Claude scope composition             | 012D                | In progress | bounded internal directory membership; runtime promotion open                           |
 | D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input/message/task/effective-state/plan/tool replacement; no Gate met |
-| D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
-| D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
-| X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
-| X2. Diagnostic disposition/aggregation   | 012A implementation | Gate met    | bounded rows with count/provenance parity                      |
-| X3. Physical extraction                  | Implementation      | Gate met    | workspace boundaries mirror dependency checks                  |
-| X4. Default promotion/drift lane         | Umbrella            | Gate met    | promoted durable Claude 2.1.223 + rollback; corpus telemetry later |
+| D4. SDK and Chopsticks migration         | 012D                | In progress | injected-source shadow only; public observer transport open                             |
+| D5. Observer performance calibration     | 012D                | In progress | partial timings; memory/access/slow-consumer report open                                |
+| X1. Search/finalization separation       | 012B integration    | In progress | strategy harness landed; required report fields open                                    |
+| X2. Diagnostic disposition/aggregation   | 012A implementation | In progress | bounded machinery landed; retained reduction/parity report open                         |
+| X3. Physical extraction                  | Implementation      | In progress | coverage encoding extracted; remaining boundaries still logical                         |
+| X4. Default promotion/drift lane         | Umbrella            | In progress | Claude candidate quarantined; independent review/telemetry open                         |
 
 ## 5. Completed evidence work (E0)
 
@@ -439,11 +437,13 @@ restricted packages still cannot authorize the operation.
 
 A2 remains `In progress`: the internal scoped composition now owns the
 authorized plan lifecycle, executes its first common confined primitive, and
-reuses the store-agnostic decode boundary, but no catalog, durable, or public
-scoped-observer host owns the full strict lifecycle; no N-API/IPC retrieval or
-native version-probe driver consumes the new request yet; and adapter
-registrations must move from the explicit legacy path to the strict promoted
-catalog after the first support release is promoted. The promotion-
+reuses the store-agnostic decode boundary. The native host verifies the
+built-in catalog and performs a bounded Claude native probe before durable
+source access. Candidate declarations are compared with every runtime stream
+in conformance tests, but no current release can mint typed authority, publish
+promoted coverage, replay it, or select its query pack. Catalog and public
+scoped-observer hosts still do not own the full strict lifecycle, and no public
+N-API/IPC access-report retrieval surface exists. The promotion-
 safety capability gap is now closed across Rust, Python, and portable
 TypeScript: verified release descriptors retain the digest-bound capability
 topology and level declarations; exact/range classification permits a broad
@@ -497,11 +497,14 @@ sanitizer-v2 declared-input identity matrix and rebound `claude-identity-rules`
 without flipping it off `degraded`. Decoder-executed `identity-determinism`
 stays `planned`. Compiled ADS/source/scope digests were not touched.
 
-A3 remains `In progress`: no artifact version is pinned; Codex/Grok still need
-independent sanitized transition corpora; Claude needs the complete executable
-RFC 012D relation set and RFC 012C semantic fixtures; catalog/scoped stream
-compositions are not implemented; and identity, compositionality,
-cross-topology, performance, and human sanitizer-review gates remain planned.
+A3 remains `In progress`: Claude Code 2.1.223 has a narrower durable candidate
+with bounded marker probing and digest-bound stream declarations, but the
+native distributable digest, independent sanitizer approval, complete
+conformance report, section 12 performance report, and compatible-release
+telemetry remain open. It is not runtime-selectable. Catalog and scoped
+capabilities remain unsupported. Codex and Grok also remain candidates and
+still need production-authorizing composition and complete independent
+transition evidence.
 
 ### A4. New-agent proof
 
@@ -1016,6 +1019,14 @@ work. Add:
 
 Remove initial-library per-project usage and per-session task fan-out.
 
+Current landing status (2026-08-21): the sole-owner host can admit query
+workers before complete-only FTS finishes and exposes source-neutral readiness
+and search state. Deferred bootstrap is an explicit caller choice rather than
+an SDK filesystem-size heuristic. This does not yet provide the authorized
+public catalog pages, last-complete warm policy view, selected-session hydration
+command, renderer pagination/content states, or the complete cold/warm UX
+matrix. B4 remains `In progress`.
+
 ### B5. Performance calibration
 
 Run cold/warm/catalog-query/selected-hydration experiments on frozen inputs.
@@ -1023,6 +1034,11 @@ Report every environment/evidence digest required by RFC 012B. Propose a child
 RFC gate amendment that promotes measured values from experiment target to
 ratified release ceiling. Until amended, semantic correctness gates block
 release but provisional p95 values do not become accidental architecture law.
+
+The current FTS strategy fixture is diagnostic-only. It records a small subset
+of elapsed/WAL/query timing values, but not the complete benchmark-report
+contract in section 12, selected-hydration measurements, repetitions, memory,
+or a reviewed gate amendment. B5 remains `In progress`.
 
 ## 8. RFC 012C workstream
 
@@ -1052,14 +1068,15 @@ entity/revision identity, explicit retraction, partial non-retraction, and its
 complete replacement representation.
 
 Current C1 landing status (2026-08-21): actor-run, actor-affiliation, usage-v2,
-effective-state, and user-input-request v1 fixtures now have strict Rust,
-JSON-string N-API, and portable TypeScript consumers. Effective-state covers
-configured/observed/retract identities for the independent Model dimension and
-rejects unknown dimensions. Interaction covers RFC 012C §11 Pending | Resolved |
-Failed | Cancelled plus complete retract and partial non-retraction, with
-committed fact and semantic-revision identities. This closes the C1
-serialization-fixture Exit. Messages, plans, tasks, tools, and scoped-versus-
-durable reducer equality remain later 012C work, not this package's Exit.
+effective-state, user-input-request, interaction, message, task, plan, and tool
+v1 fixtures now have strict Rust, JSON-string N-API, and portable TypeScript
+consumers. Effective-state currently proves the independent Model dimension;
+interaction covers Pending | Resolved | Failed | Cancelled plus complete
+retract and partial non-retraction. The fixture breadth is substantial, but it
+does not close C1: remaining model/effort/mode dimensions, content/progress and
+capability families, complete family-by-family replacement/retraction cases,
+full semantic reduction, tier/view compositionality, and durable/scoped reducer
+digest equality remain open.
 
 ### C2. Usage-v2 shadow projection
 
@@ -1406,6 +1423,16 @@ At the same RFC 012A source/family coverage vector, durable and observation
 reducers must produce equal per-family semantic and replacement-state digests.
 
 No consumer may parse native payloads for supported typed behavior.
+
+Current landing status (2026-08-21): Rust and portable TypeScript reference
+consumers merge durable and scoped usage-v2 by `SemanticRevisionRef`, dedupe
+delivery by occurrence-scoped event ID, and retire overlays only when both
+coverage vectors are complete and durable coverage is equal to or ahead of the
+observer. Partial, unavailable, incomparable, and observer-ahead evidence is
+retained. The remaining runtime families, catalog/base-session equality,
+snapshot expiration/reset matrices, multi-run identity, and all-family reduced
+and replacement-state digest comparison are not implemented. C4 remains
+`In progress`.
 
 ## 9. RFC 012D workstream
 
@@ -2413,8 +2440,8 @@ Current landing status (2026-08-21): D2 remains `In progress`. Decoder-executed
 now also decodes the team-inbox sidecar to `Fact::TeamInboxSnapshot` rather
 than `UnknownRecord`, and still proves typed root/child/workflow/team facts.
 `rfc012_d2_observer_composes_claude_root_current_future_and_sidecar` attaches a
-Promoted KnownObject program with Claude-shaped root-transcript, current-child,
-future-child, and team-inbox-sidecar grants. Future-child is missing at
+synthetic promoted fixture program with Claude-shaped root-transcript,
+current-child, future-child, and team-inbox-sidecar grants. Future-child is missing at
 bootstrap (attach-before-create), then root/current/sidecar appear, then the
 future child is created later; each object keeps a distinct source identity.
 `rfc012_d2_host_composes_child_directory_membership_before_bootstrap_completion`
@@ -2424,9 +2451,9 @@ a `ChildDirectoryByNativeId` descendant relation, binds the declared
 directory checkpoint as AccessAttempt evidence before bootstrap completion.
 Bootstrap without membership remains `IncompleteScopePass`. Candidate support
 still cannot carry a Promoted dynamic program. This is not Candidate-program
-authorization or a Claude support status flip. Promoted Claude remains
-durable-only with a KnownObject root-transcript program; candidate still holds
-the full RFC 012D relation set. The former `9f9749b` authorize-time rejection
+authorization or a Claude support status flip. No Claude release is promoted;
+the candidate holds the full RFC 012D relation set but cannot authorize it.
+The former `9f9749b` authorize-time rejection
 of uncomposed observation primitives is replaced by bootstrap-complete-time
 membership evidence for those relations. Evidence-derived artifact relations
 remain on their separately bound availability contract. Sibling, referenced,
@@ -3488,6 +3515,14 @@ Shadow on sanitized/frozen scenarios. Do not remove the compatibility tail or
 update the pinned SDK until a released Spaghetti observer passes the full
 matrix.
 
+Current landing status (2026-08-21): the SDK has a feature-flagged shadow
+wrapper beside `watchSessionTranscript`, but enabling it requires a
+caller-injected `ObserverRecordSource`. It does not open or own the Rust scoped
+observer, and it currently transports only the narrow typed usage shadow
+record. There is no public N-API/IPC observer facade, lifecycle/error transport,
+all-family normalization, or released Chopsticks integration. The legacy tail
+therefore remains the only production source. D4 remains `In progress`.
+
 ### D5. Performance calibration
 
 Measure attach, bootstrap barrier, hook/poll-to-admission,
@@ -3500,7 +3535,11 @@ Current landing status (2026-08-21): `rfc012_d5_emit_observer_kernel_report`
 times attach, poll, overflow/resync, and three-scope attach with `Instant`
 inside the observer kernel and writes
 `scripts/rfc012_experiments/fixtures/observer-kernel-report.json`. Numeric p95
-ceilings stay unratified.
+ceilings stay unratified. The fixture omits admission-to-delivery under demand,
+helper/barrier application, queue/control high-water, close, access count,
+retained bytes, memory, repetitions/statistics, and a deliberately slow
+consumer, and it does not satisfy section 12's report contract. D5 remains
+`In progress`.
 
 ## 10. Integration packages
 
@@ -3556,7 +3595,9 @@ runs deferred one-shot, eager/incremental-after-catalog, and crash-recovery
 finalization on the same Claude transcript. Search stays `BootstrapInProgress`
 until `completeQueryBootstrap` in every strategy. The report records elapsed
 time, deferred WAL bytes, and query p99 during deferred bootstrap. RSS is not
-sampled in-process.
+sampled in-process. It also omits the full repetitions/environment/digest,
+writer/checkpoint, convergence, and recovery fields required by section 12, so
+X1 remains `In progress`.
 
 ### X2. Diagnostic disposition and aggregation
 
@@ -3565,6 +3606,12 @@ aggregate genuine repeated diagnostics by source/reason/family while retaining
 count, first/last provenance, sample identity, and bounded examples. Gate on
 fact/query parity and measured row/database reduction.
 
+Current landing status (2026-08-21): bounded aggregation helpers and a
+read-only SQLite calibration/dump seam exist, but the generated diagnostic
+database is ignored and there is no retained, digest-bound report proving
+fact/query parity and measured row/database reduction on a frozen input. X2
+remains `In progress`.
+
 ### X3. Physical extraction
 
 Extract physical crates/modules only after logical dependency tests are stable.
@@ -3572,12 +3619,32 @@ Extraction must preserve public N-API/SDK behavior, source/decoder fixtures,
 durable query digests, observer differential tests, and performance. No
 physical move may introduce a forbidden dependency edge through feature flags.
 
+Current landing status (2026-08-21): the store/transport-free coverage
+membership encoder is consumed from `spaghetti-coverage`. The separate
+`spaghetti-architecture` crate is currently a filesystem/manifest sentinel;
+adapter, source/decode, semantic reducer, durable store/query, and observation
+API boundaries still reside physically in `spaghetti-napi`. The full behavior
+and digest-preserving extraction gate is not met. X3 remains `In progress`.
+
 ### X4. Promotion and drift
 
 Promote current-agent support releases, run version/drift classification in
 production, collect cold/warm/observer telemetry on maintainer-owned corpora,
 and keep rollback flags through one compatible release cycle. Default-on
 requires every owning child gate for that product path.
+
+Audit correction (2026-08-21): the overnight Claude durable bundle was marked
+promoted by a generator that also supplied its own sanitizer approval, while
+the retained sanitizer input report still had `reviewer: null` and said review
+was pending. Its `performance-v1.json` contained operation labels rather than
+section 12 measurements, and `promotion-telemetry-v1.json` was a static
+classification summary rather than compatible-release-cycle evidence. That
+state violated RFC 012A section 9.8 and could not confer runtime authority. The
+bundle is retained as `candidate-2026-08-21` with explicit blockers; the public
+host verifies it but treats exact 2.1.223 as recognized-unverified. The old
+mutating generator is replaced by a read-only preflight that requires external
+sanitizer approval, a complete performance report, and compatible-cycle
+telemetry. X4 remains `In progress` with zero promoted current-agent releases.
 
 ## 11. Cross-workstream validation matrix
 
@@ -3654,29 +3721,37 @@ durable state except for the explicitly versioned usage-v2 correction.
 
 ## 14. Immediate next work
 
-Catalog-first host no longer waits for FTS: the query pool is admitted while
-search stays `BootstrapInProgress` until `completeQueryBootstrap`. C1 now
-serializes actor/usage/state/interaction fixtures across Rust, N-API, and
-TypeScript. X1 compares deferred, eager, and crash-recovery FTS on identical
-Claude input and keeps search complete-only. D5 emits attach/poll/overflow/
-three-scope Instant samples from the observer kernel. D2 now attaches
-Claude-shaped KnownObject root/current/future/sidecar grants, including
-attach-before-create for the future child, and composes Promoted
-`ChildDirectoryByNativeId` membership before bootstrap completion. Claude
-Candidate directory promotion stays `In progress` as a later policy decision.
-D3 serializes catalog/query workers and observer passes on one shared permit
-and now freezes `runtime.user-input-request` replacement from the C1 fixture.
-Message/task RFC 012C replacement stays `In progress`. D4's public
-scoped-observer facade remains a later product decision.
+The next implementation sequence follows the remaining authority and semantic
+gates rather than the prior wave labels:
+
+1. finish C1/C2 family coverage and reducer laws, including the remaining
+   effective-state dimensions, progress/content/capability facts, complete
+   replacement/retraction fixtures, and equal durable/scoped reduced-state
+   digests;
+2. complete B1-B4 with real promoted catalog source compositions, an
+   authorization-bound public catalog query/retention policy, selected-session
+   hydration, and the cold/warm progressive-host matrix;
+3. complete D1-D3 dynamic scope composition and publish one intentionally
+   bounded native observer facade before treating D4's injected shadow source
+   as a product migration;
+4. replace the diagnostic B5/D5/X1/X2 timing fixtures with reproducible reports
+   satisfying section 12, then review numeric ceilings instead of inferring
+   them from single runs;
+5. continue X3 only along dependency boundaries that preserve the existing
+   public/digest matrices; and
+6. collect real X4 cold/warm/drift telemetry through one compatible release
+   cycle before any default-on decision.
 
 Later product decisions, not implementation gates:
 
 1. ratify draft children RFC 012B/C/D against the landed evidence;
 2. consider default-on switches (`Rolled out`) after one compatible release
    cycle of telemetry and rollback;
-3. amend RFC 012B/012D only if numeric p95 ceilings are actually ratified;
-4. wire D4 `observerSource` to a public scoped-observer facade once that
-   contract is intentionally published.
+3. amend RFC 012B/012D only if numeric p95 ceilings are actually ratified.
+
+Publishing the bounded scoped-observer facade and wiring D4's
+`observerSource` to it are implementation gates, not optional product
+decisions.
 
 No step may use a temporary renderer catalog, private adapter tail, arbitrary
 scope search, second database, or duplicated native decoder to shorten the

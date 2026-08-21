@@ -29,6 +29,8 @@ pub(crate) enum CoverageMembershipEncodingError {
     UnsupportedDomain,
     #[error("coverage membership encoded length is exhausted")]
     LengthExhausted,
+    #[error("coverage membership exceeds its encoded byte bound")]
+    MembershipTooLarge,
     #[error(transparent)]
     Contract(#[from] SemanticContractError),
 }
@@ -62,14 +64,14 @@ pub(crate) fn source_membership_prefix(
     }
 }
 
-/// Derive one membership revision without keeping the encoded set in the
-/// observation crate. Encoding lives in `spaghetti-coverage`.
+/// Derive one membership revision through the store-free streaming encoder in
+/// `spaghetti-coverage`, without materializing the encoded membership set.
 pub(crate) fn derive_coverage_membership_revision(
     prefix: &[u8],
     streams: &[&[u8]],
     objects: &[CoverageMembershipObject<'_>],
 ) -> Result<CoverageMembershipRevision, CoverageMembershipEncodingError> {
-    let encoded = spaghetti_coverage::encode_membership(
+    let digest = spaghetti_coverage::membership_digest(
         prefix,
         streams,
         &objects
@@ -95,8 +97,11 @@ pub(crate) fn derive_coverage_membership_revision(
         spaghetti_coverage::CoverageEncodingError::LengthExhausted => {
             CoverageMembershipEncodingError::LengthExhausted
         }
+        spaghetti_coverage::CoverageEncodingError::MembershipTooLarge => {
+            CoverageMembershipEncodingError::MembershipTooLarge
+        }
     })?;
-    CoverageMembershipRevision::derive(&encoded).map_err(Into::into)
+    Ok(CoverageMembershipRevision::from_digest(digest))
 }
 
 fn append_vec_component(

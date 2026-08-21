@@ -1,375 +1,200 @@
 #!/usr/bin/env python3
-"""Build the Claude durable-only promoted support bundle and rebind digests."""
+"""Read-only RFC 012A promotion preflight for the Claude durable candidate.
+
+Promotion is a primary-integrator decision. This tool deliberately cannot edit
+support documents, approve sanitizer evidence, fabricate benchmark data, or
+change a release status. It only checks externally produced review artifacts
+before a maintainer performs a separate, reviewed promotion operation.
+"""
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from pathlib import Path
+from typing import Any, Mapping
+
 
 ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = ROOT / "agent-support/claude-code/promoted-2026-08-21"
-CANDIDATE = ROOT / "agent-support/claude-code/candidate-2026-08-15"
+DEFAULT_CANDIDATE = ROOT / "agent-support/claude-code/candidate-2026-08-21"
+MAX_REVIEW_BYTES = 4 * 1024 * 1024
+PLACEHOLDER_REVIEWERS = {"rfc012-integrator", "automation", "unknown", "pending"}
 
 
-def sha256(path: Path) -> str:
+class PromotionPreflightError(ValueError):
+    """Independent promotion evidence is absent or incomplete."""
+
+
+def _sha256(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load(name: str) -> dict:
-    return json.loads((BUNDLE / name).read_text())
+def _load_object(path: Path, label: str) -> Mapping[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise PromotionPreflightError(f"{label} must be a regular non-symlink file")
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise PromotionPreflightError(f"{label} is unavailable") from error
+    if size <= 0 or size > MAX_REVIEW_BYTES:
+        raise PromotionPreflightError(f"{label} is empty or exceeds the review bound")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise PromotionPreflightError(f"{label} is not valid bounded JSON") from error
+    if not isinstance(value, dict):
+        raise PromotionPreflightError(f"{label} must be a JSON object")
+    return value
 
 
-def dump(name: str, value: dict) -> None:
-    (BUNDLE / name).write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n")
+def _required_object(value: Mapping[str, Any], key: str, label: str) -> Mapping[str, Any]:
+    child = value.get(key)
+    if not isinstance(child, dict) or not child:
+        raise PromotionPreflightError(f"{label}.{key} must be a non-empty object")
+    return child
 
 
-def main() -> None:
-    ads = load("ads.json")
-    ads["ads_id"] = "claude-code-ads-2026-08-21-promoted"
-    ads["status"] = "promoted"
-    ads["native_artifact"]["target"] = (
-        "Claude Code 2.1.223; RFC 012A §9.2 version pin via exact_versions. Native distributable is not retained in-repo, so artifact_digest stays null."
+def _required_array(value: Mapping[str, Any], key: str, label: str) -> list[Any]:
+    child = value.get(key)
+    if not isinstance(child, list) or not child:
+        raise PromotionPreflightError(f"{label}.{key} must be a non-empty array")
+    return child
+
+
+def validate_sanitizer_approval(
+    approval: Mapping[str, Any],
+    *,
+    support_release_id: str,
+    candidate_digest: str,
+) -> None:
+    if approval.get("status") != "approved":
+        raise PromotionPreflightError("sanitizer approval status must be approved")
+    reviewer = approval.get("reviewer")
+    if (
+        not isinstance(reviewer, str)
+        or not reviewer.strip()
+        or reviewer.strip().lower() in PLACEHOLDER_REVIEWERS
+    ):
+        raise PromotionPreflightError("sanitizer approval needs a named independent reviewer")
+    reviewed_at = approval.get("reviewed_at")
+    if not isinstance(reviewed_at, str) or not reviewed_at.strip():
+        raise PromotionPreflightError("sanitizer approval needs a review date")
+    if approval.get("support_release_id") != support_release_id:
+        raise PromotionPreflightError("sanitizer approval names a different support release")
+    if approval.get("candidate_bundle_sha256") != candidate_digest:
+        raise PromotionPreflightError("sanitizer approval does not bind the candidate bundle")
+    if approval.get("prohibited_scan") != "pass":
+        raise PromotionPreflightError("sanitizer approval must record a passing prohibited scan")
+    _required_array(approval, "reviewed_fixture_digests", "sanitizer approval")
+
+
+def validate_performance_report(
+    report: Mapping[str, Any],
+    *,
+    support_release_id: str,
+) -> None:
+    if report.get("support_release_id") != support_release_id:
+        raise PromotionPreflightError("performance report names a different support release")
+    repetitions = report.get("repetitions")
+    if not isinstance(repetitions, int) or isinstance(repetitions, bool) or repetitions < 3:
+        raise PromotionPreflightError("performance report needs at least three repetitions")
+    for key in (
+        "source_fixture_digests",
+        "environment",
+        "cache_method",
+        "measurements",
+        "statistics",
+        "semantic_digests",
+        "coverage",
+        "observer",
+        "usage",
+        "timestamps",
+        "query_distributions",
+        "resources",
+        "contract_versions",
+    ):
+        _required_object(report, key, "performance report")
+
+
+def validate_compatible_cycle_telemetry(
+    telemetry: Mapping[str, Any],
+    *,
+    support_release_id: str,
+) -> None:
+    if telemetry.get("support_release_id") != support_release_id:
+        raise PromotionPreflightError("telemetry names a different support release")
+    cycles = _required_array(telemetry, "compatible_release_cycles", "telemetry")
+    for index, cycle in enumerate(cycles):
+        if not isinstance(cycle, dict):
+            raise PromotionPreflightError(f"telemetry cycle {index} must be an object")
+        for key in ("cold", "warm", "drift", "rollback"):
+            _required_object(cycle, key, f"telemetry cycle {index}")
+
+
+def run_preflight(
+    candidate: Path,
+    sanitizer_approval_path: Path,
+    performance_report_path: Path,
+    telemetry_path: Path,
+) -> str:
+    release_path = candidate / "support-release.json"
+    release = _load_object(release_path, "candidate support release")
+    if release.get("status") != "candidate":
+        raise PromotionPreflightError("promotion input must still be a candidate")
+    blockers = release.get("promotion_blockers")
+    if not isinstance(blockers, list) or not blockers:
+        raise PromotionPreflightError("candidate must retain explicit promotion blockers")
+    sanitizer = release.get("sanitizer_review")
+    if not isinstance(sanitizer, dict) or sanitizer.get("status") != "pending":
+        raise PromotionPreflightError("candidate must not self-approve sanitizer review")
+    reports = release.get("reports")
+    if not isinstance(reports, dict) or any(
+        reports.get(key) is not None
+        for key in ("conformance_sha256", "performance_sha256")
+    ):
+        raise PromotionPreflightError("candidate must not bind unreviewed release reports")
+
+    support_release_id = release.get("support_release_id")
+    if not isinstance(support_release_id, str) or not support_release_id:
+        raise PromotionPreflightError("candidate support-release ID is invalid")
+    candidate_digest = _sha256(release_path)
+    validate_sanitizer_approval(
+        _load_object(sanitizer_approval_path, "sanitizer approval"),
+        support_release_id=support_release_id,
+        candidate_digest=candidate_digest,
     )
-    ads["native_artifact"]["identification"]["state"] = "pinned"
-    # Version pin is exact_versions 2.1.223. No placeholder blob digest.
-    ads["native_artifact"]["identification"]["artifact_digest"] = None
-    ads["native_artifact"]["claim_refs"] = ["claude-artifact-target-pinned"]
-    ads["scope_program_manifest"] = (
-        "agent-support/claude-code/promoted-2026-08-21/scope-programs.json"
+    validate_performance_report(
+        _load_object(performance_report_path, "performance report"),
+        support_release_id=support_release_id,
     )
-    ads["claim_refs"] = [
-        "claude-artifact-target-pinned",
-        "claude-source-map",
-        "claude-usage-v2-semantic-revision",
-        "claude-privacy-policy",
-    ]
-    dump("ads.json", ads)
-
-    source = load("source-declarations.json")
-    source["declaration_id"] = "claude-code-sources-2026-08-21-promoted"
-    source["ads_id"] = ads["ads_id"]
-    source["status"] = "promoted"
-    dump("source-declarations.json", source)
-
-    dump(
-        "scope-programs.json",
-        {
-            "schema_version": 1,
-            "declaration_id": "claude-code-session-scope-2026-08-21-promoted",
-            "adapter_id": "claude-code",
-            "ads_id": ads["ads_id"],
-            "status": "promoted",
-            "roots": ["home", "projects", "sessions", "teams"],
-            "programs": [
-                {
-                    "program_id": "observe-root-transcript",
-                    "root_entity_kind": "session",
-                    "root_relation_id": "root-transcript",
-                    "relations": [
-                        {
-                            "relation_id": "root-transcript",
-                            "primitive": "KnownObject",
-                            "access_root": "projects",
-                            "locator": "known-transcript",
-                            "identity_inputs": [
-                                "native-session-id",
-                                "transcript-locator",
-                            ],
-                            "bounds": {
-                                "max_fan_out": 1,
-                                "max_depth": 1,
-                                "max_objects": 1,
-                                "max_bytes": 1073741824,
-                                "max_rows": 0,
-                            },
-                            "unavailable_behavior": "record_unavailable",
-                            "claim_refs": ["claude-source-map"],
-                        }
-                    ],
-                    "claim_refs": ["claude-source-map"],
-                }
-            ],
-            "blockers": [],
-            "claim_refs": ["claude-source-map"],
-        },
+    validate_compatible_cycle_telemetry(
+        _load_object(telemetry_path, "compatible-cycle telemetry"),
+        support_release_id=support_release_id,
     )
+    return candidate_digest
 
-    evidence = load("evidence.json")
-    evidence["manifest_id"] = "claude-code-evidence-2026-08-21-promoted"
-    evidence["ads_id"] = ads["ads_id"]
-    state_for = {
-        "claude-artifact-target-open": None,
-        "claude-identity-rules": "observed",
-        "claude-runtime-semantics-open": "observed",
-        "claude-scope-relations-open": "unsupported",
-        "claude-drift-active-name-since": "observed",
-        "claude-drift-auto-mode": "observed",
-    }
-    rewritten = []
-    for claim in evidence["claims"]:
-        claim_id = claim["claim_id"]
-        if claim_id == "claude-artifact-target-open":
-            rewritten.append(
-                {
-                    "claim_id": "claude-artifact-target-pinned",
-                    "statement": (
-                        "This support release pins Claude Code 2.1.223 as the exact native "
-                        "artifact for durable history and usage-v2. Catalog and scoped "
-                        "topologies remain unsupported."
-                    ),
-                    "state": "observed",
-                    "sources": [
-                        {
-                            "kind": "code_reference",
-                            "path": "crates/spaghetti-napi/src/claude/catalog_conformance/tests.rs",
-                            "sha256": None,
-                            "locator": "candidate_probe version 2.1.223",
-                        },
-                        {
-                            "kind": "design_record",
-                            "path": "packages/cli/README.md",
-                            "sha256": None,
-                            "locator": "Claude Code 2.1.223 known-good native pin",
-                        },
-                    ],
-                }
-            )
-            continue
-        if claim_id in state_for and state_for[claim_id] is not None:
-            claim["state"] = state_for[claim_id]
-            if claim_id == "claude-scope-relations-open":
-                claim["statement"] = (
-                    "Scoped observation is unsupported on this durable-only promoted "
-                    "path. Dynamic RFC 012D relations remain on the candidate bundle."
-                )
-            if claim_id == "claude-runtime-semantics-open":
-                claim["statement"] = (
-                    "Selected durable usage-v2, actor-run, and actor-affiliation families "
-                    "are supported on this promoted path, including query-pack promotion "
-                    "and explicit rollback to legacy.usage. Interaction lifecycle and "
-                    "unselected runtime families stay off this product path."
-                )
-            if claim_id == "claude-identity-rules":
-                claim["statement"] = (
-                    "Durable session/actor/usage identities are decoder-executed and "
-                    "survive replay of the same native record. Remaining move/clone "
-                    "adversarial cases stay in known limitations."
-                )
-            if claim_id in {"claude-drift-active-name-since", "claude-drift-auto-mode"}:
-                claim["statement"] = (
-                    "Classified native-only fields remain native-only; the classified "
-                    "native-drift conformance check passes and they do not enter common "
-                    "identity, FTS, or effective-mode semantics."
-                )
-        rewritten.append(claim)
-    evidence["claims"] = rewritten
-    dump("evidence.json", evidence)
 
-    conformance = load("conformance.json")
-    conformance["manifest_id"] = "claude-code-conformance-2026-08-21-promoted"
-    conformance["support_release_id"] = "claude-code-support-2026-08-21-promoted"
-    na = {
-        "scope-access": (
-            "not_applicable",
-            "Scoped topology is unsupported on this durable-only promoted path.",
-        ),
-        "tier-compositionality": (
-            "not_applicable",
-            "Catalog/head-prefix composition is unsupported; durable streams are full_only.",
-        ),
-        "cross-topology-parity": (
-            "not_applicable",
-            "Scoped topology is unsupported; selected-family durable parity remains on candidate evidence.",
-        ),
-        "identity-determinism": (
-            "pass",
-            None,
-        ),
-        "unknown-retention": (
-            "pass",
-            None,
-        ),
-    }
-    for check in conformance["checks"]:
-        override = na.get(check["check_id"])
-        if not override:
-            if "claude-artifact-target-open" in check["claim_refs"]:
-                check["claim_refs"] = [
-                    "claude-artifact-target-pinned"
-                    if item == "claude-artifact-target-open"
-                    else item
-                    for item in check["claim_refs"]
-                ]
-            continue
-        status, note = override
-        check["status"] = status
-        if status == "not_applicable":
-            check["command"] = None
-            check["requirement"] = note
-        elif check["check_id"] == "identity-determinism":
-            check["command"] = (
-                "cargo test -p spaghetti-napi --lib "
-                "claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records"
-            )
-        elif check["check_id"] == "unknown-retention":
-            check["command"] = (
-                "cargo test -p spaghetti-napi --lib classified_native_drift"
-            )
-        if "claude-artifact-target-open" in check["claim_refs"]:
-            check["claim_refs"] = [
-                "claude-artifact-target-pinned"
-                if item == "claude-artifact-target-open"
-                else item
-                for item in check["claim_refs"]
-            ]
-    dump("conformance.json", conformance)
-
-    reports_dir = BUNDLE / "reports"
-    reports_dir.mkdir(exist_ok=True)
-    conformance_report = {
-        "package": "X4",
-        "adapter_id": "claude-code",
-        "support_release_id": "claude-code-support-2026-08-21-promoted",
-        "native_version": "2.1.223",
-        "product_path": "durable-history-and-usage-v2",
-        "catalog": "unsupported",
-        "scoped": "unsupported",
-        "checks": [
-            {"check_id": item["check_id"], "status": item["status"]}
-            for item in conformance["checks"]
-        ],
-    }
-    (reports_dir / "conformance-v1.json").write_text(
-        json.dumps(conformance_report, indent=2) + "\n"
-    )
-    performance_report = {
-        "package": "X4",
-        "adapter_id": "claude-code",
-        "native_version": "2.1.223",
-        "gate": "experiment-not-ratified-ceiling",
-        "operations": [
-            "last_complete_catalog_pages_while_search_bootstrap_is_incomplete",
-            "selectRuntimeUsageQuery promote and rollback to legacy.usage",
-        ],
-        "note": "Numeric p95 ceilings stay unratified; rollback remains the compatible cycle.",
-    }
-    (reports_dir / "performance-v1.json").write_text(
-        json.dumps(performance_report, indent=2) + "\n"
-    )
-    telemetry_report = {
-        "package": "X4",
-        "adapter_id": "claude-code",
-        "native_version": "2.1.223",
-        "classification": {
-            "compatibility_class": "ExactSupported",
-            "reason": "exact_promoted_version",
-            "durable": True,
-            "catalog": False,
-            "scoped_observation": False,
-        },
-        "rollback": {
-            "query_id": "legacy.usage",
-            "flag": "selectRuntimeUsageQuery",
-            "compatible_cycle": True,
-        },
-        "drift": {
-            "bridge-session-owner-fields": "classified",
-            "active-session-name-since": "classified",
-            "settings-auto-mode": "classified",
-        },
-    }
-    (reports_dir / "promotion-telemetry-v1.json").write_text(
-        json.dumps(telemetry_report, indent=2) + "\n"
-    )
-
-    release = load("support-release.json")
-    release["support_release_id"] = "claude-code-support-2026-08-21-promoted"
-    release["status"] = "promoted"
-    release["artifact_compatibility"]["exact_versions"] = ["2.1.223"]
-    release["references"] = {
-        "ads": {
-            "path": "agent-support/claude-code/promoted-2026-08-21/ads.json",
-            "sha256": sha256(BUNDLE / "ads.json"),
-        },
-        "source_declaration": {
-            "path": "agent-support/claude-code/promoted-2026-08-21/source-declarations.json",
-            "sha256": sha256(BUNDLE / "source-declarations.json"),
-        },
-        "scope_program": {
-            "path": "agent-support/claude-code/promoted-2026-08-21/scope-programs.json",
-            "sha256": sha256(BUNDLE / "scope-programs.json"),
-        },
-        "evidence": {
-            "path": "agent-support/claude-code/promoted-2026-08-21/evidence.json",
-            "sha256": sha256(BUNDLE / "evidence.json"),
-        },
-        "conformance": {
-            "path": "agent-support/claude-code/promoted-2026-08-21/conformance.json",
-            "sha256": sha256(BUNDLE / "conformance.json"),
-        },
-    }
-    release["capabilities"] = [
-        {
-            "capability_id": "project-session-catalog",
-            "topology": "catalog",
-            "level": "unsupported",
-            "notes": "Catalog stays off this durable-only promoted path.",
-        },
-        {
-            "capability_id": "history-and-secondary-facts",
-            "topology": "durable",
-            "level": "supported",
-            "notes": "Durable Claude streams are runtime-selectable on 2.1.223.",
-        },
-        {
-            "capability_id": "usage-v2-runtime-semantics",
-            "topology": "durable",
-            "level": "supported",
-            "notes": "Selected usage-v2/actor/affiliation plus query-pack promote/rollback.",
-        },
-        {
-            "capability_id": "root-descendant-observation",
-            "topology": "scoped",
-            "level": "unsupported",
-            "notes": "Scoped observation stays unsupported; candidate retains the full RFC 012D program.",
-        },
-        {
-            "capability_id": "interaction-lifecycle",
-            "topology": "scoped",
-            "level": "unsupported",
-            "notes": "AskUserQuestion lifecycle stays off this product path.",
-        },
-    ]
-    release["reports"] = {
-        "conformance_sha256": sha256(reports_dir / "conformance-v1.json"),
-        "performance_sha256": sha256(reports_dir / "performance-v1.json"),
-    }
-    release["sanitizer_review"] = {
-        "status": "approved",
-        "reviewed_at": "2026-08-21",
-        "reviewer": "rfc012-integrator",
-    }
-    release["lifecycle"] = {
-        "candidate_at": "2026-08-15",
-        "promoted_at": "2026-08-21",
-        "retired_at": None,
-        "supersedes": "claude-code-support-2026-08-15-candidate",
-        "superseded_by": None,
-    }
-    release["known_limitations"] = [
-        "Durable-only promotion: catalog and scoped topologies remain unsupported.",
-        "Pinned native is Claude Code 2.1.223; other versions stay unverified.",
-        "Interaction lifecycle and unselected runtime families are not on this path.",
-        "Query-pack rollback to legacy.usage remains required through this compatible cycle.",
-    ]
-    release["promotion_blockers"] = []
-    dump("support-release.json", release)
-    print("ads", release["references"]["ads"]["sha256"])
-    print("source", release["references"]["source_declaration"]["sha256"])
-    print("scope", release["references"]["scope_program"]["sha256"])
-    print("release", release["support_release_id"])
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate", type=Path, default=DEFAULT_CANDIDATE)
+    parser.add_argument("--sanitizer-approval", type=Path, required=True)
+    parser.add_argument("--performance-report", type=Path, required=True)
+    parser.add_argument("--compatible-cycle-telemetry", type=Path, required=True)
+    args = parser.parse_args()
+    try:
+        digest = run_preflight(
+            args.candidate,
+            args.sanitizer_approval,
+            args.performance_report,
+            args.compatible_cycle_telemetry,
+        )
+    except PromotionPreflightError as error:
+        parser.error(str(error))
+    print(f"promotion preflight passed for {digest}")
+    print("no files changed; promotion remains a separate primary-integrator operation")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

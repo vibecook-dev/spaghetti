@@ -23,7 +23,7 @@ export interface ScopedUsageObserverEvent {
   operation: ScopedUsageOperation;
 }
 
-export type OverlayDisposition = 'retired' | { retained: { stale: true } };
+export type OverlayDisposition = 'retired' | { retained: { stale: boolean } };
 
 export interface MergedUsageContribution {
   factId: string;
@@ -48,11 +48,18 @@ function overlayDisposition(
   const comparison = compareCoverage(observerCoverage, durableCoverage);
   if (
     observerCoverage.completeness === 'complete' &&
-    (comparison === 'equal' || comparison === 'dominates' || comparison === 'behind')
+    durableCoverage.completeness === 'complete' &&
+    (comparison === 'equal' || comparison === 'behind')
   ) {
     return 'retired';
   }
-  return { retained: { stale: true } };
+  return {
+    retained: {
+      stale:
+        observerCoverage.completeness !== 'complete' ||
+        (durableCoverage.completeness === 'complete' && comparison !== 'dominates'),
+    },
+  };
 }
 
 /**

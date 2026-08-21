@@ -1,18 +1,18 @@
 {
-  "package": "X4",
+  "package": "X4-candidate-review",
   "adapter_id": "claude-code",
   "native_version": "2.1.223",
   "classification": {
-    "compatibility_class": "ExactSupported",
-    "reason": "exact_promoted_version",
-    "durable": true,
+    "compatibility_class": "RecognizedUnverified",
+    "reason": "candidate_release_not_selectable",
+    "durable": false,
     "catalog": false,
     "scoped_observation": false
   },
   "rollback": {
     "query_id": "legacy.usage",
     "flag": "selectRuntimeUsageQuery",
-    "compatible_cycle": true
+    "compatible_cycle": false
   },
   "drift": {
     "bridge-session-owner-fields": "classified",

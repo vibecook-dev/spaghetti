@@ -1,13 +1,13 @@
 {
   "schema_version": 1,
-  "ads_id": "claude-code-ads-2026-08-21-promoted",
+  "ads_id": "claude-code-ads-2026-08-21-candidate",
   "adapter_id": "claude-code",
-  "status": "promoted",
+  "status": "candidate",
   "native_artifact": {
     "family": "claude-code",
-    "target": "Claude Code 2.1.223; RFC 012A §9.2 version pin via exact_versions. Native distributable is not retained in-repo, so artifact_digest stays null.",
+    "target": "Claude Code 2.1.223 marker shape; native distributable and artifact digest remain unverified for promotion.",
     "identification": {
-      "state": "pinned",
+      "state": "recognized_unverified",
       "version_markers": [
         "active-session.version",
         "settings.schema-shape",
@@ -23,7 +23,7 @@
       "workflows"
     ],
     "claim_refs": [
-      "claude-artifact-target-pinned"
+      "claude-artifact-target-open"
     ]
   },
   "source_instance": {
@@ -761,7 +761,7 @@
       ]
     }
   ],
-  "scope_program_manifest": "agent-support/claude-code/promoted-2026-08-21/scope-programs.json",
+  "scope_program_manifest": "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
   "size_limits": [
     {
       "limit_id": "jsonl-record",
@@ -838,7 +838,7 @@
     ]
   },
   "claim_refs": [
-    "claude-artifact-target-pinned",
+    "claude-artifact-target-open",
     "claude-source-map",
     "claude-usage-v2-semantic-revision",
     "claude-privacy-policy"

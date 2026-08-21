@@ -69,8 +69,9 @@ def catalog_calibration() -> dict[str, object]:
     }
 
 
-def observer_calibration() -> dict[str, object]:
-    report_path = REPO / "scripts/rfc012_experiments/fixtures/observer-kernel-report.json"
+def observer_calibration(report_path: Path | None = None) -> dict[str, object]:
+    if report_path is None:
+        report_path = REPO / "scripts/rfc012_experiments/fixtures/observer-kernel-report.json"
     completed = run_napi_lib_test(
         "rfc012_d5_emit_observer_kernel_report",
         extra_env={"RFC012_D5_REPORT": str(report_path)},
@@ -92,8 +93,9 @@ def observer_calibration() -> dict[str, object]:
     }
 
 
-def x2_report() -> dict[str, object]:
-    fixture = REPO / "scripts/rfc012_experiments/fixtures/source-record-errors.sqlite"
+def x2_report(fixture: Path | None = None) -> dict[str, object]:
+    if fixture is None:
+        fixture = REPO / "scripts/rfc012_experiments/fixtures/source-record-errors.sqlite"
     completed = run_napi_lib_test(
         "rfc012_x2_dump_engine_source_record_errors",
         extra_env={"RFC012_X2_DUMP": str(fixture)},
@@ -107,7 +109,7 @@ def x2_report() -> dict[str, object]:
     aggregated = aggregate_diagnostics(rows)
     return {
         "package": "X2",
-        "fixture": str(fixture.relative_to(REPO)),
+        "fixture": _display_path(fixture),
         "source": "rfc012_x2_dump_engine_source_record_errors",
         "raw_rows": len(rows),
         "aggregated_rows": len(aggregated),
@@ -129,8 +131,14 @@ def x2_report() -> dict[str, object]:
     }
 
 
-def x1_report() -> dict[str, object]:
-    trace = REPO / "scripts/rfc012_experiments/fixtures/fts-bootstrap-trace.json"
+def x1_report(
+    trace: Path | None = None,
+    compare_path: Path | None = None,
+) -> dict[str, object]:
+    if trace is None:
+        trace = REPO / "scripts/rfc012_experiments/fixtures/fts-bootstrap-trace.json"
+    if compare_path is None:
+        compare_path = REPO / "scripts/rfc012_experiments/fixtures/fts-strategy-report.json"
     completed = run_napi_lib_test(
         "rfc012_x1_emit_complete_only_ingest_trace",
         extra_env={"RFC012_X1_TRACE": str(trace)},
@@ -142,7 +150,6 @@ def x1_report() -> dict[str, object]:
         raise RuntimeError("ingest trace timestamps were not emitted from a real run")
     strategies = compare_strategies(milestones)
     search_complete_only = all(not item.search_visible_before_complete for item in strategies)
-    compare_path = REPO / "scripts/rfc012_experiments/fixtures/fts-strategy-report.json"
     compare = run_napi_lib_test(
         "rfc012_x1_compare_fts_strategies_on_identical_claude_input",
         extra_env={"RFC012_X1_STRATEGIES": str(compare_path)},
@@ -161,3 +168,10 @@ def x1_report() -> dict[str, object]:
         "milestones": [item.__dict__ for item in milestones],
         "identical_input_comparison": comparison,
     }
+
+
+def _display_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(REPO))
+    except ValueError:
+        return str(path)

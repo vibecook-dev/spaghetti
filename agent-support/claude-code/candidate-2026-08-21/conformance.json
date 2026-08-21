@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "manifest_id": "claude-code-conformance-2026-08-21-promoted",
+  "manifest_id": "claude-code-conformance-2026-08-21-candidate",
   "adapter_id": "claude-code",
-  "support_release_id": "claude-code-support-2026-08-21-promoted",
+  "support_release_id": "claude-code-support-2026-08-21-candidate",
   "checks": [
     {
       "check_id": "schema-validation",
@@ -56,7 +56,7 @@
     },
     {
       "check_id": "scope-access",
-      "requirement": "Scoped topology is unsupported on this durable-only promoted path.",
+      "requirement": "Scoped topology is unsupported in this durable-only candidate.",
       "status": "not_applicable",
       "command": null,
       "report_sha256": null,
@@ -71,7 +71,7 @@
       "command": "python3 -m unittest scripts.agent_support.test_contracts",
       "report_sha256": null,
       "claim_refs": [
-        "claude-artifact-target-pinned"
+        "claude-artifact-target-open"
       ]
     },
     {

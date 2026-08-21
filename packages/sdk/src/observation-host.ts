@@ -7,8 +7,7 @@
  * SQLite service, or projection implementation.
  */
 
-import { readdir, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import {
   openSpaghettiEngine,
@@ -46,6 +45,11 @@ export interface ObservationHostOptions {
   queryWorkers?: number;
   /** Diagnostic label written to the owner metadata sidecar. */
   ownerLabel?: string;
+  /**
+   * Explicitly defer search-only structures until the initial native scans
+   * finish. The host never traverses source roots to infer this policy.
+   */
+  deferQueryStructures?: boolean;
   /** Cancels startup; every partially started supervisor is still disposed. */
   signal?: AbortSignal;
   /** Structured startup snapshots, including heartbeats during long scans. */
@@ -104,11 +108,6 @@ export interface ObservationHost {
   dispose(): Promise<SpaghettiEngineStatus>;
 }
 
-// The controlled crossover was between the 64k (~30 MiB, no benefit) and
-// 131k (~60 MiB, material benefit) production-path corpora. This threshold
-// stays above the accepted <=64k gate while selecting roughly >=100k records.
-const QUERY_BOOTSTRAP_INPUT_THRESHOLD_BYTES = 48 * 1024 * 1024;
-
 /** Open one sole-owner Rust host and start every configured adapter. */
 export async function openObservationHost(options: ObservationHostOptions): Promise<ObservationHost> {
   options.signal?.throwIfAborted();
@@ -119,16 +118,11 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
     sourceCount: sources.length,
     elapsedMs: 0,
   });
-  const bootstrapQueryStructures = await inputMeetsBootstrapThreshold(
-    sources.flatMap((source) => source.roots),
-    QUERY_BOOTSTRAP_INPUT_THRESHOLD_BYTES,
-  );
-  options.signal?.throwIfAborted();
   const engine = await openSpaghettiEngine({
     dbPath: resolveDatabasePath(options.dbPath),
     queryWorkers: options.queryWorkers,
     ownerLabel: options.ownerLabel ?? 'sdk-observation-host',
-    ...(bootstrapQueryStructures ? { bootstrapQueryStructures: true } : {}),
+    ...(options.deferQueryStructures ? { bootstrapQueryStructures: true } : {}),
   });
   const bootstrapActive = engine.status.state === 'bootstrapping';
   let client: SpaghettiClient | undefined;
@@ -370,53 +364,4 @@ function resolveSourceRoot(value: string): string {
     throw new Error('Observation source root must not be empty.');
   }
   return resolve(value);
-}
-
-async function inputMeetsBootstrapThreshold(roots: string[], thresholdBytes: number): Promise<boolean> {
-  const pending = [...new Set(roots)];
-  const visited = new Set<string>();
-  let bytes = 0;
-
-  while (pending.length > 0 && bytes < thresholdBytes) {
-    const current = pending.shift();
-    if (!current || visited.has(current)) continue;
-    visited.add(current);
-    let metadata;
-    try {
-      metadata = await stat(current);
-    } catch {
-      continue;
-    }
-    if (metadata.isFile()) {
-      bytes += metadata.size;
-      continue;
-    }
-    if (!metadata.isDirectory()) continue;
-
-    let entries;
-    try {
-      entries = await readdir(current, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    const files: string[] = [];
-    for (const entry of entries) {
-      const child = join(current, entry.name);
-      if (entry.isDirectory()) pending.push(child);
-      else if (entry.isFile()) files.push(child);
-    }
-    for (let offset = 0; offset < files.length && bytes < thresholdBytes; offset += 64) {
-      const sizes = await Promise.all(
-        files.slice(offset, offset + 64).map(async (file) => {
-          try {
-            return (await stat(file)).size;
-          } catch {
-            return 0;
-          }
-        }),
-      );
-      for (const size of sizes) bytes += size;
-    }
-  }
-  return bytes >= thresholdBytes;
 }

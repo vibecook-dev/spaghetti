@@ -978,7 +978,8 @@ test('access-request portable values reject authority-shaped drift', () => {
     (error: unknown) => {
       assert.ok(error instanceof ContractValidationError);
       assert.match(error.message, /machine identifier/);
-      assert.doesNotMatch(error.message, /\u0000|secret/);
+      assert.equal(error.message.includes('\u0000'), false);
+      assert.doesNotMatch(error.message, /secret/);
       return true;
     },
   );

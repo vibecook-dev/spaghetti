@@ -53,7 +53,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::adapter::{AdapterRegistry, FactBatch, SourceCoverageSet};
+use crate::adapter::{
+    AdapterId, AdapterRegistry, FactBatch, SourceCoverageSet, TypedAccessAuthorization,
+};
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
@@ -1726,6 +1728,36 @@ impl SpaghettiEngineCore {
         self.adapters
             .resolve(adapter_id)
             .map_err(|error| EngineError::InvalidConfig(error.to_string()))
+    }
+
+    /// Run the bounded native probe before any verified durable source read.
+    /// Unsupported and candidate artifacts intentionally receive no typed
+    /// authority; callers may retain legacy ingestion, but must not publish
+    /// promoted fact-family coverage from that path.
+    pub(crate) fn durable_authorization_for_roots(
+        &self,
+        adapter_id: &str,
+        roots: &[PathBuf],
+    ) -> Result<Option<TypedAccessAuthorization>, EngineError> {
+        if !self.adapters.has_verified_support_catalog() {
+            return Ok(None);
+        }
+        let adapter_id = AdapterId::new(adapter_id)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
+        let Some(probe) = self
+            .adapters
+            .probe_native_support(&adapter_id, roots)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        self.adapters
+            .authorize_durable_if_supported(&adapter_id, &probe)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))
+    }
+
+    pub(crate) fn uses_verified_support_catalog(&self) -> bool {
+        self.adapters.has_verified_support_catalog()
     }
 
     /// Retain a lossless, bounded dirty marker for one discovered instance.

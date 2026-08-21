@@ -2070,6 +2070,12 @@ export declare function parseRfc012cEffectiveStateV1Json(json: string): string
  */
 export declare function parseRfc012cInteractionV1Json(json: string): string
 
+/** Parse one committed RFC 012C v1 message fixture from a JSON string. */
+export declare function parseRfc012cMessageV1Json(json: string): string
+
+/** Parse one committed RFC 012C v1 plan fixture from a JSON string. */
+export declare function parseRfc012cPlanV1Json(json: string): string
+
 /**
  * Parse one committed RFC 012C v1 runtime fixture from a JSON string.
  *
@@ -2077,3 +2083,9 @@ export declare function parseRfc012cInteractionV1Json(json: string): string
  * source, store, query, or delivery path.
  */
 export declare function parseRfc012cRuntimeV1Json(json: string): string
+
+/** Parse one committed RFC 012C v1 task fixture from a JSON string. */
+export declare function parseRfc012cTaskV1Json(json: string): string
+
+/** Parse one committed RFC 012C v1 tool fixture from a JSON string. */
+export declare function parseRfc012cToolV1Json(json: string): string

@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from scripts.rfc012_experiments.calibration import (
     catalog_calibration,
@@ -34,7 +35,12 @@ class DiagnosticAggregationTests(unittest.TestCase):
 
 class FtsFinalizationTests(unittest.TestCase):
     def test_all_strategies_keep_search_complete_only_on_emitted_trace(self) -> None:
-        report = x1_report()
+        with TemporaryDirectory(prefix="spaghetti-rfc012-x1-") as directory:
+            root = Path(directory)
+            report = x1_report(
+                root / "fts-bootstrap-trace.json",
+                root / "fts-strategy-report.json",
+            )
         self.assertTrue(report["search_remains_complete_only"])
         self.assertTrue(any(item["t_ms"] > 0 for item in report["milestones"]))
         self.assertEqual(report["operation"], "rfc012_x1_emit_complete_only_ingest_trace")
@@ -48,20 +54,19 @@ class FtsFinalizationTests(unittest.TestCase):
 
 class CalibrationTests(unittest.TestCase):
     def test_x2_report_loads_engine_produced_source_record_errors(self) -> None:
-        report = x2_report()
-        self.assertEqual(report["source"], "rfc012_x2_dump_engine_source_record_errors")
-        self.assertGreaterEqual(report["raw_rows"], 2)
-        dump = Path(report["fixture"])
-        if not dump.is_absolute():
-            dump = Path.cwd() / dump
-        records = load_diagnostic_rows(dump)
-        self.assertEqual(len(records), report["raw_rows"])
-        self.assertTrue(all(row[0] for row in records))
-        self.assertGreater(report["reduction"], 0.0)
+        with TemporaryDirectory(prefix="spaghetti-rfc012-x2-") as directory:
+            report = x2_report(Path(directory) / "source-record-errors.sqlite")
+            self.assertEqual(report["source"], "rfc012_x2_dump_engine_source_record_errors")
+            self.assertGreaterEqual(report["raw_rows"], 2)
+            records = load_diagnostic_rows(Path(report["fixture"]))
+            self.assertEqual(len(records), report["raw_rows"])
+            self.assertTrue(all(row[0] for row in records))
+            self.assertGreater(report["reduction"], 0.0)
 
     def test_catalog_and_observer_reports_time_named_operations(self) -> None:
         catalog = catalog_calibration()
-        observer = observer_calibration()
+        with TemporaryDirectory(prefix="spaghetti-rfc012-d5-") as directory:
+            observer = observer_calibration(Path(directory) / "observer-kernel-report.json")
         self.assertEqual(catalog["operation"], "catalog-retained-page")
         self.assertEqual(observer["operation"], "rfc012_d5_emit_observer_kernel_report")
         labels = {item["label"] for item in observer["kernel"]["operations"]}

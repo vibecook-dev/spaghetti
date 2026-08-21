@@ -7,7 +7,6 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-SSD_TARGET = Path("/Volumes/SamsungRed/spaghetti-rfc012/build/w5-fix/target")
 
 
 def run_napi_lib_test(
@@ -17,8 +16,6 @@ def run_napi_lib_test(
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    if "CARGO_TARGET_DIR" not in env and SSD_TARGET.parent.is_dir():
-        env["CARGO_TARGET_DIR"] = str(SSD_TARGET)
     if extra_env:
         env.update(extra_env)
     return subprocess.run(

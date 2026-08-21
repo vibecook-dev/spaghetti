@@ -30,6 +30,54 @@ use crate::source::{
 };
 
 const ADAPTER_ID: &str = "grok";
+
+pub(crate) fn verified_support_release(
+) -> Result<crate::adapter::VerifiedSupportRelease, crate::adapter::SupportContractError> {
+    crate::adapter::verify_support_release_bundle(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../agent-support/grok/candidate-2026-08-15/support-release.json"
+        )),
+        &[
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/grok/candidate-2026-08-15/ads.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/grok/candidate-2026-08-15/ads.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/grok/candidate-2026-08-15/source-declarations.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/grok/candidate-2026-08-15/source-declarations.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/grok/candidate-2026-08-15/scope-programs.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/grok/candidate-2026-08-15/evidence.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/grok/candidate-2026-08-15/evidence.json"
+                )),
+            ),
+            crate::adapter::SupportBundleDocument::new(
+                "agent-support/grok/candidate-2026-08-15/conformance.json",
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../agent-support/grok/candidate-2026-08-15/conformance.json"
+                )),
+            ),
+        ],
+    )
+}
+
 const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"

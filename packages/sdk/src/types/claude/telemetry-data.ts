@@ -3,12 +3,21 @@
  */
 
 export type TelemetryEventName =
+  | 'tengu_api_after_normalize'
+  | 'tengu_api_before_normalize'
+  | 'tengu_api_cache_breakpoints'
+  | 'tengu_api_query'
+  | 'tengu_api_success'
+  | 'tengu_attachment_compute_duration'
+  | 'tengu_attachments'
+  | 'tengu_bg_classify'
   | 'tengu_binary_download_attempt'
   | 'tengu_binary_download_success'
   | 'tengu_bridge_repl_poll_error'
   | 'tengu_bridge_repl_poll_give_up'
   | 'tengu_bridge_repl_teardown'
   | 'tengu_bridge_repl_ws_closed'
+  | 'tengu_cache_eviction_hint'
   | 'tengu_claudeai_limits_status_changed'
   | 'tengu_claudeai_mcp_eligibility'
   | 'tengu_claudemd__initial_load'
@@ -23,8 +32,10 @@ export type TelemetryEventName =
   | 'tengu_file_history_snapshot_success'
   | 'tengu_file_suggestions_git_ls_files'
   | 'tengu_grove_oauth_401_received'
+  | 'tengu_hook_plugin_injected'
   | 'tengu_init'
   | 'tengu_input_command'
+  | 'tengu_keybinding_fired'
   | 'tengu_mcp_cli_status'
   | 'tengu_mcp_ide_server_connection_failed'
   | 'tengu_mcp_ide_server_connection_succeeded'
@@ -32,6 +43,7 @@ export type TelemetryEventName =
   | 'tengu_mcp_server_connection_succeeded'
   | 'tengu_mcp_server_needs_auth'
   | 'tengu_mcp_servers'
+  | 'tengu_message_display_hooks'
   | 'tengu_native_auto_updater_fail'
   | 'tengu_native_auto_updater_start'
   | 'tengu_native_auto_updater_success'
@@ -52,6 +64,9 @@ export type TelemetryEventName =
   | 'tengu_paste_text'
   | 'tengu_plugins_loaded'
   | 'tengu_prompt_suggestion_init'
+  | 'tengu_prompt_suggestion'
+  | 'tengu_query_after_attachments'
+  | 'tengu_query_before_attachments'
   | 'tengu_repl_hook_finished'
   | 'tengu_repo_text_file_size'
   | 'tengu_ripgrep_availability'
@@ -59,13 +74,25 @@ export type TelemetryEventName =
   | 'tengu_session_forked_branches_fetched'
   | 'tengu_session_resumed'
   | 'tengu_shell_set_cwd'
+  | 'tengu_shutdown_signal'
   | 'tengu_skill_loaded'
   | 'tengu_startup_manual_model_config'
   | 'tengu_startup_telemetry'
   | 'tengu_status_line_mount'
+  | 'tengu_status_line_result'
+  | 'tengu_sysprompt_block'
+  | 'tengu_sysprompt_boundary_found'
   | 'tengu_timer'
   | 'tengu_tip_shown'
+  | 'tengu_tool_search_mode_decision'
+  | 'tengu_tool_use_can_use_tool_allowed'
+  | 'tengu_tool_use_granted_in_prompt_temporary'
+  | 'tengu_tool_use_progress'
+  | 'tengu_tool_use_show_permission_request'
+  | 'tengu_tool_use_success'
   | 'tengu_trust_dialog_shown'
+  | 'tengu_turn_end'
+  | 'tengu_unary_event'
   | 'tengu_version_check_success'
   | 'tengu_version_lock_acquired'
   | 'tengu_worktree_detection'
@@ -131,6 +158,10 @@ export interface TelemetryEventData {
   experiment_metadata?: string;
   variation_id?: number;
   user_attributes?: string;
+  /** Git and plugin coordinates emitted by repository/plugin telemetry. */
+  head_sha?: string;
+  marketplace_name?: string;
+  plugin_name?: string;
 }
 
 export interface TelemetryAuth {

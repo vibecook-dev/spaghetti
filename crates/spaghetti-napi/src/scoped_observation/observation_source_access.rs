@@ -415,7 +415,7 @@ pub(crate) enum ScopedObservationDirectoryMemberObserveFailureKind {
 /// Present carries decoded facts; missing is explicit absence; oversized never
 /// enters decode or projection.
 pub(crate) enum ScopedObservationDirectoryMemberLifecycle {
-    Present(ScopedObservationDirectoryMemberDecodedSnapshot),
+    Present(Box<ScopedObservationDirectoryMemberDecodedSnapshot>),
     Absent {
         binding: ScopedObservationDirectoryMemberBinding,
         generation: u64,
@@ -1603,7 +1603,7 @@ impl ScopedObservationDirectoryMemberDecodeInput {
             }
         };
         Ok(ScopedObservationDirectoryMemberLifecycle::Present(
-            ScopedObservationDirectoryMemberDecodedSnapshot {
+            Box::new(ScopedObservationDirectoryMemberDecodedSnapshot {
                 binding: self.binding,
                 object_context: self.object_context,
                 checkpoint,
@@ -1612,7 +1612,7 @@ impl ScopedObservationDirectoryMemberDecodeInput {
                 batch: decoded.batch,
                 next_decoder_state: decoded.next_decoder_state,
                 quarantined: decoded.quarantined,
-            },
+            }),
         ))
     }
 

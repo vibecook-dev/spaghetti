@@ -491,7 +491,7 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
             .as_ref()
             .unwrap()
             .support_release_id(),
-        "claude-code-support-2026-08-21-promoted"
+        "claude-code-support-2026-08-21-candidate"
     );
     let catalog = SupportCatalog::new([release]).unwrap();
     let probe = candidate_probe();

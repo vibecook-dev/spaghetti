@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "support_release_id": "claude-code-support-2026-08-21-promoted",
+  "support_release_id": "claude-code-support-2026-08-21-candidate",
   "adapter_id": "claude-code",
-  "status": "promoted",
+  "status": "candidate",
   "artifact_compatibility": {
     "family": "claude-code",
     "platforms": [
@@ -21,24 +21,24 @@
   },
   "references": {
     "ads": {
-      "path": "agent-support/claude-code/promoted-2026-08-21/ads.json",
-      "sha256": "sha256:3da1667fc89602d1cf95e59017219fedb9e796404c4332eff4677ac1e39507bc"
+      "path": "agent-support/claude-code/candidate-2026-08-21/ads.json",
+      "sha256": "sha256:d88b3e31bb3b8d7ebe7e3147a30adf774801301f164ccdfa8518545b98cb34ab"
     },
     "source_declaration": {
-      "path": "agent-support/claude-code/promoted-2026-08-21/source-declarations.json",
-      "sha256": "sha256:36f0dfc5d55a0d6e52d8034aaa0a45a35e70caf2c48e6d3f3e50f05351f27ec6"
+      "path": "agent-support/claude-code/candidate-2026-08-21/source-declarations.json",
+      "sha256": "sha256:a1da27b6370c89e6d8bbc8b8fe671ab3cee4544758699729970617b29fd4ae0d"
     },
     "scope_program": {
-      "path": "agent-support/claude-code/promoted-2026-08-21/scope-programs.json",
-      "sha256": "sha256:9e354d1cc2b17465f5de7a7c286ea7d6be18e303a53eddc467db1c5f4e69316e"
+      "path": "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
+      "sha256": "sha256:b28608dcf0f0a5d6d55475b121cd4162b592c4f6a5e47e7284d3ba2b2a4434a8"
     },
     "evidence": {
-      "path": "agent-support/claude-code/promoted-2026-08-21/evidence.json",
-      "sha256": "sha256:123fdc88bfa979f11c2f7c14d45664b46e35a108834953b2e74b37c3be66c54c"
+      "path": "agent-support/claude-code/candidate-2026-08-21/evidence.json",
+      "sha256": "sha256:b4c2386b82d6c780fa4e331bd87a57323130489d6e6101067080201d9c6ddc4b"
     },
     "conformance": {
-      "path": "agent-support/claude-code/promoted-2026-08-21/conformance.json",
-      "sha256": "sha256:204e56d325a55d464cd65f09aad80926e2886bc98124c115e2ac5a848717feb9"
+      "path": "agent-support/claude-code/candidate-2026-08-21/conformance.json",
+      "sha256": "sha256:8d31d91b6ddbc619de9f3eaa4b8d9e63518bf4f4f4f823e075e35b265bcd8cb8"
     }
   },
   "versions": {
@@ -62,19 +62,19 @@
       "capability_id": "project-session-catalog",
       "topology": "catalog",
       "level": "unsupported",
-      "notes": "Catalog stays off this durable-only promoted path."
+      "notes": "Catalog stays unsupported in this durable-only candidate."
     },
     {
       "capability_id": "history-and-secondary-facts",
       "topology": "durable",
       "level": "supported",
-      "notes": "Durable Claude streams are runtime-selectable on 2.1.223."
+      "notes": "Durable Claude stream behavior is implemented for the exact-version candidate, but candidates are not runtime-selectable."
     },
     {
       "capability_id": "usage-v2-runtime-semantics",
       "topology": "durable",
-      "level": "supported",
-      "notes": "Selected usage-v2/actor/affiliation plus query-pack promote/rollback."
+      "level": "degraded",
+      "notes": "Selected usage-v2/actor/affiliation and query-pack promote/rollback are implemented, but independent promotion, performance, and compatible-cycle review remain open."
     },
     {
       "capability_id": "root-descendant-observation",
@@ -172,26 +172,28 @@
     }
   ],
   "reports": {
-    "conformance_sha256": "sha256:cf9c4ea8da57acc14b55ba9a15edda3f106ad32466bf7e6715e1510139a389bc",
-    "performance_sha256": "sha256:37c617563df09891b4f19dc3c19933b2fbf643e4a67dd4734079d9de52a079dc"
+    "conformance_sha256": null,
+    "performance_sha256": null
   },
   "sanitizer_review": {
-    "status": "approved",
-    "reviewed_at": "2026-08-21",
-    "reviewer": "rfc012-integrator"
+    "status": "pending",
+    "reviewed_at": null,
+    "reviewer": null
   },
   "lifecycle": {
-    "candidate_at": "2026-08-15",
-    "promoted_at": "2026-08-21",
+    "candidate_at": "2026-08-21",
+    "promoted_at": null,
     "retired_at": null,
-    "supersedes": "claude-code-support-2026-08-15-candidate",
+    "supersedes": null,
     "superseded_by": null
   },
   "known_limitations": [
-    "Durable-only promotion: catalog and scoped topologies remain unsupported.",
-    "Pinned native is Claude Code 2.1.223; other versions stay unverified.",
-    "Interaction lifecycle and unselected runtime families are not on this path.",
-    "Query-pack rollback to legacy.usage remains required through this compatible cycle."
+    "Candidate entries never confer runtime support.",
+    "The retained performance file is a worksheet with operation labels, not the RFC 012A benchmark-report contract.",
+    "The retained telemetry file is a static classifier fixture, not evidence from a compatible release cycle.",
+    "Human sanitizer review remains pending, matching sanitizer-review-inputs-v1.json.",
+    "The native distributable is not retained or digest-pinned; the version marker alone is insufficient for promotion.",
+    "Catalog, scoped observation, interaction lifecycle, and unselected runtime families remain unsupported."
   ],
   "drift_signatures": [
     {
@@ -231,5 +233,12 @@
       ]
     }
   ],
-  "promotion_blockers": []
+  "promotion_blockers": [
+    "Obtain independent human sanitizer review of the retained inputs.",
+    "Retain the native distributable digest or amend the artifact-identification contract with reviewed evidence.",
+    "Produce and review a reproducible RFC 012A performance report with measurements, environment, repetitions, and evidence digests.",
+    "Run and retain the complete conformance report against this exact candidate bundle.",
+    "Collect cold, warm, drift, and rollback telemetry through one compatible release cycle.",
+    "Make a separate primary-integrator promotion decision after every blocker is closed."
+  ]
 }

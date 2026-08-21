@@ -3,6 +3,8 @@
 //! Adapters discover native sources and decode common-driver records into
 //! storage-agnostic facts. They never receive a Spaghetti database handle.
 
+#[cfg(test)]
+mod builtin_support;
 mod contract;
 mod facts;
 mod registry;
@@ -13,6 +15,10 @@ mod support;
 #[cfg(test)]
 mod runtime_contract_fixture;
 
+#[cfg(test)]
+pub(crate) use builtin_support::{
+    verified_builtin_support_catalog, verified_claude_candidate_for_test,
+};
 pub use contract::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
@@ -81,6 +87,6 @@ pub use support::{
     SUPPORT_SELECTION_CONTRACT_VERSION,
 };
 pub(crate) use support::{
-    AuthorizedObservationSourceAuthority, AuthorizedObservationSourceContract,
-    AuthorizedObservationSourceDriver,
+    AuthorizedDurableAccess, AuthorizedObservationSourceAuthority,
+    AuthorizedObservationSourceContract, AuthorizedObservationSourceDriver,
 };

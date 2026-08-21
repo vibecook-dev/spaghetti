@@ -10,7 +10,7 @@ use napi::bindgen_prelude::{
 };
 use napi_derive::napi;
 
-use crate::adapter::AdapterRegistry;
+use crate::adapter::{AdapterRegistry, SupportCatalog, SupportContractError};
 use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
@@ -60,6 +60,14 @@ use crate::engine::{
 use crate::grok::GrokAdapter;
 
 const CLAUDE_ADAPTER_ID: &str = "claude-code";
+
+fn verified_builtin_support_catalog() -> std::result::Result<SupportCatalog, SupportContractError> {
+    SupportCatalog::new([
+        crate::claude::verified_support_release()?,
+        crate::codex::verified_support_release()?,
+        crate::grok::verified_support_release()?,
+    ])
+}
 
 fn ns_to_ms(value: u64) -> f64 {
     value as f64 / 1_000_000.0
@@ -5101,11 +5109,18 @@ impl Task for OpenEngineTask {
             .options
             .query_workers
             .map(|value| usize::try_from(value).unwrap_or(usize::MAX));
+        let support_catalog = verified_builtin_support_catalog()
+            .map(Arc::new)
+            .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
         let registry = AdapterRegistry::builder()
             .register(ClaudeCodeAdapter::new())
             .register(CodexAdapter::new())
             .register(GrokAdapter::new())
-            .build_legacy()
+            .register_native_support_probe(
+                CLAUDE_ADAPTER_ID,
+                crate::claude::support_probe::probe_claude_native_artifact,
+            )
+            .build_verified(support_catalog)
             .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
         let inner = SpaghettiEngineCore::open_with_registry(
             EngineOptions {
@@ -6379,7 +6394,20 @@ fn napi_error(error: EngineError) -> Error {
         EngineError::ShuttingDown => Status::Closing,
         _ => Status::GenericFailure,
     };
-    Error::new(status, error.to_string())
+    Error::new(status, public_engine_error_message(&error))
+}
+
+fn public_engine_error_message(error: &EngineError) -> String {
+    match error {
+        // Observation details can originate in native paths, source payloads,
+        // SQLite diagnostics, or adapter messages. Keep those details inside
+        // the engine; the public N-API boundary exposes only the bounded
+        // operation label.
+        EngineError::Observation { operation, .. } => {
+            format!("observation coordinator {operation} failed")
+        }
+        _ => error.to_string(),
+    }
 }
 
 fn cancellation_for_signal(signal: Option<&AbortSignal>) -> QueryCancellationToken {
@@ -6440,12 +6468,26 @@ fn validate_roots(roots: &[String], operation: &str) -> Result<()> {
 
 #[cfg(test)]
 mod support_binding_tests {
+    use super::public_engine_error_message;
     use crate::adapter::{
         verify_support_release_bundle, AgentAdapter, SupportBundleDocument, SupportReleaseStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::codex::CodexAdapter;
+    use crate::engine::EngineError;
     use crate::grok::GrokAdapter;
+
+    #[test]
+    fn public_observation_errors_do_not_echo_native_paths_or_payloads() {
+        let message = public_engine_error_message(&EngineError::Observation {
+            operation: "read source object",
+            detail: "/Users/alice/private/session.jsonl: secret payload".to_string(),
+        });
+        assert_eq!(message, "observation coordinator read source object failed");
+        for private in ["/Users/", "alice", "private", "session.jsonl", "secret"] {
+            assert!(!message.contains(private));
+        }
+    }
 
     #[test]
     fn compiled_adapters_match_their_digest_bound_support_packages() {
@@ -6453,46 +6495,46 @@ mod support_binding_tests {
             &ClaudeCodeAdapter::new(),
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../agent-support/claude-code/promoted-2026-08-21/support-release.json"
+                "/../../agent-support/claude-code/candidate-2026-08-21/support-release.json"
             )),
             &[
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/promoted-2026-08-21/ads.json",
+                    "agent-support/claude-code/candidate-2026-08-21/ads.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/promoted-2026-08-21/ads.json"
+                        "/../../agent-support/claude-code/candidate-2026-08-21/ads.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/promoted-2026-08-21/source-declarations.json",
+                    "agent-support/claude-code/candidate-2026-08-21/source-declarations.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/promoted-2026-08-21/source-declarations.json"
+                        "/../../agent-support/claude-code/candidate-2026-08-21/source-declarations.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/promoted-2026-08-21/scope-programs.json",
+                    "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/promoted-2026-08-21/scope-programs.json"
+                        "/../../agent-support/claude-code/candidate-2026-08-21/scope-programs.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/promoted-2026-08-21/evidence.json",
+                    "agent-support/claude-code/candidate-2026-08-21/evidence.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/promoted-2026-08-21/evidence.json"
+                        "/../../agent-support/claude-code/candidate-2026-08-21/evidence.json"
                     )),
                 ),
                 SupportBundleDocument::new(
-                    "agent-support/claude-code/promoted-2026-08-21/conformance.json",
+                    "agent-support/claude-code/candidate-2026-08-21/conformance.json",
                     include_bytes!(concat!(
                         env!("CARGO_MANIFEST_DIR"),
-                        "/../../agent-support/claude-code/promoted-2026-08-21/conformance.json"
+                        "/../../agent-support/claude-code/candidate-2026-08-21/conformance.json"
                     )),
                 ),
             ],
-            SupportReleaseStatus::Promoted,
+            SupportReleaseStatus::Candidate,
         );
         assert_support_binding(
             &CodexAdapter::new(),

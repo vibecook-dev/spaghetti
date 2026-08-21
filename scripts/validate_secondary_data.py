@@ -802,7 +802,7 @@ def validate_subagent_meta() -> Section:
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def main():
+def main() -> int:
     print("=" * 78)
     print("  @spaghetti/core  —  Secondary Data Validation")
     print(f"  Source: {CLAUDE_DIR}")
@@ -836,7 +836,8 @@ def main():
     else:
         print("  Some types need updates — see [GAP] items above")
     print("=" * 78)
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
