@@ -2471,6 +2471,23 @@ before access. No current Candidate document was rebound, no adapter invokes a
 selector or source driver, no child receives an access token, and `9f9749b`
 remains closed.
 
+Commit `eabef8d` applies that declaration contract to the incomplete Claude
+Candidate without making it executable. Eleven concrete dynamic or
+related-object relations now name an exact existing scoped stream and source
+pattern; the three directory relations additionally carry confined relative
+selectors that compose byte-for-byte with their canonical identity-input
+locator templates. The workflow-child selector is retained as a narrower,
+non-widening pattern on the existing subagent stream, and the adapter
+conformance test now derives runtime root, pattern, decoder, and topology
+checks from the digest-bound declarations instead of a parallel selector
+table. Source, scope, evidence, and conformance hashes are rebound, but the
+release remains Candidate, the scope program remains incomplete, the scoped
+capability remains unsupported, observation contract versions remain empty,
+and `scope-access` remains planned. The conceptual task-artifact relation is
+still unbound. No attachment invokes a source driver, no native source is
+opened, no child access token or watcher is minted, and `9f9749b` remains
+closed.
+
 ### D3. Identity, control, and resync
 
 Implement:
