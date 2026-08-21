@@ -2507,6 +2507,22 @@ joins the relative locator to a host root nor calls a driver, admits a
 discovered child, installs a watcher, changes Candidate support, or relaxes
 `9f9749b`.
 
+Commit `9238ac2` prevents that reservation from degrading back into a stream
+name plus a digest. Support-bundle verification now retains a closed,
+non-serializable driver contract for every observation-bound scoped stream:
+`AppendDelimited` carries its exact record/batch bounds, while
+`ReplaceDocument` and `PresenceObject` carry their exact object bound. The
+contract is retained inside typed access authorization and may enter an
+authorized scope plan only when the selected program relation still names the
+same verified stream and access-root label. The reservation therefore carries
+the driver kind and bounds checked against the source document's scoped
+topology, existing implementation state, lifecycle, safe decoder-state
+boundary, relation budget, and source-declaration digest; later code cannot
+reconstruct stronger source semantics from a string or digest alone.
+Unrecognized driver kinds and lifecycle/boundary drift fail bundle
+verification. This still selects no adapter decoder, joins no native root,
+opens no source, and changes no Candidate capability or promotion guard.
+
 ### D3. Identity, control, and resync
 
 Implement:
