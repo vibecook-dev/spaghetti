@@ -7,12 +7,19 @@ import subprocess
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DEFAULT_TARGET = Path("/Volumes/SamsungRed/spaghetti-rfc012/build/w3-int/target")
+DEFAULT_TARGET = Path("/Volumes/SamsungRed/spaghetti-rfc012/build/w4-int/target")
 
 
-def run_napi_lib_test(test_name: str, *, timeout: int = 180) -> subprocess.CompletedProcess[str]:
+def run_napi_lib_test(
+    test_name: str,
+    *,
+    timeout: int = 180,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.setdefault("CARGO_TARGET_DIR", str(DEFAULT_TARGET))
+    if extra_env:
+        env.update(extra_env)
     return subprocess.run(
         [
             "cargo",

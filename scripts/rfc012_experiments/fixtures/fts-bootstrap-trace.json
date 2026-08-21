@@ -6,28 +6,28 @@
       "fts_complete": false,
       "history_complete": false,
       "label": "catalog-ready",
-      "t_ms": 36
+      "t_ms": 27
     },
     {
       "catalog_complete": true,
       "fts_complete": false,
       "history_complete": true,
       "label": "history-ready",
-      "t_ms": 37
+      "t_ms": 28
     },
     {
       "catalog_complete": true,
       "fts_complete": false,
       "history_complete": true,
       "label": "fts-incomplete",
-      "t_ms": 37
+      "t_ms": 28
     },
     {
       "catalog_complete": true,
       "fts_complete": true,
       "history_complete": true,
       "label": "fts-complete",
-      "t_ms": 37
+      "t_ms": 28
     }
   ],
   "source_test": "rfc012_x1_emit_complete_only_ingest_trace"

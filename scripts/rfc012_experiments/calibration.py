@@ -12,7 +12,7 @@ from typing import Callable
 from .cargo_ops import run_napi_lib_test
 from .diagnostic_aggregation import aggregate_diagnostics, row_reduction, rows_from_sqlite_census
 from .fts_finalization import compare_strategies, load_frozen_trace
-from .sqlite_diagnostics import load_diagnostic_rows, write_diagnostic_fixture
+from .sqlite_diagnostics import load_diagnostic_rows
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -71,12 +71,12 @@ def catalog_calibration() -> dict[str, object]:
 
 def observer_calibration() -> dict[str, object]:
     def once() -> str:
-        completed = run_napi_lib_test("nested_directory_child_jsonl_decodes_through_replace_driver")
+        completed = run_napi_lib_test("scoped_resync_required_invalidates_backlog_and_delivers_next")
         if "test result: ok" not in completed.stdout:
-            raise RuntimeError("observer directory-member test did not pass")
-        return "observer-attach-poll"
+            raise RuntimeError("scoped resync/overflow test did not pass")
+        return "scoped-resync-overflow"
 
-    timed = time_call("observer-attach-poll", once)
+    timed = time_call("scoped-resync-overflow", once)
     operation = timed.pop("result")
     return {
         "package": "D5",
@@ -90,13 +90,21 @@ def observer_calibration() -> dict[str, object]:
 
 def x2_report() -> dict[str, object]:
     fixture = REPO / "scripts/rfc012_experiments/fixtures/source-record-errors.sqlite"
-    write_diagnostic_fixture(fixture)
+    completed = run_napi_lib_test(
+        "rfc012_x2_dump_engine_source_record_errors",
+        extra_env={"RFC012_X2_DUMP": str(fixture)},
+    )
+    if "test result: ok" not in completed.stdout:
+        raise RuntimeError("engine source_record_errors dump test did not pass")
     records = load_diagnostic_rows(fixture)
+    if not records:
+        raise RuntimeError("engine dump has no source_record_errors rows")
     rows = rows_from_sqlite_census(records)
     aggregated = aggregate_diagnostics(rows)
     return {
         "package": "X2",
         "fixture": str(fixture.relative_to(REPO)),
+        "source": "rfc012_x2_dump_engine_source_record_errors",
         "raw_rows": len(rows),
         "aggregated_rows": len(aggregated),
         "reduction": row_reduction(len(rows), aggregated),
@@ -118,14 +126,22 @@ def x2_report() -> dict[str, object]:
 
 
 def x1_report() -> dict[str, object]:
-    completed = run_napi_lib_test("search_stays_unavailable_until_query_bootstrap_completes")
+    trace = REPO / "scripts/rfc012_experiments/fixtures/fts-bootstrap-trace.json"
+    completed = run_napi_lib_test(
+        "rfc012_x1_emit_complete_only_ingest_trace",
+        extra_env={"RFC012_X1_TRACE": str(trace)},
+    )
     if "test result: ok" not in completed.stdout:
-        raise RuntimeError("complete-only search gate test did not pass")
-    strategies = compare_strategies(load_frozen_trace())
+        raise RuntimeError("complete-only ingest trace test did not pass")
+    milestones = load_frozen_trace(trace)
+    if not any(item.t_ms > 0 for item in milestones):
+        raise RuntimeError("ingest trace timestamps were not emitted from a real run")
+    strategies = compare_strategies(milestones)
     search_complete_only = all(not item.search_visible_before_complete for item in strategies)
     return {
         "package": "X1",
-        "operation": "search-complete-only-gate",
+        "operation": "rfc012_x1_emit_complete_only_ingest_trace",
         "strategies": [item.__dict__ for item in strategies],
         "search_remains_complete_only": search_complete_only,
+        "milestones": [item.__dict__ for item in milestones],
     }
