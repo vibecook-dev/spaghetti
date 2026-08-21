@@ -28,16 +28,16 @@ QUERY_MUTATION_RE = re.compile(r"\b(?:ensure|rebuild)\w*Projection\s*\(")
 SOURCE_RUNTIME_RE = re.compile(
     r"(?:^|[-_/])(?:live|watch|watcher|checkpoint|writer|query|lifecycle-owner)(?:[-_/\.]|$)"
 )
-SOURCE_ID_LITERAL_RE = re.compile(r'"(?:claude-code|codex|grok)"')
+SOURCE_ID_LITERAL_RE = re.compile(r'"(?:claude-code|codex|factory|grok)"')
 SOURCE_ID_CONCAT_RE = re.compile(
-    r"\bconcat!\s*\([^)]*\b(?:claude|codex|grok)\b[^)]*\)"
+    r"\bconcat!\s*\([^)]*\b(?:claude|codex|factory|grok)\b[^)]*\)"
 )
 CONCRETE_ADAPTER_DEPENDENCY_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|grok)(?:::|\b)"
-    r"|(?:ClaudeCode|Codex|Grok)Adapter\b)"
+    r"\b(?:crate::(?:claude|codex|factory|grok)(?:::|\b)"
+    r"|(?:ClaudeCode|Codex|Factory|Grok)Adapter\b)"
 )
 SOURCE_LAYER_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|grok|engine|orchestrate|napi_engine)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|engine|orchestrate|napi_engine)"
     r"|napi|sonic_rs|serde_json)(?:::|\b)"
 )
 SOURCE_LAYER_SQLITE_RE = re.compile(r"\brusqlite(?:::|\b)")
@@ -57,31 +57,32 @@ RFC012_SUPPORT_FORBIDDEN_RE = re.compile(
     r"(?:\bcrate::|\bsuper::(?:::|\b)|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
 )
 RFC012_SCOPED_HOST_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate)"
     r"|rusqlite|napi)(?:::|\b)"
 )
 RFC012_OBSERVATION_CONTRACT_FORBIDDEN_RE = re.compile(
     r"(?:\bcrate::(?!adapter(?:::|\b))|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
 )
 RFC012_DECODE_RUNTIME_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|scoped_observation)"
     r"|rusqlite|napi)(?:::|\b)"
 )
 RFC012_CATALOG_CONTRACT_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation|source)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|scoped_observation|source)"
     r"|rusqlite|napi)(?:::|\b)"
 )
 RFC012_SEMANTIC_CONTRACT_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation|source|catalog_contract|observation_contract)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|scoped_observation|source|catalog_contract|observation_contract)"
     r"|rusqlite|napi)(?:::|\b)"
 )
 RFC012_SEMANTIC_CONTRACT_NAPI_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|grok|core|engine|napi_engine|orchestrate|scoped_observation|source|catalog_contract|observation_contract)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|scoped_observation|source|catalog_contract|observation_contract)"
     r"|rusqlite)(?:::|\b)"
 )
 BUILTIN_ADAPTER_PATHS = (
     "crates/spaghetti-napi/src/claude/adapter.rs",
     "crates/spaghetti-napi/src/codex/adapter.rs",
+    "crates/spaghetti-napi/src/factory/adapter.rs",
     "crates/spaghetti-napi/src/grok/adapter.rs",
 )
 MIGRATED_CLIENT_CONSUMERS = (
@@ -289,7 +290,7 @@ def production_rust() -> list[Path]:
 
 def discover_rust_common_source_dispatch() -> set[str]:
     root = REPO_ROOT / "crates/spaghetti-napi/src"
-    adapter_roots = {"claude", "codex", "grok"}
+    adapter_roots = {"claude", "codex", "factory", "grok"}
     found: set[str] = set()
     for path in production_rust():
         relative = path.relative_to(root)
@@ -355,7 +356,7 @@ def discover_rust_adapter_storage_boundary_violations() -> set[str]:
     paths = list((root / "adapter").rglob("*.rs"))
     paths.extend(
         path
-        for adapter in ("claude", "codex", "grok")
+        for adapter in ("claude", "codex", "factory", "grok")
         if (path := root / adapter / "adapter.rs").exists()
     )
     return {
@@ -371,7 +372,7 @@ def discover_rfc012_adapter_access_authority_violations() -> set[str]:
     paths = list((root / "adapter").rglob("*.rs"))
     paths.extend(
         path
-        for adapter in ("claude", "codex", "grok")
+        for adapter in ("claude", "codex", "factory", "grok")
         if (path := root / adapter / "adapter.rs").exists()
     )
     return {

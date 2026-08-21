@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "declaration_id": "factory-session-scope-2026-08-21-candidate",
+  "adapter_id": "factory",
+  "ads_id": "factory-ads-2026-08-21-candidate",
+  "status": "incomplete",
+  "roots": ["sessions"],
+  "programs": [
+    {
+      "program_id": "observe-session-files",
+      "root_entity_kind": "session",
+      "relations": [
+        {
+          "relation_id": "root-transcript",
+          "primitive": "KnownObject",
+          "access_root": "sessions",
+          "locator": "known-transcript",
+          "identity_inputs": ["native-session-id", "transcript-locator"],
+          "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 2147483648, "max_rows": 0 },
+          "unavailable_behavior": "record_unavailable",
+          "claim_refs": ["factory-scope-open"]
+        },
+        {
+          "relation_id": "session-document",
+          "primitive": "SiblingObject",
+          "access_root": "sessions",
+          "locator": "session.json",
+          "identity_inputs": ["transcript-object"],
+          "bounds": { "max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 1048576, "max_rows": 0 },
+          "unavailable_behavior": "skip_optional",
+          "claim_refs": ["factory-scope-open", "factory-identity-open"]
+        }
+      ],
+      "claim_refs": ["factory-scope-open", "factory-identity-open"]
+    }
+  ],
+  "blockers": [
+    "Catalog and scoped observation remain unsupported for this candidate.",
+    "Wire the sibling declarations to the common scoped observer.",
+    "Author independent sanitized session-document lifecycle fixtures."
+  ],
+  "claim_refs": ["factory-scope-open"]
+}

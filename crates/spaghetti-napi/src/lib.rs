@@ -10,7 +10,7 @@
 //!   SQLite writer / bulk FTS.
 //! - [`claude`] — Claude Code–specific types, message FTS extraction,
 //!   project tree walk, on-disk fingerprint discovery.
-//! - [`codex`] / [`grok`] — additional AgentSource native cold/warm readers.
+//! - [`codex`] / [`grok`] / [`factory`] — additional AgentSource native cold/warm readers.
 //! - [`engine`] — persistent RFC 011 lifecycle, ownership, writer, and query
 //!   workers (library-first; no Node types).
 //! - [`source`] — adapter-neutral RFC 011 source drivers, provenance records,
@@ -30,6 +30,7 @@ pub mod core;
 mod coverage_runtime;
 mod decode_runtime;
 pub mod engine;
+pub mod factory;
 pub mod grok;
 mod napi_engine;
 mod observation_contract;

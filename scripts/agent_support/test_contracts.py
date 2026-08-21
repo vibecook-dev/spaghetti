@@ -912,7 +912,10 @@ class SchemaAndRepositoryTests(unittest.TestCase):
     def test_repository_bundles_are_valid_and_candidates_are_nonselectable(self) -> None:
         bundles, errors = validate_repository()
         self.assertEqual(errors, [])
-        self.assertEqual({bundle.document("ads.json")["adapter_id"] for bundle in bundles}, {"claude-code", "codex", "grok"})
+        self.assertEqual(
+            {bundle.document("ads.json")["adapter_id"] for bundle in bundles},
+            {"claude-code", "codex", "factory", "grok"},
+        )
         releases = [bundle.document("support-release.json") for bundle in bundles]
         for release in releases:
             probe = RuntimeProbe(
