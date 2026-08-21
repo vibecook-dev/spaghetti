@@ -2590,6 +2590,25 @@ reservation, account an enumerated entry, admit a member, or install a watcher.
 Child access accounting and per-entry audit semantics therefore remain open,
 the dynamic-relation guard stays closed, and Candidate support is unchanged.
 
+Commit `6592ff1` closes that pre-I/O child-accounting contract without invoking
+the directory driver. Because the listing root is already one accessed object
+at depth one, the confined scan configuration now receives the remaining
+`max_objects - 1` child capacity, fan-out capped by that remaining capacity,
+and `max_depth - 1` recursion levels. Each future yielded entry must reserve a
+domain-separated opaque token derived from the exact listing-root token and
+binary-safe relative path identity before it can become membership evidence.
+Its trace edge binds either the listing root or a previously completed
+directory entry as parent; missing/file parents, duplicates, depth, fan-out,
+aggregate object overflow, abandonment, and path-shaped or cross-pass
+substitution fail closed. An in-memory root authority binds the exact budget
+instance and reservation sequence, so another pass with equal visible
+coordinates cannot spend it. The audit retains only child tokens and entry
+kinds, never relative names or native paths. The confined scan still does not
+call this contract, so recording every yielded entry before metadata/open,
+completing the listing from an exact checkpoint, child content-read authority,
+membership admission, and watcher installation remain open. The dynamic-
+relation guard stays closed and Candidate support is unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
