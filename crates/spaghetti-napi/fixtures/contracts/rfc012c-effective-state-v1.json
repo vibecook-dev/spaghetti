@@ -1,0 +1,46 @@
+{
+  "adapter_id": "fixture-adapter",
+  "family": "runtime.effective-state",
+  "family_version": 1,
+  "fixture_contract_version": 1,
+  "runtime_semantic_contract_version": 1,
+  "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM",
+  "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+  "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+  "dimension": "model",
+  "fact_id": "v1:N6QGV3zIDYj5U2tj-j1KpqaVk9jriuYWEBzkE9CagoI",
+  "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+  "configured": {
+    "completeness": "complete",
+    "evidence_kind": "configured_intent",
+    "operation": "upsert",
+    "semantic_revision_key_hex": "1a72374d6779e1d8293e7606b705e40bb610be9c18ab21fd1ab0609254322076",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:KXeh7VAfe2PhSkqfcfQUlReJdbC1DPXUpOIvMFYWwxA"
+    },
+    "value": "claude-sonnet"
+  },
+  "observed": {
+    "completeness": "complete",
+    "evidence_kind": "response_observed",
+    "operation": "upsert",
+    "semantic_revision_key_hex": "09bdb1e6dc18dad456d32c2c058deab15c7a4143bc5258daa6b079a311e1566e",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:bk6DTdRZlFIFATlZc_tRen23rHzunVRPy90NqbalrB0"
+    },
+    "value": "claude-sonnet"
+  },
+  "retract": {
+    "completeness": "complete",
+    "evidence_kind": "native_transition",
+    "operation": "retract",
+    "semantic_revision_key_hex": "70ebbe29e9f291c59a0a706b217959e420aaa42321711e9d157b6bd2ed3d45ef",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:dokdqE31YwuxmRmSWV_hYFkpQWtZtnmCN8sIMMS_p-8"
+    },
+    "value": "claude-sonnet"
+  }
+}

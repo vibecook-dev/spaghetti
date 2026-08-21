@@ -38,6 +38,8 @@ class FtsFinalizationTests(unittest.TestCase):
         self.assertTrue(report["search_remains_complete_only"])
         self.assertTrue(any(item["t_ms"] > 0 for item in report["milestones"]))
         self.assertEqual(report["operation"], "rfc012_x1_emit_complete_only_ingest_trace")
+        self.assertTrue(report["identical_input_comparison"]["search_remains_complete_only"])
+        self.assertEqual(len(report["identical_input_comparison"]["strategies"]), 3)
         results = compare_strategies(load_frozen_trace())
         self.assertEqual(len(results), 3)
         for item in results:
@@ -61,12 +63,12 @@ class CalibrationTests(unittest.TestCase):
         catalog = catalog_calibration()
         observer = observer_calibration()
         self.assertEqual(catalog["operation"], "catalog-retained-page")
-        self.assertEqual(observer["operation"], "scoped-resync-overflow")
-        self.assertNotEqual(observer["timing"]["label"], "observer-attach-poll")
-        self.assertNotEqual(observer["timing"]["label"], "observation-negotiation-fixture")
+        self.assertEqual(observer["operation"], "rfc012_d5_emit_observer_kernel_report")
+        labels = {item["label"] for item in observer["kernel"]["operations"]}
+        self.assertEqual(labels, {"attach", "poll", "overflow-resync", "three-scope-attach"})
+        self.assertTrue(all(int(item["t_us"]) > 0 for item in observer["kernel"]["operations"]))
         self.assertEqual(catalog["gate"], "experiment-not-ratified-ceiling")
         self.assertIn("p50_ms", catalog["timing"])
-        self.assertIn("p50_ms", observer["timing"])
 
 
 if __name__ == "__main__":

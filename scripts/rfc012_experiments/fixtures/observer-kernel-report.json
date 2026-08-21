@@ -1,0 +1,28 @@
+{
+  "gate": "experiment-not-ratified-ceiling",
+  "operations": [
+    {
+      "label": "attach",
+      "t_ms": 11,
+      "t_us": 11405
+    },
+    {
+      "label": "poll",
+      "t_ms": 1,
+      "t_us": 1236
+    },
+    {
+      "label": "overflow-resync",
+      "t_ms": 0,
+      "t_us": 198
+    },
+    {
+      "label": "three-scope-attach",
+      "scopes": 3,
+      "t_ms": 10,
+      "t_us": 10542
+    }
+  ],
+  "package": "D5",
+  "source_test": "rfc012_d5_emit_observer_kernel_report"
+}

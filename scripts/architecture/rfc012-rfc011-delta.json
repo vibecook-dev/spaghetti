@@ -209,6 +209,11 @@
           "state": "implemented",
           "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-interaction-v1.json",
           "claim": "Versioned interaction serialization is frozen beside usage-v2 actor fixtures."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-v1.json",
+          "claim": "Versioned effective-state serialization covers configured, observed, and retract identities."
         }
       ]
     },

@@ -6,11 +6,73 @@
   "fixture_contract_version": 1,
   "kind": "choice",
   "native_tool_use_id": "toolu_fixture_question_1",
-  "open": {
+  "fact_id": "v1:NREJ10QgfTO9BNEkBFVbVns6Xse2Ew8km8eo2DKm85A",
+  "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+  "pending": {
     "completeness": "complete",
     "operation": "upsert",
     "result_reference": null,
-    "state": "open"
+    "semantic_revision_key_hex": "c2e5ac488b910ef01fbc82fe92fa64a8046464a8e9079a3f5414523dc3c885dc",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:uNddFcL2krh0x4Uf0CAJOdAs7k5JG8JY9huO-vQlY6U"
+    },
+    "state": "pending"
+  },
+  "resolved": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "result_reference": "continue",
+    "semantic_revision_key_hex": "ebc6e2d379ad969a1b03b17e48c4cfb349614291ba66cbd67cdd3c65eb4e2565",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:_zV06bA9zdz4m91mcbuebc-4lUsQSCdeFWaMJKCql6Q"
+    },
+    "state": "resolved"
+  },
+  "failed": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "result_reference": null,
+    "semantic_revision_key_hex": "ca78dbd1b3cd1b151a7afc88a270284363fa53ba4dc18d5715089f8b2877182c",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:wPDfEEF6t4G2rgYb6uCHIn_6VOu4yiZ_qwH8b6JC5oo"
+    },
+    "state": "failed"
+  },
+  "cancelled": {
+    "completeness": "complete",
+    "operation": "upsert",
+    "result_reference": null,
+    "semantic_revision_key_hex": "89247137a7f58a3538cc583aeed2b90ea6481f9bf88ed08be1cc733ae264c7da",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:VUqDLDzUV_fKU3Xb3S_EKwjEL41BfQnYV29QjQeFwOY"
+    },
+    "state": "cancelled"
+  },
+  "retract": {
+    "completeness": "complete",
+    "operation": "retract",
+    "result_reference": null,
+    "semantic_revision_key_hex": "da4bae1ac7a384adf67b7a8f68e0ec52d0db07293c48031d47ea04df0bbfe028",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:VMS0EGVFElnv3C-RGINnQeLyZDfUYkGHVUmleiQqAzM"
+    },
+    "state": "pending"
+  },
+  "partial": {
+    "completeness": "partial",
+    "operation": "upsert",
+    "result_reference": null,
+    "semantic_revision_key_hex": "3e526f9b54d87c63c82a336cd4b3ec9cae723c696654df3e1f9c226093a5bae1",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:zyTPFJB6W3JCEYND9PC2AjvT3krUm7zHxYx6WAogF18"
+    },
+    "state": "pending"
   },
   "questions": [
     {
@@ -31,12 +93,6 @@
       "prompt": "Which option should we take?"
     }
   ],
-  "resolved": {
-    "completeness": "complete",
-    "operation": "upsert",
-    "result_reference": "continue",
-    "state": "resolved"
-  },
   "runtime_semantic_contract_version": 1,
   "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
   "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM"

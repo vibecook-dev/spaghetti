@@ -312,26 +312,41 @@ fn merge_consumes_typed_usage_and_interaction_values_without_native_payloads() {
 
     let interaction = parse_rfc012c_interaction_v1_json(RFC012C_INTERACTION).expect("interaction");
     assert_eq!(interaction.family, "runtime.user-input-request");
-    assert_eq!(interaction.open.state, UserInputLifecycleState::Open);
+    assert_eq!(interaction.pending.state, UserInputLifecycleState::Pending);
     assert_eq!(
         interaction.resolved.state,
         UserInputLifecycleState::Resolved
     );
-    assert_eq!(interaction.open.fact_id, interaction.resolved.fact_id);
+    assert_eq!(interaction.failed.state, UserInputLifecycleState::Failed);
+    assert_eq!(
+        interaction.cancelled.state,
+        UserInputLifecycleState::Cancelled
+    );
+    assert_eq!(interaction.retract.operation, UserInputOperation::Retract);
+    assert_eq!(
+        interaction.partial.completeness,
+        crate::adapter::ContractCompleteness::Partial
+    );
+    assert_eq!(interaction.pending.fact_id, interaction.resolved.fact_id);
     assert_ne!(
-        interaction.open.semantic_revision_ref,
+        interaction.pending.semantic_revision_ref,
         interaction.resolved.semantic_revision_ref
     );
     assert_eq!(
-        interaction.open.questions[0].prompt,
+        interaction.pending.questions[0].prompt,
         "Which option should we take?"
     );
-    assert_eq!(interaction.open.questions[0].options[0].label, "Continue");
     assert_eq!(
-        interaction.open.questions[0].options[1].preview.as_deref(),
+        interaction.pending.questions[0].options[0].label,
+        "Continue"
+    );
+    assert_eq!(
+        interaction.pending.questions[0].options[1]
+            .preview
+            .as_deref(),
         Some("Abort the in-flight plan")
     );
-    assert!(interaction.open.result_reference.is_none());
+    assert!(interaction.pending.result_reference.is_none());
     assert_eq!(
         interaction.resolved.result_reference.as_deref(),
         Some("continue")

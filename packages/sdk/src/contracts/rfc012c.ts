@@ -12,6 +12,7 @@ import {
   parseOpaqueContractReference,
   parseQualifiedValue,
   parseSemanticRevisionRef,
+  type ContractCompleteness,
   type ExternalEntityRef,
   type OpaqueContractReference,
   type QualifiedValue,
@@ -28,6 +29,10 @@ export const RUNTIME_SEMANTIC_CONTRACT_VERSION = 1 as const;
 export const ACTOR_RUN_FAMILY = 'runtime.actor-run' as const;
 export const ACTOR_AFFILIATION_FAMILY = 'runtime.actor-affiliation' as const;
 export const USAGE_V2_FAMILY = 'runtime.usage-v2' as const;
+export const EFFECTIVE_STATE_FAMILY = 'runtime.effective-state' as const;
+export const USER_INPUT_FAMILY = 'runtime.user-input-request' as const;
+export const EFFECTIVE_STATE_FAMILY_VERSION = 1 as const;
+export const USER_INPUT_FAMILY_VERSION = 1 as const;
 export const ACTOR_RUN_FAMILY_VERSION = 1 as const;
 export const ACTOR_AFFILIATION_FAMILY_VERSION = 1 as const;
 export const USAGE_V2_FAMILY_VERSION = 1 as const;
@@ -171,6 +176,8 @@ type UnknownRecord = Record<string, unknown>;
 
 const MAX_RUNTIME_SEMANTIC_TEXT_BYTES = 8 * 1024;
 const MAX_ADAPTER_ID_BYTES = 128;
+const MAX_INTERACTION_QUESTIONS = 32;
+const MAX_INTERACTION_OPTIONS = 32;
 const MAX_USAGE_RESPONSE_KEY_BYTES = 8 * 1024;
 const MAX_USAGE_PROVENANCE_FIELD_BYTES = 256;
 const MAX_U32 = 0xffff_ffff;
@@ -923,4 +930,438 @@ export function parseRuntimeContractFixture(value: unknown, expectedContextInput
 
 export function parseRfc012cRuntimeV1Json(json: string, expectedContextInput: unknown): RuntimeContractFixture {
   return parseRuntimeContractFixture(preflightSemanticFixtureJson(json), expectedContextInput);
+}
+
+export type EffectiveStateDimension = 'model' | 'effort' | 'session_mode' | 'permission_mode';
+export type EffectiveStateEvidenceKind = 'configured_intent' | 'response_observed' | 'native_transition';
+export type EffectiveStateOperation = 'upsert' | 'retract';
+export type UserInputKind = 'choice' | 'multi_choice' | 'free_text' | 'mixed';
+export type UserInputLifecycleState = 'pending' | 'resolved' | 'failed' | 'cancelled';
+export type UserInputOperation = 'upsert' | 'retract';
+
+export interface EffectiveStateSlot {
+  completeness: ContractCompleteness;
+  evidence_kind: EffectiveStateEvidenceKind;
+  operation: EffectiveStateOperation;
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+  value: string;
+}
+
+export interface EffectiveStateFixture {
+  adapter_id: string;
+  family: typeof EFFECTIVE_STATE_FAMILY;
+  family_version: typeof EFFECTIVE_STATE_FAMILY_VERSION;
+  fixture_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  runtime_semantic_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  source_instance_key: OpaqueContractReference;
+  session: OpaqueContractReference;
+  actor_run: OpaqueContractReference;
+  dimension: EffectiveStateDimension;
+  fact_id: OpaqueContractReference;
+  source_record_id: OpaqueContractReference;
+  configured: EffectiveStateSlot;
+  observed: EffectiveStateSlot;
+  retract: EffectiveStateSlot;
+}
+
+export interface UserInputOption {
+  label: string;
+  description: string | null;
+  preview: string | null;
+}
+
+export interface UserInputQuestion {
+  header: string | null;
+  prompt: string;
+  options: UserInputOption[];
+  multi_select: boolean;
+}
+
+export interface InteractionLifecycleSlot {
+  completeness: ContractCompleteness;
+  operation: UserInputOperation;
+  result_reference: string | null;
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+  state: UserInputLifecycleState;
+}
+
+export interface InteractionFixture {
+  adapter_id: string;
+  actor_run: OpaqueContractReference;
+  family: typeof USER_INPUT_FAMILY;
+  family_version: typeof USER_INPUT_FAMILY_VERSION;
+  fixture_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  kind: UserInputKind;
+  native_tool_use_id: string;
+  fact_id: OpaqueContractReference;
+  source_record_id: OpaqueContractReference;
+  pending: InteractionLifecycleSlot;
+  resolved: InteractionLifecycleSlot;
+  failed: InteractionLifecycleSlot;
+  cancelled: InteractionLifecycleSlot;
+  retract: InteractionLifecycleSlot;
+  partial: InteractionLifecycleSlot;
+  questions: UserInputQuestion[];
+  runtime_semantic_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  session: OpaqueContractReference;
+  source_instance_key: OpaqueContractReference;
+}
+
+function parseContractCompleteness(value: unknown, label: string): ContractCompleteness {
+  if (value !== 'complete' && value !== 'partial' && value !== 'unknown') {
+    throw new ContractValidationError(`${label} must be complete, partial, or unknown`);
+  }
+  return value;
+}
+
+function bindSlotIdentity(
+  label: string,
+  parsed: { semantic_revision_key_hex: string; semantic_revision_ref: SemanticRevisionRef },
+  expected: { semantic_revision_key_hex: string; semantic_revision_ref: SemanticRevisionRef },
+): void {
+  if (
+    parsed.semantic_revision_key_hex !== expected.semantic_revision_key_hex ||
+    parsed.semantic_revision_ref.fact_revision_id !== expected.semantic_revision_ref.fact_revision_id ||
+    parsed.semantic_revision_ref.semantic_reference_contract_version !==
+      expected.semantic_revision_ref.semantic_reference_contract_version
+  ) {
+    throw new ContractValidationError(`${label} semantic content does not match the caller-held revision identity`);
+  }
+}
+
+function parseEffectiveStateSlot(value: unknown, label: string): EffectiveStateSlot {
+  const input = record(value, label);
+  assertKnownFields(
+    input,
+    ['completeness', 'evidence_kind', 'operation', 'semantic_revision_key_hex', 'semantic_revision_ref', 'value'],
+    label,
+  );
+  const evidence = input.evidence_kind;
+  if (evidence !== 'configured_intent' && evidence !== 'response_observed' && evidence !== 'native_transition') {
+    throw new ContractValidationError(`${label} evidence_kind is unsupported`);
+  }
+  const operation = input.operation;
+  if (operation !== 'upsert' && operation !== 'retract') {
+    throw new ContractValidationError(`${label} operation is unsupported`);
+  }
+  return {
+    completeness: parseContractCompleteness(input.completeness, `${label} completeness`),
+    evidence_kind: evidence,
+    operation,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+    value: boundedText(input.value, `${label} value`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+  };
+}
+
+function parseEffectiveStateFixtureShape(value: unknown): EffectiveStateFixture {
+  assertSemanticFixtureGraph(value);
+  const input = record(value, 'effective-state fixture');
+  assertKnownFields(
+    input,
+    [
+      'adapter_id',
+      'family',
+      'family_version',
+      'fixture_contract_version',
+      'runtime_semantic_contract_version',
+      'source_instance_key',
+      'session',
+      'actor_run',
+      'dimension',
+      'fact_id',
+      'source_record_id',
+      'configured',
+      'observed',
+      'retract',
+    ],
+    'effective-state fixture',
+  );
+  if (input.fixture_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION) {
+    throw new ContractValidationError('unsupported effective-state fixture contract version');
+  }
+  if (input.runtime_semantic_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION) {
+    throw new ContractValidationError('unsupported runtime semantic contract version');
+  }
+  if (input.family !== EFFECTIVE_STATE_FAMILY || input.family_version !== EFFECTIVE_STATE_FAMILY_VERSION) {
+    throw new ContractValidationError('effective-state fixture family must be runtime.effective-state@1');
+  }
+  const dimension = input.dimension;
+  if (
+    dimension !== 'model' &&
+    dimension !== 'effort' &&
+    dimension !== 'session_mode' &&
+    dimension !== 'permission_mode'
+  ) {
+    throw new ContractValidationError('unsupported effective-state dimension');
+  }
+  const configured = parseEffectiveStateSlot(input.configured, 'configured');
+  const observed = parseEffectiveStateSlot(input.observed, 'observed');
+  const retract = parseEffectiveStateSlot(input.retract, 'retract');
+  if (configured.evidence_kind !== 'configured_intent' || configured.operation !== 'upsert') {
+    throw new ContractValidationError('effective-state configured slot must be configured_intent upsert');
+  }
+  if (observed.evidence_kind !== 'response_observed' || observed.operation !== 'upsert') {
+    throw new ContractValidationError('effective-state observed slot must be response_observed upsert');
+  }
+  if (retract.evidence_kind !== 'native_transition' || retract.operation !== 'retract') {
+    throw new ContractValidationError('effective-state retract slot must be native_transition retract');
+  }
+  if (
+    configured.completeness !== 'complete' ||
+    observed.completeness !== 'complete' ||
+    retract.completeness !== 'complete'
+  ) {
+    throw new ContractValidationError('effective-state configured, observed, and retract must be complete');
+  }
+  if (
+    configured.semantic_revision_ref.fact_revision_id === observed.semantic_revision_ref.fact_revision_id ||
+    configured.semantic_revision_ref.fact_revision_id === retract.semantic_revision_ref.fact_revision_id ||
+    observed.semantic_revision_ref.fact_revision_id === retract.semantic_revision_ref.fact_revision_id
+  ) {
+    throw new ContractValidationError(
+      'effective-state configured, observed, and retract revisions must have distinct semantic identity',
+    );
+  }
+  return {
+    adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
+    family: EFFECTIVE_STATE_FAMILY,
+    family_version: EFFECTIVE_STATE_FAMILY_VERSION,
+    fixture_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
+    session: parseOpaqueContractReference(input.session, 'session'),
+    actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
+    dimension,
+    fact_id: parseOpaqueContractReference(input.fact_id, 'effective-state fact id'),
+    source_record_id: parseOpaqueContractReference(input.source_record_id, 'effective-state source record id'),
+    configured,
+    observed,
+    retract,
+  };
+}
+
+export function parseEffectiveStateFixture(value: unknown, expectedContextInput: unknown): EffectiveStateFixture {
+  const expected = parseEffectiveStateFixtureShape(expectedContextInput);
+  const parsed = parseEffectiveStateFixtureShape(value);
+  if (
+    parsed.fact_id !== expected.fact_id ||
+    parsed.source_record_id !== expected.source_record_id ||
+    parsed.session !== expected.session ||
+    parsed.actor_run !== expected.actor_run
+  ) {
+    throw new ContractValidationError('effective-state identity does not match the caller-held revision identity');
+  }
+  bindSlotIdentity('configured', parsed.configured, expected.configured);
+  bindSlotIdentity('observed', parsed.observed, expected.observed);
+  bindSlotIdentity('retract', parsed.retract, expected.retract);
+  return parsed;
+}
+
+export function parseRfc012cEffectiveStateV1Json(json: string, expectedContextInput: unknown): EffectiveStateFixture {
+  return parseEffectiveStateFixture(preflightSemanticFixtureJson(json), expectedContextInput);
+}
+
+function parseUserInputOption(value: unknown, label: string): UserInputOption {
+  const input = record(value, label);
+  assertKnownFields(input, ['label', 'description', 'preview'], label);
+  return {
+    label: boundedText(input.label, `${label} label`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    description:
+      input.description === null || input.description === undefined
+        ? null
+        : boundedText(input.description, `${label} description`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    preview:
+      input.preview === null || input.preview === undefined
+        ? null
+        : boundedText(input.preview, `${label} preview`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+  };
+}
+
+function parseUserInputQuestion(value: unknown, label: string): UserInputQuestion {
+  const input = record(value, label);
+  assertKnownFields(input, ['header', 'prompt', 'options', 'multi_select'], label);
+  if (!Array.isArray(input.options) || input.options.length > MAX_INTERACTION_OPTIONS) {
+    throw new ContractValidationError(`${label} options exceed ${MAX_INTERACTION_OPTIONS}`);
+  }
+  if (typeof input.multi_select !== 'boolean') {
+    throw new ContractValidationError(`${label} multi_select must be a boolean`);
+  }
+  return {
+    header:
+      input.header === null || input.header === undefined
+        ? null
+        : boundedText(input.header, `${label} header`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    prompt: boundedText(input.prompt, `${label} prompt`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    options: input.options.map((option, index) => parseUserInputOption(option, `${label} option ${index}`)),
+    multi_select: input.multi_select,
+  };
+}
+
+function parseInteractionSlot(
+  value: unknown,
+  label: string,
+  expectedState: UserInputLifecycleState,
+  expectedOperation: UserInputOperation,
+  expectedCompleteness: ContractCompleteness,
+  requireResult: boolean,
+): InteractionLifecycleSlot {
+  const input = record(value, label);
+  assertKnownFields(
+    input,
+    ['completeness', 'operation', 'result_reference', 'semantic_revision_key_hex', 'semantic_revision_ref', 'state'],
+    label,
+  );
+  const state = input.state;
+  if (state !== 'pending' && state !== 'resolved' && state !== 'failed' && state !== 'cancelled') {
+    throw new ContractValidationError(`${label} state is unsupported`);
+  }
+  if (state !== expectedState) {
+    throw new ContractValidationError('interaction lifecycle state does not match its fixture slot');
+  }
+  const operation = input.operation;
+  if (operation !== 'upsert' && operation !== 'retract') {
+    throw new ContractValidationError(`${label} operation is unsupported`);
+  }
+  if (operation !== expectedOperation) {
+    throw new ContractValidationError(`interaction ${label} operation does not match its fixture slot`);
+  }
+  const completeness = parseContractCompleteness(input.completeness, `${label} completeness`);
+  if (completeness !== expectedCompleteness) {
+    throw new ContractValidationError(`interaction ${label} completeness does not match its fixture slot`);
+  }
+  const resultReference =
+    input.result_reference === null || input.result_reference === undefined
+      ? null
+      : boundedText(input.result_reference, `${label} result_reference`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
+  if (requireResult && resultReference === null) {
+    throw new ContractValidationError('resolved interaction requires a typed result_reference');
+  }
+  if (expectedState === 'pending' && resultReference !== null) {
+    throw new ContractValidationError('pending interaction cannot carry a result_reference');
+  }
+  return {
+    completeness,
+    operation,
+    result_reference: resultReference,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+    state,
+  };
+}
+
+function parseInteractionFixtureShape(value: unknown): InteractionFixture {
+  assertSemanticFixtureGraph(value);
+  const input = record(value, 'interaction fixture');
+  assertKnownFields(
+    input,
+    [
+      'adapter_id',
+      'actor_run',
+      'family',
+      'family_version',
+      'fixture_contract_version',
+      'kind',
+      'native_tool_use_id',
+      'fact_id',
+      'source_record_id',
+      'pending',
+      'resolved',
+      'failed',
+      'cancelled',
+      'retract',
+      'partial',
+      'questions',
+      'runtime_semantic_contract_version',
+      'session',
+      'source_instance_key',
+    ],
+    'interaction fixture',
+  );
+  if (input.fixture_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION) {
+    throw new ContractValidationError('unsupported interaction fixture contract version');
+  }
+  if (input.runtime_semantic_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION) {
+    throw new ContractValidationError('unsupported runtime semantic contract version');
+  }
+  if (input.family !== USER_INPUT_FAMILY || input.family_version !== USER_INPUT_FAMILY_VERSION) {
+    throw new ContractValidationError('interaction fixture family must be runtime.user-input-request@1');
+  }
+  const kind = input.kind;
+  if (kind !== 'choice' && kind !== 'multi_choice' && kind !== 'free_text' && kind !== 'mixed') {
+    throw new ContractValidationError('unsupported interaction kind');
+  }
+  if (
+    !Array.isArray(input.questions) ||
+    input.questions.length === 0 ||
+    input.questions.length > MAX_INTERACTION_QUESTIONS
+  ) {
+    throw new ContractValidationError(
+      `interaction questions must contain 1..=${MAX_INTERACTION_QUESTIONS} typed questions`,
+    );
+  }
+  const pending = parseInteractionSlot(input.pending, 'pending', 'pending', 'upsert', 'complete', false);
+  const resolved = parseInteractionSlot(input.resolved, 'resolved', 'resolved', 'upsert', 'complete', true);
+  const failed = parseInteractionSlot(input.failed, 'failed', 'failed', 'upsert', 'complete', false);
+  const cancelled = parseInteractionSlot(input.cancelled, 'cancelled', 'cancelled', 'upsert', 'complete', false);
+  const retract = parseInteractionSlot(input.retract, 'retract', 'pending', 'retract', 'complete', false);
+  const partial = parseInteractionSlot(input.partial, 'partial', 'pending', 'upsert', 'partial', false);
+  const refs = [
+    pending.semantic_revision_ref.fact_revision_id,
+    resolved.semantic_revision_ref.fact_revision_id,
+    failed.semantic_revision_ref.fact_revision_id,
+    cancelled.semantic_revision_ref.fact_revision_id,
+    retract.semantic_revision_ref.fact_revision_id,
+    partial.semantic_revision_ref.fact_revision_id,
+  ];
+  if (new Set(refs).size !== refs.length) {
+    throw new ContractValidationError('interaction lifecycle slots must have distinct semantic identity');
+  }
+  return {
+    adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
+    actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
+    family: USER_INPUT_FAMILY,
+    family_version: USER_INPUT_FAMILY_VERSION,
+    fixture_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    kind,
+    native_tool_use_id: boundedText(input.native_tool_use_id, 'native_tool_use_id', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    fact_id: parseOpaqueContractReference(input.fact_id, 'interaction fact id'),
+    source_record_id: parseOpaqueContractReference(input.source_record_id, 'interaction source record id'),
+    pending,
+    resolved,
+    failed,
+    cancelled,
+    retract,
+    partial,
+    questions: input.questions.map((question, index) => parseUserInputQuestion(question, `question ${index}`)),
+    runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    session: parseOpaqueContractReference(input.session, 'session'),
+    source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
+  };
+}
+
+export function parseInteractionFixture(value: unknown, expectedContextInput: unknown): InteractionFixture {
+  const expected = parseInteractionFixtureShape(expectedContextInput);
+  const parsed = parseInteractionFixtureShape(value);
+  if (
+    parsed.fact_id !== expected.fact_id ||
+    parsed.source_record_id !== expected.source_record_id ||
+    parsed.session !== expected.session ||
+    parsed.actor_run !== expected.actor_run
+  ) {
+    throw new ContractValidationError('interaction identity does not match the caller-held revision identity');
+  }
+  bindSlotIdentity('pending', parsed.pending, expected.pending);
+  bindSlotIdentity('resolved', parsed.resolved, expected.resolved);
+  bindSlotIdentity('failed', parsed.failed, expected.failed);
+  bindSlotIdentity('cancelled', parsed.cancelled, expected.cancelled);
+  bindSlotIdentity('retract', parsed.retract, expected.retract);
+  bindSlotIdentity('partial', parsed.partial, expected.partial);
+  return parsed;
+}
+
+export function parseRfc012cInteractionV1Json(json: string, expectedContextInput: unknown): InteractionFixture {
+  return parseInteractionFixture(preflightSemanticFixtureJson(json), expectedContextInput);
 }

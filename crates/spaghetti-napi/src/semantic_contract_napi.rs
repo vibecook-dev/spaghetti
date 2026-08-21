@@ -64,3 +64,24 @@ pub fn parse_rfc012c_runtime_v1_json(json: Utf16String) -> Result<String> {
     let json = utf16_json_to_utf8(json)?;
     crate::semantic_contract::parse_rfc012c_runtime_v1_json(&json).map_err(public_fixture_error)
 }
+
+/// Parse one committed RFC 012C v1 effective-state fixture from a JSON string.
+///
+/// Returns the same fixture as canonical JSON. The helper does not open a
+/// source, store, query, or delivery path.
+#[napi(js_name = "parseRfc012cEffectiveStateV1Json")]
+pub fn parse_rfc012c_effective_state_v1_json(json: Utf16String) -> Result<String> {
+    let json = utf16_json_to_utf8(json)?;
+    crate::semantic_contract::parse_rfc012c_effective_state_v1_json(&json)
+        .map_err(public_fixture_error)
+}
+
+/// Parse one committed RFC 012C v1 user-input interaction fixture from a JSON string.
+///
+/// Returns the same fixture as canonical JSON. The helper does not open a
+/// source, store, query, or delivery path.
+#[napi(js_name = "parseRfc012cInteractionV1Json")]
+pub fn parse_rfc012c_interaction_v1_json(json: Utf16String) -> Result<String> {
+    let json = utf16_json_to_utf8(json)?;
+    crate::semantic_contract::parse_rfc012c_interaction_v1_json(&json).map_err(public_fixture_error)
+}

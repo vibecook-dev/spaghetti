@@ -12413,4 +12413,134 @@ pub(crate) mod tests {
         assert!(delivery.bootstrap_barrier().is_none());
         assert!(delivery.is_empty());
     }
+
+    #[tokio::test]
+    async fn rfc012_d5_emit_observer_kernel_report() {
+        use std::time::Instant;
+
+        fn sample(started: Instant) -> (u64, u64) {
+            let elapsed = started.elapsed();
+            (
+                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            )
+        }
+
+        let registry = stateful_supported_fixture_registry();
+        let temp = TempDir::new().unwrap();
+        let watcher_policy = || {
+            ScopedObservationNativeWatcherRecoveryPolicy::new(
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_millis(1),
+                std::time::Duration::from_millis(1),
+                1,
+            )
+            .unwrap()
+        };
+        let source_policy = ScopedObservationSourceOwnerRetryPolicy::default();
+
+        let attach_started = Instant::now();
+        let (runtime, handle, pair, target, drops, _) =
+            automatic_single_object_pair_with_root_and_watcher_policy(
+                &registry,
+                AutomaticSingleObjectFixtureRoot::distinct(
+                    temp.path().join("d5-attach-root"),
+                    b"d5-attach-session".to_vec(),
+                ),
+                b"d5-attach-session".to_vec(),
+                AppendDelimitedConfig::json_lines(),
+                128,
+                AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy()),
+            )
+            .await;
+        let (attach_ms, attach_us) = sample(attach_started);
+
+        let owner = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 100, || 101));
+        std::fs::write(&target, b"d5\n").unwrap();
+        let poll_started = Instant::now();
+        let poll = tokio::time::timeout(std::time::Duration::from_secs(2), handle.poll())
+            .await
+            .unwrap()
+            .unwrap();
+        let (poll_ms, poll_us) = sample(poll_started);
+        assert!(matches!(poll, ScopedObservationPollResolution::Ready(_)));
+
+        let overflow_started = Instant::now();
+        let required = handle
+            .require_resync(ScopedResyncReason::WatcherOverflow, 110)
+            .unwrap();
+        let overflow_result = tokio::time::timeout(std::time::Duration::from_secs(2), owner)
+            .await
+            .unwrap()
+            .unwrap();
+        let (overflow_ms, overflow_us) = sample(overflow_started);
+        let ScopedObservationAsyncOwnerRunResult::Resync(handoff) = overflow_result else {
+            panic!("overflow must retain a replacement handoff");
+        };
+        drop(required);
+
+        let multi_started = Instant::now();
+        let mut scopes = Vec::new();
+        for (label, session) in [
+            ("d5-scope-a", b"d5-scope-a".as_slice()),
+            ("d5-scope-b", b"d5-scope-b".as_slice()),
+            ("d5-scope-c", b"d5-scope-c".as_slice()),
+        ] {
+            scopes.push(
+                automatic_single_object_pair_with_root_and_watcher_policy(
+                    &registry,
+                    AutomaticSingleObjectFixtureRoot::distinct(
+                        temp.path().join(label),
+                        session.to_vec(),
+                    ),
+                    session.to_vec(),
+                    AppendDelimitedConfig::json_lines(),
+                    128,
+                    AutomaticSingleObjectOwnerPolicies::new(source_policy, watcher_policy()),
+                )
+                .await,
+            );
+        }
+        let (multi_scope_ms, multi_scope_us) = sample(multi_started);
+        assert_eq!(scopes.len(), 3);
+
+        let report = serde_json::json!({
+            "source_test": "rfc012_d5_emit_observer_kernel_report",
+            "package": "D5",
+            "gate": "experiment-not-ratified-ceiling",
+            "operations": [
+                { "label": "attach", "t_ms": attach_ms, "t_us": attach_us },
+                { "label": "poll", "t_ms": poll_ms, "t_us": poll_us },
+                { "label": "overflow-resync", "t_ms": overflow_ms, "t_us": overflow_us },
+                { "label": "three-scope-attach", "t_ms": multi_scope_ms, "t_us": multi_scope_us, "scopes": 3 }
+            ]
+        });
+        let default_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/rfc012_experiments/fixtures/observer-kernel-report.json");
+        let path =
+            std::env::var_os("RFC012_D5_REPORT").map_or(default_path, std::path::PathBuf::from);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+
+        let close = runtime.request_close();
+        drop(handoff);
+        assert!(close.wait_async().await.complete);
+        for (scope_runtime, _, pair, _, scope_drops, _) in scopes {
+            let task = tokio::spawn(pair.run_with_factory_and_clocks(|_| Err(()), || 200, || 201));
+            let close = scope_runtime.request_close();
+            let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                stopped,
+                ScopedObservationAsyncOwnerRunResult::Stopped(_)
+            ));
+            assert!(close.wait_async().await.complete);
+            assert_eq!(scope_drops.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
 }

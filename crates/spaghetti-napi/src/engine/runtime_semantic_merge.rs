@@ -6,21 +6,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
-
 use crate::adapter::{
-    compare_coverage, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
-    ContractCompleteness, CoverageComparison, CoverageSetCompleteness, FactRevisionId,
-    SemanticContractError, SemanticRevisionRef, SourceCoverageSet, UsageRevisionV2Fact,
+    compare_coverage, CanonicalEntityKey, CanonicalFactId, ContractCompleteness,
+    CoverageComparison, CoverageSetCompleteness, SemanticContractError, SemanticRevisionRef,
+    SourceCoverageSet, UsageRevisionV2Fact,
 };
-use crate::semantic_contract::MAX_SEMANTIC_FIXTURE_JSON_BYTES;
-
-const USER_INPUT_FAMILY: &str = "runtime.user-input-request";
-const USER_INPUT_FAMILY_VERSION: u32 = 1;
-const INTERACTION_FIXTURE_CONTRACT_VERSION: u32 = 1;
-const MAX_INTERACTION_QUESTIONS: usize = 32;
-const MAX_INTERACTION_OPTIONS: usize = 32;
-const MAX_INTERACTION_TEXT_BYTES: usize = 8 * 1024;
+use crate::semantic_contract::{
+    decode_rfc012c_interaction_v1, InteractionFixtureWire, InteractionLifecycleSlotWire,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum SemanticMergeError {
@@ -288,72 +281,9 @@ pub(crate) fn merge_durable_and_scoped_usage(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum UserInputKind {
-    Choice,
-    MultiChoice,
-    FreeText,
-    Mixed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum UserInputLifecycleState {
-    Open,
-    Resolved,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum UserInputOperation {
-    Upsert,
-    Retract,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct UserInputOption {
-    pub label: String,
-    pub description: Option<String>,
-    pub preview: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct UserInputQuestion {
-    pub header: Option<String>,
-    pub prompt: String,
-    pub options: Vec<UserInputOption>,
-    pub multi_select: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct UserInputLifecycleWire {
-    state: UserInputLifecycleState,
-    operation: UserInputOperation,
-    completeness: ContractCompleteness,
-    result_reference: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct InteractionFixtureWire {
-    fixture_contract_version: u32,
-    runtime_semantic_contract_version: u32,
-    family: String,
-    family_version: u32,
-    adapter_id: String,
-    source_instance_key: CanonicalSourceInstanceKey,
-    session: CanonicalEntityKey,
-    actor_run: CanonicalEntityKey,
-    native_tool_use_id: String,
-    kind: UserInputKind,
-    questions: Vec<UserInputQuestion>,
-    open: UserInputLifecycleWire,
-    resolved: UserInputLifecycleWire,
-}
+pub(crate) use crate::semantic_contract::{
+    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UserInputLifecycleRevision {
@@ -372,95 +302,23 @@ pub(crate) struct UserInputLifecycleRevision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InteractionContractFixture {
-    pub family: &'static str,
+    pub family: String,
     pub family_version: u32,
-    pub open: UserInputLifecycleRevision,
+    pub pending: UserInputLifecycleRevision,
     pub resolved: UserInputLifecycleRevision,
-}
-
-fn bounded_text(label: &str, value: &str) -> Result<(), SemanticMergeError> {
-    if value.is_empty() || value.trim() != value {
-        return Err(SemanticMergeError::invalid(format!(
-            "{label} must be a non-empty canonical string"
-        )));
-    }
-    if value.len() > MAX_INTERACTION_TEXT_BYTES {
-        return Err(SemanticMergeError::invalid(format!(
-            "{label} exceeds {MAX_INTERACTION_TEXT_BYTES} UTF-8 bytes"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_questions(questions: &[UserInputQuestion]) -> Result<(), SemanticMergeError> {
-    if questions.is_empty() || questions.len() > MAX_INTERACTION_QUESTIONS {
-        return Err(SemanticMergeError::invalid(format!(
-            "interaction questions must contain 1..={MAX_INTERACTION_QUESTIONS} typed questions"
-        )));
-    }
-    for question in questions {
-        if let Some(header) = &question.header {
-            bounded_text("question header", header)?;
-        }
-        bounded_text("question prompt", &question.prompt)?;
-        if question.options.len() > MAX_INTERACTION_OPTIONS {
-            return Err(SemanticMergeError::invalid(format!(
-                "question options exceed {MAX_INTERACTION_OPTIONS}"
-            )));
-        }
-        for option in &question.options {
-            bounded_text("option label", &option.label)?;
-            if let Some(description) = &option.description {
-                bounded_text("option description", description)?;
-            }
-            if let Some(preview) = &option.preview {
-                bounded_text("option preview", preview)?;
-            }
-        }
-    }
-    Ok(())
+    pub failed: UserInputLifecycleRevision,
+    pub cancelled: UserInputLifecycleRevision,
+    pub retract: UserInputLifecycleRevision,
+    pub partial: UserInputLifecycleRevision,
 }
 
 fn lifecycle_revision(
     wire: &InteractionFixtureWire,
-    lifecycle: &UserInputLifecycleWire,
-    expected_state: UserInputLifecycleState,
-) -> Result<UserInputLifecycleRevision, SemanticMergeError> {
-    if lifecycle.state != expected_state {
-        return Err(SemanticMergeError::invalid(
-            "interaction lifecycle state does not match its fixture slot",
-        ));
-    }
-    if expected_state == UserInputLifecycleState::Resolved && lifecycle.result_reference.is_none() {
-        return Err(SemanticMergeError::invalid(
-            "resolved interaction requires a typed result_reference",
-        ));
-    }
-    if expected_state == UserInputLifecycleState::Open && lifecycle.result_reference.is_some() {
-        return Err(SemanticMergeError::invalid(
-            "open interaction cannot carry a result_reference",
-        ));
-    }
-    if let Some(result_reference) = &lifecycle.result_reference {
-        bounded_text("result_reference", result_reference)?;
-    }
-    let fact_id = CanonicalFactId::native(
-        &wire.adapter_id,
-        &wire.source_instance_key,
-        USER_INPUT_FAMILY,
-        wire.native_tool_use_id.as_bytes(),
-    )?;
-    let revision_key = match expected_state {
-        UserInputLifecycleState::Open => b"open".as_slice(),
-        UserInputLifecycleState::Resolved => b"resolved".as_slice(),
-    };
-    Ok(UserInputLifecycleRevision {
-        fact_id,
-        semantic_revision_ref: SemanticRevisionRef::new(FactRevisionId::derive(
-            &fact_id,
-            1,
-            revision_key,
-        )?),
+    lifecycle: &InteractionLifecycleSlotWire,
+) -> UserInputLifecycleRevision {
+    UserInputLifecycleRevision {
+        fact_id: wire.fact_id,
+        semantic_revision_ref: lifecycle.semantic_revision_ref,
         session: wire.session,
         actor_run: wire.actor_run,
         native_tool_use_id: wire.native_tool_use_id.clone(),
@@ -470,57 +328,24 @@ fn lifecycle_revision(
         operation: lifecycle.operation,
         completeness: lifecycle.completeness,
         result_reference: lifecycle.result_reference.clone(),
-    })
+    }
 }
 
-/// Parse the merge-test-only RFC 012C interaction lifecycle fixture.
+/// Parse the RFC 012C interaction lifecycle fixture for typed merge consumers.
 pub(crate) fn parse_rfc012c_interaction_v1_json(
     json: &str,
 ) -> Result<InteractionContractFixture, SemanticMergeError> {
-    if json.is_empty() {
-        return Err(SemanticMergeError::invalid(
-            "interaction fixture JSON must not be empty",
-        ));
-    }
-    if json.len() > MAX_SEMANTIC_FIXTURE_JSON_BYTES {
-        return Err(SemanticMergeError::invalid(format!(
-            "interaction fixture JSON exceeds {MAX_SEMANTIC_FIXTURE_JSON_BYTES} bytes"
-        )));
-    }
-    let wire: InteractionFixtureWire = serde_json::from_str(json)
+    let wire = decode_rfc012c_interaction_v1(json)
         .map_err(|error| SemanticMergeError::invalid(error.to_string()))?;
-    if wire.fixture_contract_version != INTERACTION_FIXTURE_CONTRACT_VERSION
-        || wire.runtime_semantic_contract_version != INTERACTION_FIXTURE_CONTRACT_VERSION
-    {
-        return Err(SemanticMergeError::invalid(
-            "unsupported interaction fixture contract version",
-        ));
-    }
-    if wire.family != USER_INPUT_FAMILY || wire.family_version != USER_INPUT_FAMILY_VERSION {
-        return Err(SemanticMergeError::invalid(
-            "interaction fixture family must be runtime.user-input-request@1",
-        ));
-    }
-    bounded_text("adapter_id", &wire.adapter_id)?;
-    bounded_text("native_tool_use_id", &wire.native_tool_use_id)?;
-    validate_questions(&wire.questions)?;
-    let open = lifecycle_revision(&wire, &wire.open, UserInputLifecycleState::Open)?;
-    let resolved = lifecycle_revision(&wire, &wire.resolved, UserInputLifecycleState::Resolved)?;
-    if open.fact_id != resolved.fact_id {
-        return Err(SemanticMergeError::invalid(
-            "open and resolved interaction revisions must share one fact identity",
-        ));
-    }
-    if open.semantic_revision_ref == resolved.semantic_revision_ref {
-        return Err(SemanticMergeError::invalid(
-            "open and resolved interaction revisions must have distinct semantic identity",
-        ));
-    }
     Ok(InteractionContractFixture {
-        family: USER_INPUT_FAMILY,
-        family_version: USER_INPUT_FAMILY_VERSION,
-        open,
-        resolved,
+        family: wire.family.clone(),
+        family_version: wire.family_version,
+        pending: lifecycle_revision(&wire, &wire.pending),
+        resolved: lifecycle_revision(&wire, &wire.resolved),
+        failed: lifecycle_revision(&wire, &wire.failed),
+        cancelled: lifecycle_revision(&wire, &wire.cancelled),
+        retract: lifecycle_revision(&wire, &wire.retract),
+        partial: lifecycle_revision(&wire, &wire.partial),
     })
 }
 

@@ -70,30 +70,25 @@ def catalog_calibration() -> dict[str, object]:
 
 
 def observer_calibration() -> dict[str, object]:
-    def overflow() -> str:
-        completed = run_napi_lib_test("scoped_resync_required_invalidates_backlog_and_delivers_next")
-        if "test result: ok" not in completed.stdout:
-            raise RuntimeError("scoped resync/overflow test did not pass")
-        return "scoped-resync-overflow"
-
-    def fairness() -> str:
-        completed = run_napi_lib_test("scoped_three_observers_isolate_slow_overflow_from_healthy_progress")
-        if "test result: ok" not in completed.stdout:
-            raise RuntimeError("multi-scope observer fairness test did not pass")
-        return "multi-scope-slow-consumer"
-
-    overflow_timed = time_call("scoped-resync-overflow", overflow)
-    fairness_timed = time_call("multi-scope-slow-consumer", fairness)
-    overflow_timed.pop("result")
-    fairness_timed.pop("result")
+    report_path = REPO / "scripts/rfc012_experiments/fixtures/observer-kernel-report.json"
+    completed = run_napi_lib_test(
+        "rfc012_d5_emit_observer_kernel_report",
+        extra_env={"RFC012_D5_REPORT": str(report_path)},
+        timeout=300,
+    )
+    if "test result: ok" not in completed.stdout:
+        raise RuntimeError("observer kernel Instant report test did not pass")
+    kernel = json.loads(report_path.read_text())
+    operations = kernel.get("operations") or []
+    if not operations or any(int(item.get("t_us", -1)) <= 0 for item in operations):
+        raise RuntimeError("observer kernel report is missing Instant samples")
     return {
         "package": "D5",
         "gate": "experiment-not-ratified-ceiling",
-        "operation": "scoped-resync-overflow",
+        "operation": "rfc012_d5_emit_observer_kernel_report",
         "environment": environment_digest(),
-        "timing": overflow_timed,
-        "fairness_timing": fairness_timed,
-        "note": "Measures overflow/resync and three-scope slow-consumer kernel paths. Numeric ceilings stay unratified.",
+        "kernel": kernel,
+        "note": "Attach/poll/overflow/three-scope samples are Instant inside the observer kernel test. Numeric ceilings stay unratified.",
     }
 
 
@@ -147,10 +142,22 @@ def x1_report() -> dict[str, object]:
         raise RuntimeError("ingest trace timestamps were not emitted from a real run")
     strategies = compare_strategies(milestones)
     search_complete_only = all(not item.search_visible_before_complete for item in strategies)
+    compare_path = REPO / "scripts/rfc012_experiments/fixtures/fts-strategy-report.json"
+    compare = run_napi_lib_test(
+        "rfc012_x1_compare_fts_strategies_on_identical_claude_input",
+        extra_env={"RFC012_X1_STRATEGIES": str(compare_path)},
+        timeout=300,
+    )
+    if "test result: ok" not in compare.stdout:
+        raise RuntimeError("FTS strategy comparison test did not pass")
+    comparison = json.loads(compare_path.read_text())
+    if not comparison.get("search_remains_complete_only"):
+        raise RuntimeError("strategy comparison lost the complete-only search gate")
     return {
         "package": "X1",
         "operation": "rfc012_x1_emit_complete_only_ingest_trace",
         "strategies": [item.__dict__ for item in strategies],
         "search_remains_complete_only": search_complete_only,
         "milestones": [item.__dict__ for item in milestones],
+        "identical_input_comparison": comparison,
     }

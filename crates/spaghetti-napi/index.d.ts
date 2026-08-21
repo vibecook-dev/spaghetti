@@ -2055,6 +2055,22 @@ export declare function openSpaghettiEngine(options: EngineOpenOptions): Promise
 export declare function parseRfc012aV1Json(json: string): string
 
 /**
+ * Parse one committed RFC 012C v1 effective-state fixture from a JSON string.
+ *
+ * Returns the same fixture as canonical JSON. The helper does not open a
+ * source, store, query, or delivery path.
+ */
+export declare function parseRfc012cEffectiveStateV1Json(json: string): string
+
+/**
+ * Parse one committed RFC 012C v1 user-input interaction fixture from a JSON string.
+ *
+ * Returns the same fixture as canonical JSON. The helper does not open a
+ * source, store, query, or delivery path.
+ */
+export declare function parseRfc012cInteractionV1Json(json: string): string
+
+/**
  * Parse one committed RFC 012C v1 runtime fixture from a JSON string.
  *
  * Returns the same fixture as canonical JSON. The helper does not open a

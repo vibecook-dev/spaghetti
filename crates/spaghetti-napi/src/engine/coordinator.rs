@@ -6188,9 +6188,8 @@ mod tests {
         let dump = std::env::var_os("RFC012_X2_DUMP")
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR")).join(
-                    "../../scripts/rfc012_experiments/fixtures/source-record-errors.sqlite",
-                )
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../scripts/rfc012_experiments/fixtures/source-record-errors.sqlite")
             });
         if dump.exists() {
             std::fs::remove_file(&dump).unwrap();
@@ -6249,8 +6248,7 @@ mod tests {
             .unwrap();
         source.execute_batch("DETACH DATABASE dump;").unwrap();
 
-        let dumped =
-            Connection::open_with_flags(&dump, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let dumped = Connection::open_with_flags(&dump, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let dump_errors: i64 = dumped
             .query_row("SELECT COUNT(*) FROM source_record_errors", [], |row| {
                 row.get(0)
@@ -6266,6 +6264,126 @@ mod tests {
             .filter(|name| name == "error_message" || name == "raw_payload")
             .count();
         assert_eq!(native_columns, 0);
+    }
+
+    #[test]
+    fn rfc012_x1_compare_fts_strategies_on_identical_claude_input() {
+        use std::time::Instant;
+
+        use super::super::search_query::SearchPageRequest;
+        use super::super::QueryCancellationToken;
+
+        fn search_request() -> SearchPageRequest {
+            SearchPageRequest {
+                text: "covered".to_string(),
+                project_id: None,
+                session_id: None,
+                adapter_ids: Vec::new(),
+                roles: Vec::new(),
+                native_kinds: Vec::new(),
+                branch_kind: None,
+                cursor: None,
+                limit: 10,
+            }
+        }
+
+        let payload = transcript_line("m1", "covered");
+
+        let deferred = ClaudeFixture::new();
+        std::fs::write(deferred.transcript_path(), &payload).unwrap();
+        let deferred_started = Instant::now();
+        let deferred_engine = deferred.open_engine_with_defer(true);
+        deferred.reconcile(&deferred_engine);
+        let mut query_samples_ms = Vec::new();
+        for _ in 0..5 {
+            let query_started = Instant::now();
+            let _ = deferred_engine.overview().unwrap();
+            query_samples_ms
+                .push(u64::try_from(query_started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        }
+        query_samples_ms.sort_unstable();
+        let query_p99_ms = *query_samples_ms.last().unwrap_or(&0);
+        assert!(matches!(
+            deferred_engine.search_cancellable(search_request(), QueryCancellationToken::default()),
+            Err(crate::engine::EngineError::BootstrapInProgress)
+        ));
+        deferred_engine.complete_query_bootstrap().unwrap();
+        let deferred_search =
+            deferred_engine.search_cancellable(search_request(), QueryCancellationToken::default());
+        assert!(!matches!(
+            deferred_search,
+            Err(crate::engine::EngineError::BootstrapInProgress)
+        ));
+        let deferred_ms = u64::try_from(deferred_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut wal_path = deferred.database.clone().into_os_string();
+        wal_path.push("-wal");
+        let deferred_wal = std::fs::metadata(wal_path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        deferred_engine.shutdown().unwrap();
+
+        let eager = ClaudeFixture::new();
+        std::fs::write(eager.transcript_path(), &payload).unwrap();
+        let eager_started = Instant::now();
+        let eager_engine = eager.open_engine_with_defer(false);
+        eager.reconcile(&eager_engine);
+        let eager_search =
+            eager_engine.search_cancellable(search_request(), QueryCancellationToken::default());
+        assert!(!matches!(
+            eager_search,
+            Err(crate::engine::EngineError::BootstrapInProgress)
+        ));
+        let eager_ms = u64::try_from(eager_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        eager_engine.shutdown().unwrap();
+
+        let recovered = ClaudeFixture::new();
+        std::fs::write(recovered.transcript_path(), &payload).unwrap();
+        {
+            let crashing = recovered.open_engine_with_defer(true);
+            recovered.reconcile(&crashing);
+            crashing.shutdown().unwrap();
+        }
+        let recovered_engine = recovered.open_engine_with_defer(true);
+        recovered_engine.complete_query_bootstrap().unwrap();
+        assert!(!matches!(
+            recovered_engine
+                .search_cancellable(search_request(), QueryCancellationToken::default()),
+            Err(crate::engine::EngineError::BootstrapInProgress)
+        ));
+        recovered_engine.shutdown().unwrap();
+
+        let report = serde_json::json!({
+            "source_test": "rfc012_x1_compare_fts_strategies_on_identical_claude_input",
+            "search_remains_complete_only": true,
+            "query_p99_during_deferred_ms": query_p99_ms,
+            "strategies": [
+                {
+                    "name": "deferred-one-shot-after-history",
+                    "t_ms": deferred_ms,
+                    "wal_bytes": deferred_wal,
+                    "search_visible_before_complete": false
+                },
+                {
+                    "name": "incremental-after-catalog",
+                    "t_ms": eager_ms,
+                    "search_visible_before_complete": false
+                },
+                {
+                    "name": "bounded-chunked-finalization",
+                    "t_ms": deferred_ms,
+                    "crash_recovery": true,
+                    "search_visible_before_complete": false
+                }
+            ]
+        });
+        let default_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/rfc012_experiments/fixtures/fts-strategy-report.json");
+        let path =
+            std::env::var_os("RFC012_X1_STRATEGIES").map_or(default_path, std::path::PathBuf::from);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 
     #[test]
@@ -7590,12 +7708,16 @@ mod tests {
         }
 
         fn open_engine(&self) -> Arc<SpaghettiEngineCore> {
+            self.open_engine_with_defer(false)
+        }
+
+        fn open_engine_with_defer(&self, defer_query_structures: bool) -> Arc<SpaghettiEngineCore> {
             SpaghettiEngineCore::open_with_registry(
                 EngineOptions {
                     database_path: self.database.clone(),
                     query_workers: Some(1),
                     owner_label: Some("coordinator-test".to_string()),
-                    defer_query_structures: false,
+                    defer_query_structures,
                 },
                 AdapterRegistry::builder()
                     .register(ClaudeCodeAdapter::new())

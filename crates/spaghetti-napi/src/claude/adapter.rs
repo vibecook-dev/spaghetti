@@ -9125,5 +9125,28 @@ mod tests {
             fact_values(&team_batch).any(|fact| matches!(fact, Fact::ActorAffiliationRevision(_)))
         );
         assert!(!fact_values(&team_batch).any(|fact| matches!(fact, Fact::UnknownRecord { .. })));
+
+        let inbox_ctx = adapter
+            .bootstrap_object(
+                &inst,
+                &object(TEAM_INBOX_STREAM, "alpha/inboxes/team-lead.json"),
+            )
+            .unwrap();
+        let mut inbox_batch = FactBatch::new(8, 4).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TEAM_INBOX_DECODER).unwrap(),
+                    object_context: &inbox_ctx,
+                    decoder_state: None,
+                },
+                &record(
+                    br#"[{"from":"worker","text":"native","timestamp":"2026-08-11T00:00:00Z","read":false,"msg_id":"msg-1","msgV":1,"type":"message"}]"#,
+                ),
+                &mut inbox_batch,
+            )
+            .unwrap();
+        assert!(fact_values(&inbox_batch).any(|fact| matches!(fact, Fact::TeamInboxSnapshot(_))));
+        assert!(!fact_values(&inbox_batch).any(|fact| matches!(fact, Fact::UnknownRecord { .. })));
     }
 }

@@ -2309,6 +2309,38 @@ mod tests {
     }
 
     #[test]
+    fn rfc012_d3_durable_queries_progress_while_search_bootstrap_is_incomplete() {
+        let dir = tempdir().unwrap();
+        let mut bootstrap_options = options(dir.path().join("d3-fair.db"));
+        bootstrap_options.defer_query_structures = true;
+        let engine = SpaghettiEngineCore::open(bootstrap_options).unwrap();
+        assert!(engine.status().accepting_queries);
+        assert!(!engine.status().search_available);
+        let _overview = engine.overview().unwrap();
+        let search_request = super::search_query::SearchPageRequest {
+            text: "anything".to_string(),
+            project_id: None,
+            session_id: None,
+            adapter_ids: Vec::new(),
+            roles: Vec::new(),
+            native_kinds: Vec::new(),
+            branch_kind: None,
+            cursor: None,
+            limit: 10,
+        };
+        assert!(matches!(
+            engine.search_cancellable(search_request.clone(), QueryCancellationToken::default()),
+            Err(EngineError::BootstrapInProgress)
+        ));
+        engine.complete_query_bootstrap().unwrap();
+        assert!(!matches!(
+            engine.search_cancellable(search_request, QueryCancellationToken::default()),
+            Err(EngineError::BootstrapInProgress)
+        ));
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
     fn rfc012_x1_emit_complete_only_ingest_trace() {
         use std::time::Instant;
 
@@ -2379,7 +2411,8 @@ mod tests {
             ]
         });
         let default_path = dir.path().join("fts-bootstrap-trace.json");
-        let path = std::env::var_os("RFC012_X1_TRACE").map_or(default_path, std::path::PathBuf::from);
+        let path =
+            std::env::var_os("RFC012_X1_TRACE").map_or(default_path, std::path::PathBuf::from);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }

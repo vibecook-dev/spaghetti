@@ -1,0 +1,24 @@
+{
+  "query_p99_during_deferred_ms": 1,
+  "search_remains_complete_only": true,
+  "source_test": "rfc012_x1_compare_fts_strategies_on_identical_claude_input",
+  "strategies": [
+    {
+      "name": "deferred-one-shot-after-history",
+      "search_visible_before_complete": false,
+      "t_ms": 163,
+      "wal_bytes": 0
+    },
+    {
+      "name": "incremental-after-catalog",
+      "search_visible_before_complete": false,
+      "t_ms": 89
+    },
+    {
+      "crash_recovery": true,
+      "name": "bounded-chunked-finalization",
+      "search_visible_before_complete": false,
+      "t_ms": 163
+    }
+  ]
+}

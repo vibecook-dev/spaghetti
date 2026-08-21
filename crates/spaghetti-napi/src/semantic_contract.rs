@@ -10,8 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::adapter::{
     compare_coverage, ActorAffiliationDimension, ActorAffiliationRevisionFact,
     ActorAffiliationState, ActorRunRevisionFact, ActorRunRole, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, CoverageComparison, ExternalEntityRef, FactRevisionId,
-    NativeIdentityClaim, QualifiedTimestamp, QualifiedValue, SemanticRevisionRef,
+    CanonicalSourceInstanceKey, ContractCompleteness, CoverageComparison, ExternalEntityRef,
+    FactRevisionId, NativeIdentityClaim, QualifiedTimestamp, QualifiedValue, SemanticRevisionRef,
     SourceCoverageSet, SourceRecordId, TimestampQuality, UsageBucketsV2, UsageResponseIdentity,
     UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
 };
@@ -26,6 +26,10 @@ const FAMILY_VERSION: u32 = 1;
 const ACTOR_RUN_FAMILY: &str = "runtime.actor-run";
 const ACTOR_AFFILIATION_FAMILY: &str = "runtime.actor-affiliation";
 const USAGE_V2_FAMILY: &str = "runtime.usage-v2";
+const EFFECTIVE_STATE_FAMILY: &str = "runtime.effective-state";
+const USER_INPUT_FAMILY: &str = "runtime.user-input-request";
+const MAX_INTERACTION_QUESTIONS: usize = 32;
+const MAX_INTERACTION_OPTIONS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -175,6 +179,138 @@ pub(crate) struct RuntimeContractFixtureWire {
     pub actors: ActorsWire,
     pub affiliations: AffiliationsWire,
     pub usage: UsageWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EffectiveStateDimension {
+    Model,
+    Effort,
+    SessionMode,
+    PermissionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EffectiveStateEvidenceKind {
+    ConfiguredIntent,
+    ResponseObserved,
+    NativeTransition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EffectiveStateOperation {
+    Upsert,
+    Retract,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EffectiveStateSlotWire {
+    pub completeness: ContractCompleteness,
+    pub evidence_kind: EffectiveStateEvidenceKind,
+    pub operation: EffectiveStateOperation,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EffectiveStateFixtureWire {
+    pub adapter_id: String,
+    pub family: String,
+    pub family_version: u32,
+    pub fixture_contract_version: u32,
+    pub runtime_semantic_contract_version: u32,
+    pub source_instance_key: CanonicalSourceInstanceKey,
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub dimension: EffectiveStateDimension,
+    pub fact_id: CanonicalFactId,
+    pub source_record_id: SourceRecordId,
+    pub configured: EffectiveStateSlotWire,
+    pub observed: EffectiveStateSlotWire,
+    pub retract: EffectiveStateSlotWire,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UserInputKind {
+    Choice,
+    MultiChoice,
+    FreeText,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UserInputLifecycleState {
+    #[serde(alias = "open")]
+    Pending,
+    Resolved,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum UserInputOperation {
+    Upsert,
+    Retract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UserInputOption {
+    pub label: String,
+    pub description: Option<String>,
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UserInputQuestion {
+    pub header: Option<String>,
+    pub prompt: String,
+    pub options: Vec<UserInputOption>,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InteractionLifecycleSlotWire {
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub result_reference: Option<String>,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+    pub state: UserInputLifecycleState,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InteractionFixtureWire {
+    pub adapter_id: String,
+    pub actor_run: CanonicalEntityKey,
+    pub family: String,
+    pub family_version: u32,
+    pub fixture_contract_version: u32,
+    pub kind: UserInputKind,
+    pub native_tool_use_id: String,
+    pub fact_id: CanonicalFactId,
+    pub source_record_id: SourceRecordId,
+    pub pending: InteractionLifecycleSlotWire,
+    pub resolved: InteractionLifecycleSlotWire,
+    pub failed: InteractionLifecycleSlotWire,
+    pub cancelled: InteractionLifecycleSlotWire,
+    pub retract: InteractionLifecycleSlotWire,
+    pub partial: InteractionLifecycleSlotWire,
+    pub questions: Vec<UserInputQuestion>,
+    pub runtime_semantic_contract_version: u32,
+    pub session: CanonicalEntityKey,
+    pub source_instance_key: CanonicalSourceInstanceKey,
 }
 
 fn account_json_graph(
@@ -881,12 +1017,368 @@ pub(crate) fn parse_rfc012c_runtime_v1_json(json: &str) -> Result<String, Semant
     encode_json(&fixture)
 }
 
+fn fixture_slot_revision_key(family: &str, native: &[u8], slot: &str) -> [u8; 32] {
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(format!("spaghetti/{family}/semantic-revision\0").as_bytes());
+    encoded.extend_from_slice(&1_u32.to_be_bytes());
+    encoded.extend_from_slice(native);
+    encoded.push(0);
+    encoded.extend_from_slice(slot.as_bytes());
+    *blake3::hash(&encoded).as_bytes()
+}
+
+fn effective_state_native_bytes(dimension: EffectiveStateDimension) -> &'static [u8] {
+    match dimension {
+        EffectiveStateDimension::Model => b"model",
+        EffectiveStateDimension::Effort => b"effort",
+        EffectiveStateDimension::SessionMode => b"session_mode",
+        EffectiveStateDimension::PermissionMode => b"permission_mode",
+    }
+}
+
+fn verify_committed_fact_id(
+    adapter_id: &str,
+    source_instance_key: &CanonicalSourceInstanceKey,
+    family: &str,
+    native: &[u8],
+    committed: &CanonicalFactId,
+) -> Result<(), SemanticFixtureError> {
+    let expected = CanonicalFactId::native(adapter_id, source_instance_key, family, native)
+        .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
+    if expected != *committed {
+        return Err(SemanticFixtureError::invalid(format!(
+            "{family} fact_id does not match native derivation"
+        )));
+    }
+    Ok(())
+}
+
+fn verify_slot_identity(
+    family: &str,
+    native: &[u8],
+    slot: &str,
+    fact_id: &CanonicalFactId,
+    semantic_revision_key_hex: &str,
+    semantic_revision_ref: &SemanticRevisionRef,
+) -> Result<(), SemanticFixtureError> {
+    verify_semantic_revision(
+        family,
+        FAMILY_VERSION,
+        family,
+        semantic_revision_key_hex,
+        fixture_slot_revision_key(family, native, slot),
+        fact_id,
+        semantic_revision_ref,
+    )
+}
+
+fn validate_canonical_runtime_text(label: &str, value: &str) -> Result<(), SemanticFixtureError> {
+    validate_canonical_source_string(label, value, MAX_RUNTIME_SEMANTIC_TEXT_BYTES)
+}
+
+fn validate_effective_state_slot(
+    fixture: &EffectiveStateFixtureWire,
+    slot_name: &str,
+    slot: &EffectiveStateSlotWire,
+    expected_kind: EffectiveStateEvidenceKind,
+    expected_operation: EffectiveStateOperation,
+) -> Result<(), SemanticFixtureError> {
+    if slot.evidence_kind != expected_kind {
+        return Err(SemanticFixtureError::invalid(format!(
+            "effective-state {slot_name} evidence_kind does not match its fixture slot"
+        )));
+    }
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "effective-state {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != ContractCompleteness::Complete {
+        return Err(SemanticFixtureError::invalid(format!(
+            "effective-state {slot_name} must be a complete replacement slot"
+        )));
+    }
+    validate_canonical_runtime_text("effective-state value", &slot.value)?;
+    verify_slot_identity(
+        EFFECTIVE_STATE_FAMILY,
+        effective_state_native_bytes(fixture.dimension),
+        slot_name,
+        &fixture.fact_id,
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+    )
+}
+
+fn validate_rfc012c_effective_state_fixture(
+    fixture: &EffectiveStateFixtureWire,
+) -> Result<(), SemanticFixtureError> {
+    if fixture.fixture_contract_version != RFC012C_FIXTURE_CONTRACT_VERSION
+        || fixture.runtime_semantic_contract_version != RUNTIME_SEMANTIC_CONTRACT_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "unsupported effective-state fixture contract version",
+        ));
+    }
+    if fixture.family != EFFECTIVE_STATE_FAMILY || fixture.family_version != FAMILY_VERSION {
+        return Err(SemanticFixtureError::invalid(
+            "effective-state fixture family must be runtime.effective-state@1",
+        ));
+    }
+    validate_canonical_source_string("adapter_id", &fixture.adapter_id, MAX_ADAPTER_ID_BYTES)?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        EFFECTIVE_STATE_FAMILY,
+        effective_state_native_bytes(fixture.dimension),
+        &fixture.fact_id,
+    )?;
+    validate_effective_state_slot(
+        fixture,
+        "configured",
+        &fixture.configured,
+        EffectiveStateEvidenceKind::ConfiguredIntent,
+        EffectiveStateOperation::Upsert,
+    )?;
+    validate_effective_state_slot(
+        fixture,
+        "observed",
+        &fixture.observed,
+        EffectiveStateEvidenceKind::ResponseObserved,
+        EffectiveStateOperation::Upsert,
+    )?;
+    validate_effective_state_slot(
+        fixture,
+        "retract",
+        &fixture.retract,
+        EffectiveStateEvidenceKind::NativeTransition,
+        EffectiveStateOperation::Retract,
+    )?;
+    if fixture.configured.semantic_revision_ref == fixture.observed.semantic_revision_ref
+        || fixture.configured.semantic_revision_ref == fixture.retract.semantic_revision_ref
+        || fixture.observed.semantic_revision_ref == fixture.retract.semantic_revision_ref
+    {
+        return Err(SemanticFixtureError::invalid(
+            "effective-state configured, observed, and retract revisions must have distinct semantic identity",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_interaction_questions(
+    questions: &[UserInputQuestion],
+) -> Result<(), SemanticFixtureError> {
+    if questions.is_empty() || questions.len() > MAX_INTERACTION_QUESTIONS {
+        return Err(SemanticFixtureError::invalid(format!(
+            "interaction questions must contain 1..={MAX_INTERACTION_QUESTIONS} typed questions"
+        )));
+    }
+    for question in questions {
+        if let Some(header) = &question.header {
+            validate_canonical_runtime_text("question header", header)?;
+        }
+        validate_canonical_runtime_text("question prompt", &question.prompt)?;
+        if question.options.len() > MAX_INTERACTION_OPTIONS {
+            return Err(SemanticFixtureError::invalid(format!(
+                "question options exceed {MAX_INTERACTION_OPTIONS}"
+            )));
+        }
+        for option in &question.options {
+            validate_canonical_runtime_text("option label", &option.label)?;
+            if let Some(description) = &option.description {
+                validate_canonical_runtime_text("option description", description)?;
+            }
+            if let Some(preview) = &option.preview {
+                validate_canonical_runtime_text("option preview", preview)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_interaction_slot(
+    fixture: &InteractionFixtureWire,
+    slot_name: &str,
+    slot: &InteractionLifecycleSlotWire,
+    expected_state: UserInputLifecycleState,
+    expected_operation: UserInputOperation,
+    expected_completeness: ContractCompleteness,
+    require_result: bool,
+) -> Result<(), SemanticFixtureError> {
+    if slot.state != expected_state {
+        return Err(SemanticFixtureError::invalid(
+            "interaction lifecycle state does not match its fixture slot",
+        ));
+    }
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "interaction {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != expected_completeness {
+        return Err(SemanticFixtureError::invalid(format!(
+            "interaction {slot_name} completeness does not match its fixture slot"
+        )));
+    }
+    if require_result && slot.result_reference.is_none() {
+        return Err(SemanticFixtureError::invalid(
+            "resolved interaction requires a typed result_reference",
+        ));
+    }
+    if expected_state == UserInputLifecycleState::Pending && slot.result_reference.is_some() {
+        return Err(SemanticFixtureError::invalid(
+            "pending interaction cannot carry a result_reference",
+        ));
+    }
+    if let Some(result_reference) = &slot.result_reference {
+        validate_canonical_runtime_text("result_reference", result_reference)?;
+    }
+    verify_slot_identity(
+        USER_INPUT_FAMILY,
+        fixture.native_tool_use_id.as_bytes(),
+        slot_name,
+        &fixture.fact_id,
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+    )
+}
+
+fn validate_rfc012c_interaction_fixture(
+    fixture: &InteractionFixtureWire,
+) -> Result<(), SemanticFixtureError> {
+    if fixture.fixture_contract_version != RFC012C_FIXTURE_CONTRACT_VERSION
+        || fixture.runtime_semantic_contract_version != RUNTIME_SEMANTIC_CONTRACT_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "unsupported interaction fixture contract version",
+        ));
+    }
+    if fixture.family != USER_INPUT_FAMILY || fixture.family_version != FAMILY_VERSION {
+        return Err(SemanticFixtureError::invalid(
+            "interaction fixture family must be runtime.user-input-request@1",
+        ));
+    }
+    validate_canonical_source_string("adapter_id", &fixture.adapter_id, MAX_ADAPTER_ID_BYTES)?;
+    validate_canonical_runtime_text("native_tool_use_id", &fixture.native_tool_use_id)?;
+    validate_interaction_questions(&fixture.questions)?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        USER_INPUT_FAMILY,
+        fixture.native_tool_use_id.as_bytes(),
+        &fixture.fact_id,
+    )?;
+    validate_interaction_slot(
+        fixture,
+        "pending",
+        &fixture.pending,
+        UserInputLifecycleState::Pending,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        false,
+    )?;
+    validate_interaction_slot(
+        fixture,
+        "resolved",
+        &fixture.resolved,
+        UserInputLifecycleState::Resolved,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        true,
+    )?;
+    validate_interaction_slot(
+        fixture,
+        "failed",
+        &fixture.failed,
+        UserInputLifecycleState::Failed,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        false,
+    )?;
+    validate_interaction_slot(
+        fixture,
+        "cancelled",
+        &fixture.cancelled,
+        UserInputLifecycleState::Cancelled,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+        false,
+    )?;
+    validate_interaction_slot(
+        fixture,
+        "retract",
+        &fixture.retract,
+        UserInputLifecycleState::Pending,
+        UserInputOperation::Retract,
+        ContractCompleteness::Complete,
+        false,
+    )?;
+    validate_interaction_slot(
+        fixture,
+        "partial",
+        &fixture.partial,
+        UserInputLifecycleState::Pending,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+        false,
+    )?;
+    let refs = [
+        &fixture.pending.semantic_revision_ref,
+        &fixture.resolved.semantic_revision_ref,
+        &fixture.failed.semantic_revision_ref,
+        &fixture.cancelled.semantic_revision_ref,
+        &fixture.retract.semantic_revision_ref,
+        &fixture.partial.semantic_revision_ref,
+    ];
+    for (index, left) in refs.iter().enumerate() {
+        for right in refs.iter().skip(index + 1) {
+            if left == right {
+                return Err(SemanticFixtureError::invalid(
+                    "interaction lifecycle slots must have distinct semantic identity",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_rfc012c_effective_state_v1(
+    json: &str,
+) -> Result<EffectiveStateFixtureWire, SemanticFixtureError> {
+    let fixture: EffectiveStateFixtureWire = decode_json(json)?;
+    validate_rfc012c_effective_state_fixture(&fixture)?;
+    Ok(fixture)
+}
+
+pub(crate) fn parse_rfc012c_effective_state_v1_json(
+    json: &str,
+) -> Result<String, SemanticFixtureError> {
+    encode_json(&decode_rfc012c_effective_state_v1(json)?)
+}
+
+pub(crate) fn decode_rfc012c_interaction_v1(
+    json: &str,
+) -> Result<InteractionFixtureWire, SemanticFixtureError> {
+    let fixture: InteractionFixtureWire = decode_json(json)?;
+    validate_rfc012c_interaction_fixture(&fixture)?;
+    Ok(fixture)
+}
+
+pub(crate) fn parse_rfc012c_interaction_v1_json(
+    json: &str,
+) -> Result<String, SemanticFixtureError> {
+    encode_json(&decode_rfc012c_interaction_v1(json)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const RFC012A_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012a-v1.json");
     const RFC012C_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-runtime-v1.json");
+    const RFC012C_EFFECTIVE_STATE_FIXTURE: &str =
+        include_str!("../fixtures/contracts/rfc012c-effective-state-v1.json");
+    const RFC012C_INTERACTION_FIXTURE: &str =
+        include_str!("../fixtures/contracts/rfc012c-interaction-v1.json");
 
     fn assert_privacy_safe(json: &str) {
         assert!(!json.contains("/Users/"));
@@ -1234,5 +1726,122 @@ mod tests {
 
         let over = "A".repeat(MAX_USAGE_RESPONSE_KEY_BASE64_CHARS + 1);
         assert!(serde_json::from_str::<Wrapper>(&format!(r#"{{"value":"{over}"}}"#)).is_err());
+    }
+
+    #[test]
+    fn rfc012c_effective_state_fixture_parses_and_preserves_identities() {
+        let parsed =
+            parse_rfc012c_effective_state_v1_json(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
+        assert_privacy_safe(&parsed);
+        let original: serde_json::Value =
+            serde_json::from_str(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(round_trip, original);
+        let fixture: EffectiveStateFixtureWire = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(fixture.dimension, EffectiveStateDimension::Model);
+        assert_eq!(
+            fixture.configured.evidence_kind,
+            EffectiveStateEvidenceKind::ConfiguredIntent
+        );
+        assert_eq!(
+            fixture.observed.evidence_kind,
+            EffectiveStateEvidenceKind::ResponseObserved
+        );
+        assert_eq!(fixture.retract.operation, EffectiveStateOperation::Retract);
+        assert_ne!(
+            fixture.configured.semantic_revision_ref,
+            fixture.observed.semantic_revision_ref
+        );
+        assert_ne!(
+            fixture.observed.semantic_revision_ref,
+            fixture.retract.semantic_revision_ref
+        );
+        for name in ["model", "effort", "session_mode", "permission_mode"] {
+            let dimension: EffectiveStateDimension =
+                serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(effective_state_native_bytes(dimension), name.as_bytes());
+        }
+    }
+
+    #[test]
+    fn rfc012c_interaction_fixture_parses_rfc012c_section_11_lifecycle() {
+        let parsed = parse_rfc012c_interaction_v1_json(RFC012C_INTERACTION_FIXTURE).unwrap();
+        assert_privacy_safe(&parsed);
+        let original: serde_json::Value =
+            serde_json::from_str(RFC012C_INTERACTION_FIXTURE).unwrap();
+        let round_trip: serde_json::Value = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(round_trip, original);
+        let fixture: InteractionFixtureWire = serde_json::from_str(&parsed).unwrap();
+        assert_eq!(fixture.kind, UserInputKind::Choice);
+        assert_eq!(fixture.pending.state, UserInputLifecycleState::Pending);
+        assert_eq!(fixture.resolved.state, UserInputLifecycleState::Resolved);
+        assert_eq!(fixture.failed.state, UserInputLifecycleState::Failed);
+        assert_eq!(fixture.cancelled.state, UserInputLifecycleState::Cancelled);
+        assert_eq!(fixture.retract.operation, UserInputOperation::Retract);
+        assert_eq!(fixture.partial.completeness, ContractCompleteness::Partial);
+        assert!(fixture.pending.result_reference.is_none());
+        assert_eq!(
+            fixture.resolved.result_reference.as_deref(),
+            Some("continue")
+        );
+        assert_eq!(fixture.questions[0].prompt, "Which option should we take?");
+        assert_ne!(
+            fixture.pending.semantic_revision_ref,
+            fixture.resolved.semantic_revision_ref
+        );
+        assert_ne!(
+            fixture.failed.semantic_revision_ref,
+            fixture.cancelled.semantic_revision_ref
+        );
+    }
+
+    #[test]
+    fn rfc012c_state_and_interaction_reject_identity_and_lifecycle_drift() {
+        let mut fact_id =
+            serde_json::from_str::<serde_json::Value>(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
+        fact_id["fact_id"] = fact_id["session"].clone();
+        assert!(parse_rfc012c_effective_state_v1_json(&fact_id.to_string()).is_err());
+
+        let mut reused =
+            serde_json::from_str::<serde_json::Value>(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
+        reused["observed"]["semantic_revision_ref"] =
+            reused["configured"]["semantic_revision_ref"].clone();
+        reused["observed"]["semantic_revision_key_hex"] =
+            reused["configured"]["semantic_revision_key_hex"].clone();
+        assert!(parse_rfc012c_effective_state_v1_json(&reused.to_string()).is_err());
+
+        let mut extra =
+            serde_json::from_str::<serde_json::Value>(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
+        extra["future"] = serde_json::json!(true);
+        assert!(parse_rfc012c_effective_state_v1_json(&extra.to_string()).is_err());
+
+        let mut pending_result =
+            serde_json::from_str::<serde_json::Value>(RFC012C_INTERACTION_FIXTURE).unwrap();
+        pending_result["pending"]["result_reference"] = serde_json::json!("continue");
+        assert!(parse_rfc012c_interaction_v1_json(&pending_result.to_string()).is_err());
+
+        let mut resolved_missing =
+            serde_json::from_str::<serde_json::Value>(RFC012C_INTERACTION_FIXTURE).unwrap();
+        resolved_missing["resolved"]["result_reference"] = serde_json::Value::Null;
+        assert!(parse_rfc012c_interaction_v1_json(&resolved_missing.to_string()).is_err());
+
+        let mut native_payload =
+            serde_json::from_str::<serde_json::Value>(RFC012C_INTERACTION_FIXTURE).unwrap();
+        native_payload["native_payload"] = serde_json::json!({"prompt": "raw"});
+        assert!(parse_rfc012c_interaction_v1_json(&native_payload.to_string()).is_err());
+
+        let mut swapped =
+            serde_json::from_str::<serde_json::Value>(RFC012C_INTERACTION_FIXTURE).unwrap();
+        swapped["failed"]["semantic_revision_ref"] =
+            swapped["cancelled"]["semantic_revision_ref"].clone();
+        swapped["failed"]["semantic_revision_key_hex"] =
+            swapped["cancelled"]["semantic_revision_key_hex"].clone();
+        assert!(parse_rfc012c_interaction_v1_json(&swapped.to_string()).is_err());
+
+        assert!(parse_rfc012c_effective_state_v1_json("").is_err());
+        assert!(parse_rfc012c_interaction_v1_json("").is_err());
+        let oversized = "x".repeat(MAX_SEMANTIC_FIXTURE_JSON_BYTES + 1);
+        assert!(parse_rfc012c_effective_state_v1_json(&oversized).is_err());
+        assert!(parse_rfc012c_interaction_v1_json(&oversized).is_err());
     }
 }
