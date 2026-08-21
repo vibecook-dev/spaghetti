@@ -2542,6 +2542,23 @@ and invokes no listing, object driver, decoder, or watcher. The attachment does
 not call this seam while the dynamic-relation guard is closed; Candidate
 documents, capability status, and promotion state remain unchanged.
 
+Commit `db947dc` joins that runtime-stream reservation to the exact native root
+already approved by the active scoped attachment, still without opening it.
+Each access pass retains the attachment-selected adapter, and the resulting
+non-serializable, pass-borrowed reservation requires the supplied source
+instance ID, identity-contract version, opaque stable key, derived canonical
+source-instance key, access-root label, unique declared root, and native root
+path to match the attachment and runtime binding exactly. The approved root
+and confined relative locator remain separate values. Root substitution,
+source-instance substitution, foreign canonical identity, and attachment close
+before or during the join fail through stable path-free errors and consume any
+already-minted common reservation conservatively; Debug exposes only presence
+flags. This seam performs no source open, listing, read, driver execution,
+decode, child admission, or watcher installation. Catalog-discovery provenance
+for the source instance and evidence-owned identity inputs for later locator
+execution remain open, the dynamic-relation guard stays closed, and Candidate
+documents, capability status, and promotion state remain unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
