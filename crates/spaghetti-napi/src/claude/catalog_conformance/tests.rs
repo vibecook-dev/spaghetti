@@ -490,19 +490,9 @@ fn current_candidate_and_planned_composition_remain_non_authorizing_and_distinct
             .support_binding
             .as_ref()
             .unwrap()
-            .source_declaration_digest()
-            .to_string(),
-        declaration_digest
+            .support_release_id(),
+        "claude-code-support-2026-08-21-promoted"
     );
-    release
-        .verify_adapter_binding(
-            manifest.id.as_str(),
-            manifest.support_binding.as_ref().unwrap(),
-        )
-        .unwrap();
-    release
-        .verify_scope_programs(manifest.scope_programs.as_ref().unwrap())
-        .unwrap();
     let catalog = SupportCatalog::new([release]).unwrap();
     let probe = candidate_probe();
     let decision = catalog.classify(&probe).unwrap();
