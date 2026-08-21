@@ -207,16 +207,18 @@ pub(crate) mod tests {
     };
     use crate::scoped_observation::{
         bind_observation_runtime_source_for_test,
-        prepare_observation_directory_membership_for_test, ScopedAccessRootGrant,
-        ScopedActorAttribution, ScopedActorFallbackReason, ScopedAdmissionError,
-        ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig, ScopedAppendDeliveryPhase,
-        ScopedAppendObservation, ScopedAppendPresenceChange, ScopedAppendReconcileRequest,
-        ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy, ScopedBootstrapBarrierError,
-        ScopedContinuityError, ScopedCoverageAssemblyError, ScopedDecodeFailureClass,
-        ScopedDecodedAppendItem, ScopedDeliveryError, ScopedEnvelopeEvidenceAuthority,
-        ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedKnownObjectReadRequest,
-        ScopedObjectRead, ScopedObservationAccessError, ScopedObservationAccessHost,
-        ScopedObservationAccessPass, ScopedObservationAccessRequest,
+        prepare_observation_directory_membership_for_test,
+        scan_observation_directory_membership_for_test,
+        scan_observation_directory_membership_with_foreign_attachment_for_test,
+        ScopedAccessRootGrant, ScopedActorAttribution, ScopedActorFallbackReason,
+        ScopedAdmissionError, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
+        ScopedAppendDeliveryPhase, ScopedAppendObservation, ScopedAppendPresenceChange,
+        ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy, ScopedArtifactContentPolicy,
+        ScopedBootstrapBarrierError, ScopedContinuityError, ScopedCoverageAssemblyError,
+        ScopedDecodeFailureClass, ScopedDecodedAppendItem, ScopedDeliveryError,
+        ScopedEnvelopeEvidenceAuthority, ScopedKnownAppendObject, ScopedKnownObjectGrant,
+        ScopedKnownObjectReadRequest, ScopedObjectRead, ScopedObservationAccessError,
+        ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAccessRequest,
         ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
         ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
         ScopedObservationAsyncOwnerFirstExit, ScopedObservationAsyncOwnerPair,
@@ -224,7 +226,7 @@ pub(crate) mod tests {
         ScopedObservationAutomaticResyncError, ScopedObservationCloseError,
         ScopedObservationConsumerOfferError, ScopedObservationContextualPollResolution,
         ScopedObservationContinuity, ScopedObservationDeliveryLane,
-        ScopedObservationDeliveryLimits, ScopedObservationEvent,
+        ScopedObservationDeliveryLimits, ScopedObservationDirectoryScan, ScopedObservationEvent,
         ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
         ScopedObservationNativeWatcherError, ScopedObservationNativeWatcherRecoveryPolicy,
         ScopedObservationNativeWatcherRunExit, ScopedObservationOpenDrainError,
@@ -238,9 +240,10 @@ pub(crate) mod tests {
         ScopedObservationStartupReconcileAction, ScopedObservationUnknownWireNegotiation,
         ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
         ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedReplacementMode, ScopedReplacementRepresentation, ScopedReplacementStageError,
-        ScopedResyncReason, ScopedRootIdentityRequest, ScopedScopeRelationState,
-        ScopedSourceFailureClass, ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
+        ScopedRelationMembershipObservation, ScopedReplacementMode,
+        ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
+        ScopedRootIdentityRequest, ScopedScopeRelationState, ScopedSourceFailureClass,
+        ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
     };
     use crate::source::{
         AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig,
@@ -1995,7 +1998,8 @@ pub(crate) mod tests {
             .relations()
             .iter()
             .find(|relation| relation.relation_id == "descendant-objects")
-            .unwrap();
+            .unwrap()
+            .clone();
         assert_eq!(descendant.attempts, 2);
         assert_eq!(descendant.completed, 2);
         assert_eq!(descendant.abandoned, 0);
@@ -2670,6 +2674,239 @@ pub(crate) mod tests {
         assert_eq!(Some(replayed.object_token()), first_token);
         rooted.complete(512, AccessOutcome::Available).unwrap();
         assert!(plan.report().verify_digest());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_directory_scan_mints_exact_refresh_bound_membership_evidence() {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+        let registry = AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![fixture_descendant_runtime_stream()]),
+            )
+            .build_supported(catalog)
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let native_root = temp.path().join("authorized-root");
+        let listing_root = native_root.join("sessions/secret-session-id/children");
+        std::fs::create_dir_all(listing_root.join("nested")).unwrap();
+        std::fs::write(listing_root.join("root.jsonl"), b"root").unwrap();
+        std::fs::write(listing_root.join("nested/child.jsonl"), b"child").unwrap();
+        let request = scoped_access_request(native_root.clone());
+        let instance = request.source_instance.clone();
+        let expected_source_instance_key = CanonicalSourceInstanceKey::derive(
+            instance.spec.identity_contract_version,
+            instance.spec.stable_key.as_bytes(),
+        )
+        .unwrap();
+        let approved_root = ScopedAccessRootGrant {
+            access_root: "root".to_string(),
+            root: native_root,
+        };
+        let adapter = registry.get(&AdapterId::new("fixture").unwrap()).unwrap();
+        let make_bound = |native_session_id: &[u8]| {
+            let (_, authorization) = registry
+                .authorize_typed_access(
+                    &AdapterId::new("fixture").unwrap(),
+                    &request.artifact_probe,
+                    SupportOperation::ScopedTypedObservation,
+                    &request.observation_contract_request.contract_versions,
+                    &request.observation_contract_offer.contract_versions,
+                )
+                .unwrap();
+            let plan = AuthorizedScopeAccessPlan::from_authorized_program(
+                authorization
+                    .select_scope_program("observe-session")
+                    .unwrap(),
+            )
+            .unwrap();
+            let identity = [ScopeIdentityInput {
+                name: "native-session-id",
+                value: native_session_id,
+            }];
+            let runtime = plan
+                .reserve_observation_source(ScopeAccessRequest {
+                    relation_id: "descendant-objects",
+                    operation: AccessOperation::ObjectListing,
+                    phase: AccessPhase::Initial,
+                    parent_token: None,
+                    identity_inputs: &identity,
+                    depth: 1,
+                    max_bytes: 1_024,
+                    max_rows: 0,
+                })
+                .unwrap()
+                .bind_runtime_stream(adapter.as_ref(), &instance)
+                .unwrap();
+            let rooted = bind_observation_runtime_source_for_test(
+                runtime,
+                &instance,
+                &approved_root,
+                &expected_source_instance_key,
+            )
+            .unwrap();
+            (plan, rooted)
+        };
+
+        let (first_plan, first_binding) = make_bound(b"secret-session-id");
+        let first =
+            match scan_observation_directory_membership_for_test(first_binding, None).unwrap() {
+                ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                other => panic!("expected an exact initial listing, got {other:?}"),
+            };
+        assert_eq!(first.accounted_entry_count(), 3);
+        assert_eq!(first.selected_entry_count(), 2);
+        assert_eq!(first.change_count(), 2);
+        assert!(!first.root_moved());
+        let first_revision = first.checkpoint().revision;
+        let rendered = format!("{first:?}");
+        for private in [
+            "secret-session-id",
+            "root.jsonl",
+            "child.jsonl",
+            "nested",
+            "authorized-root",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        let first_relation = first_plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(first_relation.attempts, 4);
+        assert_eq!(first_relation.completed, 4);
+        assert_eq!(first_relation.objects_accessed, 4);
+        assert!(first_relation
+            .trace
+            .iter()
+            .all(|entry| entry.outcome == AccessOutcome::Available));
+
+        std::fs::write(listing_root.join("root.jsonl"), b"root-expanded").unwrap();
+        let (refresh_plan, refresh_binding) = make_bound(b"secret-session-id");
+        let refreshed =
+            match scan_observation_directory_membership_for_test(refresh_binding, Some(&first))
+                .unwrap()
+            {
+                ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                other => panic!("expected an exact refreshed listing, got {other:?}"),
+            };
+        assert_eq!(refreshed.accounted_entry_count(), 3);
+        assert_eq!(refreshed.selected_entry_count(), 2);
+        assert_eq!(refreshed.change_count(), 1);
+        assert!(!refreshed.root_moved());
+        assert_ne!(refreshed.checkpoint().revision, first_revision);
+        assert_eq!(refreshed.checkpoint().generation, 1);
+        assert!(refresh_plan.report().verify_digest());
+
+        let (substituted_plan, substituted_binding) = make_bound(b"other-session-id");
+        let error =
+            scan_observation_directory_membership_for_test(substituted_binding, Some(&first))
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "scoped observation source binding does not match the active attachment"
+        );
+        let substituted_relation = substituted_plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(substituted_relation.attempts, 1);
+        assert_eq!(substituted_relation.completed, 1);
+        assert_eq!(substituted_relation.trace[0].outcome, AccessOutcome::Failed);
+
+        let (foreign_attachment_plan, foreign_attachment_binding) =
+            make_bound(b"secret-session-id");
+        let error = scan_observation_directory_membership_with_foreign_attachment_for_test(
+            foreign_attachment_binding,
+            &first,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "scoped observation source binding does not match the active attachment"
+        );
+        let foreign_attachment_relation = foreign_attachment_plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(foreign_attachment_relation.attempts, 1);
+        assert_eq!(foreign_attachment_relation.completed, 1);
+        assert_eq!(
+            foreign_attachment_relation.trace[0].outcome,
+            AccessOutcome::Failed
+        );
+
+        let (missing_plan, missing_binding) = make_bound(b"missing-session-id");
+        assert!(matches!(
+            scan_observation_directory_membership_for_test(missing_binding, None).unwrap(),
+            ScopedObservationDirectoryScan::Unavailable
+        ));
+        let missing_relation = missing_plan
+            .report()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap()
+            .clone();
+        assert_eq!(missing_relation.attempts, 1);
+        assert_eq!(missing_relation.completed, 1);
+        assert_eq!(
+            missing_relation.trace[0].outcome,
+            AccessOutcome::Unavailable
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            symlink(
+                "/Users/alice/private/secret.jsonl",
+                listing_root.join("private-link.jsonl"),
+            )
+            .unwrap();
+            let (failed_plan, failed_binding) = make_bound(b"secret-session-id");
+            let error =
+                scan_observation_directory_membership_for_test(failed_binding, Some(&first))
+                    .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "scoped observation directory scan failed"
+            );
+            for private in ["/Users/", "alice", "private", "secret.jsonl"] {
+                assert!(!error.to_string().contains(private));
+            }
+            let failed_relation = failed_plan
+                .report()
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "descendant-objects")
+                .unwrap()
+                .clone();
+            assert!(failed_relation.attempts >= 2);
+            assert!(failed_relation
+                .trace
+                .iter()
+                .any(|entry| entry.outcome == AccessOutcome::Failed));
+        }
+
+        let observation =
+            ScopedRelationMembershipObservation::from_directory_listing(refreshed).unwrap();
+        let mut admission = admission_lane_for_objects(1);
+        admission
+            .record_relation_membership(7, ScopedAppendDeliveryPhase::Correction, observation)
+            .unwrap();
     }
 
     #[test]

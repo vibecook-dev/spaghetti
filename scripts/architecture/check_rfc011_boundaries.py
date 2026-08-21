@@ -527,6 +527,27 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     )
     if any(binding not in source_wire_text for binding in required_source_wire_bindings):
         found.add(f"{relative}#missing-contextual-source-envelope-contract")
+    source_access = scoped_dir / "observation_source_access.rs"
+    source_access_text = (
+        production_rust_text(source_access)
+        if source_access in production_scoped_paths
+        else ""
+    )
+    required_directory_membership_bindings = (
+        "pub(crate) struct ScopedObservationDirectoryListing",
+        "struct ScopedObservationDirectoryContractIdentity",
+        "attachment_authority: Arc<ScopedObservationAttachmentAuthority>",
+        "Arc::ptr_eq(",
+        "scan_confined_audited(",
+        "matches_checkpoint(&self.binding, &checkpoint)",
+        "pub(crate) fn from_directory_listing(",
+    )
+    combined_directory_membership_text = scoped_text + source_access_text
+    if any(
+        binding not in combined_directory_membership_text
+        for binding in required_directory_membership_bindings
+    ) or "from_directory_checkpoint" in combined_directory_membership_text:
+        found.add(f"{relative}#missing-authorized-directory-membership-listing")
     continuity_wire = scoped_dir / "continuity_wire.rs"
     continuity_wire_text = (
         production_rust_text(continuity_wire)

@@ -37,12 +37,14 @@ pub use append_delimited::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
     AppendTransition,
 };
+pub(crate) use directory_snapshot::{
+    AuditedDirectoryScanError, DirectoryEntryAuditReservation, DirectoryEntryAuditor,
+};
 pub use directory_snapshot::{
     DirectoryChange, DirectoryChangeKind, DirectoryCheckpoint, DirectoryEntryKind,
     DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySelector, DirectorySnapshot,
     DirectorySnapshotConfig,
 };
-pub(crate) use directory_snapshot::{DirectoryEntryAuditReservation, DirectoryEntryAuditor};
 pub(crate) use file::confined_relative_path_key;
 pub use file::platform_path_key;
 pub(crate) use file::{read_stable_file_confined, StableRead};

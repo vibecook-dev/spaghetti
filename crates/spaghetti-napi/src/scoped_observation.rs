@@ -76,6 +76,8 @@ mod source_wire;
 mod usage_wire;
 mod watermark_wire;
 
+use observation_source_access::ScopedObservationDirectoryListing;
+
 pub type ScopedArtifactAvailabilityEntry = artifact_availability::ScopedArtifactAvailabilityEntry;
 pub type ScopedArtifactAvailabilityEnvelopeConsumerContext =
     artifact_availability_event_wire::ScopedArtifactAvailabilityEnvelopeConsumerContext;
@@ -901,19 +903,20 @@ struct ScopedCoverageMembershipIdentity {
 /// boundary. The checkpoint describes the relation's membership source, not
 /// any one discovered child. Child source objects keep their own canonical
 /// coordinates when the D2 orchestrator admits them later.
-#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ScopedRelationMembershipObservation {
     membership: ScopedCoverageMembershipIdentity,
     coverage: ScopedOfferedDecodeCoverage,
+    _listing_authority: ScopedObservationDirectoryListing,
 }
 
 impl ScopedRelationMembershipObservation {
-    pub(crate) fn from_directory_checkpoint(
-        relation_id: &str,
-        source: ScopedSourceObjectIdentity,
-        checkpoint: &crate::source::DirectoryCheckpoint,
+    pub(crate) fn from_directory_listing(
+        listing: ScopedObservationDirectoryListing,
     ) -> Result<Self, ScopedAdmissionError> {
-        validate_relation_id(relation_id).map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
+        let relation_id = listing.relation_id().to_string();
+        let source = listing.source().clone();
+        let checkpoint = listing.checkpoint();
+        validate_relation_id(&relation_id).map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
         if checkpoint.generation == 0 {
             return Err(ScopedAdmissionError::InvalidCoverage);
         }
@@ -944,6 +947,7 @@ impl ScopedRelationMembershipObservation {
                 explicit_errors: Vec::new(),
                 completeness: CoverageSetCompleteness::Complete,
             },
+            _listing_authority: listing,
         })
     }
 }
@@ -19093,6 +19097,9 @@ fn scoped_dependency_access_error() -> AdapterError {
 #[cfg(test)]
 pub(crate) use observation_source_access::{
     bind_observation_runtime_source_for_test, prepare_observation_directory_membership_for_test,
+    scan_observation_directory_membership_for_test,
+    scan_observation_directory_membership_with_foreign_attachment_for_test,
+    ScopedObservationDirectoryScan,
 };
 
 #[cfg(test)]
@@ -19850,10 +19857,12 @@ mod projection_tests {
     fn dynamic_relation_membership_checkpoint_is_exact_bounded_and_boundary_only() {
         let source = relation_membership_source(b"descendants");
         let first_checkpoint = relation_directory_checkpoint(1, b"descendants-a");
-        let first = ScopedRelationMembershipObservation::from_directory_checkpoint(
-            "descendant-transcripts",
-            source.clone(),
-            &first_checkpoint,
+        let first = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "descendant-transcripts",
+                source.clone(),
+                first_checkpoint.clone(),
+            ),
         )
         .unwrap();
         let first_point = first.coverage.point.as_ref().unwrap();
@@ -19874,22 +19883,22 @@ mod projection_tests {
             CoverageSetCompleteness::Complete
         );
 
-        assert!(
-            ScopedRelationMembershipObservation::from_directory_checkpoint(
+        assert!(ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
                 "bad relation",
                 source.clone(),
-                &first_checkpoint,
-            )
-            .is_err()
-        );
-        assert!(
-            ScopedRelationMembershipObservation::from_directory_checkpoint(
+                first_checkpoint.clone(),
+            ),
+        )
+        .is_err());
+        assert!(ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
                 "descendant-transcripts",
                 source.clone(),
-                &relation_directory_checkpoint(0, b"zero-generation"),
-            )
-            .is_err()
-        );
+                relation_directory_checkpoint(0, b"zero-generation"),
+            ),
+        )
+        .is_err());
 
         let mut lane = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
             max_data_events: 1,
@@ -19898,12 +19907,16 @@ mod projection_tests {
             max_coverage_objects: 1,
         })
         .unwrap();
-        assert_eq!(
-            lane.record_relation_membership(
-                0,
-                ScopedAppendDeliveryPhase::Bootstrap,
-                first.clone(),
+        let zero_pass = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "descendant-transcripts",
+                source.clone(),
+                first_checkpoint.clone(),
             ),
+        )
+        .unwrap();
+        assert_eq!(
+            lane.record_relation_membership(0, ScopedAppendDeliveryPhase::Bootstrap, zero_pass),
             Err(ScopedAdmissionError::InvalidCoverage)
         );
         assert!(lane.relation_membership_objects.is_empty());
@@ -19917,15 +19930,17 @@ mod projection_tests {
         );
 
         let second_checkpoint = relation_directory_checkpoint(2, b"descendants-b");
-        let second = ScopedRelationMembershipObservation::from_directory_checkpoint(
-            "descendant-transcripts",
-            source.clone(),
-            &second_checkpoint,
+        let second = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "descendant-transcripts",
+                source.clone(),
+                second_checkpoint.clone(),
+            ),
         )
         .unwrap();
         let retained_before_live = lane.offered_decode_coverage(&source).cloned().unwrap();
         assert_eq!(
-            lane.record_relation_membership(8, ScopedAppendDeliveryPhase::Live, second.clone()),
+            lane.record_relation_membership(8, ScopedAppendDeliveryPhase::Live, second),
             Err(ScopedAdmissionError::InvalidCoverage)
         );
         assert_eq!(
@@ -19933,8 +19948,19 @@ mod projection_tests {
             Some(&retained_before_live)
         );
 
-        lane.record_relation_membership(8, ScopedAppendDeliveryPhase::Correction, second)
-            .unwrap();
+        lane.record_relation_membership(
+            8,
+            ScopedAppendDeliveryPhase::Correction,
+            ScopedRelationMembershipObservation::from_directory_listing(
+                ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                    "descendant-transcripts",
+                    source.clone(),
+                    second_checkpoint.clone(),
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let retained = lane.offered_decode_coverage(&source).unwrap();
         assert_eq!(retained.point.as_ref().unwrap().generation, 2);
         assert_eq!(
@@ -19942,10 +19968,12 @@ mod projection_tests {
             Some(ScopedCoveragePassEvidence::AccessAttempt)
         );
 
-        let retargeted = ScopedRelationMembershipObservation::from_directory_checkpoint(
-            "descendant-transcripts",
-            relation_membership_source(b"retargeted-descendants"),
-            &second_checkpoint,
+        let retargeted = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "descendant-transcripts",
+                relation_membership_source(b"retargeted-descendants"),
+                second_checkpoint.clone(),
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -19953,10 +19981,12 @@ mod projection_tests {
             Err(ScopedAdmissionError::InvalidCoverage)
         );
 
-        let relation_rebound = ScopedRelationMembershipObservation::from_directory_checkpoint(
-            "workflow-records",
-            source.clone(),
-            &second_checkpoint,
+        let relation_rebound = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "workflow-records",
+                source.clone(),
+                second_checkpoint,
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -19968,10 +19998,12 @@ mod projection_tests {
             Err(ScopedAdmissionError::InvalidCoverage)
         );
 
-        let excess = ScopedRelationMembershipObservation::from_directory_checkpoint(
-            "workflow-records",
-            relation_membership_source(b"workflows"),
-            &relation_directory_checkpoint(1, b"workflows-a"),
+        let excess = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "workflow-records",
+                relation_membership_source(b"workflows"),
+                relation_directory_checkpoint(1, b"workflows-a"),
+            ),
         )
         .unwrap();
         assert_eq!(
@@ -19990,10 +20022,12 @@ mod projection_tests {
         let root_decode = fixture_decode_coverage(root, true);
         let root_point = root_decode.points[0].clone();
         let dynamic_source = relation_membership_source(b"descendants");
-        let dynamic = ScopedRelationMembershipObservation::from_directory_checkpoint(
-            "descendant-transcripts",
-            dynamic_source,
-            checkpoint,
+        let dynamic = ScopedRelationMembershipObservation::from_directory_listing(
+            ScopedObservationDirectoryListing::from_checkpoint_for_test(
+                "descendant-transcripts",
+                dynamic_source,
+                checkpoint.clone(),
+            ),
         )
         .unwrap();
 
