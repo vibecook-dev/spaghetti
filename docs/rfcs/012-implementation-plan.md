@@ -2631,6 +2631,32 @@ read discovered child contents, complete a whole listing, install a watcher,
 or open the dynamic-relation guard. Candidate support and promotion state are
 unchanged.
 
+Commit `8d71360` lets that exact contract consume the audited driver result and
+mint the first authorized scoped directory-listing evidence. Refresh authority
+is non-serializable and bound to the exact in-memory attachment, relation and
+path-free source coordinate, support-release/source-declaration/scope-program
+digests, compiled selector and scan bounds, and listing-root token. A foreign
+attachment or changed session coordinate is rejected before native I/O even
+when its visible package coordinates are equal. The driver receives only the
+attachment-approved native root plus the declaration-rendered relative
+locator. Missing roots complete the root access as `Unavailable`; transient
+mutation abandons the pass for retry; and driver or audit failure consumes the
+root conservatively through stable errors that cannot echo native paths. A
+successful snapshot is accepted only when every retained checkpoint entry
+re-derives to one selected, kind-matching opaque audit token and the number of
+retained entries equals the completed selected-token set. Only then does the
+listing root complete as `Available`. The resulting listing hides paths in
+Debug and must be consumed to construct complete dynamic-relation coverage;
+the former production constructor that accepted an arbitrary
+`DirectoryCheckpoint` plus caller-supplied source identity no longer exists,
+and the architecture ratchet freezes that boundary. Tests cover initial scan,
+same-attachment refresh, source and attachment substitution, missing roots,
+path-free symlink failure, access-ledger outcomes, and listing-backed coverage
+admission. The scoped host still rejects the uncomposed dynamic relation: no
+discovered child is admitted or read, no live membership transition is
+published, and no watcher is installed. Candidate support and promotion state
+remain unchanged.
+
 ### D3. Identity, control, and resync
 
 Implement:
