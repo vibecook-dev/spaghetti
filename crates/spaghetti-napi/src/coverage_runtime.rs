@@ -1,9 +1,7 @@
 //! Store-free RFC 012A coverage membership encoding shared by durable and
 //! scoped observation topologies.
 
-use crate::adapter::{
-    CoverageDomain, CoverageMembershipRevision, SemanticContractError,
-};
+use crate::adapter::{CoverageDomain, CoverageMembershipRevision, SemanticContractError};
 
 pub(crate) const DECODE_SOURCE_MEMBERSHIP_PREFIX: &[u8] = b"decode/source-membership/v1";
 pub(crate) const USAGE_V2_SOURCE_MEMBERSHIP_PREFIX: &[u8] =

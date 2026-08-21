@@ -8988,4 +8988,132 @@ mod tests {
         ));
         assert_eq!(unknown_batch.diagnostics().len(), 1);
     }
+
+    #[test]
+    fn claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let inst = instance(root.path());
+
+        let parent_relative = format!("project/{SESSION}.jsonl");
+        let parent_ctx = adapter
+            .bootstrap_object(&inst, &object(PARENT_STREAM, &parent_relative))
+            .unwrap();
+        let mut parent_batch = semantic_batch(PARENT_STREAM, &parent_relative, 12, 4);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(PARENT_DECODER).unwrap(),
+                    object_context: &parent_ctx,
+                    decoder_state: None,
+                },
+                &record(
+                    format!(
+                        r#"{{"type":"user","uuid":"root-message","parentUuid":null,"timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","message":{{"role":"user","content":"compose the tree"}}}}"#
+                    )
+                    .as_bytes(),
+                ),
+                &mut parent_batch,
+            )
+            .unwrap();
+        assert!(fact_values(&parent_batch).any(|fact| matches!(
+            fact,
+            Fact::ActorRunRevision(actor) if actor.role == ActorRunRole::Root
+        )));
+        assert!(!fact_values(&parent_batch).any(|fact| matches!(fact, Fact::UnknownRecord { .. })));
+
+        let child_relative =
+            format!("project/{SESSION}/subagents/workflows/w1/agents/agent-a1.jsonl");
+        let child_ctx = adapter
+            .bootstrap_object(&inst, &object(SUBAGENT_STREAM, &child_relative))
+            .unwrap();
+        let mut child_batch = semantic_batch(SUBAGENT_STREAM, &child_relative, 12, 4);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(SUBAGENT_DECODER).unwrap(),
+                    object_context: &child_ctx,
+                    decoder_state: None,
+                },
+                &record(
+                    format!(
+                        r#"{{"type":"user","uuid":"child-message","parentUuid":null,"timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo/.worktrees/a1","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","message":{{"role":"user","content":"inspect the parser"}}}}"#
+                    )
+                    .as_bytes(),
+                ),
+                &mut child_batch,
+            )
+            .unwrap();
+        assert!(fact_values(&child_batch).any(|fact| matches!(
+            fact,
+            Fact::ActorRunRevision(actor) if actor.role == ActorRunRole::Child
+        )));
+        assert!(!fact_values(&child_batch).any(|fact| matches!(fact, Fact::UnknownRecord { .. })));
+
+        let workflow_relative = format!("project/{SESSION}/workflows/wf_main.json");
+        let workflow_ctx = adapter
+            .bootstrap_object(&inst, &object(WORKFLOW_RUN_STREAM, &workflow_relative))
+            .unwrap();
+        let mut workflow_batch = FactBatch::new(4, 2).unwrap();
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(WORKFLOW_RUN_DECODER).unwrap(),
+                    object_context: &workflow_ctx,
+                    decoder_state: None,
+                },
+                &document_record(
+                    br#"{"runId":"wf_main","timestamp":"2026-08-11T00:00:01.005Z","taskId":"task-main","script":"await run({ task: 'inspect' });","scriptPath":"/repo/workflows/main.js","args":"--careful","agentCount":1,"durationMs":1005,"summary":"inspection complete","workflowName":"Inspect","status":"completed","startTime":1786406400000,"defaultModel":"claude-sonnet","totalTokens":123,"totalToolCalls":4,"phases":[{"name":"inspect","status":"completed"}]}"#,
+                ),
+                &mut workflow_batch,
+            )
+            .unwrap();
+        assert!(matches!(
+            workflow_batch.facts()[0].value,
+            Fact::WorkflowSnapshot(_)
+        ));
+
+        let team_ctx = adapter
+            .bootstrap_object(&inst, &object(TEAM_CONFIG_STREAM, "alpha/config.json"))
+            .unwrap();
+        let mut team_batch = semantic_batch(TEAM_CONFIG_STREAM, "alpha/config.json", 8, 4);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &DecoderId::new(TEAM_CONFIG_DECODER).unwrap(),
+                    object_context: &team_ctx,
+                    decoder_state: None,
+                },
+                &record(
+                    br#"{
+                      "name":"alpha",
+                      "description":"ship the engine",
+                      "createdAt":1786406400000,
+                      "leadAgentId":"lead@alpha",
+                      "leadSessionId":"01234567-89ab-cdef-0123-456789abcdef",
+                      "members":[{
+                        "agentId":"lead@alpha",
+                        "name":"team-lead",
+                        "agentType":"general-purpose",
+                        "model":"claude-opus",
+                        "prompt":"coordinate",
+                        "color":"blue",
+                        "planModeRequired":true,
+                        "joinedAt":1786406400001,
+                        "tmuxPaneId":"%1",
+                        "cwd":"/repo",
+                        "subscriptions":["changes"],
+                        "backendType":"tmux"
+                      }]
+                    }"#,
+                ),
+                &mut team_batch,
+            )
+            .unwrap();
+        assert!(fact_values(&team_batch).any(|fact| matches!(fact, Fact::TeamSnapshot(_))));
+        assert!(
+            fact_values(&team_batch).any(|fact| matches!(fact, Fact::ActorAffiliationRevision(_)))
+        );
+        assert!(!fact_values(&team_batch).any(|fact| matches!(fact, Fact::UnknownRecord { .. })));
+    }
 }

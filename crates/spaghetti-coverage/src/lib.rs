@@ -70,7 +70,8 @@ pub fn membership_digest(
 }
 
 fn append_component(output: &mut Vec<u8>, component: &[u8]) -> Result<(), CoverageEncodingError> {
-    let length = u64::try_from(component.len()).map_err(|_| CoverageEncodingError::LengthExhausted)?;
+    let length =
+        u64::try_from(component.len()).map_err(|_| CoverageEncodingError::LengthExhausted)?;
     output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(component);
     Ok(())
@@ -99,8 +100,8 @@ mod tests {
             generation: 3,
             absent: false,
         }];
-        let encoded = encode_membership(b"decode/source-membership/v1", &[b"transcript"], &objects)
-            .unwrap();
+        let encoded =
+            encode_membership(b"decode/source-membership/v1", &[b"transcript"], &objects).unwrap();
         assert_eq!(
             membership_digest(b"decode/source-membership/v1", &[b"transcript"], &objects).unwrap(),
             contract_digest(&encoded)
@@ -112,6 +113,31 @@ mod tests {
         assert_eq!(
             encode_membership(b"prefix", &[b"z", b"a"], &[]).unwrap_err(),
             CoverageEncodingError::StreamsNotCanonical
+        );
+    }
+
+    #[test]
+    fn digest_is_stable_for_a_known_membership_set() {
+        let objects = [MembershipObject {
+            stream_key: b"transcript",
+            object_key: b"session.jsonl",
+            generation: 3,
+            absent: false,
+        }];
+        let digest =
+            membership_digest(b"decode/source-membership/v1", &[b"transcript"], &objects).unwrap();
+        assert_eq!(
+            digest,
+            membership_digest(b"decode/source-membership/v1", &[b"transcript"], &objects).unwrap()
+        );
+        assert_ne!(digest, [0_u8; 32]);
+    }
+
+    #[test]
+    fn empty_prefix_is_rejected() {
+        assert_eq!(
+            encode_membership(b"", &[], &[]).unwrap_err(),
+            CoverageEncodingError::EmptyPrefix
         );
     }
 }

@@ -26,6 +26,12 @@ export * from './contracts/rfc012b-pages.js';
 
 // RFC 012C portable actor, affiliation, and usage-v2 value contracts.
 export * from './contracts/rfc012c.js';
+export {
+  mergeDurableAndScopedUsage,
+  type DurableLiveUsageMerge,
+  type DurableUsageContribution,
+  type ScopedUsageObserverEvent,
+} from './runtime/usage-v2-live-merge.js';
 
 // RFC 012D exact-version negotiation plus deliberately incomplete contextual
 // actor, usage, source-control, continuity, exact-known-object scope coverage,

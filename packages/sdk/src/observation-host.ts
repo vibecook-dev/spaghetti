@@ -52,6 +52,12 @@ export interface ObservationHostOptions {
   onProgress?: (progress: ObservationHostProgress) => void;
 }
 
+export interface ObservationHostProgressiveView {
+  catalogQueryReady: boolean;
+  searchAvailable: boolean;
+  selectedHydrationAvailable: boolean;
+}
+
 export interface ObservationHostProgress {
   stage: 'opening' | 'adapter-scanning' | 'adapter-ready' | 'finalizing' | 'ready';
   adapterId?: string;
@@ -60,6 +66,7 @@ export interface ObservationHostProgress {
   sourceCount: number;
   elapsedMs: number;
   status?: SpaghettiEngineStatus;
+  progressive?: ObservationHostProgressiveView;
 }
 
 export interface ObservationHostSnapshot {
@@ -190,9 +197,22 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
   }
 }
 
+export function observationHostProgressiveView(
+  status: Pick<SpaghettiEngineStatus, 'state' | 'catalogQueryReady' | 'searchAvailable'>,
+): ObservationHostProgressiveView {
+  const catalogQueryReady = status.catalogQueryReady === true;
+  return {
+    catalogQueryReady,
+    searchAvailable: catalogQueryReady && status.state !== 'bootstrapping',
+    selectedHydrationAvailable: catalogQueryReady,
+  };
+}
+
 function emitHostProgress(options: ObservationHostOptions, progress: ObservationHostProgress): void {
   try {
-    options.onProgress?.(progress);
+    const progressive =
+      progress.progressive ?? (progress.status ? observationHostProgressiveView(progress.status) : undefined);
+    options.onProgress?.({ ...progress, progressive });
   } catch {
     // Observability callbacks cannot take down the sole database owner.
   }

@@ -1185,6 +1185,8 @@ def discover_rfc012_coverage_crate_boundary_violations() -> set[str]:
     wrapper_text = production_rust_text(wrapper) if wrapper.exists() else ""
     if "spaghetti_coverage::encode_membership" not in wrapper_text:
         found.add("crates/spaghetti-napi/src/coverage_runtime.rs#missing-coverage-crate")
+    if "CoverageMembershipRevision::begin_streaming" in wrapper_text:
+        found.add("crates/spaghetti-napi/src/coverage_runtime.rs#reimplemented-membership-encoder")
     return found
 
 

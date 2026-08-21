@@ -52,7 +52,6 @@ pub use scope::{
     ScopeRelationPrimitive, ScopeRelationSourceBinding, ScopeRelationSourcePrimitive,
     ScopeUnavailableBehavior, SCOPE_PROGRAM_SCHEMA_VERSION,
 };
-pub(crate) use semantic::CoverageMembershipRevisionBuilder;
 pub use semantic::{
     compare_coverage, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
     ContractCompleteness, CoverageAbsence, CoverageAbsenceKind, CoverageComparison,

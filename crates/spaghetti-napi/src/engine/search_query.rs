@@ -1247,7 +1247,7 @@ mod tests {
 
     #[test]
     fn search_stays_unavailable_until_query_bootstrap_completes() {
-        let mut connection = seeded_connection();
+        let connection = seeded_connection();
         let available = read_search_page(&connection, &request("alpha common phrase", 10)).unwrap();
         assert_eq!(available.total, 3);
         connection

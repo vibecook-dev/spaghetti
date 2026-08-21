@@ -198,11 +198,10 @@ export interface ProgressiveStartupView {
 }
 
 /** Catalog-first UX: last-complete/degraded catalog may query before FTS. */
-export function progressiveStartupView(
-  readiness: CatalogReadinessSnapshot,
+export function progressiveStartupViewFromFlags(
+  catalogQueryReady: boolean,
   searchPackComplete: boolean,
 ): ProgressiveStartupView {
-  const catalogQueryReady = readiness.state === 'ready' || readiness.state === 'degraded';
   if (searchPackComplete && !catalogQueryReady) {
     throw new ContractValidationError('complete search cannot precede a queryable catalog');
   }
@@ -211,6 +210,15 @@ export function progressiveStartupView(
     searchAvailable: catalogQueryReady && searchPackComplete,
     selectedHydrationAvailable: catalogQueryReady,
   };
+}
+
+/** Catalog-first UX: last-complete/degraded catalog may query before FTS. */
+export function progressiveStartupView(
+  readiness: CatalogReadinessSnapshot,
+  searchPackComplete: boolean,
+): ProgressiveStartupView {
+  const catalogQueryReady = readiness.state === 'ready' || readiness.state === 'degraded';
+  return progressiveStartupViewFromFlags(catalogQueryReady, searchPackComplete);
 }
 
 export interface CatalogReadinessSnapshot {

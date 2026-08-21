@@ -1,8 +1,13 @@
-"""X1: compare complete-only FTS strategies on a frozen timeline."""
+"""X1: compare complete-only FTS strategies on a frozen ingest trace."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+TRACE_PATH = Path(__file__).resolve().parent / "fixtures" / "fts-bootstrap-trace.json"
 
 
 @dataclass(frozen=True)
@@ -22,65 +27,77 @@ class StrategyResult:
     quiescence_windows: int
 
 
+def load_frozen_trace(path: Path | None = None) -> list[IngestMilestone]:
+    document = json.loads((path or TRACE_PATH).read_text())
+    if document.get("complete_only_gate") != "schema_meta.query_bootstrap_state":
+        raise ValueError("frozen FTS trace must name the query bootstrap completeness gate")
+    milestones = [
+        IngestMilestone(
+            label=str(item["label"]),
+            history_complete=bool(item["history_complete"]),
+            catalog_complete=bool(item["catalog_complete"]),
+            fts_complete=bool(item["fts_complete"]),
+            t_ms=int(item["t_ms"]),
+        )
+        for item in document["milestones"]
+    ]
+    if not milestones:
+        raise ValueError("frozen FTS trace has no milestones")
+    return milestones
+
+
 def deferred_one_shot_after_history(milestones: list[IngestMilestone]) -> StrategyResult:
-    """Search stays unavailable until history is complete, then one FTS pass."""
     search_at = None
+    visible_before = False
     for item in milestones:
-        if item.history_complete and item.fts_complete:
+        if item.fts_complete and not (item.history_complete and item.catalog_complete):
+            visible_before = True
+        if item.history_complete and item.catalog_complete and item.fts_complete:
             search_at = item.t_ms
             break
     return StrategyResult(
         name="deferred-one-shot-after-history",
         search_available_at_ms=search_at,
-        search_visible_before_complete=False,
+        search_visible_before_complete=visible_before,
         quiescence_windows=1 if search_at is not None else 0,
     )
 
 
 def incremental_after_catalog(milestones: list[IngestMilestone]) -> StrategyResult:
-    """FTS maintenance may start after catalog, but queries stay complete-only."""
     catalog_at = next((item.t_ms for item in milestones if item.catalog_complete), None)
-    search_at = next((item.t_ms for item in milestones if item.fts_complete), None)
-    if catalog_at is None or search_at is None or search_at < catalog_at:
-        search_at = next(
-            (
-                item.t_ms
-                for item in milestones
-                if item.catalog_complete and item.fts_complete
-            ),
-            None,
-        )
+    search_at = None
+    visible_before = False
+    for item in milestones:
+        if item.fts_complete and (catalog_at is None or item.t_ms < catalog_at or not item.catalog_complete):
+            visible_before = True
+        if item.catalog_complete and item.fts_complete:
+            search_at = item.t_ms
+            break
     return StrategyResult(
         name="incremental-after-catalog",
         search_available_at_ms=search_at,
-        search_visible_before_complete=False,
+        search_visible_before_complete=visible_before,
         quiescence_windows=2 if search_at is not None else 0,
     )
 
 
 def bounded_chunked_finalization(milestones: list[IngestMilestone]) -> StrategyResult:
-    """Chunked FTS with reader quiescence; still complete-only."""
     complete = [item for item in milestones if item.fts_complete]
+    visible_before = any(
+        item.fts_complete and not item.catalog_complete for item in milestones
+    )
     return StrategyResult(
         name="bounded-chunked-finalization",
         search_available_at_ms=complete[-1].t_ms if complete else None,
-        search_visible_before_complete=False,
+        search_visible_before_complete=visible_before,
         quiescence_windows=max(len(complete), 1) if complete else 0,
     )
-
-
-FROZEN_TIMELINE = [
-    IngestMilestone("catalog-ready", False, True, False, 1_200),
-    IngestMilestone("history-ready", True, True, False, 8_400),
-    IngestMilestone("fts-chunk-1", True, True, False, 9_100),
-    IngestMilestone("fts-complete", True, True, True, 11_000),
-]
 
 
 def compare_strategies(
     milestones: list[IngestMilestone] | None = None,
 ) -> list[StrategyResult]:
-    items = milestones or FROZEN_TIMELINE
+    items = milestones or load_frozen_trace()
     return [
         deferred_one_shot_after_history(items),
         incremental_after_catalog(items),

@@ -341,3 +341,43 @@ fn merge_consumes_typed_usage_and_interaction_values_without_native_payloads() {
     native_payload["native_payload"] = json!({"prompt": "raw"});
     assert!(parse_rfc012c_interaction_v1_json(&native_payload.to_string()).is_err());
 }
+
+#[test]
+fn engine_query_service_is_the_durable_live_merge_consumer() {
+    use crate::engine::{EngineError, EngineOptions, SpaghettiEngineCore};
+
+    let fixture = runtime_fixture();
+    let (baseline, _, _) = coverage_sets();
+    let partial = with_completeness(&baseline, "partial");
+    let events = [upsert_event(
+        "evt-live-1",
+        &fixture.usage.response_revisions.a,
+    )];
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = EngineOptions {
+        database_path: dir.path().join("merge-consumer.db"),
+        query_workers: Some(1),
+        owner_label: Some("merge-consumer".to_string()),
+        defer_query_structures: true,
+    };
+    let bootstrapping = SpaghettiEngineCore::open(options.clone()).unwrap();
+    assert!(matches!(
+        bootstrapping.merge_runtime_usage_live(&[], &baseline, &events, &partial),
+        Err(EngineError::BootstrapInProgress)
+    ));
+    bootstrapping.shutdown().unwrap();
+
+    options.defer_query_structures = false;
+    let engine = SpaghettiEngineCore::open(options).unwrap();
+    let merged = engine
+        .merge_runtime_usage_live(&[], &baseline, &events, &partial)
+        .expect("live query pool must reach durable/scoped merge");
+    assert_eq!(merged.overlay, OverlayDisposition::Retained { stale: true });
+    assert_eq!(merged.delivered_observer_occurrences.len(), 1);
+    assert_eq!(
+        merged.delivered_observer_occurrences[0].event_id,
+        "evt-live-1"
+    );
+    engine.shutdown().unwrap();
+}

@@ -11,6 +11,7 @@ import {
   parseCatalogSessionPage,
   parseCatalogSnapshotExpired,
   progressiveStartupView,
+  progressiveStartupViewFromFlags,
 } from '../rfc012b-pages.js';
 
 interface PageFixture {
@@ -118,6 +119,11 @@ test('catalog-first startup can query last-complete catalog while search stays c
   } else {
     reject(() => progressiveStartupView(readiness, true));
   }
+
+  const hostBeforeSearch = progressiveStartupViewFromFlags(true, false);
+  assert.equal(hostBeforeSearch.catalogQueryReady, true);
+  assert.equal(hostBeforeSearch.searchAvailable, false);
+  reject(() => progressiveStartupViewFromFlags(false, true));
 });
 
 test('pages bind exact caller selection, snapshot, query, sort, size, ordering, and final cursor', () => {

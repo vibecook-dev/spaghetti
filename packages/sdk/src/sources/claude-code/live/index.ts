@@ -55,4 +55,5 @@ export type {
   SessionObservationShadow,
   SessionObservationShadowTail,
   ScopedUsageShadowRecord,
+  ObserverRecordSource,
 } from './session-observation-shadow.js';

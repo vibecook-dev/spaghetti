@@ -21,7 +21,8 @@ pub fn napi_src_root() -> std::path::PathBuf {
 }
 
 pub fn architecture_checker() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/architecture/check_rfc011_boundaries.py")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/architecture/check_rfc011_boundaries.py")
 }
 
 #[cfg(test)]
@@ -48,8 +49,21 @@ mod tests {
         assert!(manifest.contains("spaghetti-architecture"));
         assert!(manifest.contains("spaghetti-napi"));
         assert!(
+            manifest.contains("spaghetti-coverage"),
+            "workspace must list the extracted coverage crate"
+        );
+        assert!(
             !manifest.contains("spaghetti-napi") || manifest.contains("spaghetti-architecture"),
             "workspace must list both the engine crate and this boundary crate"
+        );
+        let coverage = Path::new(env!("CARGO_MANIFEST_DIR")).join("../spaghetti-coverage");
+        assert!(coverage.join("src/lib.rs").is_file());
+        let coverage_manifest = std::fs::read_to_string(coverage.join("Cargo.toml")).unwrap();
+        assert!(
+            !coverage_manifest.contains("rusqlite")
+                && !coverage_manifest.contains("napi")
+                && !coverage_manifest.contains("spaghetti-napi"),
+            "spaghetti-coverage must stay store-free and transport-free"
         );
     }
 }

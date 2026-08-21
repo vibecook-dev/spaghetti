@@ -1423,6 +1423,8 @@ export interface EngineStatus {
   state: string
   databasePath: string
   acceptingQueries: boolean
+  catalogQueryReady: boolean
+  searchAvailable: boolean
   writerAlive: boolean
   configuredQueryWorkers: number
   aliveQueryWorkers: number

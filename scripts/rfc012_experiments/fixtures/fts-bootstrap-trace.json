@@ -1,0 +1,10 @@
+{
+  "source_test": "search_stays_unavailable_until_query_bootstrap_completes",
+  "complete_only_gate": "schema_meta.query_bootstrap_state",
+  "milestones": [
+    {"label": "catalog-ready", "history_complete": false, "catalog_complete": true, "fts_complete": false, "t_ms": 0},
+    {"label": "history-ready", "history_complete": true, "catalog_complete": true, "fts_complete": false, "t_ms": 0},
+    {"label": "fts-chunk-1", "history_complete": true, "catalog_complete": true, "fts_complete": false, "t_ms": 0},
+    {"label": "fts-complete", "history_complete": true, "catalog_complete": true, "fts_complete": true, "t_ms": 0}
+  ]
+}

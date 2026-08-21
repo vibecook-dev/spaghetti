@@ -7,6 +7,7 @@ export {
 } from './observation-service.js';
 export {
   openObservationHost,
+  observationHostProgressiveView,
   type ObservationHost,
   type ObservationHostFactFamilyReplayRequest,
   type ObservationHostOptions,

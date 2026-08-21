@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   createObservationService,
   loadNativeAddon,
+  observationHostProgressiveView,
   openObservationHost,
   type ObservationHost,
   type ObservationHostProgress,
@@ -50,6 +51,34 @@ function multiAdapterFixture(): { dbPath: string; sources: ObservationHostSource
     ],
   };
 }
+
+describe('observation host progressive startup', () => {
+  test('catalog-first view withholds search until catalog is queryable', () => {
+    const bootstrapping = observationHostProgressiveView({
+      state: 'bootstrapping',
+      catalogQueryReady: true,
+      searchAvailable: false,
+    });
+    assert.equal(bootstrapping.catalogQueryReady, true);
+    assert.equal(bootstrapping.searchAvailable, false);
+    assert.equal(bootstrapping.selectedHydrationAvailable, true);
+
+    const runningWithoutCatalog = observationHostProgressiveView({
+      state: 'running',
+      catalogQueryReady: false,
+      searchAvailable: false,
+    });
+    assert.equal(runningWithoutCatalog.catalogQueryReady, false);
+    assert.equal(runningWithoutCatalog.searchAvailable, false);
+
+    const runningWithCatalog = observationHostProgressiveView({
+      state: 'running',
+      catalogQueryReady: true,
+      searchAvailable: true,
+    });
+    assert.equal(runningWithCatalog.searchAvailable, true);
+  });
+});
 
 describe('observation host options', () => {
   test('rejects empty and duplicate adapter composition before opening storage', async () => {

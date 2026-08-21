@@ -182,6 +182,8 @@ export interface SpaghettiEngineStatus {
   state: 'bootstrapping' | 'running' | 'stopping' | 'stopped';
   databasePath: string;
   acceptingQueries: boolean;
+  catalogQueryReady: boolean;
+  searchAvailable: boolean;
   writerAlive: boolean;
   configuredQueryWorkers: number;
   aliveQueryWorkers: number;

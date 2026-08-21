@@ -51,7 +51,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::adapter::{AdapterRegistry, FactBatch};
+use rusqlite::{Connection, OpenFlags};
+
+use crate::adapter::{AdapterRegistry, FactBatch, SourceCoverageSet};
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
@@ -355,12 +357,24 @@ pub struct EngineStatusSnapshot {
     pub state: String,
     pub database_path: String,
     pub accepting_queries: bool,
+    pub catalog_query_ready: bool,
+    pub search_available: bool,
     pub writer_alive: bool,
     pub configured_query_workers: u32,
     pub alive_query_workers: u32,
     pub in_flight_queries: u32,
     pub observation: ObservationStatusSnapshot,
     pub owner: Option<OwnerMetadata>,
+}
+
+/// RFC 012B catalog-first host lifecycle: last-complete catalog may be
+/// queryable while FTS/query bootstrap is still incomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgressiveHostReadiness {
+    pub catalog_query_ready: bool,
+    pub search_available: bool,
+    pub selected_hydration_available: bool,
+    pub bootstrap_active: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -646,6 +660,8 @@ impl SpaghettiEngineCore {
             }
         }
 
+        let catalog_query_ready = running && self.last_complete_catalog_readable();
+        let search_available = running && !bootstrap_active && catalog_query_ready;
         EngineStatusSnapshot {
             state: if running && bootstrap_active {
                 "bootstrapping".to_string()
@@ -654,12 +670,38 @@ impl SpaghettiEngineCore {
             },
             database_path: self.database_path.to_string_lossy().into_owned(),
             accepting_queries: running && !bootstrap_active,
+            catalog_query_ready,
+            search_available,
             writer_alive,
             configured_query_workers: usize_to_u32(self.query_workers),
             alive_query_workers: usize_to_u32(alive_query_workers),
             in_flight_queries: usize_to_u32(in_flight_queries),
             observation,
             owner: (lifecycle.phase != LifecyclePhase::Stopped).then(|| self.owner.clone()),
+        }
+    }
+
+    /// Catalog-first readiness used by the observation host.
+    pub fn progressive_host_readiness(&self) -> ProgressiveHostReadiness {
+        let status = self.status();
+        let bootstrap_active = status.state == "bootstrapping";
+        ProgressiveHostReadiness {
+            catalog_query_ready: status.catalog_query_ready,
+            search_available: status.search_available,
+            selected_hydration_available: status.catalog_query_ready,
+            bootstrap_active,
+        }
+    }
+
+    fn last_complete_catalog_readable(&self) -> bool {
+        let Ok(connection) =
+            Connection::open_with_flags(&self.database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            return false;
+        };
+        match catalog_state::load_catalog_build_state(&connection) {
+            Ok(Some(state)) => state.ready_read_authority().is_ok(),
+            _ => false,
         }
     }
 
@@ -973,6 +1015,28 @@ impl SpaghettiEngineCore {
     ) -> Result<RuntimeUsageV2Page, EngineError> {
         let (_, queries) = self.clients()?;
         queries.runtime_usage_v2_cancellable(request, cancellation)
+    }
+
+    /// Durable usage-v2 query service plus scoped observer merge.
+    ///
+    /// Requires the live query pool (fails with `BootstrapInProgress` while FTS
+    /// structures are incomplete). Consumers supply already-typed observer
+    /// events; this path never parses native JSON.
+    pub(crate) fn merge_runtime_usage_live(
+        &self,
+        durable: &[runtime_semantic_merge::DurableUsageContribution],
+        durable_coverage: &SourceCoverageSet,
+        observer_events: &[runtime_semantic_merge::ScopedUsageObserverEvent],
+        observer_coverage: &SourceCoverageSet,
+    ) -> Result<runtime_semantic_merge::DurableLiveUsageMerge, EngineError> {
+        let _ = self.query_client()?;
+        runtime_semantic_merge::merge_durable_and_scoped_usage(
+            durable,
+            durable_coverage,
+            observer_events,
+            observer_coverage,
+        )
+        .map_err(|error| EngineError::InvalidQuery(error.to_string()))
     }
 
     /// Resolve a complete source-selection vector and return exactly one
@@ -2201,6 +2265,37 @@ mod tests {
             "bootstrap finalization must remain on WAL instead of rewriting the file in DELETE mode"
         );
         assert_eq!(engine.complete_query_bootstrap().unwrap(), None);
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn progressive_host_readiness_keeps_search_unavailable_until_catalog_and_bootstrap() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("progressive.db");
+        let mut bootstrap_options = options(database);
+        bootstrap_options.defer_query_structures = true;
+        let engine = SpaghettiEngineCore::open(bootstrap_options).unwrap();
+
+        let readiness = engine.progressive_host_readiness();
+        assert!(readiness.bootstrap_active);
+        assert!(!readiness.search_available);
+        assert!(!readiness.catalog_query_ready);
+        let status = engine.status();
+        assert!(!status.search_available);
+        assert!(!status.catalog_query_ready);
+        assert!(matches!(
+            engine.overview(),
+            Err(EngineError::BootstrapInProgress)
+        ));
+
+        engine.complete_query_bootstrap().unwrap();
+        let ready = engine.progressive_host_readiness();
+        assert!(!ready.bootstrap_active);
+        assert!(!ready.search_available);
+        assert!(
+            !ready.catalog_query_ready,
+            "empty DB has no last-complete catalog snapshot"
+        );
         engine.shutdown().unwrap();
     }
 

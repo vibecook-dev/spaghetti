@@ -1,0 +1,95 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+import { parseSourceCoverageSet, type SourceCoverageSet } from '../../contracts/rfc012a.js';
+import { parseRfc012cRuntimeV1Json } from '../../contracts/rfc012c.js';
+import { mergeDurableAndScopedUsage } from '../usage-v2-live-merge.js';
+
+const rfc012a = JSON.parse(
+  readFileSync(
+    new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012a-v1.json', import.meta.url),
+    'utf8',
+  ),
+) as { coverage: { baseline: unknown } };
+
+const rfc012cJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-runtime-v1.json', import.meta.url),
+  'utf8',
+);
+
+function coverage(value: unknown): SourceCoverageSet {
+  return parseSourceCoverageSet(value);
+}
+
+test('SDK merge consumer joins typed durable and scoped usage without native payloads', () => {
+  const runtime = parseRfc012cRuntimeV1Json(rfc012cJson, JSON.parse(rfc012cJson));
+  const aba = runtime.usage.response_revisions;
+  const baseline = coverage(rfc012a.coverage.baseline);
+  const partial: SourceCoverageSet = { ...baseline, completeness: 'partial' };
+
+  const merged = mergeDurableAndScopedUsage(
+    [],
+    baseline,
+    [
+      {
+        eventId: 'evt-a-1',
+        factId: aba.a.fact_id,
+        semanticRevisionRef: aba.a.semantic_revision_ref,
+        operation: 'upsert',
+      },
+      {
+        eventId: 'evt-b',
+        factId: aba.b.fact_id,
+        semanticRevisionRef: aba.b.semantic_revision_ref,
+        operation: 'upsert',
+      },
+      {
+        eventId: 'evt-a-1',
+        factId: aba.a.fact_id,
+        semanticRevisionRef: aba.a.semantic_revision_ref,
+        operation: 'upsert',
+      },
+      {
+        eventId: 'evt-a-2',
+        factId: aba.a_repeat.fact_id,
+        semanticRevisionRef: aba.a_repeat.semantic_revision_ref,
+        operation: 'upsert',
+      },
+    ],
+    partial,
+  );
+
+  assert.deepEqual(merged.overlay, { retained: { stale: true } });
+  assert.equal(merged.deliveredObserverOccurrences.length, 3);
+  assert.equal(merged.deliveredObserverOccurrences[0]?.eventId, 'evt-a-1');
+  assert.equal(merged.deliveredObserverOccurrences[2]?.eventId, 'evt-a-2');
+  assert.equal(merged.contributions.length, 1);
+  assert.equal(merged.contributions[0]?.origin, 'overlay');
+});
+
+test('complete comparable observer coverage retires the overlay', () => {
+  const runtime = parseRfc012cRuntimeV1Json(rfc012cJson, JSON.parse(rfc012cJson));
+  const example = runtime.usage.response_revisions.a;
+  const baseline = coverage(rfc012a.coverage.baseline);
+  const merged = mergeDurableAndScopedUsage(
+    [
+      {
+        factId: example.fact_id,
+        semanticRevisionRef: example.semantic_revision_ref,
+      },
+    ],
+    baseline,
+    [
+      {
+        eventId: 'evt-ignored-after-retire',
+        factId: example.fact_id,
+        semanticRevisionRef: example.semantic_revision_ref,
+        operation: 'upsert',
+      },
+    ],
+    baseline,
+  );
+  assert.equal(merged.overlay, 'retired');
+  assert.equal(merged.contributions[0]?.origin, 'durable');
+});

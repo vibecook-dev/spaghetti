@@ -33,6 +33,25 @@ class AggregatedDiagnostic:
     provenance_objects: tuple[str, ...]
 
 
+def rows_from_sqlite_census(records: Iterable[tuple]) -> list[DiagnosticRow]:
+    """Map census-shaped source_record_errors joins into aggregator rows."""
+    rows: list[DiagnosticRow] = []
+    for adapter_id, stream, error_class, _message, source_object, generation, commit_seq, payload_hex in records:
+        rows.append(
+            DiagnosticRow(
+                adapter_id=str(adapter_id),
+                stream=str(stream),
+                family="runtime.usage-v2" if error_class == "malformed_usage" else "history.message",
+                reason=str(error_class),
+                source_object=f"obj-{source_object}",
+                generation=int(generation),
+                commit_seq=int(commit_seq),
+                sample_identity=f"diag:{payload_hex[:12]}",
+            )
+        )
+    return rows
+
+
 def aggregate_diagnostics(
     rows: Iterable[DiagnosticRow], *, max_examples: int = 8
 ) -> list[AggregatedDiagnostic]:
