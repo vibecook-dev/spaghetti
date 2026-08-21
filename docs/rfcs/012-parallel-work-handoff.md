@@ -1,8 +1,9 @@
 # RFC 012 parallel execution runbook
 
-- **Status:** Ready to assign
+- **Status:** Superseded for Wave 2+ by
+  [012-wave-i-execution.md](./012-wave-i-execution.md)
 - **Written:** 2026-08-19
-- **Current product-code base:** `67a1ae9`
+- **Current product-code base:** `67a1ae9` (historical Wave 1 assignment base)
 - **Assignment base:** the primary-integrator commit containing this runbook;
   use the exact SHA announced as `RUNBOOK READY — BASE <sha>`
 - **Audience:** repository owner, primary integrator, and parallel implementation
