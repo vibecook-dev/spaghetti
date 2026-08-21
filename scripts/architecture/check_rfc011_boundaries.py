@@ -567,6 +567,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "pub(crate) struct ScopedObservationDirectoryMemberIdentity",
         "pub(crate) struct ScopedObservationDirectoryMemberBinding",
         "semantic_context: FactSemanticContext",
+        "adapter: Arc<dyn AgentAdapter>",
+        "source_instance: Arc<SourceInstance>",
         "runtime_stream: Arc<StreamSpec>",
         "descriptor: SourceObjectDescriptor",
         "confined_relative_path_key(&relative_path)",

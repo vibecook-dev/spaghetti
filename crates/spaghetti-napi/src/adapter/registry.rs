@@ -2146,7 +2146,8 @@ pub(crate) mod tests {
         .unwrap();
         let rooted = bind_observation_runtime_source_for_test(
             bound,
-            &instance,
+            Arc::clone(adapter),
+            Arc::new(instance.clone()),
             &approved_root,
             &expected_source_instance_key,
         )
@@ -2398,7 +2399,8 @@ pub(crate) mod tests {
                     .unwrap();
                 let error = bind_observation_runtime_source_for_test(
                     runtime,
-                    supplied_instance,
+                    Arc::clone(adapter),
+                    Arc::new(supplied_instance.clone()),
                     &supplied_root,
                     &expected_source_instance_key,
                 )
@@ -2454,7 +2456,8 @@ pub(crate) mod tests {
             CanonicalSourceInstanceKey::derive(1, b"foreign-source-instance").unwrap();
         let error = bind_observation_runtime_source_for_test(
             runtime,
-            &instance,
+            Arc::clone(adapter),
+            Arc::new(instance.clone()),
             &ScopedAccessRootGrant {
                 access_root: "root".to_string(),
                 root: PathBuf::from("/Users/alice/private/root"),
@@ -2543,7 +2546,8 @@ pub(crate) mod tests {
                 .unwrap();
             let rooted = bind_observation_runtime_source_for_test(
                 runtime,
-                &instance,
+                Arc::clone(adapter),
+                Arc::new(instance.clone()),
                 &approved_root,
                 &expected_source_instance_key,
             )
@@ -2745,7 +2749,8 @@ pub(crate) mod tests {
                 .unwrap();
             let rooted = bind_observation_runtime_source_for_test(
                 runtime,
-                &instance,
+                Arc::clone(adapter),
+                Arc::new(instance.clone()),
                 &approved_root,
                 &expected_source_instance_key,
             )
@@ -2887,6 +2892,12 @@ pub(crate) mod tests {
                         content.runtime_stream_for_test(),
                         &fixture_descendant_runtime_stream()
                     );
+                    assert!(Arc::ptr_eq(content.adapter_for_test(), adapter));
+                    assert_eq!(content.source_instance_for_test().id, instance.id);
+                    assert_eq!(
+                        content.source_instance_for_test().spec.stable_key,
+                        instance.spec.stable_key
+                    );
                     assert_eq!(
                         content.descriptor_for_test().stream_id.as_str(),
                         "descendant-stream"
@@ -3008,6 +3019,8 @@ pub(crate) mod tests {
             oversized_member.runtime_stream_for_test(),
             &fixture_descendant_runtime_stream()
         );
+        assert!(Arc::ptr_eq(oversized_member.adapter_for_test(), adapter));
+        assert_eq!(oversized_member.source_instance_for_test().id, instance.id);
         assert_eq!(
             oversized_member.descriptor_for_test().relative_path,
             std::path::Path::new("sessions/oversized-session-id/children/large.jsonl")

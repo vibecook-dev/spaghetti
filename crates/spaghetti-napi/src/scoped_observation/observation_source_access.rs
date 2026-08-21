@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::adapter::{
-    AdapterId, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
+    AdapterId, AgentAdapter, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
     FactSemanticContext, ScopeRelationPrimitive, SourceInstance, SourceInstanceKey,
     SourceObjectDescriptor, StreamSpec,
 };
@@ -52,6 +52,8 @@ pub(crate) enum ScopedObservationRuntimeSourceError {
 /// path can escape this private boundary.
 pub(crate) struct ScopedObservationRuntimeSourceBinding {
     runtime: AuthorizedObservationRuntimeStreamReservation,
+    adapter: Arc<dyn AgentAdapter>,
+    source_instance: Arc<SourceInstance>,
     root: PathBuf,
     canonical_source_instance_key: CanonicalSourceInstanceKey,
 }
@@ -60,6 +62,7 @@ impl fmt::Debug for ScopedObservationRuntimeSourceBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ScopedObservationRuntimeSourceBinding")
+            .field("has_adapter", &true)
             .field("has_source_instance", &true)
             .field("has_native_root", &true)
             .field(
@@ -73,7 +76,8 @@ impl fmt::Debug for ScopedObservationRuntimeSourceBinding {
 impl ScopedObservationRuntimeSourceBinding {
     fn bind(
         runtime: AuthorizedObservationRuntimeStreamReservation,
-        instance: &SourceInstance,
+        adapter: Arc<dyn AgentAdapter>,
+        instance: Arc<SourceInstance>,
         approved_root: &ScopedAccessRootGrant,
         expected_source_instance_key: &CanonicalSourceInstanceKey,
     ) -> Result<Self, ScopedObservationRuntimeSourceError> {
@@ -84,6 +88,7 @@ impl ScopedObservationRuntimeSourceBinding {
         let matches = canonical_source_instance_key
             .as_ref()
             .is_ok_and(|actual| actual == expected_source_instance_key)
+            && adapter.manifest().id.as_str() == runtime.adapter_id()
             && instance.id == runtime.source_instance_id()
             && instance.spec.identity_contract_version
                 == runtime.source_instance_identity_contract_version()
@@ -107,6 +112,8 @@ impl ScopedObservationRuntimeSourceBinding {
         }
         Ok(Self {
             runtime,
+            adapter,
+            source_instance: instance,
             root: approved_root.root.clone(),
             canonical_source_instance_key: *expected_source_instance_key,
         })
@@ -162,6 +169,14 @@ impl ScopedObservationRuntimeSourceBinding {
 
     pub(crate) fn stream(&self) -> &StreamSpec {
         self.runtime.stream()
+    }
+
+    fn adapter(&self) -> &Arc<dyn AgentAdapter> {
+        &self.adapter
+    }
+
+    fn source_instance(&self) -> &Arc<SourceInstance> {
+        &self.source_instance
     }
 
     pub(crate) fn complete(
@@ -280,6 +295,8 @@ pub(crate) struct ScopedObservationDirectoryMemberIdentity {
 #[derive(Clone)]
 pub(crate) struct ScopedObservationDirectoryMemberBinding {
     identity: ScopedObservationDirectoryMemberIdentity,
+    adapter: Arc<dyn AgentAdapter>,
+    source_instance: Arc<SourceInstance>,
     runtime_stream: Arc<StreamSpec>,
     descriptor: SourceObjectDescriptor,
 }
@@ -407,6 +424,8 @@ impl fmt::Debug for ScopedObservationDirectoryMemberBinding {
         formatter
             .debug_struct("ScopedObservationDirectoryMemberBinding")
             .field("identity", &self.identity)
+            .field("has_adapter", &true)
+            .field("has_source_instance", &true)
             .field("has_runtime_stream", &true)
             .field("has_source_descriptor", &true)
             .finish_non_exhaustive()
@@ -779,6 +798,8 @@ impl ScopedObservationDirectoryMembershipProof {
             members.push(ScopedObservationDirectoryMemberCoordinate {
                 binding: ScopedObservationDirectoryMemberBinding {
                     identity,
+                    adapter: Arc::clone(binding.adapter()),
+                    source_instance: Arc::clone(binding.source_instance()),
                     runtime_stream: Arc::clone(&runtime_stream),
                     descriptor: SourceObjectDescriptor {
                         stream_id: runtime_stream.id.clone(),
@@ -985,6 +1006,14 @@ impl ScopedObservationDirectoryMemberContent {
         self.binding.runtime_stream()
     }
 
+    pub(super) fn adapter(&self) -> &Arc<dyn AgentAdapter> {
+        self.binding.adapter()
+    }
+
+    pub(super) fn source_instance(&self) -> &Arc<SourceInstance> {
+        self.binding.source_instance()
+    }
+
     pub(super) fn descriptor(&self) -> &SourceObjectDescriptor {
         self.binding.descriptor()
     }
@@ -998,6 +1027,16 @@ impl ScopedObservationDirectoryMemberContent {
     pub(crate) fn descriptor_for_test(&self) -> &SourceObjectDescriptor {
         self.descriptor()
     }
+
+    #[cfg(test)]
+    pub(crate) fn adapter_for_test(&self) -> &Arc<dyn AgentAdapter> {
+        self.adapter()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_instance_for_test(&self) -> &Arc<SourceInstance> {
+        self.source_instance()
+    }
 }
 
 impl ScopedObservationDirectoryMemberBinding {
@@ -1007,6 +1046,14 @@ impl ScopedObservationDirectoryMemberBinding {
 
     pub(super) fn runtime_stream(&self) -> &StreamSpec {
         &self.runtime_stream
+    }
+
+    pub(super) fn adapter(&self) -> &Arc<dyn AgentAdapter> {
+        &self.adapter
+    }
+
+    pub(super) fn source_instance(&self) -> &Arc<SourceInstance> {
+        &self.source_instance
     }
 
     pub(super) fn descriptor(&self) -> &SourceObjectDescriptor {
@@ -1021,6 +1068,16 @@ impl ScopedObservationDirectoryMemberBinding {
     #[cfg(test)]
     pub(crate) fn descriptor_for_test(&self) -> &SourceObjectDescriptor {
         self.descriptor()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn adapter_for_test(&self) -> &Arc<dyn AgentAdapter> {
+        self.adapter()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_instance_for_test(&self) -> &Arc<SourceInstance> {
+        self.source_instance()
     }
 }
 
@@ -1318,7 +1375,8 @@ impl ScopedObservationAccessPass {
         };
         let binding = ScopedObservationRuntimeSourceBinding::bind(
             runtime,
-            self.source_instance.as_ref(),
+            Arc::clone(&self.adapter),
+            Arc::clone(&self.source_instance),
             approved_root,
             &self.root_identity.source_instance_key,
         )?;
@@ -1375,12 +1433,14 @@ impl ScopedObservationDirectoryListing {
 #[cfg(test)]
 pub(crate) fn bind_observation_runtime_source_for_test(
     runtime: AuthorizedObservationRuntimeStreamReservation,
-    instance: &SourceInstance,
+    adapter: Arc<dyn AgentAdapter>,
+    instance: Arc<SourceInstance>,
     approved_root: &ScopedAccessRootGrant,
     expected_source_instance_key: &CanonicalSourceInstanceKey,
 ) -> Result<ScopedObservationRuntimeSourceBinding, ScopedObservationRuntimeSourceError> {
     ScopedObservationRuntimeSourceBinding::bind(
         runtime,
+        adapter,
         instance,
         approved_root,
         expected_source_instance_key,
