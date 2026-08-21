@@ -2453,6 +2453,24 @@ is still only a relative path. There is no source-stream/decoder binding for
 these relations yet, and neither this seam nor the confined directory driver
 is called by an attachment.
 
+Commit `dde701b` adds that source-selection authority to the common declaration
+contract without attaching a source. An `observation_binding` names one exact
+stream plus one exact pattern from the digest-bound source declaration;
+`ChildDirectoryByNativeId` additionally carries a non-caller-controlled
+selector relative to its confined rendered locator. The locator template and
+selector must compose byte-for-byte to the declared source pattern, while a
+referenced-object locator must compose directly to its pattern. Placeholders
+must be unique declared identity inputs, and patterns are bounded canonical
+star-only relative paths. Cross-document verification also requires the same
+root, existing scoped topology, a complete object-revision or append-cursor
+lifecycle, and source record/object bounds within the relation byte budget. A
+Promoted dynamic relation cannot omit this binding; primitives whose execution
+law is still undefined cannot declare one. The already-landed promotion guard
+is exercised with an otherwise fully bound child relation and still rejects it
+before access. No current Candidate document was rebound, no adapter invokes a
+selector or source driver, no child receives an access token, and `9f9749b`
+remains closed.
+
 ### D3. Identity, control, and resync
 
 Implement:
