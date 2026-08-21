@@ -12,8 +12,9 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::adapter::{
-    CanonicalEntityKey, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
-    ExternalEntityRef, NativeIdentityClaim,
+    CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
+    CoverageObjectKey, CoverageStreamKey, ExternalEntityRef, NativeIdentityClaim, UserInputKind,
+    UserInputLifecycleState, UserInputQuestion,
 };
 use crate::observation_contract::unknown_wire::ObservationUnknownWireContractSelection;
 use crate::observation_contract::ObservationContractSelection;
@@ -39,10 +40,25 @@ use super::{
 pub(crate) const SCOPED_OBSERVATION_KNOWN_ENVELOPE_CONTRACT_VERSION: u32 = 1;
 pub(crate) const SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION: u32 = 1;
 
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct InteractionEnvelopeWire {
+    fact_family: &'static str,
+    fact_id: CanonicalFactId,
+    operation: &'static str,
+    native_tool_use_id: String,
+    kind: UserInputKind,
+    state: UserInputLifecycleState,
+    completeness: ContractCompleteness,
+    result_reference: Option<String>,
+    questions: Vec<UserInputQuestion>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopedObservationKnownEventFamily {
     Usage,
     Actor,
+    Interaction,
     Source,
     ArtifactAvailability,
     Completion,
@@ -54,6 +70,7 @@ impl ScopedObservationKnownEventFamily {
         match self {
             Self::Usage => "usage",
             Self::Actor => "actor",
+            Self::Interaction => "interaction",
             Self::Source => "source",
             Self::ArtifactAvailability => "artifact_availability",
             Self::Completion => "completion",
@@ -175,6 +192,32 @@ impl ScopedObservationKnownEnvelope {
                         ScopedActorEnvelopeWire::from_scoped(envelope)
                             .map_err(|_| ScopedEnvelopeError::DeliveryMismatch)?,
                     )?,
+                    common_context()?,
+                )
+            }
+            ScopedObservationEvent::UserInputRequest {
+                fact_id,
+                operation,
+                revision,
+                ..
+            } => {
+                require_no_specialized_contexts(&contexts)?;
+                (
+                    ScopedObservationKnownEventFamily::Interaction,
+                    serialize_wire(InteractionEnvelopeWire {
+                        fact_family: "runtime.user-input-request",
+                        fact_id: *fact_id,
+                        operation: match operation {
+                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
+                            super::ScopedRevisionedEntityOperation::Retract => "retract",
+                        },
+                        native_tool_use_id: revision.native_tool_use_id.clone(),
+                        kind: revision.kind,
+                        state: revision.state,
+                        completeness: revision.completeness,
+                        result_reference: revision.result_reference.clone(),
+                        questions: revision.questions.clone(),
+                    })?,
                     common_context()?,
                 )
             }

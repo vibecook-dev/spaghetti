@@ -38,8 +38,10 @@ pub use facts::{
     TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact,
     TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage, UsageAccounting,
     UsageBucketsV2, UsageFact, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
-    UsageScope, UsageValueAuthority, UsageValueProvenance, ValueQuality, WorkflowMemberEventFact,
-    WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
+    UsageScope, UsageValueAuthority, UsageValueProvenance, UserInputKind, UserInputLifecycleState,
+    UserInputOperation, UserInputOption, UserInputQuestion, UserInputRequestRevisionFact,
+    ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
+    WorkflowStatus,
 };
 #[cfg(test)]
 pub(crate) use registry::tests::{

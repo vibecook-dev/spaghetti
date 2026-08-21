@@ -22,6 +22,8 @@ import {
   ACTOR_RUN_FAMILY_VERSION,
   USAGE_V2_FAMILY,
   USAGE_V2_FAMILY_VERSION,
+  USER_INPUT_FAMILY,
+  USER_INPUT_FAMILY_VERSION,
 } from './rfc012c.js';
 import { parseObservationContractSelectionForExpected, type ObservationContractSelection } from './rfc012d.js';
 
@@ -29,10 +31,13 @@ export const SCOPED_REPLACEMENT_MANIFEST_CONTRACT_VERSION = 1 as const;
 export const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION = 1 as const;
 
 const MAX_CONTEXT_COVERAGE_SETS = 64;
-const MAX_MANIFEST_FAMILIES = 3;
+const MAX_MANIFEST_FAMILIES = 4;
 type UnknownRecord = Record<string, unknown>;
 
-export type ScopedReplacementRepresentation = 'revisioned_entity_current' | 'usage_latest_contribution_per_response';
+export type ScopedReplacementRepresentation =
+  | 'revisioned_entity_current'
+  | 'usage_latest_contribution_per_response'
+  | 'correlated_lifecycle_current';
 
 export interface ScopedReplacementFamilyManifest {
   fact_family: string;
@@ -143,6 +148,12 @@ function familyContract(family: unknown): {
         family,
         version: USAGE_V2_FAMILY_VERSION,
         representation: 'usage_latest_contribution_per_response',
+      };
+    case USER_INPUT_FAMILY:
+      return {
+        family,
+        version: USER_INPUT_FAMILY_VERSION,
+        representation: 'correlated_lifecycle_current',
       };
     default:
       throw new ContractValidationError('replacement manifest contains an unsupported family');

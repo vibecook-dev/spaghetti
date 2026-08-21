@@ -23,6 +23,8 @@ const JS_SAFE_INTEGER_MAX_U64: u64 = 9_007_199_254_740_991;
 const JS_SAFE_INTEGER_MAX_I64: i64 = 9_007_199_254_740_991;
 const MAX_RUNTIME_SEMANTIC_TEXT_BYTES: usize = 8 * 1024;
 const MAX_CANONICAL_ARTIFACTS_PER_FACT: usize = 4 * 1024;
+const MAX_USER_INPUT_QUESTIONS: usize = 32;
+const MAX_USER_INPUT_OPTIONS: usize = 32;
 
 mod base64_bytes {
     use base64::engine::general_purpose::STANDARD;
@@ -722,6 +724,173 @@ impl ActorAffiliationRevisionFact {
             }
             None => encoded.push(0),
         }
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
+/// RFC 012C structured user-input request. One correlated lifecycle entity
+/// identified by native tool-use id; questions are typed rather than native
+/// payload fragments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInputKind {
+    Choice,
+    MultiChoice,
+    FreeText,
+    Mixed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInputLifecycleState {
+    #[serde(alias = "open")]
+    Pending,
+    Resolved,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserInputOperation {
+    Upsert,
+    Retract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserInputOption {
+    pub label: String,
+    pub description: Option<String>,
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserInputQuestion {
+    pub header: Option<String>,
+    pub prompt: String,
+    pub options: Vec<UserInputOption>,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserInputRequestRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub native_tool_use_id: String,
+    pub kind: UserInputKind,
+    pub questions: Vec<UserInputQuestion>,
+    pub state: UserInputLifecycleState,
+    pub operation: UserInputOperation,
+    pub completeness: ContractCompleteness,
+    pub result_reference: Option<String>,
+}
+
+impl UserInputRequestRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        if self.native_tool_use_id.is_empty()
+            || self.native_tool_use_id.len() > MAX_RUNTIME_SEMANTIC_TEXT_BYTES
+            || self.native_tool_use_id.trim() != self.native_tool_use_id
+        {
+            return Err(AdapterError::invalid_contract(
+                "user-input native_tool_use_id must be canonical bounded text",
+            ));
+        }
+        if self.questions.is_empty() || self.questions.len() > MAX_USER_INPUT_QUESTIONS {
+            return Err(AdapterError::invalid_contract(format!(
+                "user-input questions must contain 1..={MAX_USER_INPUT_QUESTIONS} typed questions"
+            )));
+        }
+        for question in &self.questions {
+            validate_runtime_semantic_text("question header", question.header.as_deref())?;
+            validate_runtime_semantic_text("question prompt", Some(question.prompt.as_str()))?;
+            if question.prompt.is_empty() {
+                return Err(AdapterError::invalid_contract(
+                    "user-input question prompt must not be empty",
+                ));
+            }
+            if question.options.len() > MAX_USER_INPUT_OPTIONS {
+                return Err(AdapterError::invalid_contract(format!(
+                    "user-input question options exceed {MAX_USER_INPUT_OPTIONS}"
+                )));
+            }
+            for option in &question.options {
+                validate_runtime_semantic_text("option label", Some(option.label.as_str()))?;
+                if option.label.is_empty() {
+                    return Err(AdapterError::invalid_contract(
+                        "user-input option label must not be empty",
+                    ));
+                }
+                validate_runtime_semantic_text(
+                    "option description",
+                    option.description.as_deref(),
+                )?;
+                validate_runtime_semantic_text("option preview", option.preview.as_deref())?;
+            }
+        }
+        if self.state == UserInputLifecycleState::Pending && self.result_reference.is_some() {
+            return Err(AdapterError::invalid_contract(
+                "pending user-input cannot carry a result_reference",
+            ));
+        }
+        if self.state == UserInputLifecycleState::Resolved && self.result_reference.is_none() {
+            return Err(AdapterError::invalid_contract(
+                "resolved user-input requires a typed result_reference",
+            ));
+        }
+        validate_runtime_semantic_text("result_reference", self.result_reference.as_deref())?;
+        Ok(())
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.user-input-request/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.native_tool_use_id.as_bytes());
+        encoded.push(match self.kind {
+            UserInputKind::Choice => 1,
+            UserInputKind::MultiChoice => 2,
+            UserInputKind::FreeText => 3,
+            UserInputKind::Mixed => 4,
+        });
+        encoded.extend_from_slice(&(self.questions.len() as u64).to_be_bytes());
+        for question in &self.questions {
+            push_optional_component(&mut encoded, question.header.as_deref().map(str::as_bytes));
+            push_component(&mut encoded, question.prompt.as_bytes());
+            encoded.push(u8::from(question.multi_select));
+            encoded.extend_from_slice(&(question.options.len() as u64).to_be_bytes());
+            for option in &question.options {
+                push_component(&mut encoded, option.label.as_bytes());
+                push_optional_component(
+                    &mut encoded,
+                    option.description.as_deref().map(str::as_bytes),
+                );
+                push_optional_component(&mut encoded, option.preview.as_deref().map(str::as_bytes));
+            }
+        }
+        encoded.push(match self.state {
+            UserInputLifecycleState::Pending => 1,
+            UserInputLifecycleState::Resolved => 2,
+            UserInputLifecycleState::Failed => 3,
+            UserInputLifecycleState::Cancelled => 4,
+        });
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        push_optional_component(
+            &mut encoded,
+            self.result_reference.as_deref().map(str::as_bytes),
+        );
         Ok(*blake3::hash(&encoded).as_bytes())
     }
 }
@@ -1654,6 +1823,7 @@ pub enum Fact {
     Run(RunFact),
     ActorRunRevision(ActorRunRevisionFact),
     ActorAffiliationRevision(ActorAffiliationRevisionFact),
+    UserInputRequestRevision(UserInputRequestRevisionFact),
     Delegation(DelegationFact),
     DelegationMetadata(DelegationMetadataFact),
     DelegationSpawn(DelegationSpawnFact),
@@ -1688,6 +1858,7 @@ impl Fact {
             Self::Run(_) => "run",
             Self::ActorRunRevision(_) => "runtime.actor-run",
             Self::ActorAffiliationRevision(_) => "runtime.actor-affiliation",
+            Self::UserInputRequestRevision(_) => "runtime.user-input-request",
             Self::Delegation(_) => "delegation",
             Self::DelegationMetadata(_) => "delegation_metadata",
             Self::DelegationSpawn(_) => "delegation_spawn",
@@ -1716,7 +1887,9 @@ impl Fact {
             Self::InterpretationSettings(fact) => Some(&fact.document),
             Self::Message(fact) => Some(&fact.message),
             Self::Run(fact) => Some(&fact.run),
-            Self::ActorRunRevision(_) | Self::ActorAffiliationRevision(_) => None,
+            Self::ActorRunRevision(_)
+            | Self::ActorAffiliationRevision(_)
+            | Self::UserInputRequestRevision(_) => None,
             Self::Delegation(fact) => Some(&fact.child_run),
             Self::DelegationMetadata(fact) => Some(&fact.child_run),
             Self::DelegationSpawn(fact) => Some(&fact.spawn),
@@ -1742,6 +1915,7 @@ impl Fact {
         match self {
             Self::ActorRunRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ActorAffiliationRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::UserInputRequestRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ArtifactMetadataSnapshot(revision) => revision.semantic_revision_key(),
             Self::ArtifactContent(revision) => revision.semantic_revision_key(),
             _ => Ok(None),
@@ -2295,6 +2469,10 @@ impl FactBatch {
                             | (
                                 Fact::ActorAffiliationRevision(_),
                                 Fact::ActorAffiliationRevision(_)
+                            )
+                            | (
+                                Fact::UserInputRequestRevision(_),
+                                Fact::UserInputRequestRevision(_)
                             )
                             | (
                                 Fact::ArtifactMetadataSnapshot(_),

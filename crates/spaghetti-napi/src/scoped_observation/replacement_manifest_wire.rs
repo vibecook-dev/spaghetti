@@ -18,7 +18,8 @@ use super::{
     selected_replacement_coverage_completeness, ScopedReplacementFamilyManifest,
     ScopedReplacementRepresentation, RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
     RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION, RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
-    SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES, SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
+    RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION, SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
+    SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
 };
 
 pub(crate) const SCOPED_REPLACEMENT_MANIFEST_CONTRACT_VERSION: u32 = 1;
@@ -51,6 +52,7 @@ impl ScopedReplacementManifestContractError {
 enum ScopedReplacementRepresentationWire {
     RevisionedEntityCurrent,
     UsageLatestContributionPerResponse,
+    CorrelatedLifecycleCurrent,
 }
 
 impl From<ScopedReplacementRepresentation> for ScopedReplacementRepresentationWire {
@@ -61,6 +63,9 @@ impl From<ScopedReplacementRepresentation> for ScopedReplacementRepresentationWi
             }
             ScopedReplacementRepresentation::UsageLatestContributionPerResponse => {
                 Self::UsageLatestContributionPerResponse
+            }
+            ScopedReplacementRepresentation::CorrelatedLifecycleCurrent => {
+                Self::CorrelatedLifecycleCurrent
             }
         }
     }
@@ -340,6 +345,10 @@ fn family_contract(
         "runtime.usage-v2" => Ok((
             RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
             ScopedReplacementRepresentationWire::UsageLatestContributionPerResponse,
+        )),
+        "runtime.user-input-request" => Ok((
+            RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION,
+            ScopedReplacementRepresentationWire::CorrelatedLifecycleCurrent,
         )),
         _ => Err(ScopedReplacementManifestContractError::invalid(
             "replacement manifest contains an unsupported family",

@@ -27,7 +27,8 @@ use crate::adapter::{
     SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
     SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
     SourceRows, SourceSnapshot, SupportOperation, TimestampQuality, TypedAccessAuthorization,
-    UsageRevisionV2Fact, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState, UserInputOperation,
+    UserInputQuestion, UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -1985,6 +1986,7 @@ pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 // coverage, and barrier identity are now executable.
 const RUNTIME_ACTOR_RUN_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 const RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
+const RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_INITIAL_SCOPE_EPOCH: u64 = 1;
 const SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES: &[(&str, u32)] = &[
     (
@@ -1998,6 +2000,10 @@ const SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES: &[(&str, u32)] = &[
     (
         "runtime.usage-v2",
         RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
+    ),
+    (
+        "runtime.user-input-request",
+        RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION,
     ),
 ];
 
@@ -2329,6 +2335,21 @@ pub struct ScopedActorAffiliationEvent {
     pub revision: ActorAffiliationRevisionFact,
 }
 
+/// Selected internal user-input-request revision event. Replacement freezes
+/// current correlated-lifecycle entities; occurrence identity stays event_id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedUserInputRequestEvent {
+    pub event_id: ScopedObservationEventId,
+    pub semantic_revision_ref: SemanticRevisionRef,
+    pub fact_id: CanonicalFactId,
+    pub operation: ScopedRevisionedEntityOperation,
+    pub phase: ScopedAppendDeliveryPhase,
+    pub observed_at: i64,
+    pub source: ScopedUsageV2Source,
+    pub retraction: Option<ScopedRevisionedEntityRetractionCause>,
+    pub revision: UserInputRequestRevisionFact,
+}
+
 /// Family-level replacement primitive used by clean bootstrap and future
 /// resync staging. Coverage/completeness remain barrier-owned; this value
 /// proves only the complete current reducer state known to this sink.
@@ -2431,10 +2452,48 @@ impl std::fmt::Debug for ScopedActorAffiliationReplacementSnapshot {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedUserInputReplacementEntity {
+    semantic: FactSemanticRevision,
+    generation: u64,
+    source: ScopedUsageV2Source,
+    revision: UserInputRequestRevisionFact,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedUserInputReplacementSnapshot {
+    fact_family_contract_version: u32,
+    replacement_digest_contract_version: u32,
+    phase: ScopedAppendDeliveryPhase,
+    entity_count: u64,
+    semantic_digest: ScopedReplacementSemanticDigest,
+    entities: Vec<ScopedUserInputReplacementEntity>,
+}
+
+impl std::fmt::Debug for ScopedUserInputReplacementSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedUserInputReplacementSnapshot")
+            .field(
+                "fact_family_contract_version",
+                &self.fact_family_contract_version,
+            )
+            .field(
+                "replacement_digest_contract_version",
+                &self.replacement_digest_contract_version,
+            )
+            .field("phase", &self.phase)
+            .field("entity_count", &self.entity_count)
+            .field("semantic_digest", &self.semantic_digest)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ScopedReplacementRepresentation {
     RevisionedEntityCurrent,
     UsageLatestContributionPerResponse,
+    CorrelatedLifecycleCurrent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2616,6 +2675,10 @@ pub enum ScopedProjectedObservation {
         lane_ordinal: u64,
         event: Box<ScopedActorAffiliationEvent>,
     },
+    UserInputRequest {
+        lane_ordinal: u64,
+        event: Box<ScopedUserInputRequestEvent>,
+    },
     ArtifactAvailability {
         observed_at: i64,
         phase: ScopedAppendDeliveryPhase,
@@ -2666,6 +2729,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => event.event_id,
             Self::ActorRun { event, .. } => event.event_id,
             Self::ActorAffiliation { event, .. } => event.event_id,
+            Self::UserInputRequest { event, .. } => event.event_id,
             Self::ArtifactAvailability { event_id, .. } => *event_id,
             Self::UnknownWire { event } => event.prepared.event_id,
             Self::ObserverBootstrapComplete { event_id, .. } => *event_id,
@@ -2681,6 +2745,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => Some(event.semantic_revision_ref),
             Self::ActorRun { event, .. } => Some(event.semantic_revision_ref),
             Self::ActorAffiliation { event, .. } => Some(event.semantic_revision_ref),
+            Self::UserInputRequest { event, .. } => Some(event.semantic_revision_ref),
             Self::ArtifactAvailability { .. } => None,
             Self::UnknownWire { event } => event.prepared.semantic_revision_ref,
             Self::SourcePresence { .. }
@@ -2701,6 +2766,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => event.phase,
             Self::ActorRun { event, .. } => event.phase,
             Self::ActorAffiliation { event, .. } => event.phase,
+            Self::UserInputRequest { event, .. } => event.phase,
             Self::ArtifactAvailability { phase, .. } => *phase,
             Self::UnknownWire { event } => event.prepared.phase,
             Self::ObserverBootstrapComplete { .. } => ScopedAppendDeliveryPhase::Bootstrap,
@@ -2719,6 +2785,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => &event.source.object,
             Self::ActorRun { event, .. } => &event.source.object,
             Self::ActorAffiliation { event, .. } => &event.source.object,
+            Self::UserInputRequest { event, .. } => &event.source.object,
             Self::ArtifactAvailability { occurrence, .. } => occurrence.source(),
             Self::UnknownWire { event } => &event.prepared.source,
             Self::ObserverBootstrapComplete { source, .. } => source,
@@ -2738,6 +2805,7 @@ impl ScopedProjectedObservation {
             Self::UsageV2 { event, .. } => event.observed_at,
             Self::ActorRun { event, .. } => event.observed_at,
             Self::ActorAffiliation { event, .. } => event.observed_at,
+            Self::UserInputRequest { event, .. } => event.observed_at,
             Self::ArtifactAvailability { observed_at, .. } => *observed_at,
             Self::UnknownWire { event } => event.prepared.observed_at,
             Self::ObserverBootstrapComplete { observed_at, .. } => *observed_at,
@@ -2962,6 +3030,12 @@ pub enum ScopedObservationEvent {
         operation: ScopedRevisionedEntityOperation,
         retraction: Option<ScopedRevisionedEntityRetractionCause>,
         revision: Box<ActorAffiliationRevisionFact>,
+    },
+    UserInputRequest {
+        fact_id: CanonicalFactId,
+        operation: ScopedRevisionedEntityOperation,
+        retraction: Option<ScopedRevisionedEntityRetractionCause>,
+        revision: Box<UserInputRequestRevisionFact>,
     },
     ArtifactAvailability {
         entry: ScopedArtifactAvailabilityEntry,
@@ -3978,6 +4052,7 @@ impl ScopedObservationConsumerDrain {
             | ScopedObservationEvent::UsageV2 { .. }
             | ScopedObservationEvent::ActorRun { .. }
             | ScopedObservationEvent::ActorAffiliation { .. }
+            | ScopedObservationEvent::UserInputRequest { .. }
             | ScopedObservationEvent::ArtifactAvailability { .. }
             | ScopedObservationEvent::UnknownWire { .. }
             | ScopedObservationEvent::ObserverResyncRequired { .. }
@@ -8458,6 +8533,67 @@ impl ScopedObservationEnvelopeMapper {
                     },
                 }
             }
+            ScopedProjectedObservation::UserInputRequest { event, .. } => {
+                if self
+                    .contract_selection
+                    .contract_versions
+                    .fact_family_versions
+                    .get("runtime.user-input-request")
+                    != Some(&RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION)
+                {
+                    return Err(ScopedEnvelopeError::EventFamilyNotSelected);
+                }
+                if semantic_revision_ref != Some(event.semantic_revision_ref)
+                    || event
+                        .semantic_revision_ref
+                        .semantic_reference_contract_version
+                        != self
+                            .contract_selection
+                            .contract_versions
+                            .semantic_revision_reference_version
+                    || event.revision.session != self.root.session_key
+                    || (event.operation == ScopedRevisionedEntityOperation::Upsert
+                        && event.retraction.is_some())
+                {
+                    return Err(ScopedEnvelopeError::DeliveryMismatch);
+                }
+                let source = scoped_usage_envelope_source(&event.source)?;
+                let (authority, quality) = match event.operation {
+                    ScopedRevisionedEntityOperation::Upsert => (
+                        ScopedEnvelopeEvidenceAuthority::NativeRecord,
+                        QualifiedValueQuality::Exact,
+                    ),
+                    ScopedRevisionedEntityOperation::Retract => (
+                        ScopedEnvelopeEvidenceAuthority::CommonReducer,
+                        QualifiedValueQuality::Derived,
+                    ),
+                };
+                ScopedMappedEnvelopeParts {
+                    actor_run_key: event.revision.actor_run,
+                    actor_attribution: ScopedActorAttribution::DerivedExact,
+                    source,
+                    native_time: None,
+                    observed_at: event.observed_at,
+                    evidence: ScopedEnvelopeEvidence {
+                        authority,
+                        quality,
+                        effective_at: None,
+                        completeness: event.revision.completeness,
+                    },
+                    event: ScopedObservationEvent::UserInputRequest {
+                        fact_id: event.fact_id,
+                        operation: event.operation,
+                        retraction: event.retraction,
+                        revision: Box::new(event.revision),
+                    },
+                    native_evidence: ScopedNativeEvidence::Withheld {
+                        media_type: event.source.media_type,
+                        state: event.source.state,
+                        payload_hash: event.source.payload_hash,
+                        reason: ScopedNativeEvidenceWithheldReason::ProjectionBoundary,
+                    },
+                }
+            }
             ScopedProjectedObservation::ObserverBootstrapComplete {
                 observed_at,
                 barrier,
@@ -10251,6 +10387,7 @@ fn projected_observation_measurement(value: &ScopedProjectedObservation) -> (boo
         ScopedProjectedObservation::UsageV2 { .. }
         | ScopedProjectedObservation::ActorRun { .. }
         | ScopedProjectedObservation::ActorAffiliation { .. }
+        | ScopedProjectedObservation::UserInputRequest { .. }
         | ScopedProjectedObservation::ArtifactAvailability { .. } => (true, 0),
         ScopedProjectedObservation::UnknownWire { event } => {
             (true, event.prepared.payload.encoded_bytes())
@@ -10286,6 +10423,8 @@ pub enum ScopedProjectionError {
     ActorRunCapacityFull,
     #[error("scoped actor-affiliation projection entity capacity is full")]
     ActorAffiliationCapacityFull,
+    #[error("scoped user-input-request projection entity capacity is full")]
+    UserInputCapacityFull,
     #[error("scoped artifact evidence capacity is full")]
     ArtifactEvidenceCapacityFull,
     #[error("scoped usage-v2 fact is missing its canonical semantic revision")]
@@ -10326,6 +10465,7 @@ struct ScopedProjectionFamilies {
     actor_run: bool,
     actor_affiliation: bool,
     usage_v2: bool,
+    user_input_request: bool,
 }
 
 impl ScopedProjectionFamilies {
@@ -10334,6 +10474,7 @@ impl ScopedProjectionFamilies {
             actor_run: false,
             actor_affiliation: false,
             usage_v2: true,
+            user_input_request: false,
         }
     }
 
@@ -10358,6 +10499,8 @@ impl ScopedProjectionFamilies {
                 == Some(&RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION),
             usage_v2: versions.get("runtime.usage-v2")
                 == Some(&RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION),
+            user_input_request: versions.get("runtime.user-input-request")
+                == Some(&RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION),
         })
     }
 
@@ -10377,6 +10520,10 @@ impl ScopedProjectionFamilies {
                 }
                 "runtime.usage-v2" => {
                     self.usage_v2 && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION
+                }
+                "runtime.user-input-request" => {
+                    self.user_input_request
+                        && *version == RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION
                 }
                 _ => false,
             },
@@ -10410,6 +10557,15 @@ struct ScopedActorAffiliationProjectionState {
     semantic: FactSemanticRevision,
     source: ScopedUsageV2Source,
     revision: ActorAffiliationRevisionFact,
+}
+
+#[derive(Clone)]
+struct ScopedUserInputProjectionState {
+    object_token: u64,
+    generation: u64,
+    semantic: FactSemanticRevision,
+    source: ScopedUsageV2Source,
+    revision: UserInputRequestRevisionFact,
 }
 
 const SCOPED_ACTOR_AFFILIATION_CONTEXT_MAX_REVISIONS: usize = 64;
@@ -10454,6 +10610,8 @@ struct ScopedProjectionMutation {
     actor_retractions: Vec<CanonicalEntityKey>,
     affiliation_upserts: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
     affiliation_retractions: Vec<CanonicalEntityKey>,
+    user_input_upserts: BTreeMap<CanonicalFactId, ScopedUserInputProjectionState>,
+    user_input_retractions: Vec<CanonicalFactId>,
     artifact_evidence: artifact_evidence::ScopedArtifactEvidenceMutation,
 }
 
@@ -10484,6 +10642,7 @@ pub struct ScopedObservationProjectionSink {
     usage_v2: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
     actor_runs: BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
     actor_affiliations: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
+    user_input_requests: BTreeMap<CanonicalFactId, ScopedUserInputProjectionState>,
     artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer,
 }
 
@@ -10530,6 +10689,7 @@ impl ScopedObservationProjectionSink {
             usage_v2: BTreeMap::new(),
             actor_runs: BTreeMap::new(),
             actor_affiliations: BTreeMap::new(),
+            user_input_requests: BTreeMap::new(),
             artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer::new(root_session),
         })
     }
@@ -10623,9 +10783,17 @@ impl ScopedObservationProjectionSink {
                 "prepared actor-affiliation retraction must exist"
             );
         }
+        for fact_id in mutation.user_input_retractions {
+            let removed = self.user_input_requests.remove(&fact_id);
+            debug_assert!(
+                removed.is_some(),
+                "prepared user-input retraction must exist"
+            );
+        }
         self.usage_v2.extend(mutation.usage_upserts);
         self.actor_runs.extend(mutation.actor_upserts);
         self.actor_affiliations.extend(mutation.affiliation_upserts);
+        self.user_input_requests.extend(mutation.user_input_upserts);
     }
 
     fn validate_replacement_object_rollback(
@@ -10649,6 +10817,8 @@ impl ScopedObservationProjectionSink {
         self.actor_runs
             .retain(|_, state| state.object_token != object_token);
         self.actor_affiliations
+            .retain(|_, state| state.object_token != object_token);
+        self.user_input_requests
             .retain(|_, state| state.object_token != object_token);
     }
 
@@ -10812,6 +10982,36 @@ impl ScopedObservationProjectionSink {
         })
     }
 
+    fn user_input_replacement_snapshot(
+        &self,
+        phase: ScopedAppendDeliveryPhase,
+    ) -> Result<ScopedUserInputReplacementSnapshot, ScopedProjectionError> {
+        if phase == ScopedAppendDeliveryPhase::Live {
+            return Err(ScopedProjectionError::InvalidReplacementPhase);
+        }
+        let entities = self
+            .user_input_requests
+            .values()
+            .map(|state| ScopedUserInputReplacementEntity {
+                semantic: state.semantic,
+                generation: state.generation,
+                source: state.source.clone(),
+                revision: state.revision.clone(),
+            })
+            .collect::<Vec<_>>();
+        let entity_count = u64::try_from(entities.len())
+            .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+        let semantic_digest = user_input_replacement_digest(&entities)?;
+        Ok(ScopedUserInputReplacementSnapshot {
+            fact_family_contract_version: RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION,
+            replacement_digest_contract_version: SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION,
+            phase,
+            entity_count,
+            semantic_digest,
+            entities,
+        })
+    }
+
     fn prepare_reset(
         &self,
         object_token: u64,
@@ -10848,10 +11048,22 @@ impl ScopedObservationProjectionSink {
             reset.old_generation,
             ScopedProjectionError::InvalidResetState,
         )?;
+        let (user_input_projected, user_input_retractions) = self.prepare_user_input_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedRetractionDelivery {
+                lane_ordinal,
+                observed_at,
+                phase: ScopedAppendDeliveryPhase::Correction,
+            },
+            ScopedRevisionedEntityRetractionCause::Reset(reset),
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
                 .saturating_add(context_retractions.projected.len())
+                .saturating_add(user_input_projected.len())
                 .saturating_add(1),
         );
         projected.push(ScopedProjectedObservation::SourceReset {
@@ -10865,12 +11077,14 @@ impl ScopedObservationProjectionSink {
         });
         projected.extend(retracted);
         projected.extend(context_retractions.projected);
+        projected.extend(user_input_projected);
         Ok(ScopedProjectionPlan {
             projected,
             mutation: ScopedProjectionMutation {
                 usage_retractions: fact_ids,
                 actor_retractions: context_retractions.actors,
                 affiliation_retractions: context_retractions.affiliations,
+                user_input_retractions,
                 artifact_evidence,
                 ..ScopedProjectionMutation::default()
             },
@@ -10898,6 +11112,10 @@ impl ScopedObservationProjectionSink {
                         .any(|state| state.object_token == object_token)
                     || self
                         .actor_affiliations
+                        .values()
+                        .any(|state| state.object_token == object_token)
+                    || self
+                        .user_input_requests
                         .values()
                         .any(|state| state.object_token == object_token)
                     || self.artifact_evidence.has_object(object_token)
@@ -10950,10 +11168,26 @@ impl ScopedObservationProjectionSink {
                 )?
             }
         };
+        let (user_input_projected, user_input_retractions) = match change {
+            ScopedAppendPresenceChange::Created { .. } => (Vec::new(), Vec::new()),
+            ScopedAppendPresenceChange::Deleted { generation } => self
+                .prepare_user_input_retractions(
+                    object_token,
+                    generation,
+                    ScopedRetractionDelivery {
+                        lane_ordinal,
+                        observed_at,
+                        phase,
+                    },
+                    ScopedRevisionedEntityRetractionCause::SourceDeleted { generation },
+                    ScopedProjectionError::InvalidPresenceState,
+                )?,
+        };
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
                 .saturating_add(context_retractions.projected.len())
+                .saturating_add(user_input_projected.len())
                 .saturating_add(1),
         );
         projected.push(ScopedProjectedObservation::SourcePresence {
@@ -10967,12 +11201,14 @@ impl ScopedObservationProjectionSink {
         });
         projected.extend(retracted);
         projected.extend(context_retractions.projected);
+        projected.extend(user_input_projected);
         Ok(ScopedProjectionPlan {
             projected,
             mutation: ScopedProjectionMutation {
                 usage_retractions: fact_ids,
                 actor_retractions: context_retractions.actors,
                 affiliation_retractions: context_retractions.affiliations,
+                user_input_retractions,
                 artifact_evidence,
                 ..ScopedProjectionMutation::default()
             },
@@ -11153,6 +11389,61 @@ impl ScopedObservationProjectionSink {
         Ok((projected, fact_ids))
     }
 
+    fn prepare_user_input_retractions(
+        &self,
+        object_token: u64,
+        generation: u64,
+        delivery: ScopedRetractionDelivery,
+        cause: ScopedRevisionedEntityRetractionCause,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<(Vec<ScopedProjectedObservation>, Vec<CanonicalFactId>), ScopedProjectionError>
+    {
+        if self
+            .user_input_requests
+            .values()
+            .any(|state| state.object_token == object_token && state.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        let fact_ids = self
+            .user_input_requests
+            .iter()
+            .filter_map(|(fact_id, state)| {
+                (state.object_token == object_token && state.generation == generation)
+                    .then_some(*fact_id)
+            })
+            .collect::<Vec<_>>();
+        let mut projected = Vec::with_capacity(fact_ids.len());
+        if self.families.user_input_request {
+            for fact_id in &fact_ids {
+                let state = self
+                    .user_input_requests
+                    .get(fact_id)
+                    .expect("retraction keys came from the same user-input reducer map");
+                projected.push(ScopedProjectedObservation::UserInputRequest {
+                    lane_ordinal: delivery.lane_ordinal,
+                    event: Box::new(ScopedUserInputRequestEvent {
+                        event_id: revisioned_entity_event_id(
+                            b"runtime.user-input-request",
+                            ScopedRevisionedEntityOperation::Retract,
+                            &state.semantic,
+                            Some(cause),
+                        ),
+                        semantic_revision_ref: state.semantic.semantic_revision_ref,
+                        fact_id: state.semantic.fact_id,
+                        operation: ScopedRevisionedEntityOperation::Retract,
+                        phase: delivery.phase,
+                        observed_at: delivery.observed_at,
+                        source: state.source.clone(),
+                        retraction: Some(cause),
+                        revision: state.revision.clone(),
+                    }),
+                });
+            }
+        }
+        Ok((projected, fact_ids))
+    }
+
     fn prepare_decoded(
         &self,
         object_token: u64,
@@ -11172,6 +11463,7 @@ impl ScopedObservationProjectionSink {
         };
 
         let mut mutation = ScopedProjectionMutation::default();
+        let mut user_input_events = Vec::new();
         for envelope in batch.facts() {
             match &envelope.value {
                 Fact::ActorRunRevision(revision) => {
@@ -11241,6 +11533,89 @@ impl ScopedObservationProjectionSink {
                     }
                     mutation.affiliation_upserts.insert(key, state);
                 }
+                Fact::UserInputRequestRevision(revision) => {
+                    let mut state = scoped_user_input_state(
+                        object_token,
+                        source,
+                        evidence,
+                        envelope,
+                        revision,
+                    )?;
+                    let key = state.semantic.fact_id;
+                    let current = mutation
+                        .user_input_upserts
+                        .get(&key)
+                        .or_else(|| self.user_input_requests.get(&key));
+                    if let Some(current) = current {
+                        validate_actor_revision_progress(
+                            (
+                                current.object_token,
+                                current.generation,
+                                &current.semantic,
+                                &current.source,
+                                &current.revision,
+                            ),
+                            (
+                                state.object_token,
+                                state.generation,
+                                &state.semantic,
+                                &state.source,
+                                &state.revision,
+                            ),
+                        )?;
+                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
+                            continue;
+                        }
+                        if state.revision.operation == UserInputOperation::Retract
+                            && state.revision.completeness != ContractCompleteness::Complete
+                        {
+                            continue;
+                        }
+                        if state.revision.completeness == ContractCompleteness::Partial
+                            && state.revision.operation == UserInputOperation::Upsert
+                        {
+                            state.revision.questions = merge_user_input_questions(
+                                &current.revision.questions,
+                                &state.revision.questions,
+                            );
+                        }
+                    } else if state.revision.operation == UserInputOperation::Retract {
+                        if state.revision.completeness != ContractCompleteness::Complete {
+                            continue;
+                        }
+                    }
+                    if state.revision.operation == UserInputOperation::Retract {
+                        if self.user_input_requests.contains_key(&key)
+                            && !mutation.user_input_upserts.contains_key(&key)
+                        {
+                            mutation.user_input_retractions.push(key);
+                        }
+                        mutation.user_input_upserts.remove(&key);
+                        if self.families.user_input_request {
+                            user_input_events.push(ScopedProjectedObservation::UserInputRequest {
+                                lane_ordinal,
+                                event: Box::new(ScopedUserInputRequestEvent {
+                                    event_id: revisioned_entity_event_id(
+                                        b"runtime.user-input-request",
+                                        ScopedRevisionedEntityOperation::Retract,
+                                        &state.semantic,
+                                        None,
+                                    ),
+                                    semantic_revision_ref: state.semantic.semantic_revision_ref,
+                                    fact_id: state.semantic.fact_id,
+                                    operation: ScopedRevisionedEntityOperation::Retract,
+                                    phase,
+                                    observed_at: state.source.provenance.observed_at,
+                                    source: state.source.clone(),
+                                    retraction: None,
+                                    revision: state.revision.clone(),
+                                }),
+                            });
+                        }
+                        continue;
+                    }
+                    mutation.user_input_upserts.insert(key, state);
+                }
                 Fact::ArtifactMetadataSnapshot(fact) => {
                     self.artifact_evidence.prepare_metadata(
                         &mut mutation.artifact_evidence,
@@ -11279,6 +11654,19 @@ impl ScopedObservationProjectionSink {
             .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::ActorAffiliationCapacityFull);
+        }
+        let new_user_inputs = mutation
+            .user_input_upserts
+            .keys()
+            .filter(|fact_id| !self.user_input_requests.contains_key(fact_id))
+            .count();
+        if self
+            .user_input_requests
+            .len()
+            .checked_add(new_user_inputs)
+            .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        {
+            return Err(ScopedProjectionError::UserInputCapacityFull);
         }
 
         let actor_contexts =
@@ -11350,6 +11738,30 @@ impl ScopedObservationProjectionSink {
                 });
             }
         }
+        if self.families.user_input_request {
+            for state in mutation.user_input_upserts.values() {
+                projected.push(ScopedProjectedObservation::UserInputRequest {
+                    lane_ordinal,
+                    event: Box::new(ScopedUserInputRequestEvent {
+                        event_id: revisioned_entity_event_id(
+                            b"runtime.user-input-request",
+                            ScopedRevisionedEntityOperation::Upsert,
+                            &state.semantic,
+                            None,
+                        ),
+                        semantic_revision_ref: state.semantic.semantic_revision_ref,
+                        fact_id: state.semantic.fact_id,
+                        operation: ScopedRevisionedEntityOperation::Upsert,
+                        phase,
+                        observed_at: state.source.provenance.observed_at,
+                        source: state.source.clone(),
+                        retraction: None,
+                        revision: state.revision.clone(),
+                    }),
+                });
+            }
+        }
+        projected.extend(user_input_events);
         for envelope in batch.facts() {
             let Fact::UsageRevisionV2(revision) = &envelope.value else {
                 continue;
@@ -11466,8 +11878,10 @@ struct ScopedPreparedReplacementSnapshot {
     // selected subset is offered or admitted to the family manifest.
     actor_runs: ScopedActorRunReplacementSnapshot,
     actor_affiliations: ScopedActorAffiliationReplacementSnapshot,
+    user_input: ScopedUserInputReplacementSnapshot,
     next_actor_run: usize,
     next_actor_affiliation: usize,
+    next_user_input: usize,
     next_usage_event: usize,
 }
 
@@ -11582,12 +11996,18 @@ impl ScopedObservationReplacementStage {
             .projection
             .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .map_err(ScopedReplacementStageError::Projection)?;
+        let user_input = self
+            .projection
+            .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .map_err(ScopedReplacementStageError::Projection)?;
         self.prepared = Some(ScopedPreparedReplacementSnapshot {
             usage_v2,
             actor_runs,
             actor_affiliations,
+            user_input,
             next_actor_run: 0,
             next_actor_affiliation: 0,
+            next_user_input: 0,
             next_usage_event: 0,
         });
         Ok(&self
@@ -11685,6 +12105,43 @@ impl ScopedObservationReplacementStage {
         } else {
             0
         };
+        if self.projection.families.user_input_request {
+            if let Some(entity) = prepared.user_input.entities.get(prepared.next_user_input) {
+                let offset = actor_count
+                    .checked_add(affiliation_count)
+                    .ok_or(ScopedReplacementStageError::CapacityExhausted)?;
+                let lane_ordinal = replacement_lane_ordinal(offset, prepared.next_user_input)?;
+                let event = ScopedUserInputRequestEvent {
+                    event_id: revisioned_entity_event_id(
+                        b"runtime.user-input-request",
+                        ScopedRevisionedEntityOperation::Upsert,
+                        &entity.semantic,
+                        None,
+                    ),
+                    semantic_revision_ref: entity.semantic.semantic_revision_ref,
+                    fact_id: entity.semantic.fact_id,
+                    operation: ScopedRevisionedEntityOperation::Upsert,
+                    phase: prepared.user_input.phase,
+                    observed_at: entity.source.provenance.observed_at,
+                    source: entity.source.clone(),
+                    retraction: None,
+                    revision: entity.revision.clone(),
+                };
+                let receipt = delivery
+                    .offer_projected(vec![ScopedProjectedObservation::UserInputRequest {
+                        lane_ordinal,
+                        event: Box::new(event),
+                    }])
+                    .map_err(|failure| ScopedReplacementStageError::Delivery(failure.error))?;
+                prepared.next_user_input += 1;
+                return Ok(Some(receipt));
+            }
+        }
+        let user_input_count = if self.projection.families.user_input_request {
+            prepared.user_input.entities.len()
+        } else {
+            0
+        };
         if !self.projection.families.usage_v2 {
             return Ok(None);
         }
@@ -11693,6 +12150,7 @@ impl ScopedObservationReplacementStage {
         };
         let usage_offset = actor_count
             .checked_add(affiliation_count)
+            .and_then(|count| count.checked_add(user_input_count))
             .ok_or(ScopedReplacementStageError::CapacityExhausted)?;
         let lane_ordinal = replacement_lane_ordinal(usage_offset, prepared.next_usage_event)?;
         let receipt = delivery
@@ -11712,6 +12170,8 @@ impl ScopedObservationReplacementStage {
                 && (!self.projection.families.actor_affiliation
                     || prepared.next_actor_affiliation
                         == prepared.actor_affiliations.entities.len())
+                && (!self.projection.families.user_input_request
+                    || prepared.next_user_input == prepared.user_input.entities.len())
                 && (!self.projection.families.usage_v2
                     || prepared.next_usage_event == prepared.usage_v2.events.len())
         })
@@ -11735,6 +12195,7 @@ impl ScopedObservationReplacementStage {
             &prepared.usage_v2,
             Some(&prepared.actor_runs),
             Some(&prepared.actor_affiliations),
+            Some(&prepared.user_input),
             source_coverage,
         )
     }
@@ -11984,7 +12445,7 @@ fn replacement_family_manifest(
     usage_v2: &ScopedUsageV2ReplacementSnapshot,
     source_coverage: &[SourceCoverageSet],
 ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
-    selected_replacement_family_manifest(contracts, usage_v2, None, None, source_coverage)
+    selected_replacement_family_manifest(contracts, usage_v2, None, None, None, source_coverage)
 }
 
 fn selected_replacement_family_manifest(
@@ -11992,6 +12453,7 @@ fn selected_replacement_family_manifest(
     usage_v2: &ScopedUsageV2ReplacementSnapshot,
     actor_runs: Option<&ScopedActorRunReplacementSnapshot>,
     actor_affiliations: Option<&ScopedActorAffiliationReplacementSnapshot>,
+    user_input: Option<&ScopedUserInputReplacementSnapshot>,
     source_coverage: &[SourceCoverageSet],
 ) -> Result<Vec<ScopedReplacementFamilyManifest>, ScopedReplacementStageError> {
     let families = ScopedProjectionFamilies::from_contracts(contracts)
@@ -12006,6 +12468,13 @@ fn selected_replacement_family_manifest(
         || (families.actor_affiliation
             && actor_affiliations.is_none_or(|snapshot| {
                 !affiliation_replacement_snapshot_is_valid(
+                    snapshot,
+                    semantic_reference_contract_version,
+                )
+            }))
+        || (families.user_input_request
+            && user_input.is_none_or(|snapshot| {
+                !user_input_replacement_snapshot_is_valid(
                     snapshot,
                     semantic_reference_contract_version,
                 )
@@ -12055,6 +12524,19 @@ fn selected_replacement_family_manifest(
             semantic_digest: usage_v2.semantic_digest,
         });
     }
+    if families.user_input_request {
+        let snapshot = user_input.expect("selected user-input snapshot was validated");
+        manifest.push(ScopedReplacementFamilyManifest {
+            fact_family: "runtime.user-input-request".to_owned(),
+            contract_version: snapshot.fact_family_contract_version,
+            replacement_representation: ScopedReplacementRepresentation::CorrelatedLifecycleCurrent,
+            completeness: completeness
+                .remove("runtime.user-input-request")
+                .ok_or(ScopedReplacementStageError::InvalidManifest)?,
+            entity_or_event_count: snapshot.entity_count,
+            semantic_digest: snapshot.semantic_digest,
+        });
+    }
     if !completeness.is_empty() || manifest.len() != contracts.fact_family_versions.len() {
         return Err(ScopedReplacementStageError::InvalidManifest);
     }
@@ -12094,6 +12576,12 @@ fn selected_replacement_coverage_completeness(
                             && *version == RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION =>
                     {
                         "runtime.usage-v2"
+                    }
+                    "runtime.user-input-request"
+                        if families.user_input_request
+                            && *version == RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION =>
+                    {
+                        "runtime.user-input-request"
                     }
                     _ => return Err(ScopedReplacementStageError::InvalidManifest),
                 };
@@ -12315,6 +12803,170 @@ fn scoped_actor_run_state(
         source,
         revision: revision.clone(),
     })
+}
+
+fn scoped_user_input_state(
+    object_token: u64,
+    source: &ScopedSourceObjectIdentity,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+    revision: &UserInputRequestRevisionFact,
+) -> Result<ScopedUserInputProjectionState, ScopedProjectionError> {
+    revision
+        .validate()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    if FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+        != semantic.fact_revision_id
+    {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    Ok(ScopedUserInputProjectionState {
+        object_token,
+        generation: evidence.generation,
+        semantic,
+        source,
+        revision: revision.clone(),
+    })
+}
+
+fn merge_user_input_questions(
+    current: &[UserInputQuestion],
+    incoming: &[UserInputQuestion],
+) -> Vec<UserInputQuestion> {
+    let mut merged = current.to_vec();
+    for question in incoming {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|known| known.prompt == question.prompt)
+        {
+            if existing.header.is_none() {
+                existing.header = question.header.clone();
+            }
+            existing.multi_select |= question.multi_select;
+            for option in &question.options {
+                if !existing
+                    .options
+                    .iter()
+                    .any(|known| known.label == option.label)
+                {
+                    existing.options.push(option.clone());
+                }
+            }
+        } else {
+            merged.push(question.clone());
+        }
+    }
+    merged
+}
+
+fn user_input_replacement_digest(
+    entities: &[ScopedUserInputReplacementEntity],
+) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
+    let mut hasher = replacement_family_digest(
+        b"runtime.user-input-request",
+        RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION,
+        entity_count,
+    );
+    for entity in entities {
+        validate_and_hash_replacement_source(
+            &mut hasher,
+            &entity.semantic,
+            entity.generation,
+            &entity.source,
+        )?;
+        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
+        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_event_component(&mut hasher, entity.revision.native_tool_use_id.as_bytes());
+        hasher.update(&[match entity.revision.kind {
+            UserInputKind::Choice => 1,
+            UserInputKind::MultiChoice => 2,
+            UserInputKind::FreeText => 3,
+            UserInputKind::Mixed => 4,
+        }]);
+        hasher.update(&(entity.revision.questions.len() as u64).to_be_bytes());
+        for question in &entity.revision.questions {
+            hash_optional_event_component(
+                &mut hasher,
+                question.header.as_deref().map(str::as_bytes),
+            );
+            hash_event_component(&mut hasher, question.prompt.as_bytes());
+            hasher.update(&[u8::from(question.multi_select)]);
+            hasher.update(&(question.options.len() as u64).to_be_bytes());
+            for option in &question.options {
+                hash_event_component(&mut hasher, option.label.as_bytes());
+                hash_optional_event_component(
+                    &mut hasher,
+                    option.description.as_deref().map(str::as_bytes),
+                );
+                hash_optional_event_component(
+                    &mut hasher,
+                    option.preview.as_deref().map(str::as_bytes),
+                );
+            }
+        }
+        hasher.update(&[match entity.revision.state {
+            UserInputLifecycleState::Pending => 1,
+            UserInputLifecycleState::Resolved => 2,
+            UserInputLifecycleState::Failed => 3,
+            UserInputLifecycleState::Cancelled => 4,
+        }]);
+        hasher.update(&[match entity.revision.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        }]);
+        hasher.update(&[match entity.revision.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        }]);
+        hash_optional_event_component(
+            &mut hasher,
+            entity
+                .revision
+                .result_reference
+                .as_deref()
+                .map(str::as_bytes),
+        );
+    }
+    Ok(ScopedReplacementSemanticDigest(
+        *hasher.finalize().as_bytes(),
+    ))
+}
+
+fn user_input_replacement_snapshot_is_valid(
+    snapshot: &ScopedUserInputReplacementSnapshot,
+    semantic_reference_contract_version: u32,
+) -> bool {
+    snapshot.fact_family_contract_version == RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION
+        && snapshot.replacement_digest_contract_version
+            == SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION
+        && snapshot.phase != ScopedAppendDeliveryPhase::Live
+        && usize::try_from(snapshot.entity_count).ok() == Some(snapshot.entities.len())
+        && !snapshot
+            .entities
+            .windows(2)
+            .any(|entities| entities[0].semantic.fact_id >= entities[1].semantic.fact_id)
+        && snapshot.entities.iter().all(|entity| {
+            entity
+                .semantic
+                .semantic_revision_ref
+                .semantic_reference_contract_version
+                == semantic_reference_contract_version
+                && entity
+                    .revision
+                    .semantic_revision_key()
+                    .ok()
+                    .and_then(|key| FactRevisionId::derive(&entity.semantic.fact_id, 1, &key).ok())
+                    == Some(entity.semantic.fact_revision_id)
+        })
+        && user_input_replacement_digest(&snapshot.entities).ok() == Some(snapshot.semantic_digest)
 }
 
 fn scoped_actor_affiliation_state(
@@ -12816,6 +13468,7 @@ fn replacement_snapshot_digest(
         hasher.update(&[match manifest.replacement_representation {
             ScopedReplacementRepresentation::UsageLatestContributionPerResponse => 1,
             ScopedReplacementRepresentation::RevisionedEntityCurrent => 2,
+            ScopedReplacementRepresentation::CorrelatedLifecycleCurrent => 3,
         }]);
         hasher.update(&[match manifest.completeness {
             CoverageSetCompleteness::Complete => 1,
@@ -16382,11 +17035,15 @@ impl ScopedObservationAccessHost {
         let actor_affiliations = projection
             .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
+        let user_input = projection
+            .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
         let family_manifest = selected_replacement_family_manifest(
             &self.observation_contract.contract_versions,
             &replacement,
             Some(&actor_runs),
             Some(&actor_affiliations),
+            Some(&user_input),
             &watermark.source_coverage,
         )
         .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
@@ -16494,11 +17151,15 @@ impl ScopedObservationAccessHost {
         let actor_affiliations = projection
             .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
             .map_err(ScopedReplacementStageError::Projection)?;
+        let user_input = projection
+            .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .map_err(ScopedReplacementStageError::Projection)?;
         let family_manifest = selected_replacement_family_manifest(
             &self.observation_contract.contract_versions,
             &replacement,
             Some(&actor_runs),
             Some(&actor_affiliations),
+            Some(&user_input),
             &watermark.source_coverage,
         )?;
         let replacement_digest = replacement_snapshot_digest(ScopedCompletionSnapshotComponents {
@@ -20929,6 +21590,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             &coverage,
         )
         .unwrap();
@@ -20962,6 +21624,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             &coverage[..2],
         )
         .is_err());
@@ -20970,6 +21633,7 @@ mod projection_tests {
             &usage,
             None,
             Some(&affiliations),
+            None,
             &coverage,
         )
         .is_err());
@@ -20987,6 +21651,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             &coverage,
         )
         .is_err());
@@ -22609,6 +23274,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             &complete_coverage,
         )
         .unwrap();
@@ -22636,6 +23302,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             &partial_coverage,
         )
         .unwrap();
@@ -22815,6 +23482,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             &complete_coverage,
         )
         .unwrap();
@@ -22830,6 +23498,7 @@ mod projection_tests {
             &usage,
             Some(&actors),
             Some(&affiliations),
+            None,
             &partial_coverage,
         )
         .unwrap();
@@ -22907,6 +23576,217 @@ mod projection_tests {
             bytes_hex(usage.semantic_digest.as_bytes()),
             "8c2f2173f7d779b560e6d84c690216b71693d3b0bb2061617b50e68bc1ba8f67"
         );
+    }
+
+    #[test]
+    fn rfc012d_user_input_request_replaces_one_lifecycle_entity_without_duplicates() {
+        let wire = crate::semantic_contract::decode_rfc012c_interaction_v1(include_str!(
+            "../fixtures/contracts/rfc012c-interaction-v1.json"
+        ))
+        .unwrap();
+        let selection = observation_contract_selection_for("runtime.user-input-request");
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let fact_for = |batch: &FactBatch,
+                        operation: UserInputOperation,
+                        state,
+                        completeness,
+                        result: Option<&str>| {
+            UserInputRequestRevisionFact {
+                session: batch
+                    .canonical_entity_key("session", b"native-session")
+                    .unwrap(),
+                actor_run: batch
+                    .canonical_entity_key("actor-run", b"native-run")
+                    .unwrap(),
+                native_tool_use_id: wire.native_tool_use_id.clone(),
+                kind: wire.kind,
+                questions: wire.questions.clone(),
+                state,
+                operation,
+                completeness,
+                result_reference: result.map(str::to_owned),
+            }
+        };
+
+        let pending_record = rfc012c_record(0, 1, 10);
+        let mut pending_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let pending = fact_for(
+            &pending_batch,
+            UserInputOperation::Upsert,
+            UserInputLifecycleState::Pending,
+            ContractCompleteness::Complete,
+            None,
+        );
+        pending_batch
+            .push_native(
+                &pending_record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(pending.clone()),
+            )
+            .unwrap();
+        let events = projection
+            .project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &pending_record,
+                pending_batch,
+            ))
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(projection.user_input_requests.len(), 1);
+        assert_eq!(
+            projection
+                .user_input_requests
+                .values()
+                .next()
+                .unwrap()
+                .revision
+                .state,
+            UserInputLifecycleState::Pending
+        );
+
+        let resolved_record = rfc012c_record(1, 2, 11);
+        let mut resolved_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let resolved = fact_for(
+            &resolved_batch,
+            UserInputOperation::Upsert,
+            UserInputLifecycleState::Resolved,
+            ContractCompleteness::Complete,
+            Some("continue"),
+        );
+        resolved_batch
+            .push_native(
+                &resolved_record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(resolved),
+            )
+            .unwrap();
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    2,
+                    ScopedAppendDeliveryPhase::Live,
+                    &resolved_record,
+                    resolved_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(projection.user_input_requests.len(), 1);
+        assert_eq!(
+            projection
+                .user_input_requests
+                .values()
+                .next()
+                .unwrap()
+                .revision
+                .state,
+            UserInputLifecycleState::Resolved
+        );
+
+        let bootstrap = projection
+            .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Bootstrap)
+            .unwrap();
+        let resync = projection
+            .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(bootstrap.entity_count, 1);
+        assert_eq!(resync.entity_count, 1);
+        assert_eq!(bootstrap.semantic_digest, resync.semantic_digest);
+        assert_eq!(bootstrap.entities.len(), 1);
+
+        let retract_record = rfc012c_record(2, 3, 12);
+        let mut retract_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let retract = fact_for(
+            &retract_batch,
+            UserInputOperation::Retract,
+            UserInputLifecycleState::Pending,
+            ContractCompleteness::Complete,
+            None,
+        );
+        retract_batch
+            .push_native(
+                &retract_record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(retract),
+            )
+            .unwrap();
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    3,
+                    ScopedAppendDeliveryPhase::Live,
+                    &retract_record,
+                    retract_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(projection.user_input_requests.is_empty());
+        assert_eq!(
+            projection
+                .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+                .unwrap()
+                .entity_count,
+            0
+        );
+
+        let restored_record = rfc012c_record(3, 4, 13);
+        let mut restored_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        restored_batch
+            .push_native(
+                &restored_record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(pending),
+            )
+            .unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                4,
+                ScopedAppendDeliveryPhase::Live,
+                &restored_record,
+                restored_batch,
+            ))
+            .unwrap();
+        let partial_record = rfc012c_record(4, 5, 14);
+        let mut partial_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let partial = fact_for(
+            &partial_batch,
+            UserInputOperation::Retract,
+            UserInputLifecycleState::Pending,
+            ContractCompleteness::Partial,
+            None,
+        );
+        partial_batch
+            .push_native(
+                &partial_record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(partial),
+            )
+            .unwrap();
+        assert!(projection
+            .project(&rfc012c_decoded_frame(
+                5,
+                ScopedAppendDeliveryPhase::Live,
+                &partial_record,
+                partial_batch,
+            ))
+            .unwrap()
+            .is_empty());
+        assert_eq!(projection.user_input_requests.len(), 1);
     }
 
     #[test]

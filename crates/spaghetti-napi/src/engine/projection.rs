@@ -436,7 +436,8 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::WorkflowMemberEvent(_)
                 | Fact::RunEvidence(_)
                 | Fact::Usage(_)
-                | Fact::UsageRevisionV2(_) => {}
+                | Fact::UsageRevisionV2(_)
+                | Fact::UserInputRequestRevision(_) => {}
             }
         }
         self.record_detail(CommitDetail::HistoryProjectionWalk, projection_walk_started);

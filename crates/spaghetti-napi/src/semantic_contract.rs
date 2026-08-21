@@ -235,48 +235,9 @@ pub(crate) struct EffectiveStateFixtureWire {
     pub retract: EffectiveStateSlotWire,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum UserInputKind {
-    Choice,
-    MultiChoice,
-    FreeText,
-    Mixed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum UserInputLifecycleState {
-    #[serde(alias = "open")]
-    Pending,
-    Resolved,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum UserInputOperation {
-    Upsert,
-    Retract,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct UserInputOption {
-    pub label: String,
-    pub description: Option<String>,
-    pub preview: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct UserInputQuestion {
-    pub header: Option<String>,
-    pub prompt: String,
-    pub options: Vec<UserInputOption>,
-    pub multi_select: bool,
-}
+pub(crate) use crate::adapter::{
+    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

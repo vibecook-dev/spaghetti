@@ -3,10 +3,11 @@
 - **Status:** Active non-normative roadmap. Catalog-first host and complete-only
   search are on the engine path. C1 actor/usage/state/interaction fixtures are
   Gate met. D2 now composes Promoted `ChildDirectoryByNativeId` membership
-  before bootstrap; D3 query workers share the observer pass pool. D2/D3 remain
-  In progress against Claude Candidate promotion and message/question/task
-  replacement manifests. Default-on (`Rolled out`) and child-RFC 012B/C/D
-  ratification remain later product decisions.
+  before bootstrap; D3 query workers share the observer pass pool; scoped
+  `runtime.user-input-request` replacement is live. D2/D3 remain In progress
+  against Claude Candidate promotion and message/task replacement fixtures.
+  Default-on (`Rolled out`) and child-RFC 012B/C/D ratification remain later
+  product decisions.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -138,7 +139,7 @@ prerequisite for early vertical slices.
 | C4. Runtime semantic downstream suite    | 012C                | Gate met    | typed consumers plus durable/live merge without native parsing |
 | D1. Store-free observer kernel           | 012D                | Gate met    | attach/bootstrap/poll/close/deps; no store/global scan         |
 | D2. Claude scope composition             | 012D                | In progress | Promoted directory membership; Candidate promotion later       |
-| D3. Control lane and epoch replacement   | 012D                | In progress | shared pass pool; message/question/task replacement later      |
+| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input replacement; message/task later        |
 | D4. SDK and Chopsticks migration         | 012D                | Gate met    | feature-flagged shadow comparison and rollback                 |
 | D5. Observer performance calibration     | 012D                | Gate met    | reproducible latency/memory/access report                      |
 | X1. Search/finalization separation       | 012B integration    | Gate met    | complete-only FTS and maintenance experiment                   |
@@ -2837,13 +2838,16 @@ released.
 proves engine catalog/query workers `blocking_acquire` that same caller-owned
 pool: a held permit stalls `overview()` until release, and shutdown does not
 acquire so disposal cannot deadlock behind a held permit. Task complete-snapshot
-replacement already retracts missing items; interaction fixtures distinguish
-complete retract from partial non-retraction. Per-family replacement manifests
-for message/question/task remain open: the observer's implemented families are
-still `runtime.actor-affiliation`, `runtime.actor-run`, and `runtime.usage-v2`.
-C1 deferred message/plan/task fixtures; `runtime.user-input-request` has C1
-serialization but no observer projection. Adding those families to replacement
-without those reducers would invent policy. Native-derived
+replacement already retracts missing items.
+`rfc012d_user_input_request_replaces_one_lifecycle_entity_without_duplicates`
+projects C1 `runtime.user-input-request` as a correlated-lifecycle family:
+pending→resolved revises one entity, complete retract removes it, partial
+retract does not, and bootstrap/correction replacement digests match at the
+same current set. The replacement representation is
+`correlated_lifecycle_current`. Message/task replacement manifests remain
+open: C1 deferred those family fixtures, and RFC 011 `MessageFact`/
+`TaskSnapshotFact` are not RFC 012C `MessageRevision`/`TaskRevision`. Adding
+them without those fixtures would invent policy. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have
@@ -3630,8 +3634,9 @@ Claude-shaped KnownObject root/current/future/sidecar grants, including
 attach-before-create for the future child, and composes Promoted
 `ChildDirectoryByNativeId` membership before bootstrap completion. Claude
 Candidate directory promotion stays `In progress` as a later policy decision.
-D3 serializes catalog/query workers and observer passes on one shared permit;
-message/question/task replacement manifests stay `In progress`. D4's public
+D3 serializes catalog/query workers and observer passes on one shared permit
+and now freezes `runtime.user-input-request` replacement from the C1 fixture.
+Message/task RFC 012C replacement stays `In progress`. D4's public
 scoped-observer facade remains a later product decision.
 
 Later product decisions, not implementation gates:
