@@ -2657,6 +2657,36 @@ discovered child is admitted or read, no live membership transition is
 published, and no watcher is installed. Candidate support and promotion state
 remain unchanged.
 
+Commit `8c53831` binds selected children of that listing to their first bounded
+content read. The common access seam seals the exact in-memory root authority
+after a successful audited pass and remembers which opaque child coordinates
+completed as declaration-selected files. Only an available
+`ChildDirectoryByNativeId` stream whose verified driver is `ReplaceDocument`
+can mint the resulting non-serializable read authority; its per-object byte
+ceiling comes from that closed driver contract. Each selected child may reserve
+exactly one `ObjectRead` with the original parent edge and depth, while ignored
+files, directories, fabricated tokens, replay, another root authority, and an
+unavailable listing remain non-authorizing. The scoped layer derives reads in
+canonical checkpoint order without accepting a caller path or token. It
+reconstructs the exact native relative name from the checkpoint's framed
+binary key, rejects noncanonical/truncated/separator-smuggling keys, reserves
+the full byte bound before I/O, and uses the descriptor-confined stable reader
+without following symlinks. A returned file stamp must still equal the listing
+identity, length, and modification time: disappearance, same-path replacement,
+or instability invalidates the listing for retry, while a stable oversized
+file is retained only as an explicit `Oversized` access outcome. Native driver
+errors consume the reservation conservatively through one path-free error.
+Dynamic-relation membership cannot enter admission until every selected read
+has reached a stable or explicit oversized outcome; admission then destroys
+the native root and read authority before retaining the listing proof. Tests
+cover stable nested reads and exact accounting, unread-listing rejection,
+same-path replacement, stable oversize, post-listing symlink substitution,
+selector exclusion, one-shot replay, malformed binary keys, and non-UTF-8 key
+round trips. This still invokes no declaration-owned decoder, constructs no
+discovered-child source identity, publishes no live transition, installs no
+watcher, and does not relax the dynamic-relation promotion guard or Candidate
+status.
+
 ### D3. Identity, control, and resync
 
 Implement:
