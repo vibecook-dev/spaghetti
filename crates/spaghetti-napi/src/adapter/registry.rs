@@ -188,11 +188,13 @@ pub(crate) mod tests {
     use crate::adapter::{
         verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, AuthorizedObservationSourceDriver, CanonicalEntityKey,
-        CompatibilityClass, CoverageAbsenceKind, CoverageDomain, CoveragePositionKind,
-        CoverageSetCompleteness, CoverageStatus, DecodeContext, DecodeDisposition, DecoderId,
-        DiscoveryContext, ExternalEntityRef, Fact, FactBatch, FactSemanticContext,
+        CompatibilityClass, ConsistencyPolicy, CoverageAbsenceKind, CoverageDomain,
+        CoveragePositionKind, CoverageSetCompleteness, CoverageStatus, DecodeContext,
+        DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope,
+        ExternalEntityRef, Fact, FactBatch, FactSemanticContext, ObjectSelector,
         RawRetentionPolicy, ScopeRelationPrimitive, Sha256Digest, SourceAccess, SourceInstance,
-        SourceInstanceSpec, SourceObjectDescriptor, StreamSpec, SupportBundleDocument,
+        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
+        StreamId, StreamSpec, SupportBundleDocument,
     };
     use crate::observation_contract::unknown_wire::{
         ObservationUnknownWireCapability, ObservationUnknownWireCompatibilityAxis,
@@ -241,9 +243,9 @@ pub(crate) mod tests {
     use crate::source::{
         AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendDelimitedConfig,
         AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan,
-        DirtyHint, DirtyReason, DirtyScope, HintEnqueue, RecordOrigin, Revision, ScopeAccessReport,
-        ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool, SourceMediaType,
-        SourceRecord,
+        DirtyHint, DirtyReason, DirtyScope, HintEnqueue, IngestPriority, RecordOrigin,
+        ReplaceDocumentConfig, Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput,
+        SharedSourcePassPool, SourceMediaType, SourceRecord,
     };
 
     use super::*;
@@ -315,6 +317,7 @@ pub(crate) mod tests {
 
     struct EmptyAdapter {
         manifest: AdapterManifest,
+        streams: Vec<StreamSpec>,
         decode_statefully: bool,
         request_dependency_access: bool,
         dependency_mutation: Option<(PathBuf, Vec<u8>)>,
@@ -333,6 +336,7 @@ pub(crate) mod tests {
                     source_schema_versions: Vec::new(),
                     capabilities: Vec::new(),
                 },
+                streams: Vec::new(),
                 decode_statefully: false,
                 request_dependency_access: false,
                 dependency_mutation: None,
@@ -341,6 +345,11 @@ pub(crate) mod tests {
 
         fn with_stateful_decode(mut self) -> Self {
             self.decode_statefully = true;
+            self
+        }
+
+        fn with_streams(mut self, streams: Vec<StreamSpec>) -> Self {
+            self.streams = streams;
             self
         }
 
@@ -381,7 +390,7 @@ pub(crate) mod tests {
         crate::adapter::ScopeProgramManifest,
     ) {
         let source_document = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
-            br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
+            br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"decoder_id":"fixture-descendant","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
         } else {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
         };
@@ -487,6 +496,28 @@ pub(crate) mod tests {
             .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
             .build_supported(catalog)
             .unwrap()
+    }
+
+    fn fixture_descendant_runtime_stream() -> StreamSpec {
+        StreamSpec {
+            id: StreamId::new("descendant-stream").unwrap(),
+            driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: 1_024,
+            }),
+            selector: ObjectSelector {
+                root_name: "root".to_string(),
+                include: vec!["sessions/*/children/**".to_string()],
+                exclude: Vec::new(),
+            },
+            decoder: DecoderId::new("fixture-descendant").unwrap(),
+            authority: StreamAuthority::Canonical,
+            entity_scope: EntityScope::Session,
+            priority: IngestPriority::Interactive,
+            consistency: ConsistencyPolicy::SnapshotReplace,
+            deletion: DeletionPolicy::MirrorSource,
+            retention: RawRetentionPolicy::HashOnly,
+            capabilities: Vec::new(),
+        }
     }
 
     fn stateful_supported_fixture_registry() -> AdapterRegistry {
@@ -1280,7 +1311,7 @@ pub(crate) mod tests {
         }
 
         fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
-            Ok(Vec::new())
+            Ok(self.streams.clone())
         }
 
         fn bootstrap_object(
@@ -1851,6 +1882,232 @@ pub(crate) mod tests {
         assert_eq!(root.completed, 0);
         assert_eq!(root.abandoned, 0);
         assert!(root.trace.is_empty());
+    }
+
+    #[test]
+    fn observation_source_reservation_binds_one_exact_adapter_runtime_stream() {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+        let registry = AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding.clone(), scope_programs.clone())
+                    .with_streams(vec![fixture_descendant_runtime_stream()]),
+            )
+            .build_supported(catalog)
+            .unwrap();
+        let request = scoped_access_request(PathBuf::from("/private/fixture-root"));
+        let instance = SourceInstance {
+            id: 7,
+            spec: SourceInstanceSpec {
+                identity_contract_version: 1,
+                stable_key: SourceInstanceKey::new(
+                    b"/Users/alice/private/source-instance".to_vec(),
+                )
+                .unwrap(),
+                display_name: "private fixture source".to_string(),
+                roots: vec![SourceRoot {
+                    name: "root".to_string(),
+                    path: PathBuf::from("/Users/alice/private/root"),
+                }],
+                discovery_reason: "fixture".to_string(),
+            },
+        };
+        let identity = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"secret-session-id",
+        }];
+        let make_plan = || {
+            let (_, authorization) = registry
+                .authorize_typed_access(
+                    &AdapterId::new("fixture").unwrap(),
+                    &request.artifact_probe,
+                    SupportOperation::ScopedTypedObservation,
+                    &request.observation_contract_request.contract_versions,
+                    &request.observation_contract_offer.contract_versions,
+                )
+                .unwrap();
+            AuthorizedScopeAccessPlan::from_authorized_program(
+                authorization
+                    .select_scope_program("observe-session")
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let reserve = |plan: &AuthorizedScopeAccessPlan| {
+            plan.reserve_observation_source(ScopeAccessRequest {
+                relation_id: "descendant-objects",
+                operation: AccessOperation::ObjectListing,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 1_024,
+                max_rows: 0,
+            })
+            .unwrap()
+        };
+
+        let plan = make_plan();
+        let adapter = registry.get(&AdapterId::new("fixture").unwrap()).unwrap();
+        let bound = reserve(&plan)
+            .bind_runtime_stream(adapter.as_ref(), &instance)
+            .unwrap();
+        assert_eq!(bound.relation_id(), "descendant-objects");
+        assert_eq!(bound.access_root(), "root");
+        assert_eq!(
+            bound.locator(),
+            PathBuf::from("sessions/secret-session-id/children").as_path()
+        );
+        assert_eq!(bound.source_instance_id(), 7);
+        assert_eq!(bound.source_instance_identity_contract_version(), 1);
+        assert_eq!(
+            bound.source_instance_key().as_bytes(),
+            b"/Users/alice/private/source-instance"
+        );
+        assert_eq!(bound.stream().id.as_str(), "descendant-stream");
+        assert_eq!(bound.stream().decoder.as_str(), "fixture-descendant");
+        assert_eq!(
+            bound.object_token(),
+            AccessObjectToken::derive(
+                "descendant-objects",
+                &[
+                    b"native-session-id".as_slice(),
+                    b"secret-session-id".as_slice(),
+                ],
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            bound.support_release_digest(),
+            plan.report().support_release_digest()
+        );
+        assert_eq!(
+            bound.source_declaration_digest(),
+            plan.source_declaration_digest()
+        );
+        assert_eq!(
+            bound.scope_program_digest(),
+            plan.report().scope_program_digest()
+        );
+        let rendered = format!("{bound:?}");
+        for private in [
+            "secret-session-id",
+            "fixture-descendant",
+            "descendant-stream",
+            "/Users/",
+            "alice",
+            "private",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        bound.complete(512, AccessOutcome::Available).unwrap();
+
+        let assert_runtime_drift = |streams: Vec<StreamSpec>| {
+            let plan = make_plan();
+            let adapter = EmptyAdapter::new("fixture")
+                .with_support(binding.clone(), scope_programs.clone())
+                .with_streams(streams);
+            let error = reserve(&plan)
+                .bind_runtime_stream(&adapter, &instance)
+                .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "invalid access-budget configuration: authorized observation source does not match the selected adapter runtime stream"
+            );
+            for private in ["/Users/", "alice", "private", "secret-session-id"] {
+                assert!(!error.to_string().contains(private));
+            }
+            let report = plan.report();
+            let relation = report
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "descendant-objects")
+                .unwrap();
+            assert_eq!(relation.attempts, 1);
+            assert_eq!(relation.completed, 1);
+            assert_eq!(relation.trace[0].outcome, AccessOutcome::Failed);
+        };
+
+        assert_runtime_drift(Vec::new());
+        assert_runtime_drift(vec![
+            fixture_descendant_runtime_stream(),
+            fixture_descendant_runtime_stream(),
+        ]);
+
+        let mut drift = fixture_descendant_runtime_stream();
+        drift.decoder = DecoderId::new("/Users/alice/private/decoder").unwrap();
+        assert_runtime_drift(vec![drift]);
+
+        let mut drift = fixture_descendant_runtime_stream();
+        drift.selector.include.push("private/**".to_string());
+        assert_runtime_drift(vec![drift]);
+
+        let mut drift = fixture_descendant_runtime_stream();
+        drift
+            .selector
+            .exclude
+            .push("sessions/private/**".to_string());
+        assert_runtime_drift(vec![drift]);
+
+        let mut drift = fixture_descendant_runtime_stream();
+        drift.driver = DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+            max_document_bytes: 1_025,
+        });
+        assert_runtime_drift(vec![drift]);
+
+        let mut drift = fixture_descendant_runtime_stream();
+        drift.authority = StreamAuthority::Supplemental;
+        assert_runtime_drift(vec![drift]);
+
+        let mut drift = fixture_descendant_runtime_stream();
+        drift.deletion = DeletionPolicy::PreserveHistory;
+        assert_runtime_drift(vec![drift]);
+
+        let wrong_binding = AdapterSupportBinding::new(
+            "private-release",
+            binding.adapter_package_version(),
+            binding.decoder_contract_version(),
+            &binding.ads_digest().to_string(),
+            &binding.source_declaration_digest().to_string(),
+            &binding.scope_program_digest().to_string(),
+        )
+        .unwrap();
+        let wrong_adapter = EmptyAdapter::new("fixture")
+            .with_support(wrong_binding, scope_programs.clone())
+            .with_streams(vec![fixture_descendant_runtime_stream()]);
+        let plan = make_plan();
+        let error = reserve(&plan)
+            .bind_runtime_stream(&wrong_adapter, &instance)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid access-budget configuration: authorized observation source does not match the selected adapter runtime stream"
+        );
+        assert!(!error.to_string().contains("private-release"));
+
+        let plan = make_plan();
+        let wrong_instance = SourceInstance {
+            id: 8,
+            spec: SourceInstanceSpec {
+                identity_contract_version: 1,
+                stable_key: SourceInstanceKey::new(b"wrong-source".to_vec()).unwrap(),
+                display_name: "wrong".to_string(),
+                roots: vec![SourceRoot {
+                    name: "other-root".to_string(),
+                    path: PathBuf::from("/Users/alice/private/other"),
+                }],
+                discovery_reason: "fixture".to_string(),
+            },
+        };
+        let error = reserve(&plan)
+            .bind_runtime_stream(adapter.as_ref(), &wrong_instance)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid access-budget configuration: authorized observation source does not match the selected adapter runtime stream"
+        );
+        assert!(!error.to_string().contains("/Users/"));
     }
 
     #[test]

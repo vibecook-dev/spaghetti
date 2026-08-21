@@ -13,9 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::adapter::{
-    AuthorizedObservationSourceContract, AuthorizedObservationSourceDriver, AuthorizedScopeProgram,
-    ScopeObservationSourceBinding, ScopeProgramManifest, ScopeProgramStatus,
-    ScopeRelationDeclaration, ScopeRelationPrimitive, ScopeUnavailableBehavior,
+    AgentAdapter, AuthorizedObservationSourceAuthority, AuthorizedObservationSourceContract,
+    AuthorizedObservationSourceDriver, AuthorizedScopeProgram, ConsistencyPolicy, DeletionPolicy,
+    DriverSpec, ScopeObservationSourceBinding, ScopeProgramManifest, ScopeProgramStatus,
+    ScopeRelationDeclaration, ScopeRelationPrimitive, ScopeUnavailableBehavior, SourceInstance,
+    SourceInstanceKey, StreamAuthority, StreamSpec,
 };
 
 pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
@@ -418,6 +420,8 @@ impl AuthorizedScopeAccessPlan {
         };
         Ok(AuthorizedObservationSourceReservation {
             reservation,
+            adapter_id: self.adapter_id().to_string(),
+            support_release_id: self.support_release_id.clone(),
             binding,
             source_contract,
             locator,
@@ -888,12 +892,26 @@ pub struct ScopeAccessReservation {
 /// coordinates, not native paths, and do not themselves open a source.
 pub(crate) struct AuthorizedObservationSourceReservation {
     reservation: ScopeAccessReservation,
+    adapter_id: String,
+    support_release_id: String,
     binding: ScopeObservationSourceBinding,
     source_contract: AuthorizedObservationSourceContract,
     locator: PathBuf,
     support_release_digest: [u8; 32],
     source_declaration_digest: [u8; 32],
     scope_program_digest: [u8; 32],
+}
+
+/// One declaration reservation bound to the exact runtime stream returned by
+/// the selected adapter for one source instance. This still carries no native
+/// root authority: the future attachment owner must match that instance's root
+/// to its separately approved access-root grant before invoking a driver.
+pub(crate) struct AuthorizedObservationRuntimeStreamReservation {
+    reservation: AuthorizedObservationSourceReservation,
+    source_instance_id: u64,
+    source_instance_identity_contract_version: u32,
+    source_instance_key: SourceInstanceKey,
+    stream: StreamSpec,
 }
 
 impl std::fmt::Debug for AuthorizedObservationSourceReservation {
@@ -905,6 +923,20 @@ impl std::fmt::Debug for AuthorizedObservationSourceReservation {
                 "has_relative_selector",
                 &self.binding.relative_selector.is_some(),
             )
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for AuthorizedObservationRuntimeStreamReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedObservationRuntimeStreamReservation")
+            .field("primitive", &self.reservation.primitive())
+            .field(
+                "has_relative_selector",
+                &self.reservation.relative_selector().is_some(),
+            )
+            .field("has_source_instance", &true)
             .finish_non_exhaustive()
     }
 }
@@ -958,12 +990,198 @@ impl AuthorizedObservationSourceReservation {
         self.reservation.object_token()
     }
 
+    /// Select exactly one stream from the adapter package already bound by the
+    /// typed support authorization. Any manifest, source-instance, selector,
+    /// decoder, authority, lifecycle, or driver-bound drift consumes the
+    /// reservation conservatively and reports one path-free failure.
+    pub(crate) fn bind_runtime_stream(
+        self,
+        adapter: &dyn AgentAdapter,
+        instance: &SourceInstance,
+    ) -> Result<AuthorizedObservationRuntimeStreamReservation, AccessBudgetError> {
+        let stream = match self.select_runtime_stream(adapter, instance) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.fail_conservative();
+                return Err(error);
+            }
+        };
+        Ok(AuthorizedObservationRuntimeStreamReservation {
+            reservation: self,
+            source_instance_id: instance.id,
+            source_instance_identity_contract_version: instance.spec.identity_contract_version,
+            source_instance_key: instance.spec.stable_key.clone(),
+            stream,
+        })
+    }
+
+    fn select_runtime_stream(
+        &self,
+        adapter: &dyn AgentAdapter,
+        instance: &SourceInstance,
+    ) -> Result<StreamSpec, AccessBudgetError> {
+        let manifest = adapter.manifest();
+        let support_binding = manifest
+            .support_binding
+            .as_ref()
+            .ok_or_else(invalid_observation_runtime_stream_binding)?;
+        if manifest.validate().is_err()
+            || manifest.id.as_str() != self.adapter_id
+            || support_binding.support_release_id() != self.support_release_id
+            || support_binding.source_declaration_digest().as_bytes()
+                != &self.source_declaration_digest
+            || support_binding.scope_program_digest().as_bytes() != &self.scope_program_digest
+            || instance.id == 0
+            || instance.spec.validate().is_err()
+            || instance
+                .spec
+                .roots
+                .iter()
+                .filter(|root| root.name == self.access_root())
+                .count()
+                != 1
+        {
+            return Err(invalid_observation_runtime_stream_binding());
+        }
+
+        let streams = adapter
+            .streams(instance)
+            .map_err(|_| invalid_observation_runtime_stream_binding())?;
+        let mut selected = None;
+        for stream in streams {
+            if stream.id.as_str() != self.stream_id() {
+                continue;
+            }
+            if selected.replace(stream).is_some() {
+                return Err(invalid_observation_runtime_stream_binding());
+            }
+        }
+        let stream = selected.ok_or_else(invalid_observation_runtime_stream_binding)?;
+        if stream.validate(instance).is_err() || !self.runtime_stream_matches(&stream) {
+            return Err(invalid_observation_runtime_stream_binding());
+        }
+        Ok(stream)
+    }
+
+    fn runtime_stream_matches(&self, stream: &StreamSpec) -> bool {
+        let authority = match self.source_contract.authority() {
+            AuthorizedObservationSourceAuthority::Canonical => StreamAuthority::Canonical,
+            AuthorizedObservationSourceAuthority::Supplemental => StreamAuthority::Supplemental,
+            AuthorizedObservationSourceAuthority::Diagnostic => StreamAuthority::Diagnostic,
+            AuthorizedObservationSourceAuthority::IgnoredDerived => StreamAuthority::IgnoredDerived,
+        };
+        let driver_matches = match (&stream.driver, self.source_contract.driver()) {
+            (
+                DriverSpec::AppendDelimited(runtime),
+                AuthorizedObservationSourceDriver::AppendDelimited {
+                    max_record_bytes,
+                    max_batch_bytes,
+                    max_records_per_batch,
+                },
+            ) => {
+                u64::try_from(runtime.max_record_bytes).ok() == Some(max_record_bytes)
+                    && u64::try_from(runtime.max_batch_bytes).ok() == Some(max_batch_bytes)
+                    && u64::try_from(runtime.max_records_per_batch).ok()
+                        == Some(max_records_per_batch)
+                    && stream.consistency == ConsistencyPolicy::IncrementalCursor
+            }
+            (
+                DriverSpec::ReplaceDocument(runtime),
+                AuthorizedObservationSourceDriver::ReplaceDocument { max_object_bytes },
+            ) => {
+                u64::try_from(runtime.max_document_bytes).ok() == Some(max_object_bytes)
+                    && stream.consistency == ConsistencyPolicy::SnapshotReplace
+            }
+            (
+                DriverSpec::Presence(runtime),
+                AuthorizedObservationSourceDriver::PresenceObject { max_object_bytes },
+            ) => {
+                runtime.include_content
+                    && u64::try_from(runtime.max_content_bytes).ok() == Some(max_object_bytes)
+                    && stream.consistency == ConsistencyPolicy::SnapshotReplace
+            }
+            _ => false,
+        };
+        stream.selector.root_name == self.access_root()
+            && stream.selector.include.as_slice() == self.source_contract.relative_patterns()
+            && stream.selector.exclude.is_empty()
+            && stream.decoder.as_str() == self.source_contract.decoder_id()
+            && stream.authority == authority
+            && stream.deletion == DeletionPolicy::MirrorSource
+            && self
+                .source_contract
+                .relative_patterns()
+                .iter()
+                .filter(|pattern| pattern.as_str() == self.source_pattern())
+                .count()
+                == 1
+            && driver_matches
+    }
+
     pub(crate) fn complete(
         self,
         bytes_read: u64,
         outcome: AccessOutcome,
     ) -> Result<(), AccessBudgetError> {
         self.reservation.complete(bytes_read, 0, outcome)
+    }
+
+    pub(crate) fn fail_conservative(self) {
+        self.reservation.fail_conservative();
+    }
+}
+
+impl AuthorizedObservationRuntimeStreamReservation {
+    pub(crate) fn relation_id(&self) -> &str {
+        self.reservation.relation_id()
+    }
+
+    pub(crate) fn access_root(&self) -> &str {
+        self.reservation.access_root()
+    }
+
+    pub(crate) fn locator(&self) -> &Path {
+        self.reservation.locator()
+    }
+
+    pub(crate) fn object_token(&self) -> AccessObjectToken {
+        self.reservation.object_token()
+    }
+
+    pub(crate) fn source_instance_id(&self) -> u64 {
+        self.source_instance_id
+    }
+
+    pub(crate) fn source_instance_identity_contract_version(&self) -> u32 {
+        self.source_instance_identity_contract_version
+    }
+
+    pub(crate) fn source_instance_key(&self) -> &SourceInstanceKey {
+        &self.source_instance_key
+    }
+
+    pub(crate) fn stream(&self) -> &StreamSpec {
+        &self.stream
+    }
+
+    pub(crate) fn support_release_digest(&self) -> &[u8; 32] {
+        self.reservation.support_release_digest()
+    }
+
+    pub(crate) fn source_declaration_digest(&self) -> &[u8; 32] {
+        self.reservation.source_declaration_digest()
+    }
+
+    pub(crate) fn scope_program_digest(&self) -> &[u8; 32] {
+        self.reservation.scope_program_digest()
+    }
+
+    pub(crate) fn complete(
+        self,
+        bytes_read: u64,
+        outcome: AccessOutcome,
+    ) -> Result<(), AccessBudgetError> {
+        self.reservation.complete(bytes_read, outcome)
     }
 
     pub(crate) fn fail_conservative(self) {
@@ -1246,6 +1464,13 @@ fn invalid_locator_template() -> AccessBudgetError {
 fn invalid_observation_source_reservation() -> AccessBudgetError {
     AccessBudgetError::InvalidConfig(
         "authorized observation source reservation requires one supported bound relation"
+            .to_string(),
+    )
+}
+
+fn invalid_observation_runtime_stream_binding() -> AccessBudgetError {
+    AccessBudgetError::InvalidConfig(
+        "authorized observation source does not match the selected adapter runtime stream"
             .to_string(),
     )
 }

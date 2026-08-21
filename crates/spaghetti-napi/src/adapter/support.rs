@@ -565,6 +565,10 @@ struct SupportSourceStreamWire {
     root_id: String,
     #[serde(default)]
     relative_patterns: Vec<String>,
+    #[serde(default)]
+    decoder_id: Option<String>,
+    #[serde(default)]
+    authority: Option<String>,
     primitive: String,
     topologies: Vec<String>,
     implementation_state: String,
@@ -581,6 +585,8 @@ struct SupportSourceBoundsWire {
     max_record_bytes: Option<u64>,
     #[serde(default)]
     max_batch_bytes: Option<u64>,
+    #[serde(default)]
+    max_records_per_batch: Option<u64>,
 }
 
 /// Closed common-driver contract retained from one digest-verified scoped
@@ -592,6 +598,7 @@ pub(crate) enum AuthorizedObservationSourceDriver {
     AppendDelimited {
         max_record_bytes: u64,
         max_batch_bytes: u64,
+        max_records_per_batch: u64,
     },
     ReplaceDocument {
         max_object_bytes: u64,
@@ -601,10 +608,24 @@ pub(crate) enum AuthorizedObservationSourceDriver {
     },
 }
 
+/// Closed fact-authority coordinate retained from the reviewed source
+/// declaration. Keeping this independent of the runtime adapter type prevents
+/// support selection from acquiring decoder or source execution authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthorizedObservationSourceAuthority {
+    Canonical,
+    Supplemental,
+    Diagnostic,
+    IgnoredDerived,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthorizedObservationSourceContract {
     stream_id: String,
     root_id: String,
+    relative_patterns: Vec<String>,
+    decoder_id: String,
+    authority: AuthorizedObservationSourceAuthority,
     driver: AuthorizedObservationSourceDriver,
 }
 
@@ -615,6 +636,18 @@ impl AuthorizedObservationSourceContract {
 
     pub(crate) fn root_id(&self) -> &str {
         &self.root_id
+    }
+
+    pub(crate) fn relative_patterns(&self) -> &[String] {
+        &self.relative_patterns
+    }
+
+    pub(crate) fn decoder_id(&self) -> &str {
+        &self.decoder_id
+    }
+
+    pub(crate) fn authority(&self) -> AuthorizedObservationSourceAuthority {
+        self.authority
     }
 
     pub(crate) fn driver(&self) -> AuthorizedObservationSourceDriver {
@@ -925,6 +958,9 @@ fn validate_scope_source_bindings(
     let mut observation_source_contracts = BTreeMap::new();
     for stream in &source_declaration.streams {
         validate_identifier("support source stream id", &stream.stream_id)?;
+        if let Some(decoder_id) = &stream.decoder_id {
+            validate_identifier("support source decoder id", decoder_id)?;
+        }
         if streams.insert(stream.stream_id.as_str(), stream).is_some() {
             return Err(SupportContractError::invalid(format!(
                 "support source declaration repeats stream {:?}",
@@ -975,10 +1011,12 @@ fn validate_scope_source_bindings(
                 ))
             })?;
             if stream.root_id != relation.access_root
-                || !stream
+                || stream
                     .relative_patterns
                     .iter()
-                    .any(|pattern| pattern == &binding.source_pattern)
+                    .filter(|pattern| *pattern == &binding.source_pattern)
+                    .count()
+                    != 1
                 || !stream
                     .topologies
                     .iter()
@@ -1014,10 +1052,19 @@ fn validate_scope_source_bindings(
 fn authorized_observation_source_contract(
     stream: &SupportSourceStreamWire,
 ) -> Option<AuthorizedObservationSourceContract> {
+    let decoder_id = stream.decoder_id.as_ref()?.clone();
+    let authority = match stream.authority.as_deref()? {
+        "canonical" => AuthorizedObservationSourceAuthority::Canonical,
+        "supplemental" => AuthorizedObservationSourceAuthority::Supplemental,
+        "diagnostic" => AuthorizedObservationSourceAuthority::Diagnostic,
+        "ignored_derived" => AuthorizedObservationSourceAuthority::IgnoredDerived,
+        _ => return None,
+    };
     let driver = match stream.primitive.as_str() {
         "AppendDelimited" => AuthorizedObservationSourceDriver::AppendDelimited {
             max_record_bytes: stream.bounds.max_record_bytes?,
             max_batch_bytes: stream.bounds.max_batch_bytes?,
+            max_records_per_batch: stream.bounds.max_records_per_batch?,
         },
         "ReplaceDocument" => AuthorizedObservationSourceDriver::ReplaceDocument {
             max_object_bytes: stream.bounds.max_object_bytes?,
@@ -1030,6 +1077,9 @@ fn authorized_observation_source_contract(
     Some(AuthorizedObservationSourceContract {
         stream_id: stream.stream_id.clone(),
         root_id: stream.root_id.clone(),
+        relative_patterns: stream.relative_patterns.clone(),
+        decoder_id,
+        authority,
         driver,
     })
 }
@@ -1049,21 +1099,26 @@ fn observation_stream_has_complete_lifecycle(
                 && stream
                     .bounds
                     .max_object_bytes
-                    .is_some_and(|bound| bound <= relation_max_bytes)
+                    .is_some_and(|bound| bound > 0 && bound <= relation_max_bytes)
                 && ["replace", "delete", "recreate"]
                     .into_iter()
                     .all(|required| lifecycle.contains(required))
         }
         "AppendDelimited" => {
+            let Some(max_record_bytes) = stream.bounds.max_record_bytes else {
+                return false;
+            };
+            let Some(max_batch_bytes) = stream.bounds.max_batch_bytes else {
+                return false;
+            };
+            let Some(max_records_per_batch) = stream.bounds.max_records_per_batch else {
+                return false;
+            };
             stream.safe_decoder_state_boundary == "object_generation_cursor"
-                && stream
-                    .bounds
-                    .max_record_bytes
-                    .is_some_and(|bound| bound <= relation_max_bytes)
-                && stream
-                    .bounds
-                    .max_batch_bytes
-                    .is_some_and(|bound| bound <= relation_max_bytes)
+                && max_record_bytes > 0
+                && max_record_bytes <= max_batch_bytes
+                && max_batch_bytes <= relation_max_bytes
+                && (1..=u64::from(u32::MAX)).contains(&max_records_per_batch)
                 && [
                     "append",
                     "partial_write",
@@ -4207,10 +4262,12 @@ mod tests {
                 "stream_id": "descendant-stream",
                 "root_id": "root",
                 "relative_patterns": ["sessions/*/children/**/entry-*.jsonl"],
+                "decoder_id": "fixture-descendant",
+                "authority": "canonical",
                 "primitive": "AppendDelimited",
                 "topologies": ["durable", "scoped"],
                 "implementation_state": "existing",
-                "bounds": {"max_record_bytes": 4096, "max_batch_bytes": 8192},
+                "bounds": {"max_record_bytes": 4096, "max_batch_bytes": 8192, "max_records_per_batch": 64},
                 "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"],
                 "safe_decoder_state_boundary": "object_generation_cursor"
             }]
@@ -4222,12 +4279,37 @@ mod tests {
             AuthorizedObservationSourceDriver::AppendDelimited {
                 max_record_bytes: 4096,
                 max_batch_bytes: 8192,
+                max_records_per_batch: 64,
             }
+        );
+        let contract = contracts.get("descendant-stream").unwrap();
+        assert_eq!(
+            contract.relative_patterns(),
+            ["sessions/*/children/**/entry-*.jsonl"]
+        );
+        assert_eq!(contract.decoder_id(), "fixture-descendant");
+        assert_eq!(
+            contract.authority(),
+            AuthorizedObservationSourceAuthority::Canonical
         );
 
         source.streams[0].relative_patterns[0] = "sessions/*/other/**".to_string();
         assert!(validate_scope_source_bindings(&scope, &source).is_err());
         source.streams[0].relative_patterns[0] = "sessions/*/children/**/entry-*.jsonl".to_string();
+        source.streams[0]
+            .relative_patterns
+            .push("sessions/*/children/**/entry-*.jsonl".to_string());
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        source.streams[0].relative_patterns.pop();
+        source.streams[0].decoder_id = None;
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        source.streams[0].decoder_id = Some("fixture-descendant".to_string());
+        source.streams[0].authority = Some("private".to_string());
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        source.streams[0].authority = Some("canonical".to_string());
+        source.streams[0].bounds.max_records_per_batch = None;
+        assert!(validate_scope_source_bindings(&scope, &source).is_err());
+        source.streams[0].bounds.max_records_per_batch = Some(64);
         source.streams[0].bounds.max_record_bytes = Some(16_384);
         assert!(validate_scope_source_bindings(&scope, &source).is_err());
         source.streams[0].bounds.max_record_bytes = Some(4096);

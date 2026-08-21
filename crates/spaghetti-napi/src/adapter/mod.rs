@@ -77,4 +77,7 @@ pub use support::{
     VerifiedSupportRelease, CONTRACT_VERSION_SELECTION_VERSION, SUPPORT_RELEASE_SCHEMA_VERSION,
     SUPPORT_SELECTION_CONTRACT_VERSION,
 };
-pub(crate) use support::{AuthorizedObservationSourceContract, AuthorizedObservationSourceDriver};
+pub(crate) use support::{
+    AuthorizedObservationSourceAuthority, AuthorizedObservationSourceContract,
+    AuthorizedObservationSourceDriver,
+};
