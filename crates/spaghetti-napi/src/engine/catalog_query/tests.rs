@@ -1059,8 +1059,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
                 .unwrap(),
             crate::engine::QueryCancellationToken::default(),
         )
-        .err()
-        .expect("incompatible query pack must fail");
+        .expect_err("incompatible query pack must fail");
     assert!(
         matches!(error, EngineError::InvalidQuery(ref detail) if detail == "IncompatibleCatalogContract: query_pack_version")
     );
@@ -1072,8 +1071,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
             CatalogResolutionQueryRequest::new(public_query_request(), external_ref),
             cancelled,
         )
-        .err()
-        .expect("cancelled catalog resolution must not enter SQLite");
+        .expect_err("cancelled catalog resolution must not enter SQLite");
     assert!(matches!(error, EngineError::QueryCancelled));
 
     pool.shutdown().unwrap();
