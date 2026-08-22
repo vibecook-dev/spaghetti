@@ -844,6 +844,34 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    fn configured_attachment_registry_with_decoder_bootstrap_failure(
+        probe_calls: Arc<AtomicUsize>,
+        discover_calls: Arc<AtomicUsize>,
+    ) -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(COMPOSED_ROOT_SCOPE_DOCUMENT);
+        AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![fixture_root_runtime_stream()])
+                    .with_configured_root_discovery(discover_calls)
+                    .with_dependency_free_bootstrap_failure(PathBuf::from("session.jsonl")),
+            )
+            .register_native_support_probe("fixture", move |_| {
+                probe_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap()
+    }
+
     fn configured_attachment_request(
         configured_roots: Vec<PathBuf>,
         relative_path: PathBuf,
@@ -2333,11 +2361,32 @@ pub(crate) mod tests {
         assert!(!rendered.contains("configured-private-root"));
         assert!(!rendered.contains("fixture-session"));
 
+        let prepared_runtime = attachment.prepare_append_runtime(16, 16).unwrap();
+        assert_eq!(prepared_runtime.objects().len(), 1);
+        assert_eq!(prepared_runtime.bindings().len(), 1);
+        assert_eq!(prepared_runtime.bindings()[0].relation_id(), "root-object");
+        assert_eq!(
+            prepared_runtime.objects()[0].source_identity().stream_key,
+            CoverageStreamKey::derive("fixture", b"root-stream").unwrap()
+        );
+        assert_eq!(
+            prepared_runtime.objects()[0].source_identity().object_key,
+            CoverageObjectKey::derive(
+                "root-stream",
+                &confined_relative_path_key(std::path::Path::new("sessions/session.jsonl"))
+                    .unwrap(),
+            )
+            .unwrap()
+        );
+        let rendered = format!("{prepared_runtime:?}");
+        assert!(!rendered.contains("configured-private-root"));
+        assert!(!rendered.contains("fixture-session"));
+
         let inputs = [ScopeIdentityInput {
             name: "native-session-id",
             value: b"fixture-session",
         }];
-        let pass = attachment.host().begin_pass().unwrap();
+        let pass = prepared_runtime.host().begin_pass().unwrap();
         assert!(matches!(
             pass.read_known_object(ScopedKnownObjectReadRequest {
                 relation_id: "root-object",
@@ -2351,7 +2400,10 @@ pub(crate) mod tests {
             ScopedObjectRead::Available { .. }
         ));
         drop(pass);
-        drop(attachment.into_host());
+        let (host, objects, bindings) = prepared_runtime.into_parts();
+        assert_eq!(objects.len(), 1);
+        assert_eq!(bindings.len(), 1);
+        drop(host);
     }
 
     #[test]
@@ -2385,6 +2437,36 @@ pub(crate) mod tests {
         ] {
             assert!(!rendered.contains(private));
         }
+    }
+
+    #[test]
+    fn configured_append_runtime_redacts_decoder_bootstrap_failures() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_attachment_registry_with_decoder_bootstrap_failure(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("private-configured-runtime-root");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(vec![root], PathBuf::from("sessions/session.jsonl")),
+        )
+        .unwrap()
+        .unwrap();
+
+        let error = attachment.prepare_append_runtime(16, 16).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "scoped observation authorization failed: configured scoped runtime decoder binding failed"
+        );
+        for private in ["/Users/", "alice", "private", "session.jsonl"] {
+            assert!(!error.to_string().contains(private));
+        }
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
     }
 
     #[test]

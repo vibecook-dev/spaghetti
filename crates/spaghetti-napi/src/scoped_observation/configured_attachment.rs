@@ -13,19 +13,21 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapter::{
-    AdapterRegistry, CanonicalEntityKey, DiscoveryContext, ExternalEntityRef, NativeIdentityClaim,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, StreamSpec,
+    AdapterRegistry, CanonicalEntityKey, CoverageDomain, DiscoveryContext, DriverSpec,
+    ExternalEntityRef, FactSemanticContext, NativeIdentityClaim, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
 };
 use crate::observation_contract::{ObservationContractOffer, ObservationContractRequest};
 use crate::source::{
-    confined_relative_path_key, platform_path_key, validate_relation_id, AuthorizedScopeAccessPlan,
-    MAX_IDENTITY_VALUE_BYTES,
+    confined_relative_path_key, platform_path_key, validate_relation_id, AppendDelimitedFile,
+    AuthorizedScopeAccessPlan, RecordOrigin, SourceMediaType, MAX_IDENTITY_VALUE_BYTES,
 };
 
 use super::{
     artifact_access, prepare_scoped_observation_support, PreparedScopedObservationSupport,
-    ScopedAccessRootGrant, ScopedArtifactAccessPolicy, ScopedArtifactRelationGrant,
-    ScopedKnownObjectGrant, ScopedObservationAccessError, ScopedObservationAccessHost,
+    ScopedAccessRootGrant, ScopedAppendDecoderConfig, ScopedArtifactAccessPolicy,
+    ScopedArtifactRelationGrant, ScopedKnownAppendObject, ScopedKnownObjectGrant,
+    ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAppendPassBinding,
     ScopedObservationOwnedIdentityInput, ScopedObservationTrustedAccessRequest,
     ScopedObservationUnknownWireNegotiation, ScopedRootIdentityRequest,
 };
@@ -308,6 +310,8 @@ impl std::fmt::Debug for ScopedConfiguredAttachmentRequest {
 pub(crate) struct PreparedScopedKnownObjectSource {
     relation_id: String,
     stream: StreamSpec,
+    relative_path: PathBuf,
+    max_bytes: u64,
 }
 
 impl PreparedScopedKnownObjectSource {
@@ -326,6 +330,61 @@ impl std::fmt::Debug for PreparedScopedKnownObjectSource {
             .debug_struct("PreparedScopedKnownObjectSource")
             .field("relation_id", &self.relation_id)
             .field("stream_id", &self.stream.id)
+            .field("relative_path", &"<redacted>")
+            .field("max_bytes", &self.max_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Decoder-ready append sources derived entirely from one composed attachment.
+/// No native object has been opened or watched yet. Numeric `RecordOrigin`
+/// coordinates are attachment-local registration coordinates; semantic source
+/// identity is derived only from the adapter/source/stream/object contract.
+pub(crate) struct PreparedConfiguredAppendRuntime {
+    host: ScopedObservationAccessHost,
+    objects: Vec<ScopedKnownAppendObject>,
+    bindings: Vec<ScopedObservationAppendPassBinding>,
+}
+
+impl PreparedConfiguredAppendRuntime {
+    pub(crate) fn host(&self) -> &ScopedObservationAccessHost {
+        &self.host
+    }
+
+    pub(crate) fn objects(&self) -> &[ScopedKnownAppendObject] {
+        &self.objects
+    }
+
+    pub(crate) fn bindings(&self) -> &[ScopedObservationAppendPassBinding] {
+        &self.bindings
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ScopedObservationAccessHost,
+        Vec<ScopedKnownAppendObject>,
+        Vec<ScopedObservationAppendPassBinding>,
+    ) {
+        (self.host, self.objects, self.bindings)
+    }
+}
+
+impl std::fmt::Debug for PreparedConfiguredAppendRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedConfiguredAppendRuntime")
+            .field("adapter_id", &self.host.root_identity().adapter_id)
+            .field("session_key", &self.host.root_identity().session_key)
+            .field("object_count", &self.objects.len())
+            .field(
+                "relation_ids",
+                &self
+                    .bindings
+                    .iter()
+                    .map(ScopedObservationAppendPassBinding::relation_id)
+                    .collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -363,6 +422,124 @@ impl PreparedScopedObservationAttachment {
         self.relation_identity_inputs
             .get(relation_id)
             .map(Vec::as_slice)
+    }
+
+    /// Bind every exact known object to the common append driver and decoder
+    /// before the observer installs a watcher. A non-append stream, adapter
+    /// bootstrap failure, or identity inconsistency fails closed without
+    /// reading the configured root or echoing native input.
+    pub(crate) fn prepare_append_runtime(
+        self,
+        max_facts_per_record: usize,
+        max_diagnostics_per_record: usize,
+    ) -> Result<PreparedConfiguredAppendRuntime, ScopedObservationAccessError> {
+        if max_facts_per_record == 0 || max_diagnostics_per_record == 0 {
+            return Err(invalid_configured_runtime());
+        }
+        let Self {
+            host,
+            root_relation_id: _,
+            known_object_sources,
+            relation_identity_inputs,
+        } = self;
+        if known_object_sources.len() != relation_identity_inputs.len() {
+            return Err(invalid_configured_runtime());
+        }
+
+        let adapter_id = host.adapter.manifest().id.clone();
+        let source_instance = Arc::clone(&host.source_instance);
+        let coverage_domains = host
+            .contract_selection()
+            .contract_versions
+            .fact_family_versions
+            .iter()
+            .map(|(family, version)| CoverageDomain::FactFamily {
+                family: family.clone(),
+                version: *version,
+            })
+            .collect::<Vec<_>>();
+        let media_type = SourceMediaType::new("application/x-ndjson")
+            .map_err(|_| invalid_configured_runtime())?;
+        let mut objects = Vec::with_capacity(known_object_sources.len());
+        let mut bindings = Vec::with_capacity(known_object_sources.len());
+
+        for (index, (relation_id, source)) in known_object_sources.into_iter().enumerate() {
+            if relation_id != source.relation_id {
+                return Err(invalid_configured_runtime());
+            }
+            let DriverSpec::AppendDelimited(config) = &source.stream.driver else {
+                return Err(unsupported_configured_runtime());
+            };
+            let object_key = confined_relative_path_key(&source.relative_path)
+                .map_err(|_| invalid_configured_runtime())?;
+            let descriptor = SourceObjectDescriptor {
+                stream_id: source.stream.id.clone(),
+                object_key: object_key.clone(),
+                relative_path: source.relative_path.clone(),
+            };
+            let object_context = catch_unwind(AssertUnwindSafe(|| {
+                host.adapter
+                    .bootstrap_object_without_source_access(&source_instance, &descriptor)
+            }))
+            .map_err(|_| configured_decoder_binding_failed())?
+            .map_err(|_| configured_decoder_binding_failed())?;
+            let semantic_context = FactSemanticContext::new(
+                &adapter_id,
+                source_instance.spec.identity_contract_version,
+                source_instance.spec.stable_key.as_bytes(),
+                source.stream.id.as_str().as_bytes(),
+                &object_key,
+                source.stream.driver.framing_contract_version(),
+            )
+            .map_err(|_| invalid_configured_runtime())?;
+            let driver = AppendDelimitedFile::new(config.clone())
+                .map_err(|_| invalid_configured_runtime())?;
+            let object = ScopedKnownAppendObject::new(
+                driver,
+                ScopedAppendDecoderConfig {
+                    decoder: source.stream.decoder.clone(),
+                    object_context,
+                    semantic_context,
+                    coverage_domains: coverage_domains.clone(),
+                    retention: source.stream.retention,
+                    max_facts_per_record,
+                    max_diagnostics_per_record,
+                },
+            )?;
+            let ordinal = u64::try_from(index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(invalid_configured_runtime)?;
+            let origin = RecordOrigin {
+                source_instance_id: 1,
+                stream_id: ordinal,
+                object_id: ordinal,
+                observed_at: 0,
+                source_timestamp_hint: None,
+                media_type: media_type.clone(),
+            };
+            let identity_inputs = relation_identity_inputs
+                .get(&relation_id)
+                .cloned()
+                .ok_or_else(invalid_configured_runtime)?;
+            let binding = ScopedObservationAppendPassBinding::new(
+                relation_id,
+                identity_inputs,
+                None,
+                1,
+                source.max_bytes,
+                origin,
+                false,
+            )
+            .map_err(|_| invalid_configured_runtime())?;
+            objects.push(object);
+            bindings.push(binding);
+        }
+        Ok(PreparedConfiguredAppendRuntime {
+            host,
+            objects,
+            bindings,
+        })
     }
 
     pub(crate) fn into_host(self) -> ScopedObservationAccessHost {
@@ -548,6 +725,8 @@ fn compose_prepared_attachment(
                 PreparedScopedKnownObjectSource {
                     relation_id: relation_id.clone(),
                     stream,
+                    relative_path: relative_path.clone(),
+                    max_bytes: relation.bounds.max_bytes,
                 },
             );
         }
@@ -668,5 +847,23 @@ fn discovery_failed() -> ScopedObservationAccessError {
 fn ambiguous_discovery() -> ScopedObservationAccessError {
     ScopedObservationAccessError::InvalidGrant(
         "configured scoped attachment source selection is ambiguous".to_string(),
+    )
+}
+
+fn invalid_configured_runtime() -> ScopedObservationAccessError {
+    ScopedObservationAccessError::InvalidGrant(
+        "configured scoped runtime does not match its prepared authority".to_string(),
+    )
+}
+
+fn unsupported_configured_runtime() -> ScopedObservationAccessError {
+    ScopedObservationAccessError::Authorization(
+        "configured scoped runtime stream is not supported".to_string(),
+    )
+}
+
+fn configured_decoder_binding_failed() -> ScopedObservationAccessError {
+    ScopedObservationAccessError::Authorization(
+        "configured scoped runtime decoder binding failed".to_string(),
     )
 }
