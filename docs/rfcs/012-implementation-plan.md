@@ -280,11 +280,21 @@ Current landing status (2026-08-18):
   Rust-derived identity coordinates rather than attempting to synthesize
   BLAKE3 identities, and a differential mutation matrix exercises both native
   helpers plus the portable parsers; and
-- retained A1 as `In progress`: usage-v2 is the first built-in family on the
-  canonical seam, while the remaining fact-family migrations, complete
-  retraction/replacement fixtures, full semantic reduction, tier/view
-  compositionality, scoped/durable end-to-end parity, and full-only versus
-  composed reducer digests remain.
+- retained A1 as `In progress`: every currently compiled RFC 012C semantic
+  family now enters the common canonical revision/reducer seam and the Rust
+  durable/scoped replacement digests agree. The tier conformance boundary now
+  derives its ordered record/disposition/fact/payload/provenance/state witness
+  and final replacement digest from completed common decoder output, rejects
+  legacy facts without canonical revisions, excludes observation and raw-
+  retention storage policy, and makes overlap replay idempotent without
+  rolling a newer replacement backward. A stateful real-output conformance
+  adapter proves prefix-plus-continuation equals full-only decoding and that a
+  window-boundary state reset is detectable. Actual Claude/Codex/Grok catalog
+  producers are not yet admitted by that gate: their candidate catalog paths
+  still contain direct adapter invocation and/or legacy catalog-relevant facts.
+  Vendor source composition, catalog/base-session identity equality, and the
+  public portable event specialists therefore remain open rather than being
+  inferred from the synthetic composition fixture.
 
 The repository-wide native-surface validator also discovered current Claude
 drift that predates this model slice: `bridge-session` records now include
@@ -674,11 +684,14 @@ primitives retain the exact RFC 012A overlap strategy and safe decoder-state
 boundary. Initial head/prefix planning starts only at record zero; every later
 window consumes the opaque continuation issued by the immediately preceding
 step, bound to composition, component, window specification, frozen record
-layout, next ordinal, and chain sequence. The conformance trace proves equal
-ordered record, disposition, fact/revision, semantic payload, qualified
-provenance, and final decoder-state digests against full-only decoding. The
-64 KiB head value remains candidate fixture evidence rather than a ratified
-global bound. Still open are promoted real source declarations/support
+layout, next ordinal, and chain sequence. The original frozen conformance trace
+repartitions caller-supplied synthetic witness digests and therefore proves the
+planner/accumulator contract only; it is not evidence that a vendor decoder
+produces equal semantic facts. The common real-output witness and replacement
+digest boundary now exists under A1, but the candidate vendor producers still
+must enter it with completed common decode results. The 64 KiB head value
+remains candidate fixture evidence rather than a ratified global bound. Still
+open are promoted real source declarations/support
 releases, actual common-runtime and vendor composition, independent Phase 0
 catalog identity plus final hydrated-identity oracle parity, source
 access/coverage integration, and calibrated performance evidence.
