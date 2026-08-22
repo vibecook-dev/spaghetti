@@ -1097,12 +1097,14 @@ and correction identity is separated from the value-derived revision. Host
 derived or estimated assessments cannot inhabit this native fact type. Its
 committed compaction/progress/queue fixture is regenerated and strictly
 revalidated by Rust, including every fact and semantic revision identity. The
-portable TypeScript/N-API consumer and `CurrentGenerationLog` reducer are still
-open.
+portable TypeScript consumer binds the full semantic value to caller-held
+Rust-produced identity, and the JSON-string-only N-API helper recomputes it in
+Rust with parity negatives for host assessments, omitted nullable fields, and
+semantic drift. Its `CurrentGenerationLog` reducer is still open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: native-marker TypeScript/N-API and reducer coverage,
-capability families, complete remaining family-by-family
+does not close C1: native-marker reducer coverage, capability families,
+complete remaining family-by-family
 replacement/retraction cases, full semantic reduction, tier/view
 compositionality, and remaining-family durable/scoped reducer digest equality
 remain open.

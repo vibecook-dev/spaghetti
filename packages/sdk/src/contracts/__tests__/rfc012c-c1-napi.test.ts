@@ -7,6 +7,7 @@ import {
   parseEffectiveStateFixture,
   parseInteractionFixture,
   parseMessageFixture,
+  parseNativeMarkerFixture,
   parsePlanFixture,
   parseTaskFixture,
   parseToolFixture,
@@ -16,6 +17,7 @@ interface NativeContractAddon {
   parseRfc012cEffectiveStateV1Json: (json: string) => string;
   parseRfc012cInteractionV1Json: (json: string) => string;
   parseRfc012cMessageV1Json: (json: string) => string;
+  parseRfc012cNativeMarkerV1Json: (json: string) => string;
   parseRfc012cTaskV1Json: (json: string) => string;
   parseRfc012cPlanV1Json: (json: string) => string;
   parseRfc012cToolV1Json: (json: string) => string;
@@ -56,6 +58,10 @@ const interactionJson = readFileSync(
 );
 const messageJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-message-v1.json', import.meta.url),
+  'utf8',
+);
+const nativeMarkerJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-native-marker-v1.json', import.meta.url),
   'utf8',
 );
 const taskJson = readFileSync(
@@ -142,6 +148,37 @@ test('native RFC 012C message, task, plan, and tool helpers preserve value-bound
   }
 });
 
+test('native RFC 012C native-marker helper preserves closed native-only identities', () => {
+  assert.equal(typeof native.parseRfc012cNativeMarkerV1Json, 'function');
+  const committed = JSON.parse(nativeMarkerJson) as unknown;
+  const nativeFixture = parseNativeMarkerFixture(
+    JSON.parse(native.parseRfc012cNativeMarkerV1Json(nativeMarkerJson)) as unknown,
+    committed,
+  );
+  const portableFixture = parseNativeMarkerFixture(committed, committed);
+  assert.deepEqual(nativeFixture, portableFixture);
+  assert.equal(nativeFixture.progress.current.quality, 'native_claimed');
+  assert.equal(nativeFixture.progress.retract.operation, 'retract');
+
+  const hostAssessment = structuredClone(committed) as {
+    progress: { current: { quality: string } };
+  };
+  hostAssessment.progress.current.quality = 'derived';
+  assert.throws(
+    () => native.parseRfc012cNativeMarkerV1Json(JSON.stringify(hostAssessment)),
+    /invalid semantic fixture/,
+  );
+
+  const missingNullable = structuredClone(committed) as {
+    compaction: { current: Record<string, unknown> };
+  };
+  delete missingNullable.compaction.current.correlated_native_id;
+  assert.throws(
+    () => native.parseRfc012cNativeMarkerV1Json(JSON.stringify(missingNullable)),
+    /invalid semantic fixture/,
+  );
+});
+
 test('native RFC 012C message-v1 preserves the prior field-absent shape', () => {
   const prior = JSON.parse(messageJson) as Record<string, unknown>;
   delete prior.content_block;
@@ -186,6 +223,16 @@ test('native and portable RFC 012C C1 helpers reject semantic mutation with stal
         const contentBlock = value.content_block as Record<string, unknown>;
         const correction = contentBlock.correction as Record<string, unknown>;
         (correction.content as Record<string, unknown>).text = 'stale identity';
+      },
+    },
+    {
+      json: nativeMarkerJson,
+      nativeParse: native.parseRfc012cNativeMarkerV1Json,
+      portableParse: parseNativeMarkerFixture,
+      mutate: (value) => {
+        const progress = value.progress as Record<string, unknown>;
+        const current = progress.current as Record<string, unknown>;
+        (current.value as Record<string, unknown>).state = 'completed';
       },
     },
     {

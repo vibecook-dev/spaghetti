@@ -2557,10 +2557,64 @@ pub(crate) fn parse_rfc012c_message_v1_json(json: &str) -> Result<String, Semant
     encode_json(&decode_rfc012c_message_v1(json)?)
 }
 
+fn required_fixture_object<'a>(
+    value: &'a serde_json::Value,
+    label: &str,
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, SemanticFixtureError> {
+    value
+        .as_object()
+        .ok_or_else(|| SemanticFixtureError::invalid(format!("{label} must be an object")))
+}
+
+fn required_fixture_field<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    label: &str,
+) -> Result<&'a serde_json::Value, SemanticFixtureError> {
+    object.get(field).ok_or_else(|| {
+        SemanticFixtureError::invalid(format!("{label} is missing required field {field}"))
+    })
+}
+
+fn preflight_native_marker_required_nullable_fields(
+    value: &serde_json::Value,
+) -> Result<(), SemanticFixtureError> {
+    let fixture = required_fixture_object(value, "native-marker fixture")?;
+    for (example_name, value_fields) in [
+        ("compaction", &["trigger", "pre_tokens"][..]),
+        ("progress", &["completed", "total", "detail_digest"][..]),
+        ("queue", &["depth", "item_digest"][..]),
+    ] {
+        let example = required_fixture_object(
+            required_fixture_field(fixture, example_name, "native-marker fixture")?,
+            "native-marker example",
+        )?;
+        for slot_name in ["current", "correction", "retract", "partial"] {
+            let slot = required_fixture_object(
+                required_fixture_field(example, slot_name, "native-marker example")?,
+                "native-marker revision slot",
+            )?;
+            required_fixture_field(slot, "correlated_native_id", "native-marker revision slot")?;
+            required_fixture_field(slot, "effective_at", "native-marker revision slot")?;
+            let marker_value = required_fixture_object(
+                required_fixture_field(slot, "value", "native-marker revision slot")?,
+                "native-marker value",
+            )?;
+            for field in value_fields {
+                required_fixture_field(marker_value, field, "native-marker value")?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_rfc012c_native_marker_v1(
     json: &str,
 ) -> Result<NativeMarkerFixtureWire, SemanticFixtureError> {
-    let fixture: NativeMarkerFixtureWire = decode_json(json)?;
+    let value = preflight_json(json)?;
+    preflight_native_marker_required_nullable_fields(&value)?;
+    let fixture: NativeMarkerFixtureWire = serde_json::from_value(value)
+        .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
     validate_rfc012c_native_marker_fixture(&fixture)?;
     Ok(fixture)
 }
@@ -3037,6 +3091,20 @@ mod tests {
         let mut unknown = fixture();
         unknown["queue"]["current"]["value"]["future"] = serde_json::json!(true);
         assert!(parse_rfc012c_native_marker_v1_json(&unknown.to_string()).is_err());
+
+        let mut missing_nullable = fixture();
+        missing_nullable["compaction"]["current"]
+            .as_object_mut()
+            .unwrap()
+            .remove("correlated_native_id");
+        assert!(parse_rfc012c_native_marker_v1_json(&missing_nullable.to_string()).is_err());
+
+        let mut missing_value_nullable = fixture();
+        missing_value_nullable["compaction"]["current"]["value"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pre_tokens");
+        assert!(parse_rfc012c_native_marker_v1_json(&missing_value_nullable.to_string()).is_err());
 
         assert!(
             parse_rfc012c_native_marker_v1_json(&RFC012C_NATIVE_MARKER_FIXTURE.replacen(

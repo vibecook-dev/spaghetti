@@ -2073,6 +2073,9 @@ export declare function parseRfc012cInteractionV1Json(json: string): string
 /** Parse one committed RFC 012C v1 message fixture from a JSON string. */
 export declare function parseRfc012cMessageV1Json(json: string): string
 
+/** Parse one committed RFC 012C v1 native-marker fixture from a JSON string. */
+export declare function parseRfc012cNativeMarkerV1Json(json: string): string
+
 /** Parse one committed RFC 012C v1 plan fixture from a JSON string. */
 export declare function parseRfc012cPlanV1Json(json: string): string
 

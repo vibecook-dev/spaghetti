@@ -33,6 +33,7 @@ export const EFFECTIVE_STATE_FAMILY = 'runtime.effective-state' as const;
 export const USER_INPUT_FAMILY = 'runtime.user-input-request' as const;
 export const MESSAGE_FAMILY = 'runtime.message' as const;
 export const CONTENT_BLOCK_FAMILY = 'runtime.content-block' as const;
+export const NATIVE_MARKER_FAMILY = 'runtime.native-marker' as const;
 export const PLAN_FAMILY = 'runtime.plan' as const;
 export const TASK_FAMILY = 'runtime.task' as const;
 export const TOOL_FAMILY = 'runtime.tool' as const;
@@ -40,6 +41,7 @@ export const EFFECTIVE_STATE_FAMILY_VERSION = 1 as const;
 export const USER_INPUT_FAMILY_VERSION = 1 as const;
 export const MESSAGE_FAMILY_VERSION = 1 as const;
 export const CONTENT_BLOCK_FAMILY_VERSION = 1 as const;
+export const NATIVE_MARKER_FAMILY_VERSION = 1 as const;
 export const PLAN_FAMILY_VERSION = 1 as const;
 export const TASK_FAMILY_VERSION = 1 as const;
 export const TOOL_FAMILY_VERSION = 1 as const;
@@ -209,6 +211,14 @@ function assertKnownFields(input: UnknownRecord, fields: readonly string[], labe
   const known = new Set(fields);
   for (const key of Object.keys(input)) {
     if (!known.has(key)) throw new ContractValidationError(`${label} contains unknown field ${key}`);
+  }
+}
+
+function assertRequiredFields(input: UnknownRecord, fields: readonly string[], label: string): void {
+  for (const field of fields) {
+    if (!Object.hasOwn(input, field)) {
+      throw new ContractValidationError(`${label} is missing required field ${field}`);
+    }
   }
 }
 
@@ -2442,4 +2452,335 @@ export function parseToolFixture(value: unknown, expectedContextInput: unknown):
 
 export function parseRfc012cToolV1Json(json: string, expectedContextInput: unknown): ToolFixture {
   return parseToolFixture(preflightSemanticFixtureJson(json), expectedContextInput);
+}
+
+export type NativeCompactionPhase = 'started' | 'boundary' | 'completed' | 'failed';
+export type NativeProgressState = 'pending' | 'active' | 'waiting' | 'completed' | 'failed' | 'cancelled';
+export type NativeQueueOperation = 'enqueue' | 'dequeue' | 'drain' | 'remove';
+export type NativeMarkerQuality = 'exact' | 'native_claimed';
+
+export type NativeRuntimeMarkerValue =
+  | {
+      kind: 'compaction';
+      phase: NativeCompactionPhase;
+      trigger: string | null;
+      pre_tokens: number | null;
+    }
+  | {
+      kind: 'progress';
+      state: NativeProgressState;
+      completed: number | null;
+      total: number | null;
+      detail_digest: number[] | null;
+    }
+  | {
+      kind: 'queue';
+      operation: NativeQueueOperation;
+      depth: number | null;
+      item_digest: number[] | null;
+    };
+
+export interface NativeRuntimeMarkerProvenance {
+  native_field: string;
+  normalization_contract_version: number;
+}
+
+export interface NativeMarkerRevisionSlot {
+  correlated_native_id: string | null;
+  value: NativeRuntimeMarkerValue;
+  quality: NativeMarkerQuality;
+  effective_at: number | null;
+  provenance: NativeRuntimeMarkerProvenance;
+  completeness: ContractCompleteness;
+  operation: UserInputOperation;
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+}
+
+export interface NativeMarkerExample {
+  native_marker_id: string;
+  fact_id: OpaqueContractReference;
+  current: NativeMarkerRevisionSlot;
+  correction: NativeMarkerRevisionSlot;
+  retract: NativeMarkerRevisionSlot;
+  partial: NativeMarkerRevisionSlot;
+}
+
+export interface NativeMarkerFixture {
+  adapter_id: string;
+  actor_run: OpaqueContractReference;
+  family: typeof NATIVE_MARKER_FAMILY;
+  family_version: typeof NATIVE_MARKER_FAMILY_VERSION;
+  fixture_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  runtime_semantic_contract_version: typeof RUNTIME_SEMANTIC_CONTRACT_VERSION;
+  session: OpaqueContractReference;
+  source_instance_key: OpaqueContractReference;
+  source_record_id: OpaqueContractReference;
+  compaction: NativeMarkerExample;
+  progress: NativeMarkerExample;
+  queue: NativeMarkerExample;
+}
+
+function requiredNullableRuntimeText(value: unknown, label: string): string | null {
+  return value === null ? null : boundedText(value, label, MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
+}
+
+function requiredNullableNativeField(value: unknown, label: string): string | null {
+  return value === null ? null : parseNativeField(value, label);
+}
+
+function requiredNullableCounter(value: unknown, label: string): number | null {
+  return value === null ? null : tokenCount(value, label);
+}
+
+function requiredNullableDigest32(value: unknown, label: string): number[] | null {
+  return value === null ? null : digest32(value, label);
+}
+
+function requiredNullableEffectiveAt(value: unknown, label: string): number | null {
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || Object.is(value, -0)) {
+    throw new ContractValidationError(`${label} must be null or a portable safe integer`);
+  }
+  return value;
+}
+
+function parseNativeMarkerProvenance(value: unknown): NativeRuntimeMarkerProvenance {
+  const input = record(value, 'native-marker provenance');
+  const fields = ['native_field', 'normalization_contract_version'] as const;
+  assertKnownFields(input, fields, 'native-marker provenance');
+  assertRequiredFields(input, fields, 'native-marker provenance');
+  return {
+    native_field: parseNativeField(input.native_field, 'native-marker provenance native_field'),
+    normalization_contract_version: positiveU32(
+      input.normalization_contract_version,
+      'native-marker provenance normalization_contract_version',
+    ),
+  };
+}
+
+function parseNativeMarkerValue(value: unknown, label: string): NativeRuntimeMarkerValue {
+  const input = record(value, label);
+  assertRequiredFields(input, ['kind'], label);
+  if (input.kind === 'compaction') {
+    const fields = ['kind', 'phase', 'trigger', 'pre_tokens'] as const;
+    assertKnownFields(input, fields, label);
+    assertRequiredFields(input, fields, label);
+    if (
+      input.phase !== 'started' &&
+      input.phase !== 'boundary' &&
+      input.phase !== 'completed' &&
+      input.phase !== 'failed'
+    ) {
+      throw new ContractValidationError(`${label} has an unsupported compaction phase`);
+    }
+    return {
+      kind: 'compaction',
+      phase: input.phase,
+      trigger: requiredNullableNativeField(input.trigger, `${label} trigger`),
+      pre_tokens: requiredNullableCounter(input.pre_tokens, `${label} pre_tokens`),
+    };
+  }
+  if (input.kind === 'progress') {
+    const fields = ['kind', 'state', 'completed', 'total', 'detail_digest'] as const;
+    assertKnownFields(input, fields, label);
+    assertRequiredFields(input, fields, label);
+    if (
+      input.state !== 'pending' &&
+      input.state !== 'active' &&
+      input.state !== 'waiting' &&
+      input.state !== 'completed' &&
+      input.state !== 'failed' &&
+      input.state !== 'cancelled'
+    ) {
+      throw new ContractValidationError(`${label} has an unsupported progress state`);
+    }
+    const completed = requiredNullableCounter(input.completed, `${label} completed`);
+    const total = requiredNullableCounter(input.total, `${label} total`);
+    if (completed !== null && total !== null && completed > total) {
+      throw new ContractValidationError(`${label} completed cannot exceed total`);
+    }
+    return {
+      kind: 'progress',
+      state: input.state,
+      completed,
+      total,
+      detail_digest: requiredNullableDigest32(input.detail_digest, `${label} detail_digest`),
+    };
+  }
+  if (input.kind === 'queue') {
+    const fields = ['kind', 'operation', 'depth', 'item_digest'] as const;
+    assertKnownFields(input, fields, label);
+    assertRequiredFields(input, fields, label);
+    if (
+      input.operation !== 'enqueue' &&
+      input.operation !== 'dequeue' &&
+      input.operation !== 'drain' &&
+      input.operation !== 'remove'
+    ) {
+      throw new ContractValidationError(`${label} has an unsupported queue operation`);
+    }
+    return {
+      kind: 'queue',
+      operation: input.operation,
+      depth: requiredNullableCounter(input.depth, `${label} depth`),
+      item_digest: requiredNullableDigest32(input.item_digest, `${label} item_digest`),
+    };
+  }
+  throw new ContractValidationError(`${label} has an unsupported native-marker kind`);
+}
+
+function parseNativeMarkerSlot(
+  value: unknown,
+  label: string,
+  expectedKind: NativeRuntimeMarkerValue['kind'],
+  expectedOperation: UserInputOperation,
+  expectedCompleteness: ContractCompleteness,
+): NativeMarkerRevisionSlot {
+  const input = record(value, label);
+  const fields = [
+    'correlated_native_id',
+    'value',
+    'quality',
+    'effective_at',
+    'provenance',
+    'completeness',
+    'operation',
+    'semantic_revision_key_hex',
+    'semantic_revision_ref',
+  ] as const;
+  assertKnownFields(input, fields, label);
+  assertRequiredFields(input, fields, label);
+  const markerValue = parseNativeMarkerValue(input.value, `${label} value`);
+  if (markerValue.kind !== expectedKind) {
+    throw new ContractValidationError(`${label} value kind does not match its fixture example`);
+  }
+  if (input.quality !== 'exact' && input.quality !== 'native_claimed') {
+    throw new ContractValidationError(`${label} quality must be exact or native_claimed`);
+  }
+  const completeness = parseContractCompleteness(input.completeness, `${label} completeness`);
+  if (completeness !== expectedCompleteness || input.operation !== expectedOperation) {
+    throw new ContractValidationError(`${label} operation or completeness does not match its fixture slot`);
+  }
+  return {
+    correlated_native_id: requiredNullableRuntimeText(input.correlated_native_id, `${label} correlated_native_id`),
+    value: markerValue,
+    quality: input.quality,
+    effective_at: requiredNullableEffectiveAt(input.effective_at, `${label} effective_at`),
+    provenance: parseNativeMarkerProvenance(input.provenance),
+    completeness,
+    operation: expectedOperation,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+  };
+}
+
+function parseNativeMarkerExample(
+  value: unknown,
+  label: string,
+  expectedId: string,
+  expectedKind: NativeRuntimeMarkerValue['kind'],
+): NativeMarkerExample {
+  const input = record(value, label);
+  const fields = ['native_marker_id', 'fact_id', 'current', 'correction', 'retract', 'partial'] as const;
+  assertKnownFields(input, fields, label);
+  assertRequiredFields(input, fields, label);
+  const nativeMarkerId = boundedText(
+    input.native_marker_id,
+    `${label} native_marker_id`,
+    MAX_RUNTIME_SEMANTIC_TEXT_BYTES,
+  );
+  if (nativeMarkerId !== expectedId) {
+    throw new ContractValidationError(`${label} identity does not match its declared fixture slot`);
+  }
+  const current = parseNativeMarkerSlot(input.current, `${label} current`, expectedKind, 'upsert', 'complete');
+  const correction = parseNativeMarkerSlot(input.correction, `${label} correction`, expectedKind, 'upsert', 'complete');
+  const retract = parseNativeMarkerSlot(input.retract, `${label} retract`, expectedKind, 'retract', 'complete');
+  const partial = parseNativeMarkerSlot(input.partial, `${label} partial`, expectedKind, 'upsert', 'partial');
+  if (JSON.stringify(current.value) === JSON.stringify(correction.value)) {
+    throw new ContractValidationError(`${label} correction must change the typed value`);
+  }
+  if (
+    JSON.stringify(retract.value) !== JSON.stringify(correction.value) ||
+    retract.correlated_native_id !== correction.correlated_native_id ||
+    retract.quality !== correction.quality ||
+    JSON.stringify(retract.provenance) !== JSON.stringify(correction.provenance)
+  ) {
+    throw new ContractValidationError(`${label} retract must retain the corrected native value`);
+  }
+  const revisionIds = [current, correction, retract, partial].map(
+    (slot) => slot.semantic_revision_ref.fact_revision_id,
+  );
+  if (new Set(revisionIds).size !== revisionIds.length) {
+    throw new ContractValidationError(`${label} revision slots must have distinct semantic identity`);
+  }
+  return {
+    native_marker_id: nativeMarkerId,
+    fact_id: parseOpaqueContractReference(input.fact_id, `${label} fact id`),
+    current,
+    correction,
+    retract,
+    partial,
+  };
+}
+
+function parseNativeMarkerFixtureShape(value: unknown): NativeMarkerFixture {
+  assertSemanticFixtureGraph(value);
+  const input = record(value, 'native-marker fixture');
+  const fields = [
+    'adapter_id',
+    'actor_run',
+    'family',
+    'family_version',
+    'fixture_contract_version',
+    'runtime_semantic_contract_version',
+    'session',
+    'source_instance_key',
+    'source_record_id',
+    'compaction',
+    'progress',
+    'queue',
+  ] as const;
+  assertKnownFields(input, fields, 'native-marker fixture');
+  assertRequiredFields(input, fields, 'native-marker fixture');
+  if (
+    input.fixture_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION ||
+    input.runtime_semantic_contract_version !== RUNTIME_SEMANTIC_CONTRACT_VERSION
+  ) {
+    throw new ContractValidationError('unsupported native-marker fixture contract version');
+  }
+  if (input.family !== NATIVE_MARKER_FAMILY || input.family_version !== NATIVE_MARKER_FAMILY_VERSION) {
+    throw new ContractValidationError('native-marker fixture family must be runtime.native-marker@1');
+  }
+  const compaction = parseNativeMarkerExample(input.compaction, 'compaction marker', 'compaction-1', 'compaction');
+  const progress = parseNativeMarkerExample(input.progress, 'progress marker', 'progress-1', 'progress');
+  const queue = parseNativeMarkerExample(input.queue, 'queue marker', 'queue-1', 'queue');
+  if (new Set([compaction.fact_id, progress.fact_id, queue.fact_id]).size !== 3) {
+    throw new ContractValidationError('native-marker fixture examples must have distinct fact identities');
+  }
+  return {
+    adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
+    actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
+    family: NATIVE_MARKER_FAMILY,
+    family_version: NATIVE_MARKER_FAMILY_VERSION,
+    fixture_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+    session: parseOpaqueContractReference(input.session, 'session'),
+    source_instance_key: parseOpaqueContractReference(input.source_instance_key, 'source instance key'),
+    source_record_id: parseOpaqueContractReference(input.source_record_id, 'source record id'),
+    compaction,
+    progress,
+    queue,
+  };
+}
+
+export function parseNativeMarkerFixture(value: unknown, expectedContextInput: unknown): NativeMarkerFixture {
+  const expected = parseNativeMarkerFixtureShape(expectedContextInput);
+  const parsed = parseNativeMarkerFixtureShape(value);
+  bindFixtureSemanticContext('native-marker fixture', parsed, expected);
+  return parsed;
+}
+
+export function parseRfc012cNativeMarkerV1Json(json: string, expectedContextInput: unknown): NativeMarkerFixture {
+  return parseNativeMarkerFixture(preflightSemanticFixtureJson(json), expectedContextInput);
 }
