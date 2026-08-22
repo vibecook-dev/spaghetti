@@ -1111,6 +1111,15 @@ different document's plans merely because they share a session. Durable
 reduced revision and path-free digest across partial enrichment, complete
 replacement, retraction, restoration, and owned-set omission. Its portable
 selected event specialist remains open.
+The same topology-neutral revisioned-entity boundary now owns `runtime.task`.
+Incomplete evidence cannot terminally transition or retract a known task,
+replace its subject, or carry owned-set absence authority; a terminal partial
+without current state fails closed. Complete owned-set omission is confined to
+the same source object and generation. Durable `FactBatch` reduction and the
+selected scoped projection share the exact reduced lifecycle and path-free
+digest through creation, updates, terminal completion, partial observations,
+retraction, restoration, and owned-set omission. Its portable selected event
+specialist remains open.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,
@@ -3004,7 +3013,10 @@ current set.
 projects C1 `runtime.task` as revisioned-entity plus complete owned-set
 snapshot: created→updated→completed revises one task, complete retract
 removes it, and a complete owned-set listing only the peer native id retracts
-the omitted current task while keeping the peer.
+the omitted current task while keeping the peer. Incomplete terminal evidence
+cannot change current lifecycle, incomplete owned sets and partial subject
+drift fail closed, owned-set authority is source-object/generation-local, and
+durable/scoped reduced-state digests match after every transition.
 `rfc012d_effective_state_replaces_one_revisioned_entity_without_duplicates`
 projects C1 `runtime.effective-state` as `RevisionedEntityCurrent`: configured
 intent revises to response-observed evidence on one dimension entity, complete

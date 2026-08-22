@@ -1579,6 +1579,11 @@ impl TaskRevisionFact {
         validate_runtime_semantic_text("native_task_id", Some(self.native_task_id.as_str()))?;
         validate_runtime_semantic_text("subject", Some(self.subject.as_str()))?;
         if let Some(owned_set) = &self.owned_set {
+            if self.completeness != ContractCompleteness::Complete {
+                return Err(AdapterError::invalid_contract(
+                    "task owned_set requires complete evidence",
+                ));
+            }
             if owned_set.is_empty() {
                 return Err(AdapterError::invalid_contract(
                     "task owned_set must be omitted or non-empty",
