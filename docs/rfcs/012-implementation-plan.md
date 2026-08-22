@@ -1205,6 +1205,30 @@ classification are executable. `Partial` publication, changed-plan/epoch
 replacement, physical compaction, caller-authorized local policy, richer
 queries, and promotion evidence remain open.
 
+The fourteenth bounded B3 slice (`b303b49`) adds schema-v59 and closes durable
+`Building -> Partial -> Ready` publication for multi-source initial builds and
+retained-snapshot recovery attempts. Each accepted milestone atomically
+appends an immutable, predecessor-bound header and canonical per-source
+coverage payloads before advancing readiness and emitting its path-free v8
+invalidation. Source count, per-source payload, aggregate bytes, and restart
+history are explicitly bounded; restart streams one lineage at a time,
+recomputes every payload and aggregate commitment, validates strict coverage
+progress and exact terminal ownership, and retains only the milestone needed
+to reconstruct current `Partial` state. Production records cumulative progress
+only after a required source has genuinely advanced, never for optional-only
+or unavailable-only evidence, and never emits a false final `Partial` once all
+required coverage is complete. Recovery keeps the prior Ready read authority,
+may pass through a retry reason, and publishes one exact successor against the
+latest state commit. Initial discarded-integrity recovery now also reconstructs
+the persisted retry attempt before applying its Partial milestone. Exact
+lost-ack replay, every partial-write crash seam, payload/digest/coordinate/
+predecessor/terminal corruption, partial-to-integrity failure, multi-attempt
+restart, and initial/recovery publication are executable. Changed-plan/epoch
+replacement, temporary-source retry evidence before any safe snapshot,
+automatic retirement/compaction beyond the bounded 8,192-milestone restart
+window, caller-authorized local policy, richer queries, and promotion evidence
+remain open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
