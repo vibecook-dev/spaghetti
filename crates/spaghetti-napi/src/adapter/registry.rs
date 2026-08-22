@@ -451,10 +451,10 @@ pub(crate) mod tests {
         ScopedObservationResyncResolution, ScopedObservationSourceOwnerBindingError,
         ScopedObservationSourceOwnerRetryPolicy, ScopedObservationSourceOwnerRunError,
         ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
-        ScopedObservationStartupReconcileAction, ScopedObservationUnknownWireNegotiation,
-        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
-        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedRelationMembershipObservation, ScopedReplacementMode,
+        ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
+        ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
+        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
+        ScopedQueuedObservationFrame, ScopedRelationMembershipObservation, ScopedReplacementMode,
         ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
         ScopedRootIdentityRequest, ScopedScopeRelationState, ScopedSourceFailureClass,
         ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
@@ -2096,6 +2096,26 @@ pub(crate) mod tests {
         );
         assert!(prepared.unknown_wire_contract().is_some());
         assert!(prepared.compatibility().permissions().scoped_observation);
+        let expected_selection = prepared.observation_contract().clone();
+        let trusted_request = ScopedObservationTrustedAccessRequest::new(
+            request.source_instance.clone(),
+            request.artifact_access_policy,
+            request.root_identity.clone(),
+            request.program_id.clone(),
+            request.known_objects.clone(),
+            request.access_roots.clone(),
+            request.artifact_relations.clone(),
+        );
+        let trusted_debug = format!("{trusted_request:?}");
+        assert!(!trusted_debug.contains(temp.path().to_string_lossy().as_ref()));
+        let host = ScopedObservationAccessHost::authorize_prepared(prepared, trusted_request)
+            .expect("prepared support should open the matching trusted attachment");
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(host.contract_selection(), &expected_selection);
+        assert_eq!(
+            host.compatibility().support_release_id(),
+            Some("fixture-release")
+        );
 
         let (catalog, binding, scope_programs) = promoted_fixture_catalog();
         let unsupported = AdapterRegistryBuilder::new()

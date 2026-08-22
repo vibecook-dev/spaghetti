@@ -259,14 +259,68 @@ pub struct ScopedObservationAccessRequest {
     pub artifact_relations: Vec<ScopedArtifactRelationGrant>,
 }
 
+/// Post-selection inputs supplied by the trusted attachment composer. This
+/// value contains no support probe or contract offer: those inputs have
+/// already been consumed into [`PreparedScopedObservationSupport`]. Keeping
+/// the two phases separate prevents a caller from classifying one artifact
+/// and opening another attachment under reconstructed portable coordinates.
+#[derive(Clone)]
+pub(crate) struct ScopedObservationTrustedAccessRequest {
+    source_instance: SourceInstance,
+    artifact_access_policy: ScopedArtifactAccessPolicy,
+    root_identity: ScopedRootIdentityRequest,
+    program_id: String,
+    known_objects: Vec<ScopedKnownObjectGrant>,
+    access_roots: Vec<ScopedAccessRootGrant>,
+    artifact_relations: Vec<ScopedArtifactRelationGrant>,
+}
+
+impl ScopedObservationTrustedAccessRequest {
+    pub(crate) fn new(
+        source_instance: SourceInstance,
+        artifact_access_policy: ScopedArtifactAccessPolicy,
+        root_identity: ScopedRootIdentityRequest,
+        program_id: String,
+        known_objects: Vec<ScopedKnownObjectGrant>,
+        access_roots: Vec<ScopedAccessRootGrant>,
+        artifact_relations: Vec<ScopedArtifactRelationGrant>,
+    ) -> Self {
+        Self {
+            source_instance,
+            artifact_access_policy,
+            root_identity,
+            program_id,
+            known_objects,
+            access_roots,
+            artifact_relations,
+        }
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationTrustedAccessRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationTrustedAccessRequest")
+            .field("has_source_instance", &true)
+            .field("artifact_access_policy", &self.artifact_access_policy)
+            .field("program_id", &self.program_id)
+            .field("known_object_count", &self.known_objects.len())
+            .field("access_root_count", &self.access_roots.len())
+            .field("artifact_relation_count", &self.artifact_relations.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Trusted pre-access result for one scoped attachment. The portable request
 /// never contains this value: the host negotiates the complete observation
 /// contract first, then runs its registered native probe, and only a promoted
 /// scoped release can mint the retained authorization.
 pub(crate) struct PreparedScopedObservationSupport {
     adapter_id: AdapterId,
+    adapter: Arc<dyn AgentAdapter>,
     artifact_probe: NativeArtifactProbe,
     observation_contract: ObservationContractSelection,
+    observation_contract_offer: ObservationContractOffer,
     unknown_wire_contract: Option<ObservationUnknownWireContractSelection>,
     compatibility: CompatibilityDecision,
     authorization: TypedAccessAuthorization,
@@ -345,6 +399,11 @@ pub(crate) fn prepare_scoped_observation_support(
         .transpose()?;
     let adapter_id = AdapterId::new(adapter_id)
         .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
+    let adapter = registry.get(&adapter_id).cloned().ok_or_else(|| {
+        ScopedObservationAccessError::Authorization(format!(
+            "adapter {adapter_id} is not registered"
+        ))
+    })?;
     let Some(artifact_probe) = registry
         .probe_native_support(&adapter_id, configured_roots)
         .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?
@@ -370,8 +429,10 @@ pub(crate) fn prepare_scoped_observation_support(
     }
     Ok(Some(PreparedScopedObservationSupport {
         adapter_id,
+        adapter,
         artifact_probe,
         observation_contract,
+        observation_contract_offer: offer.clone(),
         unknown_wire_contract,
         compatibility,
         authorization,
@@ -19147,16 +19208,29 @@ impl ScopedObservationAccessHost {
         registry: &AdapterRegistry,
         request: ScopedObservationAccessRequest,
     ) -> Result<Self, ScopedObservationAccessError> {
+        let ScopedObservationAccessRequest {
+            adapter_id,
+            artifact_probe,
+            source_instance,
+            artifact_access_policy,
+            observation_contract_request,
+            observation_contract_offer,
+            unknown_wire_contract,
+            root_identity,
+            program_id,
+            known_objects,
+            access_roots,
+            artifact_relations,
+        } = request;
         // Contract selection is the first operation at this composition
         // boundary. Incompatible semantics therefore fail before support
         // classification, grant validation, or construction of any source-
         // access authority.
         let observation_contract = negotiate_observation_contract(
-            &request.observation_contract_request,
-            &request.observation_contract_offer,
+            &observation_contract_request,
+            &observation_contract_offer,
         )?;
-        let unknown_wire_selection = request
-            .unknown_wire_contract
+        let unknown_wire_contract = unknown_wire_contract
             .as_ref()
             .map(|sidecar| {
                 negotiate_observation_unknown_wire(
@@ -19165,13 +19239,8 @@ impl ScopedObservationAccessHost {
                     &observation_contract,
                 )
             })
-            .transpose()?
-            .map(Arc::new);
-        artifact_wire::validate_attachment_artifact_access_policy(
-            request.artifact_access_policy,
-        )
-        .map_err(|error| ScopedObservationAccessError::InvalidArtifactPolicy(error.to_string()))?;
-        let adapter_id = AdapterId::new(request.adapter_id.as_str())
+            .transpose()?;
+        let adapter_id = AdapterId::new(adapter_id.as_str())
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
         let adapter = registry.get(&adapter_id).cloned().ok_or_else(|| {
             ScopedObservationAccessError::Authorization(format!(
@@ -19181,21 +19250,90 @@ impl ScopedObservationAccessHost {
         let (compatibility, authorization) = registry
             .authorize_typed_access(
                 &adapter_id,
-                &request.artifact_probe,
+                &artifact_probe,
                 SupportOperation::ScopedTypedObservation,
-                &request.observation_contract_request.contract_versions,
-                &request.observation_contract_offer.contract_versions,
+                &observation_contract_request.contract_versions,
+                &observation_contract_offer.contract_versions,
             )
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
+
+        Self::authorize_prepared(
+            PreparedScopedObservationSupport {
+                adapter_id,
+                adapter,
+                artifact_probe,
+                observation_contract,
+                observation_contract_offer,
+                unknown_wire_contract,
+                compatibility,
+                authorization,
+            },
+            ScopedObservationTrustedAccessRequest::new(
+                source_instance,
+                artifact_access_policy,
+                root_identity,
+                program_id,
+                known_objects,
+                access_roots,
+                artifact_relations,
+            ),
+        )
+    }
+
+    /// Consume one pre-probe support selection and the separately composed
+    /// source/grant inputs exactly once. No registry lookup, compatibility
+    /// classification, or native support probe occurs in this phase.
+    pub(crate) fn authorize_prepared(
+        prepared: PreparedScopedObservationSupport,
+        request: ScopedObservationTrustedAccessRequest,
+    ) -> Result<Self, ScopedObservationAccessError> {
+        let PreparedScopedObservationSupport {
+            adapter_id,
+            adapter,
+            artifact_probe: _,
+            observation_contract,
+            observation_contract_offer,
+            unknown_wire_contract,
+            compatibility,
+            authorization,
+        } = prepared;
+        let ScopedObservationTrustedAccessRequest {
+            source_instance,
+            artifact_access_policy,
+            root_identity: root_identity_request,
+            program_id,
+            known_objects,
+            access_roots,
+            artifact_relations,
+        } = request;
+
+        artifact_wire::validate_attachment_artifact_access_policy(artifact_access_policy).map_err(
+            |error| ScopedObservationAccessError::InvalidArtifactPolicy(error.to_string()),
+        )?;
+        if adapter.manifest().id != adapter_id {
+            return Err(ScopedObservationAccessError::Authorization(
+                "prepared adapter does not match its scoped support selection".to_string(),
+            ));
+        }
         if authorization.contracts() != &observation_contract.contract_versions {
             return Err(ScopedObservationAccessError::Authorization(
                 "typed access authorization does not match the negotiated observation contract"
                     .to_string(),
             ));
         }
+        let operation = authorization.operation();
+        if operation.operation() != SupportOperation::ScopedTypedObservation
+            || operation.compatibility_class() != compatibility.compatibility_class()
+            || operation.support_release_id() != compatibility.support_release_id()
+            || !compatibility.permissions().scoped_observation
+        {
+            return Err(ScopedObservationAccessError::Authorization(
+                "prepared scoped support selection is internally inconsistent".to_string(),
+            ));
+        }
         let observation_capabilities = ObservationCapabilities::from_negotiation(
             observation_contract.clone(),
-            &request.observation_contract_offer,
+            &observation_contract_offer,
             compatibility.compatibility_class(),
             compatibility.support_release_id(),
             SCOPED_OBSERVATION_IMPLEMENTED_FACT_FAMILIES,
@@ -19208,7 +19346,7 @@ impl ScopedObservationAccessHost {
         let completion_capability_context = Arc::new(
             capability_snapshot_wire::ScopedCapabilitySnapshotConsumerContext::from_expected(
                 &observation_contract,
-                &request.observation_contract_offer,
+                &observation_contract_offer,
                 compatibility.compatibility_class(),
                 support_release_id,
                 &observation_capabilities,
@@ -19219,22 +19357,29 @@ impl ScopedObservationAccessHost {
                 ))
             })?,
         );
-        let root_identity = request.root_identity.resolve(
+        let root_identity = root_identity_request.resolve(
             &adapter_id,
             observation_contract
                 .contract_versions
                 .external_entity_reference_version,
         )?;
         validate_attachment_source_instance_identity(
-            &request.source_instance,
-            &request.root_identity,
+            &source_instance,
+            &root_identity_request,
             &root_identity,
         )?;
         let program = authorization
-            .select_scope_program(&request.program_id)
+            .select_scope_program(&program_id)
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
         let scope_program_digest = program.scope_program_digest();
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)?;
+        if plan.adapter_id() != adapter_id.as_str()
+            || plan.support_release_id() != support_release_id
+        {
+            return Err(ScopedObservationAccessError::Authorization(
+                "prepared scope program does not match its support selection".to_string(),
+            ));
+        }
         let root_relation_id: Arc<str> = Arc::from(plan.root_relation_id());
         let scope_relations = plan
             .observation_relations()
@@ -19249,29 +19394,29 @@ impl ScopedObservationAccessHost {
             .uncomposed_observation_relation_ids()
             .map(Arc::<str>::from)
             .collect::<BTreeSet<_>>();
-        let known_objects = validate_known_object_grants(&plan, request.known_objects)?;
+        let known_objects = validate_known_object_grants(&plan, known_objects)?;
         let artifact_relations =
-            artifact_access::validate_artifact_relation_grants(&plan, request.artifact_relations)?;
+            artifact_access::validate_artifact_relation_grants(&plan, artifact_relations)?;
         let access_roots = artifact_access::validate_access_root_grants(
             &plan,
             &known_objects,
             &artifact_relations,
-            request.access_roots,
+            access_roots,
         )?;
-        validate_attachment_source_instance_roots(&request.source_instance, &access_roots)?;
+        validate_attachment_source_instance_roots(&source_instance, &access_roots)?;
         let attachment_authority = next_scoped_attachment_authority()?;
         Ok(Self {
             adapter,
-            source_instance: Arc::new(request.source_instance),
+            source_instance: Arc::new(source_instance),
             compatibility,
             observation_contract,
-            unknown_wire_selection,
+            unknown_wire_selection: unknown_wire_contract.map(Arc::new),
             observation_capabilities,
             completion_capability_context,
-            artifact_access_policy: request.artifact_access_policy,
+            artifact_access_policy,
             authorization,
             root_identity,
-            program_id: request.program_id,
+            program_id,
             scope_program_digest,
             known_objects: Arc::new(known_objects),
             scope_relations: Arc::new(scope_relations),
