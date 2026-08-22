@@ -24,8 +24,11 @@ export * from './contracts/rfc012b.js';
 export * from './contracts/rfc012b-hydration.js';
 export * from './contracts/rfc012b-pages.js';
 
-// RFC 012C portable actor, affiliation, and usage-v2 value contracts.
+// RFC 012C portable semantic values plus the bounded unknown-evidence
+// aggregate/sample snapshot. The latter is not itself query or observer
+// authority; enclosing RFC 012B/012D contracts bind scope and lifecycle.
 export * from './contracts/rfc012c.js';
+export * from './contracts/rfc012c-unknown-evidence.js';
 export {
   mergeDurableAndScopedUsage,
   type DurableLiveUsageMerge,

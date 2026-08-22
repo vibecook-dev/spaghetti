@@ -1134,12 +1134,19 @@ writer handoff without enlarging scoped queue variants. Schema v56 now stores
 the hard-bounded current unknown set under topology-neutral `SourceRecordId`,
 replaces complete snapshots, retracts prior generations, rejects cross-owner
 identity reuse and over-capacity commits atomically, and reconstructs the same
-exact aggregate/sample digest after reopen. The public durable query and the
-portable fact/replacement carrier remain open.
+exact aggregate/sample digest after reopen. The contextual portable value
+contract now freezes the exact complete count/byte total, nonzero aggregate
+digest, and the policy-selected source-identity-ranked samples across Rust and
+TypeScript. Every sample carries only a bounded machine family hint, opaque
+source/payload digests, and a closed value-free JSON shape whose byte/hash
+coordinates must match the retained evidence; raw values, native keys, and
+locators cannot enter it. The contract grants no source access, query,
+observer ordering, or replacement authority. The public durable query and the
+RFC 012D event/replacement carrier remain open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: capability and bounded unknown-evidence families, complete
-remaining family-by-family
+does not close C1: complete capability coverage and bounded unknown-evidence
+event/replacement integration, complete remaining family-by-family
 replacement/retraction cases, full semantic reduction, tier/view
 compositionality, and remaining-family durable/scoped reducer digest equality
 remain open.

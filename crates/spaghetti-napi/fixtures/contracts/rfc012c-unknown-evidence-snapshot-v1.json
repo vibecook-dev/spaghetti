@@ -1,0 +1,153 @@
+{
+  "empty": {
+    "context": {
+      "expected_aggregate_digest": "v1:mxtkzWmU_dVjjJsvehifeyW20Caq07RDMD5hWXsPcx8",
+      "expected_complete_count": 0,
+      "expected_complete_observed_bytes": 0,
+      "expected_samples": []
+    },
+    "snapshot": {
+      "aggregate_digest": "v1:mxtkzWmU_dVjjJsvehifeyW20Caq07RDMD5hWXsPcx8",
+      "complete_count": 0,
+      "complete_observed_bytes": 0,
+      "samples": [],
+      "unknown_evidence_aggregate_contract_version": 1,
+      "unknown_evidence_snapshot_contract_version": 1
+    }
+  },
+  "expected": {
+    "aggregate_digest_algorithm": "blake3-256",
+    "complete_count": 3,
+    "durable_query": false,
+    "ordered_observer_event": false,
+    "raw_native_values_disclosed": false,
+    "replacement_barrier": false,
+    "sample_count": 3,
+    "sampling_rank_basis": "source_record_id",
+    "source_access_authority": false,
+    "source_locator_disclosed": false
+  },
+  "fixture_contract_version": 1,
+  "populated": {
+    "context": {
+      "expected_aggregate_digest": "v1:ia8r3WO-z10fPTsXlD629SrwUqGyjmMEWbMPdVwdBSs",
+      "expected_complete_count": 3,
+      "expected_complete_observed_bytes": 80,
+      "expected_samples": [
+        {
+          "family_hint": "future.object",
+          "observed_bytes": 30,
+          "payload_digest": "v1:QgolFswHKjfBPoMlDdCRriyHsrtw8zt_sNSiUGjdXYg",
+          "sanitized_excerpt": {
+            "bytes": 30,
+            "hash": "420a2516cc072a37c13e83250dd091ae2c87b2bb70f33b7fb0d4a25068dd5d88",
+            "kind": "json_object",
+            "members": 2,
+            "shape": [
+              {
+                "key_hash": "d190b1fd2774",
+                "value_kind": "number"
+              },
+              {
+                "key_hash": "16d7e1e8e5dd",
+                "value_kind": "string"
+              }
+            ],
+            "truncated": false
+          },
+          "source_record_id": "v1:2VwslZvL7jsSsBtWl4Xda-BK5IbZMJl7_CCS7rL02I8"
+        },
+        {
+          "family_hint": "future.array",
+          "observed_bytes": 17,
+          "payload_digest": "v1:BxyqdIErNz0zfTlki5r6jHbzkCtOrd4ZgFGJiHyIVHE",
+          "sanitized_excerpt": {
+            "bytes": 17,
+            "hash": "071caa74812b373d337d39648b9afa8c76f3902b4eadde19805189887c885471",
+            "item_kinds": [
+              "string",
+              "number",
+              "boolean"
+            ],
+            "items": 3,
+            "kind": "json_array",
+            "truncated": false
+          },
+          "source_record_id": "v1:6SmMaguyFKygmERgscjlZyaMqqwPe4nxQI1IG5fOhwI"
+        },
+        {
+          "family_hint": null,
+          "observed_bytes": 33,
+          "payload_digest": "v1:CK87ArU_aV996eYSyyeZgjiTZgypcb4urK3uhDFFfAg",
+          "sanitized_excerpt": {
+            "bytes": 33,
+            "hash": "08af3b02b53f695f7de9e612cb2799823893660ca971be2eacadee8431457c08",
+            "kind": "opaque"
+          },
+          "source_record_id": "v1:vC0pkQU0XzTw78iqGAsU1bbwCzZSRC2K54CpxVJlvkk"
+        }
+      ]
+    },
+    "snapshot": {
+      "aggregate_digest": "v1:ia8r3WO-z10fPTsXlD629SrwUqGyjmMEWbMPdVwdBSs",
+      "complete_count": 3,
+      "complete_observed_bytes": 80,
+      "samples": [
+        {
+          "family_hint": "future.object",
+          "observed_bytes": 30,
+          "payload_digest": "v1:QgolFswHKjfBPoMlDdCRriyHsrtw8zt_sNSiUGjdXYg",
+          "sanitized_excerpt": {
+            "bytes": 30,
+            "hash": "420a2516cc072a37c13e83250dd091ae2c87b2bb70f33b7fb0d4a25068dd5d88",
+            "kind": "json_object",
+            "members": 2,
+            "shape": [
+              {
+                "key_hash": "d190b1fd2774",
+                "value_kind": "number"
+              },
+              {
+                "key_hash": "16d7e1e8e5dd",
+                "value_kind": "string"
+              }
+            ],
+            "truncated": false
+          },
+          "source_record_id": "v1:2VwslZvL7jsSsBtWl4Xda-BK5IbZMJl7_CCS7rL02I8"
+        },
+        {
+          "family_hint": "future.array",
+          "observed_bytes": 17,
+          "payload_digest": "v1:BxyqdIErNz0zfTlki5r6jHbzkCtOrd4ZgFGJiHyIVHE",
+          "sanitized_excerpt": {
+            "bytes": 17,
+            "hash": "071caa74812b373d337d39648b9afa8c76f3902b4eadde19805189887c885471",
+            "item_kinds": [
+              "string",
+              "number",
+              "boolean"
+            ],
+            "items": 3,
+            "kind": "json_array",
+            "truncated": false
+          },
+          "source_record_id": "v1:6SmMaguyFKygmERgscjlZyaMqqwPe4nxQI1IG5fOhwI"
+        },
+        {
+          "family_hint": null,
+          "observed_bytes": 33,
+          "payload_digest": "v1:CK87ArU_aV996eYSyyeZgjiTZgypcb4urK3uhDFFfAg",
+          "sanitized_excerpt": {
+            "bytes": 33,
+            "hash": "08af3b02b53f695f7de9e612cb2799823893660ca971be2eacadee8431457c08",
+            "kind": "opaque"
+          },
+          "source_record_id": "v1:vC0pkQU0XzTw78iqGAsU1bbwCzZSRC2K54CpxVJlvkk"
+        }
+      ],
+      "unknown_evidence_aggregate_contract_version": 1,
+      "unknown_evidence_snapshot_contract_version": 1
+    }
+  }
+}

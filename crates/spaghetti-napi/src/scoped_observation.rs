@@ -87,6 +87,7 @@ mod observation_source_access;
 mod replacement_manifest_wire;
 mod scope_coverage_wire;
 mod source_wire;
+mod unknown_evidence_wire;
 mod usage_wire;
 mod watermark_wire;
 

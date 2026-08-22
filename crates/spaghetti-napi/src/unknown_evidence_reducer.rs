@@ -246,8 +246,8 @@ fn is_valid_sanitized_excerpt(evidence: &BoundedNativeEvidence) -> bool {
     }
 
     match kind {
-        "json_object" => validate_object_shape(&value),
-        "json_array" => validate_array_shape(&value),
+        "json_object" => validate_object_shape(&value, evidence.observed_bytes),
+        "json_array" => validate_array_shape(&value, evidence.observed_bytes),
         "null" | "boolean" | "number" | "string" | "opaque" => {
             exact_fields(&value, &["bytes", "hash", "kind"])
         }
@@ -255,7 +255,7 @@ fn is_valid_sanitized_excerpt(evidence: &BoundedNativeEvidence) -> bool {
     }
 }
 
-fn validate_object_shape(value: &JsonMap<String, JsonValue>) -> bool {
+fn validate_object_shape(value: &JsonMap<String, JsonValue>, observed_bytes: u64) -> bool {
     if !exact_fields(
         value,
         &["bytes", "hash", "kind", "members", "shape", "truncated"],
@@ -265,6 +265,9 @@ fn validate_object_shape(value: &JsonMap<String, JsonValue>) -> bool {
     let Some(members) = value.get("members").and_then(JsonValue::as_u64) else {
         return false;
     };
+    if members > observed_bytes {
+        return false;
+    }
     let Some(shape) = value.get("shape").and_then(JsonValue::as_array) else {
         return false;
     };
@@ -297,7 +300,7 @@ fn validate_object_shape(value: &JsonMap<String, JsonValue>) -> bool {
     })
 }
 
-fn validate_array_shape(value: &JsonMap<String, JsonValue>) -> bool {
+fn validate_array_shape(value: &JsonMap<String, JsonValue>, observed_bytes: u64) -> bool {
     if !exact_fields(
         value,
         &["bytes", "hash", "item_kinds", "items", "kind", "truncated"],
@@ -307,6 +310,9 @@ fn validate_array_shape(value: &JsonMap<String, JsonValue>) -> bool {
     let Some(items) = value.get("items").and_then(JsonValue::as_u64) else {
         return false;
     };
+    if items > observed_bytes {
+        return false;
+    }
     let Some(item_kinds) = value.get("item_kinds").and_then(JsonValue::as_array) else {
         return false;
     };
