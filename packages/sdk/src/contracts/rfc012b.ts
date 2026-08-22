@@ -27,6 +27,9 @@ export const CATALOG_CONTINUATION_REQUEST_CONTRACT_VERSION = 1 as const;
 export const CATALOG_TYPED_UNKNOWN_CONTRACT_VERSION = 1 as const;
 export const CATALOG_QUERY_PACK_CONTRACT_VERSION = 1 as const;
 export const CATALOG_BASE_MODEL_MAJOR = 1 as const;
+export const CATALOG_PROJECT_FACT_FAMILY_VERSION = 1 as const;
+export const CATALOG_SESSION_FACT_FAMILY_VERSION = 1 as const;
+export const DEFAULT_CATALOG_TYPED_UNKNOWN_PAYLOAD_BYTES = 4 * 1024;
 
 const MAX_TYPED_UNKNOWN_PAYLOAD_BYTES = 64 * 1024;
 const MAX_TYPED_UNKNOWN_DEPTH = 16;
@@ -222,6 +225,31 @@ export function parseCatalogQueryContractRequest(value: unknown): CatalogQueryCo
   };
 }
 
+/** The exact v1 catalog contract understood by this SDK release. */
+export function createCatalogQueryContractRequest(): CatalogQueryContractRequest {
+  return parseCatalogQueryContractRequest({
+    catalog_query_contract_version: CATALOG_QUERY_CONTRACT_VERSION,
+    contract_versions: {
+      selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+      model_major: CATALOG_BASE_MODEL_MAJOR,
+      external_entity_reference_version: EXTERNAL_ENTITY_REFERENCE_VERSION,
+      semantic_revision_reference_version: SEMANTIC_REFERENCE_CONTRACT_VERSION,
+      coverage_contract_versions: [SOURCE_COVERAGE_CONTRACT_VERSION],
+      fact_family_versions: {
+        'catalog.project': [CATALOG_PROJECT_FACT_FAMILY_VERSION],
+        'catalog.session': [CATALOG_SESSION_FACT_FAMILY_VERSION],
+      },
+      query_pack_versions: [CATALOG_QUERY_PACK_CONTRACT_VERSION],
+    },
+    typed_unknown: {
+      typed_unknown_contract_version: CATALOG_TYPED_UNKNOWN_CONTRACT_VERSION,
+      preserves_unknown_fields: true,
+      preserves_unknown_variants: true,
+      max_payload_bytes: DEFAULT_CATALOG_TYPED_UNKNOWN_PAYLOAD_BYTES,
+    },
+  });
+}
+
 export function parseCatalogQueryContractOffer(value: unknown): CatalogQueryContractOffer {
   const input = record(value, 'catalog query contract offer');
   assertKnownFields(
@@ -390,6 +418,47 @@ function catalogQuerySelectionsEqual(
     left.typed_unknown.preserves_unknown_variants === right.typed_unknown.preserves_unknown_variants &&
     left.typed_unknown.max_payload_bytes === right.typed_unknown.max_payload_bytes
   );
+}
+
+/** Validate a Rust-produced selection against the exact caller-held request. */
+export function parseCatalogQueryContractSelectionForRequest(
+  value: unknown,
+  expectedRequestInput: unknown,
+): CatalogQueryContractSelection {
+  const request = parseCatalogQueryContractRequest(expectedRequestInput);
+  const selection = parseCatalogQueryContractSelection(value);
+  const selected = selection.contract_versions;
+  const requested = request.contract_versions;
+  const requestedFamilies = Object.keys(requested.fact_family_versions).sort();
+  const selectedFamilies = Object.keys(selected.fact_family_versions).sort();
+  const observationMatches =
+    requested.observation_contract_versions === undefined
+      ? selected.observation_contract_version === null
+      : selected.observation_contract_version !== null &&
+        requested.observation_contract_versions.includes(selected.observation_contract_version);
+  if (
+    selected.selection_contract_version !== requested.selection_contract_version ||
+    selected.model_major !== requested.model_major ||
+    selected.external_entity_reference_version !== requested.external_entity_reference_version ||
+    selected.semantic_revision_reference_version !== requested.semantic_revision_reference_version ||
+    !requested.coverage_contract_versions.includes(selected.coverage_contract_version) ||
+    selected.query_pack_version === null ||
+    !requested.query_pack_versions?.includes(selected.query_pack_version) ||
+    !observationMatches ||
+    requestedFamilies.length !== selectedFamilies.length ||
+    requestedFamilies.some(
+      (family, index) =>
+        family !== selectedFamilies[index] ||
+        !requested.fact_family_versions[family]?.includes(selected.fact_family_versions[family]!),
+    ) ||
+    selection.typed_unknown.typed_unknown_contract_version !== request.typed_unknown.typed_unknown_contract_version ||
+    selection.typed_unknown.preserves_unknown_fields !== request.typed_unknown.preserves_unknown_fields ||
+    selection.typed_unknown.preserves_unknown_variants !== request.typed_unknown.preserves_unknown_variants ||
+    selection.typed_unknown.max_payload_bytes > request.typed_unknown.max_payload_bytes
+  ) {
+    throw new ContractValidationError('selected catalog query contract does not satisfy the caller-held request');
+  }
+  return selection;
 }
 
 interface UnknownBudget {

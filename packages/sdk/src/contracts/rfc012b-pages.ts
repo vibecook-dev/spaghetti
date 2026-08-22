@@ -24,6 +24,7 @@ import {
 import {
   parseCatalogContinuationRequest,
   parseCatalogQueryContractSelection,
+  parseCatalogQueryContractSelectionForRequest,
   type CatalogContinuationRequest,
   type CatalogCursor,
   type CatalogQueryContractSelection,
@@ -269,6 +270,11 @@ export interface CatalogReadinessResponse {
   contract_selection: CatalogQueryContractSelection;
   readiness: CatalogReadinessSnapshot;
   additive_fields: JsonObject;
+}
+
+export interface CatalogReadinessQueryResult {
+  coverage_plan: CatalogPortableCoveragePlan;
+  readiness: CatalogReadinessResponse;
 }
 
 export interface CatalogResolutionRequestBinding {
@@ -1191,6 +1197,25 @@ export function parseCatalogReadinessResponse(
       ['catalog_readiness_response_contract_version', 'contract_selection', 'readiness'],
       selection,
     ),
+  };
+}
+
+/** Parse the native/IPC readiness envelope against the original client offer. */
+export function parseCatalogReadinessQueryResult(
+  value: unknown,
+  expectedRequestInput: unknown,
+): CatalogReadinessQueryResult {
+  const input = record(value, 'catalog readiness query result');
+  assertKnownFields(input, ['coverage_plan', 'readiness'], 'catalog readiness query result');
+  const plan = parseCatalogPortableCoveragePlan(input.coverage_plan);
+  const readinessInput = record(input.readiness, 'catalog readiness response');
+  const selection = parseCatalogQueryContractSelectionForRequest(
+    readinessInput.contract_selection,
+    expectedRequestInput,
+  );
+  return {
+    coverage_plan: plan,
+    readiness: parseCatalogReadinessResponse(readinessInput, selection, plan),
   };
 }
 

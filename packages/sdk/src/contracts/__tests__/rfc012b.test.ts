@@ -4,6 +4,7 @@ import test from 'node:test';
 
 import { ContractValidationError } from '../rfc012a.js';
 import {
+  createCatalogQueryContractRequest,
   IncompatibleCatalogContractError,
   negotiateCatalogQueryContract,
   parseCatalogContinuationRequest,
@@ -11,6 +12,7 @@ import {
   parseCatalogQueryContractRequest,
   parseCatalogQueryContractResponse,
   parseCatalogQueryContractSelection,
+  parseCatalogQueryContractSelectionForRequest,
   serializeCatalogQueryContractResponse,
 } from '../rfc012b.js';
 
@@ -69,6 +71,24 @@ test('Rust RFC 012B query fixture negotiates identically in the portable SDK', (
   assert.equal(continuation.cursor.snapshot_id.complete_commit, continuation.snapshot_id.complete_commit);
   assert.equal(continuation.cursor.query_fingerprint, continuation.query_fingerprint);
   assert.equal(rawFixture.expected.cursor_binding_valid, true);
+});
+
+test('default catalog request and selected response retain the caller offer', () => {
+  const request = createCatalogQueryContractRequest();
+  assert.deepEqual(request.contract_versions.fact_family_versions, {
+    'catalog.project': [1],
+    'catalog.session': [1],
+  });
+
+  const selection = clone(rawFixture.selected_response.contract_selection) as Record<string, unknown>;
+  assert.deepEqual(parseCatalogQueryContractSelectionForRequest(selection, rawFixture.contract_request), selection);
+
+  const contracts = selection.contract_versions as Record<string, unknown>;
+  contracts.fact_family_versions = { 'catalog.project': 1 };
+  assert.throws(
+    () => parseCatalogQueryContractSelectionForRequest(selection, rawFixture.contract_request),
+    /does not satisfy the caller-held request/,
+  );
 });
 
 test('additive fields and future response variants survive typed-unknown round trips', () => {

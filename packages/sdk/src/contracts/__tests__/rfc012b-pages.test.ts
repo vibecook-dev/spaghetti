@@ -7,6 +7,7 @@ import {
   parseCatalogPortableCoveragePlan,
   parseCatalogEntityResolutionResponse,
   parseCatalogProjectPage,
+  parseCatalogReadinessQueryResult,
   parseCatalogReadinessResponse,
   parseCatalogSessionPage,
   parseCatalogSnapshotExpired,
@@ -100,6 +101,31 @@ test('Rust RFC 012B project/session, readiness, resolution, and expiration fixtu
     fixture.snapshot_expired.scope,
   );
   assert.ok(expiration.latest_snapshot.complete_commit > expiration.request.snapshot_id.complete_commit);
+});
+
+test('readiness query envelope binds its selected contract to the caller offer', () => {
+  const requestFixture = JSON.parse(
+    readFileSync(
+      new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012b-catalog-query-v1.json', import.meta.url),
+      'utf8',
+    ),
+  ) as { contract_request: unknown };
+  const parsed = parseCatalogReadinessQueryResult(
+    { coverage_plan: fixture.current_plan, readiness: fixture.readiness_response },
+    requestFixture.contract_request,
+  );
+  assert.equal(parsed.coverage_plan.coverage_plan_id, parsed.readiness.readiness.coverage_plan_id);
+
+  const drifted = clone(fixture.readiness_response) as Record<string, unknown>;
+  const selection = drifted.contract_selection as Record<string, unknown>;
+  const contracts = selection.contract_versions as Record<string, unknown>;
+  contracts.fact_family_versions = { 'catalog.project': 1 };
+  reject(() =>
+    parseCatalogReadinessQueryResult(
+      { coverage_plan: fixture.current_plan, readiness: drifted },
+      requestFixture.contract_request,
+    ),
+  );
 });
 
 test('catalog-first startup can query last-complete catalog while search stays complete-only', () => {
