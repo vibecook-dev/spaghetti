@@ -6,6 +6,7 @@
 //! prevents retries, panics, and partial reads from bypassing a scope budget.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -19,6 +20,8 @@ use crate::adapter::{
     ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
     ScopeUnavailableBehavior, SourceInstance, SourceInstanceKey, StreamAuthority, StreamSpec,
 };
+
+use super::selector::GlobPattern;
 
 pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
 pub const SCOPE_ACCESS_REPORT_CONTRACT_VERSION: u32 = 1;
@@ -431,6 +434,53 @@ impl AuthorizedScopeAccessPlan {
             source_declaration_digest: self.source_declaration_digest,
             scope_program_digest: self.scope_program_digest,
         })
+    }
+
+    /// Validate the attachment's exact known object against the same runtime
+    /// stream law used by dynamic observation reservations. This does not
+    /// reserve or open native access; it only binds the concrete confined
+    /// locator to the promoted declaration and adapter-returned stream.
+    pub(crate) fn validate_known_object_runtime_stream(
+        &self,
+        relation_id: &str,
+        relative_path: &Path,
+        adapter: &dyn AgentAdapter,
+        instance: &SourceInstance,
+    ) -> Result<StreamSpec, AccessBudgetError> {
+        let declaration = self
+            .inner
+            .relation(relation_id)
+            .filter(|relation| relation.primitive == ScopeRelationPrimitive::KnownObject)
+            .ok_or_else(invalid_observation_runtime_stream_binding)?;
+        let binding = declaration
+            .observation_binding
+            .as_ref()
+            .filter(|binding| binding.relative_selector.is_none())
+            .ok_or_else(invalid_observation_runtime_stream_binding)?;
+        if !GlobPattern::new(&binding.source_pattern)
+            .map_err(|_| invalid_observation_runtime_stream_binding())?
+            .matches_path(relative_path)
+        {
+            return Err(invalid_observation_runtime_stream_binding());
+        }
+        let source_contract = self
+            .observation_source_contracts
+            .get(relation_id)
+            .filter(|contract| {
+                contract.stream_id() == binding.stream_id
+                    && contract.root_id() == declaration.access_root
+            })
+            .ok_or_else(invalid_observation_runtime_stream_binding)?;
+        ObservationRuntimeStreamBinding {
+            adapter_id: self.adapter_id(),
+            support_release_id: &self.support_release_id,
+            source_declaration_digest: &self.source_declaration_digest,
+            scope_program_digest: &self.scope_program_digest,
+            access_root: &declaration.access_root,
+            binding,
+            source_contract,
+        }
+        .select(adapter, instance)
     }
 
     pub fn reserve(
@@ -1217,8 +1267,8 @@ impl ObservationRuntimeStreamBinding<'_> {
             return Err(invalid_observation_runtime_stream_binding());
         }
 
-        let streams = adapter
-            .streams(instance)
+        let streams = catch_unwind(AssertUnwindSafe(|| adapter.streams(instance)))
+            .map_err(|_| invalid_observation_runtime_stream_binding())?
             .map_err(|_| invalid_observation_runtime_stream_binding())?;
         let mut selected = None;
         for stream in streams {

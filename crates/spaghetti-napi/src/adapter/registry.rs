@@ -417,6 +417,10 @@ pub(crate) mod tests {
         negotiate_observation_contract, ObservationCapabilities, ObservationCompatibilityAxis,
         ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
     };
+    use crate::scoped_observation::configured_attachment::{
+        prepare_configured_scoped_observation_attachment, ScopedConfiguredAttachmentRequest,
+        ScopedConfiguredRootIdentity,
+    };
     use crate::scoped_observation::{
         bind_observation_runtime_source_for_test,
         prepare_observation_directory_membership_for_test, prepare_scoped_observation_support,
@@ -460,12 +464,12 @@ pub(crate) mod tests {
         ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
     };
     use crate::source::{
-        confined_relative_path_key, AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase,
-        AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead, AppendTransition,
-        AuthorizedScopeAccessPlan, DirectoryEntryKind, DirectorySelection, DirtyHint, DirtyReason,
-        DirtyScope, HintEnqueue, IngestPriority, RecordOrigin, ReplaceDocumentConfig, Revision,
-        ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool,
-        SourceCursor, SourceMediaType, SourceRecord,
+        confined_relative_path_key, platform_path_key, AccessObjectToken, AccessOperation,
+        AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile, AppendItem,
+        AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirectoryEntryKind,
+        DirectorySelection, DirtyHint, DirtyReason, DirtyScope, HintEnqueue, IngestPriority,
+        RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport, ScopeAccessRequest,
+        ScopeIdentityInput, SharedSourcePassPool, SourceCursor, SourceMediaType, SourceRecord,
     };
 
     use super::*;
@@ -538,6 +542,9 @@ pub(crate) mod tests {
     struct EmptyAdapter {
         manifest: AdapterManifest,
         streams: Vec<StreamSpec>,
+        panic_streams: bool,
+        discover_configured_roots: bool,
+        discover_calls: Option<Arc<AtomicUsize>>,
         decode_statefully: bool,
         request_dependency_access: bool,
         dependency_mutation: Option<(PathBuf, Vec<u8>)>,
@@ -558,6 +565,9 @@ pub(crate) mod tests {
                     capabilities: Vec::new(),
                 },
                 streams: Vec::new(),
+                panic_streams: false,
+                discover_configured_roots: false,
+                discover_calls: None,
                 decode_statefully: false,
                 request_dependency_access: false,
                 dependency_mutation: None,
@@ -572,6 +582,17 @@ pub(crate) mod tests {
 
         fn with_streams(mut self, streams: Vec<StreamSpec>) -> Self {
             self.streams = streams;
+            self
+        }
+
+        fn with_stream_panic(mut self) -> Self {
+            self.panic_streams = true;
+            self
+        }
+
+        fn with_configured_root_discovery(mut self, calls: Arc<AtomicUsize>) -> Self {
+            self.discover_configured_roots = true;
+            self.discover_calls = Some(calls);
             self
         }
 
@@ -611,6 +632,8 @@ pub(crate) mod tests {
 
     const UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{native-session-id}/children","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"observation_binding":{"stream_id":"descendant-stream","source_pattern":"sessions/*/children/**","relative_selector":"**"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
+    const COMPOSED_ROOT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
     fn promoted_fixture_catalog_with_scope(
         scope_document: &[u8],
     ) -> (
@@ -620,6 +643,8 @@ pub(crate) mod tests {
     ) {
         let source_document = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"decoder_id":"fixture-descendant","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
+        } else if scope_document == COMPOSED_ROOT_SCOPE_DOCUMENT {
+            br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"}]}"#.as_slice()
         } else {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
         };
@@ -753,6 +778,105 @@ pub(crate) mod tests {
             retention: RawRetentionPolicy::HashOnly,
             capabilities: Vec::new(),
         }
+    }
+
+    fn fixture_root_runtime_stream() -> StreamSpec {
+        StreamSpec {
+            id: StreamId::new("root-stream").unwrap(),
+            driver: DriverSpec::AppendDelimited(AppendDelimitedConfig::json_lines()),
+            selector: ObjectSelector {
+                root_name: "root".to_string(),
+                include: vec!["sessions/*.jsonl".to_string()],
+                exclude: Vec::new(),
+            },
+            decoder: DecoderId::new("fixture-root").unwrap(),
+            authority: StreamAuthority::Canonical,
+            entity_scope: EntityScope::Session,
+            priority: IngestPriority::Interactive,
+            consistency: ConsistencyPolicy::IncrementalCursor,
+            deletion: DeletionPolicy::MirrorSource,
+            retention: RawRetentionPolicy::HashOnly,
+            capabilities: Vec::new(),
+        }
+    }
+
+    fn configured_attachment_registry(
+        probe_calls: Arc<AtomicUsize>,
+        discover_calls: Arc<AtomicUsize>,
+        probe_version: &'static str,
+    ) -> AdapterRegistry {
+        configured_attachment_registry_with_stream_behavior(
+            probe_calls,
+            discover_calls,
+            probe_version,
+            false,
+        )
+    }
+
+    fn configured_attachment_registry_with_stream_behavior(
+        probe_calls: Arc<AtomicUsize>,
+        discover_calls: Arc<AtomicUsize>,
+        probe_version: &'static str,
+        panic_streams: bool,
+    ) -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(COMPOSED_ROOT_SCOPE_DOCUMENT);
+        let mut adapter = EmptyAdapter::new("fixture")
+            .with_support(binding, scope_programs)
+            .with_streams(vec![fixture_root_runtime_stream()])
+            .with_configured_root_discovery(discover_calls);
+        if panic_streams {
+            adapter = adapter.with_stream_panic();
+        }
+        AdapterRegistryBuilder::new()
+            .register(adapter)
+            .register_native_support_probe("fixture", move |_| {
+                probe_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some(probe_version.to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap()
+    }
+
+    fn configured_attachment_request(
+        configured_roots: Vec<PathBuf>,
+        relative_path: PathBuf,
+    ) -> ScopedConfiguredAttachmentRequest {
+        let identity = ScopedConfiguredRootIdentity::new(
+            b"fixture-session".as_slice(),
+            BTreeMap::from([(
+                "native-session-id".to_string(),
+                Arc::<[u8]>::from(b"fixture-session".as_slice()),
+            )]),
+        )
+        .unwrap()
+        .with_root_run_identity_key(Arc::from(b"fixture-root-run".as_slice()));
+        configured_attachment_request_with_identity(configured_roots, relative_path, identity)
+    }
+
+    fn configured_attachment_request_with_identity(
+        configured_roots: Vec<PathBuf>,
+        relative_path: PathBuf,
+        identity: ScopedConfiguredRootIdentity,
+    ) -> ScopedConfiguredAttachmentRequest {
+        let template = scoped_access_request(configured_roots[0].clone());
+        ScopedConfiguredAttachmentRequest::new(
+            "fixture",
+            configured_roots,
+            "observe-session",
+            BTreeMap::from([("root-object".to_string(), relative_path)]),
+            identity,
+            template.observation_contract_request,
+            template.observation_contract_offer,
+        )
+        .unwrap()
+        .with_unknown_wire_contract(template.unknown_wire_contract.unwrap())
     }
 
     fn stateful_supported_fixture_registry() -> AdapterRegistry {
@@ -1625,12 +1749,36 @@ pub(crate) mod tests {
 
         fn discover(
             &self,
-            _context: &DiscoveryContext,
+            context: &DiscoveryContext,
         ) -> Result<Vec<SourceInstanceSpec>, AdapterError> {
-            Ok(Vec::new())
+            if !self.discover_configured_roots {
+                return Ok(Vec::new());
+            }
+            if let Some(calls) = &self.discover_calls {
+                calls.fetch_add(1, Ordering::AcqRel);
+            }
+            context
+                .configured_roots
+                .iter()
+                .map(|root| {
+                    Ok(SourceInstanceSpec {
+                        identity_contract_version: 1,
+                        stable_key: SourceInstanceKey::new(platform_path_key(root))?,
+                        display_name: "configured fixture".to_string(),
+                        roots: vec![SourceRoot {
+                            name: "root".to_string(),
+                            path: root.clone(),
+                        }],
+                        discovery_reason: "configured fixture root".to_string(),
+                    })
+                })
+                .collect()
         }
 
         fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            if self.panic_streams {
+                panic!("fixture runtime stream panic");
+            }
             Ok(self.streams.clone())
         }
 
@@ -2141,6 +2289,253 @@ pub(crate) mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    #[test]
+    fn configured_scoped_attachment_binds_one_promoted_root_without_a_store() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_attachment_registry(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+            "1.0.0",
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-private-root");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::write(root.join("sessions/session.jsonl"), b"fixture\n").unwrap();
+        let request = configured_attachment_request(
+            vec![root.clone()],
+            PathBuf::from("sessions/session.jsonl"),
+        );
+        let request_debug = format!("{request:?}");
+        assert!(!request_debug.contains("configured-private-root"));
+        assert!(!request_debug.contains("fixture-session"));
+
+        let attachment = prepare_configured_scoped_observation_attachment(&registry, request)
+            .unwrap()
+            .expect("the promoted configured root should compose");
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
+        assert_eq!(attachment.root_source().relation_id(), "root-object");
+        assert_eq!(attachment.root_source().stream().id.as_str(), "root-stream");
+        assert_eq!(attachment.known_object_sources().count(), 1);
+        assert_eq!(
+            attachment
+                .relation_identity_inputs("root-object")
+                .unwrap()
+                .iter()
+                .map(ScopedObservationOwnedIdentityInput::name)
+                .collect::<Vec<_>>(),
+            vec!["native-session-id"]
+        );
+        let rendered = format!("{attachment:?}");
+        assert!(!rendered.contains("configured-private-root"));
+        assert!(!rendered.contains("fixture-session"));
+
+        let inputs = [ScopeIdentityInput {
+            name: "native-session-id",
+            value: b"fixture-session",
+        }];
+        let pass = attachment.host().begin_pass().unwrap();
+        assert!(matches!(
+            pass.read_known_object(ScopedKnownObjectReadRequest {
+                relation_id: "root-object",
+                identity_inputs: &inputs,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                depth: 1,
+                max_bytes: 1_024,
+            })
+            .unwrap(),
+            ScopedObjectRead::Available { .. }
+        ));
+        drop(pass);
+        drop(attachment.into_host());
+    }
+
+    #[test]
+    fn configured_scoped_attachment_rejects_unbound_locator_without_path_leakage() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_attachment_registry(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+            "1.0.0",
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("private-configured-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let error = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(vec![root], PathBuf::from("private/secret-source.txt")),
+        )
+        .unwrap_err();
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
+        let rendered = error.to_string();
+        assert_eq!(
+            rendered,
+            "invalid scoped access grant: configured scoped attachment does not match its promoted authority"
+        );
+        for private in [
+            "private-configured-root",
+            "secret-source",
+            temp.path().to_str().unwrap(),
+        ] {
+            assert!(!rendered.contains(private));
+        }
+    }
+
+    #[test]
+    fn configured_scoped_attachment_redacts_probe_failures_before_discovery() {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(COMPOSED_ROOT_SCOPE_DOCUMENT);
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![fixture_root_runtime_stream()])
+                    .with_configured_root_discovery(Arc::clone(&discover_calls)),
+            )
+            .register_native_support_probe("fixture", {
+                let probe_calls = Arc::clone(&probe_calls);
+                move |_| {
+                    probe_calls.fetch_add(1, Ordering::AcqRel);
+                    Err(AdapterError::new(
+                        AdapterErrorClass::AdapterFatal,
+                        "private_probe_failure",
+                        "/Users/alice/private/session.jsonl",
+                    ))
+                }
+            })
+            .build_supported(catalog)
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let error = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![temp.path().to_path_buf()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "scoped observation authorization failed: trusted native support probe failed"
+        );
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 0);
+        assert!(!error.to_string().contains("/Users/"));
+    }
+
+    #[test]
+    fn configured_scoped_attachment_contains_runtime_stream_panics() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_attachment_registry_with_stream_behavior(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+            "1.0.0",
+            true,
+        );
+        let temp = TempDir::new().unwrap();
+        let error = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![temp.path().to_path_buf()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid scoped access grant: configured scoped attachment does not match its promoted authority"
+        );
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
+        assert!(!error.to_string().contains("/Users/"));
+    }
+
+    #[test]
+    fn configured_scoped_attachment_requires_unambiguous_source_identity() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_attachment_registry(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+            "1.0.0",
+        );
+        let temp = TempDir::new().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let error = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![first.clone(), second.clone()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid scoped access grant: configured scoped attachment source selection is ambiguous"
+        );
+
+        let canonical_source =
+            CanonicalSourceInstanceKey::derive(1, &platform_path_key(&second)).unwrap();
+        let session_key =
+            CanonicalEntityKey::derive("fixture", &canonical_source, "session", b"fixture-session")
+                .unwrap();
+        let identity = ScopedConfiguredRootIdentity::new(
+            b"fixture-session".as_slice(),
+            BTreeMap::from([(
+                "native-session-id".to_string(),
+                Arc::<[u8]>::from(b"fixture-session".as_slice()),
+            )]),
+        )
+        .unwrap()
+        .with_expected_session(session_key, ExternalEntityRef::new(session_key));
+        let selected = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request_with_identity(
+                vec![first, second],
+                PathBuf::from("sessions/session.jsonl"),
+                identity,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.host().root_identity().session_key, session_key);
+        assert_eq!(probe_calls.load(Ordering::Acquire), 2);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn unsupported_configured_scoped_attachment_never_discovers_or_falls_back() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_attachment_registry(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+            "9.9.9",
+        );
+        let temp = TempDir::new().unwrap();
+        let result = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![temp.path().to_path_buf()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap();
+        assert!(result.is_none());
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 0);
     }
 
     #[test]

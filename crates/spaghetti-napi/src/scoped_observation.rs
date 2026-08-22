@@ -87,6 +87,7 @@ mod artifact_wire;
 mod capability_snapshot_wire;
 mod close_wire;
 mod completion_wire;
+pub(crate) mod configured_attachment;
 mod continuity_wire;
 mod dependency_access;
 mod event_wire;
@@ -406,7 +407,11 @@ pub(crate) fn prepare_scoped_observation_support(
     })?;
     let Some(artifact_probe) = registry
         .probe_native_support(&adapter_id, configured_roots)
-        .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?
+        .map_err(|_| {
+            ScopedObservationAccessError::Authorization(
+                "trusted native support probe failed".to_string(),
+            )
+        })?
     else {
         return Ok(None);
     };
@@ -417,7 +422,11 @@ pub(crate) fn prepare_scoped_observation_support(
             &request.contract_versions,
             &offer.contract_versions,
         )
-        .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?
+        .map_err(|_| {
+            ScopedObservationAccessError::Authorization(
+                "scoped support authorization failed".to_string(),
+            )
+        })?
     else {
         return Ok(None);
     };
