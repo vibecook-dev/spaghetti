@@ -24,13 +24,13 @@ use crate::adapter::{
     DecodeDisposition, DecoderId, EffectiveStateRevisionFact, ExternalEntityRef, Fact, FactBatch,
     FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision,
     MessageRevisionFact, MessageRevisionRole, NativeArtifactProbe, NativeIdentityClaim,
-    PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy,
-    ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint,
-    SourceCoverageSet, SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery,
-    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TaskLifecycleState,
-    TaskRevisionFact, TimestampQuality, ToolRevisionFact, ToolRevisionKind,
-    TypedAccessAuthorization, UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState,
-    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
+    NativeRuntimeMarkerRevisionFact, PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality,
+    RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess,
+    SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceObjectList,
+    SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
+    SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
+    ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact, UserInputKind,
+    UserInputLifecycleState, UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
     EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
@@ -52,9 +52,9 @@ use crate::observation_contract::{
 };
 use crate::runtime_semantic_reducer::{
     effective_state_reduced_state_digest, reduce_content_block_revision,
-    reduce_effective_state_revision, EffectiveStateReducedDigestEntity, RevisionedEntityReduction,
-    RuntimeSemanticReductionError, RuntimeSemanticSourceRef,
-    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    reduce_effective_state_revision, reduce_native_marker_revision,
+    EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticReductionError,
+    RuntimeSemanticSourceRef, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -11100,6 +11100,8 @@ pub enum ScopedProjectionError {
     MessageCapacityFull,
     #[error("scoped content-block projection entity capacity is full")]
     ContentBlockCapacityFull,
+    #[error("scoped native-marker projection entity capacity is full")]
+    NativeMarkerCapacityFull,
     #[error("scoped plan projection entity capacity is full")]
     PlanCapacityFull,
     #[error("scoped task projection entity capacity is full")]
@@ -11303,6 +11305,15 @@ struct ScopedContentBlockProjectionState {
 }
 
 #[derive(Clone)]
+struct ScopedNativeMarkerProjectionState {
+    object_token: u64,
+    generation: u64,
+    semantic: FactSemanticRevision,
+    source: ScopedUsageV2Source,
+    revision: NativeRuntimeMarkerRevisionFact,
+}
+
+#[derive(Clone)]
 struct ScopedPlanProjectionState {
     object_token: u64,
     generation: u64,
@@ -11474,6 +11485,8 @@ struct ScopedProjectionMutation {
     message_retractions: Vec<CanonicalFactId>,
     content_block_upserts: BTreeMap<CanonicalFactId, ScopedContentBlockProjectionState>,
     content_block_retractions: Vec<CanonicalFactId>,
+    native_marker_upserts: BTreeMap<CanonicalFactId, ScopedNativeMarkerProjectionState>,
+    native_marker_retractions: Vec<CanonicalFactId>,
     plan_upserts: BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     plan_retractions: Vec<CanonicalFactId>,
     task_upserts: BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
@@ -11515,6 +11528,7 @@ pub struct ScopedObservationProjectionSink {
     user_input_requests: BTreeMap<CanonicalFactId, ScopedUserInputProjectionState>,
     messages: BTreeMap<CanonicalFactId, ScopedMessageProjectionState>,
     content_blocks: BTreeMap<CanonicalFactId, ScopedContentBlockProjectionState>,
+    native_markers: BTreeMap<CanonicalFactId, ScopedNativeMarkerProjectionState>,
     plans: BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     tasks: BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
     tools: BTreeMap<CanonicalFactId, ScopedToolProjectionState>,
@@ -11568,6 +11582,7 @@ impl ScopedObservationProjectionSink {
             user_input_requests: BTreeMap::new(),
             messages: BTreeMap::new(),
             content_blocks: BTreeMap::new(),
+            native_markers: BTreeMap::new(),
             plans: BTreeMap::new(),
             tasks: BTreeMap::new(),
             tools: BTreeMap::new(),
@@ -11687,6 +11702,13 @@ impl ScopedObservationProjectionSink {
                 "prepared content-block retraction must exist"
             );
         }
+        for fact_id in mutation.native_marker_retractions {
+            let removed = self.native_markers.remove(&fact_id);
+            debug_assert!(
+                removed.is_some(),
+                "prepared native-marker retraction must exist"
+            );
+        }
         for fact_id in mutation.plan_retractions {
             let removed = self.plans.remove(&fact_id);
             debug_assert!(removed.is_some(), "prepared plan retraction must exist");
@@ -11708,6 +11730,7 @@ impl ScopedObservationProjectionSink {
         }
         self.messages.extend(mutation.message_upserts);
         self.content_blocks.extend(mutation.content_block_upserts);
+        self.native_markers.extend(mutation.native_marker_upserts);
         self.plans.extend(mutation.plan_upserts);
         self.tasks.extend(mutation.task_upserts);
         self.tools.extend(mutation.tool_upserts);
@@ -11742,6 +11765,8 @@ impl ScopedObservationProjectionSink {
         self.messages
             .retain(|_, state| state.object_token != object_token);
         self.content_blocks
+            .retain(|_, state| state.object_token != object_token);
+        self.native_markers
             .retain(|_, state| state.object_token != object_token);
         self.plans
             .retain(|_, state| state.object_token != object_token);
@@ -11991,6 +12016,22 @@ impl ScopedObservationProjectionSink {
         .map_err(runtime_semantic_projection_error)
     }
 
+    /// Freeze the internal native-marker reducer without advertising a
+    /// selectable observer family or replacement-manifest entry.
+    #[cfg(test)]
+    fn native_marker_reduced_digest(&self) -> Result<[u8; 32], ScopedProjectionError> {
+        crate::runtime_semantic_reducer::native_marker_reduced_state_digest(
+            self.native_markers.values().map(|entity| {
+                crate::runtime_semantic_reducer::NativeMarkerReducedDigestEntity {
+                    semantic: &entity.semantic,
+                    source: runtime_semantic_source_ref(entity.generation, &entity.source),
+                    revision: &entity.revision,
+                }
+            }),
+        )
+        .map_err(runtime_semantic_projection_error)
+    }
+
     fn plan_replacement_snapshot(
         &self,
         phase: ScopedAppendDeliveryPhase,
@@ -12174,6 +12215,11 @@ impl ScopedObservationProjectionSink {
             reset.old_generation,
             ScopedProjectionError::InvalidResetState,
         )?;
+        let native_marker_retractions = self.prepare_native_marker_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let (plan_projected, plan_retractions) = self.prepare_plan_retractions(
             object_token,
             reset.old_generation,
@@ -12257,6 +12303,7 @@ impl ScopedObservationProjectionSink {
                 user_input_retractions,
                 message_retractions,
                 content_block_retractions,
+                native_marker_retractions,
                 plan_retractions,
                 task_retractions,
                 tool_retractions,
@@ -12300,6 +12347,10 @@ impl ScopedObservationProjectionSink {
                         .any(|state| state.object_token == object_token)
                     || self
                         .content_blocks
+                        .values()
+                        .any(|state| state.object_token == object_token)
+                    || self
+                        .native_markers
                         .values()
                         .any(|state| state.object_token == object_token)
                     || self
@@ -12407,6 +12458,15 @@ impl ScopedObservationProjectionSink {
                     ScopedProjectionError::InvalidPresenceState,
                 )?,
         };
+        let native_marker_retractions = match change {
+            ScopedAppendPresenceChange::Created { .. } => Vec::new(),
+            ScopedAppendPresenceChange::Deleted { generation } => self
+                .prepare_native_marker_retractions(
+                    object_token,
+                    generation,
+                    ScopedProjectionError::InvalidPresenceState,
+                )?,
+        };
         let (plan_projected, plan_retractions) = match change {
             ScopedAppendPresenceChange::Created { .. } => (Vec::new(), Vec::new()),
             ScopedAppendPresenceChange::Deleted { generation } => self.prepare_plan_retractions(
@@ -12502,6 +12562,7 @@ impl ScopedObservationProjectionSink {
                 user_input_retractions,
                 message_retractions,
                 content_block_retractions,
+                native_marker_retractions,
                 plan_retractions,
                 task_retractions,
                 tool_retractions,
@@ -12811,6 +12872,29 @@ impl ScopedObservationProjectionSink {
         }
         Ok(self
             .content_blocks
+            .iter()
+            .filter_map(|(fact_id, state)| {
+                (state.object_token == object_token && state.generation == generation)
+                    .then_some(*fact_id)
+            })
+            .collect())
+    }
+
+    fn prepare_native_marker_retractions(
+        &self,
+        object_token: u64,
+        generation: u64,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<Vec<CanonicalFactId>, ScopedProjectionError> {
+        if self
+            .native_markers
+            .values()
+            .any(|state| state.object_token == object_token && state.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        Ok(self
+            .native_markers
             .iter()
             .filter_map(|(fact_id, state)| {
                 (state.object_token == object_token && state.generation == generation)
@@ -13356,10 +13440,57 @@ impl ScopedObservationProjectionSink {
                         }
                     }
                 }
-                // Contract-only until the native-marker CurrentGenerationLog
-                // reducer is frozen; it must not enter a selected replacement
-                // claim through the generic catch-all.
-                Fact::NativeRuntimeMarkerRevision(_) => {}
+                Fact::NativeRuntimeMarkerRevision(revision) => {
+                    let state = scoped_native_marker_state(
+                        object_token,
+                        source,
+                        evidence,
+                        envelope,
+                        revision,
+                    )?;
+                    let key = state.semantic.fact_id;
+                    let current = mutation
+                        .native_marker_upserts
+                        .get(&key)
+                        .or_else(|| self.native_markers.get(&key));
+                    if let Some(current) = current {
+                        validate_actor_revision_progress(
+                            (
+                                current.object_token,
+                                current.generation,
+                                &current.semantic,
+                                &current.source,
+                                &current.revision,
+                            ),
+                            (
+                                state.object_token,
+                                state.generation,
+                                &state.semantic,
+                                &state.source,
+                                &state.revision,
+                            ),
+                        )?;
+                    }
+                    match reduce_native_marker_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+                    {
+                        RevisionedEntityReduction::Unchanged => continue,
+                        RevisionedEntityReduction::Retract => {
+                            queue_projection_retraction(
+                                &self.native_markers,
+                                &mut mutation.native_marker_upserts,
+                                &mut mutation.native_marker_retractions,
+                                key,
+                            );
+                        }
+                        RevisionedEntityReduction::Upsert => {
+                            mutation.native_marker_upserts.insert(key, state);
+                        }
+                    }
+                }
                 Fact::PlanRevision(revision) => {
                     let mut state =
                         scoped_plan_state(object_token, source, evidence, envelope, revision)?;
@@ -13787,6 +13918,15 @@ impl ScopedObservationProjectionSink {
         .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::ContentBlockCapacityFull);
+        }
+        if projected_entity_count(
+            &self.native_markers,
+            &mutation.native_marker_upserts,
+            &mutation.native_marker_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        {
+            return Err(ScopedProjectionError::NativeMarkerCapacityFull);
         }
         if projected_entity_count(
             &self.plans,
@@ -16278,6 +16418,35 @@ fn scoped_content_block_state(
         return Err(ScopedProjectionError::InvalidSemanticRevision);
     }
     Ok(ScopedContentBlockProjectionState {
+        object_token,
+        generation: evidence.generation,
+        semantic,
+        source,
+        revision: revision.clone(),
+    })
+}
+
+fn scoped_native_marker_state(
+    object_token: u64,
+    source: &ScopedSourceObjectIdentity,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+    revision: &NativeRuntimeMarkerRevisionFact,
+) -> Result<ScopedNativeMarkerProjectionState, ScopedProjectionError> {
+    revision
+        .validate()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    if FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+        != semantic.fact_revision_id
+    {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    Ok(ScopedNativeMarkerProjectionState {
         object_token,
         generation: evidence.generation,
         semantic,
@@ -23667,14 +23836,17 @@ mod projection_tests {
     };
     use crate::runtime_semantic_reducer::{
         content_block_reduced_state_digest, effective_state_reduced_state_digest,
-        reduce_content_block_revision, reduce_effective_state_revision,
+        native_marker_reduced_state_digest, reduce_content_block_revision,
+        reduce_effective_state_revision, reduce_native_marker_revision,
         ContentBlockReducedDigestEntity, EffectiveStateReducedDigestEntity,
-        RevisionedEntityReduction, RuntimeSemanticSourceRef,
+        NativeMarkerReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticSourceRef,
     };
     use crate::semantic_contract::{
-        content_block_revision, effective_state_revision, parse_rfc012c_runtime_v1_json,
-        ContentBlockRevisionSlotWire, EffectiveStateFixtureWire, EffectiveStateSlotWire,
-        MessageFixtureWire, MessageRevisionSlotWire, RuntimeContractFixtureWire,
+        content_block_revision, effective_state_revision, native_marker_revision,
+        parse_rfc012c_runtime_v1_json, ContentBlockRevisionSlotWire, EffectiveStateFixtureWire,
+        EffectiveStateSlotWire, MessageFixtureWire, MessageRevisionSlotWire,
+        NativeMarkerExampleWire, NativeMarkerFixtureWire, NativeMarkerRevisionSlotWire,
+        RuntimeContractFixtureWire,
     };
     use crate::source::{DirectoryCheckpoint, FileIdentity, RecordOrigin};
 
@@ -26543,6 +26715,13 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurableNativeMarkerEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
     fn content_block_batch(
         record: &SourceRecord,
         fixture: &MessageFixtureWire,
@@ -26718,6 +26897,173 @@ mod projection_tests {
             "content-block reduction must not expose an unnegotiated event family"
         );
         assert_content_block_topology_parity(durable, scoped);
+        decision
+    }
+
+    fn native_marker_batch_from_revision(
+        record: &SourceRecord,
+        revision: NativeRuntimeMarkerRevisionFact,
+    ) -> (FactBatch, FactEnvelope) {
+        let stable_key = revision.stable_native_fact_key().unwrap();
+        let mut batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        batch
+            .push_native(
+                record,
+                &stable_key,
+                Fact::NativeRuntimeMarkerRevision(revision),
+            )
+            .unwrap();
+        let envelope = batch.facts()[0].clone();
+        (batch, envelope)
+    }
+
+    fn native_marker_batch(
+        record: &SourceRecord,
+        fixture: &NativeMarkerFixtureWire,
+        example: &NativeMarkerExampleWire,
+        slot: &NativeMarkerRevisionSlotWire,
+    ) -> (FactBatch, FactEnvelope) {
+        let revision = native_marker_revision(fixture, example, slot);
+        let (batch, envelope) = native_marker_batch_from_revision(record, revision);
+        assert_eq!(
+            envelope.semantic_revision.unwrap().fact_id,
+            example.fact_id,
+            "fixture and durable native-marker identity must match"
+        );
+        (batch, envelope)
+    }
+
+    fn reduce_durable_native_marker(
+        current: &mut BTreeMap<CanonicalFactId, DurableNativeMarkerEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        envelope: FactEnvelope,
+    ) -> RevisionedEntityReduction {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("native-marker durable fact has semantic identity");
+        let Fact::NativeRuntimeMarkerRevision(revision) = &envelope.value else {
+            panic!("durable native-marker reducer received another family");
+        };
+        let decision = reduce_native_marker_revision(
+            current.get(&semantic.fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::NativeRuntimeMarkerRevision(current_revision) = &entity.envelope.value
+                else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )
+        .unwrap();
+        match decision {
+            RevisionedEntityReduction::Unchanged => {}
+            RevisionedEntityReduction::Upsert => {
+                current.insert(
+                    semantic.fact_id,
+                    DurableNativeMarkerEntity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+            }
+            RevisionedEntityReduction::Retract => {
+                current.remove(&semantic.fact_id);
+            }
+        }
+        decision
+    }
+
+    fn durable_native_marker_digest(
+        current: &BTreeMap<CanonicalFactId, DurableNativeMarkerEntity>,
+    ) -> [u8; 32] {
+        native_marker_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::NativeRuntimeMarkerRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            NativeMarkerReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_native_marker_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurableNativeMarkerEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        assert_eq!(scoped.native_markers.len(), durable.len());
+        assert_eq!(
+            scoped.native_marker_reduced_digest().unwrap(),
+            durable_native_marker_digest(durable),
+            "durable and scoped native-marker reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.native_markers.get(fact_id).unwrap();
+            let Fact::NativeRuntimeMarkerRevision(durable_revision) =
+                &durable_entity.envelope.value
+            else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn apply_native_marker_to_topologies(
+        durable: &mut BTreeMap<CanonicalFactId, DurableNativeMarkerEntity>,
+        scoped: &mut ScopedObservationProjectionSink,
+        fixture: &NativeMarkerFixtureWire,
+        example: &NativeMarkerExampleWire,
+        slot: &NativeMarkerRevisionSlotWire,
+        record: SourceRecord,
+        lane_ordinal: u64,
+    ) -> RevisionedEntityReduction {
+        let (batch, envelope) = native_marker_batch(&record, fixture, example, slot);
+        let decision = reduce_durable_native_marker(
+            durable,
+            rfc012c_source_identity(),
+            record.clone(),
+            envelope,
+        );
+        let projected = scoped
+            .project(&rfc012c_decoded_frame(
+                lane_ordinal,
+                ScopedAppendDeliveryPhase::Live,
+                &record,
+                batch,
+            ))
+            .unwrap();
+        assert!(
+            projected.is_empty(),
+            "native-marker reduction must not expose an unnegotiated event family"
+        );
+        assert_native_marker_topology_parity(durable, scoped);
         decision
     }
 
@@ -28056,6 +28402,266 @@ mod projection_tests {
         );
         assert!(projection.messages.is_empty());
         assert!(projection.content_blocks.is_empty());
+    }
+
+    #[test]
+    fn rfc012c_native_marker_current_generation_log_matches_durable_and_scoped_digests() {
+        let fixture = crate::semantic_contract::decode_rfc012c_native_marker_v1(include_str!(
+            "../fixtures/contracts/rfc012c-native-marker-v1.json"
+        ))
+        .unwrap();
+        let selection = observation_contract_selection_for("runtime.message");
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let initial_record = rfc012c_record(0, 10, 10);
+        let mut initial_batch =
+            FactBatch::new_with_semantic_context(3, 1, rfc012c_semantic_context()).unwrap();
+        let mut durable = BTreeMap::new();
+        for example in [&fixture.compaction, &fixture.progress, &fixture.queue] {
+            let (batch, envelope) =
+                native_marker_batch(&initial_record, &fixture, example, &example.current);
+            initial_batch.append(batch).unwrap();
+            assert_eq!(
+                reduce_durable_native_marker(
+                    &mut durable,
+                    rfc012c_source_identity(),
+                    initial_record.clone(),
+                    envelope,
+                ),
+                RevisionedEntityReduction::Upsert
+            );
+        }
+        assert!(projection
+            .project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &initial_record,
+                initial_batch,
+            ))
+            .unwrap()
+            .is_empty());
+        assert_native_marker_topology_parity(&durable, &projection);
+        assert_eq!(durable.len(), 3);
+
+        let mut reverse_projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let mut reverse_batch =
+            FactBatch::new_with_semantic_context(3, 1, rfc012c_semantic_context()).unwrap();
+        for example in [&fixture.queue, &fixture.progress, &fixture.compaction] {
+            reverse_batch
+                .append(native_marker_batch(&initial_record, &fixture, example, &example.current).0)
+                .unwrap();
+        }
+        assert!(reverse_projection
+            .project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &initial_record,
+                reverse_batch,
+            ))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            reverse_projection.native_marker_reduced_digest().unwrap(),
+            projection.native_marker_reduced_digest().unwrap(),
+            "fact order must not perturb the reduced current-generation log"
+        );
+
+        assert_eq!(
+            apply_native_marker_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &fixture.progress,
+                &fixture.progress.correction,
+                rfc012c_record(10, 20, 20),
+                2,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        let corrected_digest = durable_native_marker_digest(&durable);
+        assert_eq!(
+            apply_native_marker_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &fixture.progress,
+                &fixture.progress.correction,
+                rfc012c_record(20, 30, 30),
+                3,
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert_eq!(durable_native_marker_digest(&durable), corrected_digest);
+
+        let mut partial_retract = fixture.progress.correction.clone();
+        partial_retract.operation = UserInputOperation::Retract;
+        partial_retract.completeness = ContractCompleteness::Partial;
+        let partial_retract_record = rfc012c_record(30, 40, 40);
+        let (partial_batch, partial_envelope) = native_marker_batch_from_revision(
+            &partial_retract_record,
+            native_marker_revision(&fixture, &fixture.progress, &partial_retract),
+        );
+        assert_eq!(
+            reduce_durable_native_marker(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_retract_record.clone(),
+                partial_envelope,
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert!(projection
+            .project(&rfc012c_decoded_frame(
+                4,
+                ScopedAppendDeliveryPhase::Live,
+                &partial_retract_record,
+                partial_batch,
+            ))
+            .unwrap()
+            .is_empty());
+        assert_native_marker_topology_parity(&durable, &projection);
+
+        assert_eq!(
+            apply_native_marker_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &fixture.queue,
+                &fixture.queue.partial,
+                rfc012c_record(40, 50, 50),
+                5,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_eq!(
+            apply_native_marker_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &fixture.progress,
+                &fixture.progress.retract,
+                rfc012c_record(50, 60, 60),
+                6,
+            ),
+            RevisionedEntityReduction::Retract
+        );
+        assert_eq!(durable.len(), 2);
+        assert_eq!(
+            apply_native_marker_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &fixture.progress,
+                &fixture.progress.current,
+                rfc012c_record(60, 70, 70),
+                7,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+
+        let reset = ScopedAppendReset {
+            old_generation: 1,
+            new_generation: 2,
+            reason: AppendTransition::Truncated,
+        };
+        let reset_events = projection
+            .project(&ScopedQueuedObservationFrame::Reset {
+                object_token: OBJECT_TOKEN,
+                source: rfc012c_source_identity(),
+                lane_ordinal: 8,
+                observed_at: 80,
+                phase: ScopedAppendDeliveryPhase::Correction,
+                reset,
+            })
+            .unwrap();
+        assert_eq!(reset_events.len(), 1);
+        assert!(matches!(
+            reset_events[0],
+            ScopedProjectedObservation::SourceReset { .. }
+        ));
+        durable.clear();
+        assert_native_marker_topology_parity(&durable, &projection);
+
+        let mut generation_two_record = rfc012c_record(0, 10, 90);
+        generation_two_record.generation = 2;
+        assert_eq!(
+            apply_native_marker_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &fixture.compaction,
+                &fixture.compaction.current,
+                generation_two_record,
+                9,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        let delete_events = projection
+            .project(&ScopedQueuedObservationFrame::Presence {
+                object_token: OBJECT_TOKEN,
+                source: rfc012c_source_identity(),
+                lane_ordinal: 10,
+                observed_at: 100,
+                phase: ScopedAppendDeliveryPhase::Live,
+                change: ScopedAppendPresenceChange::Deleted { generation: 2 },
+            })
+            .unwrap();
+        assert_eq!(delete_events.len(), 1);
+        assert!(matches!(
+            delete_events[0],
+            ScopedProjectedObservation::SourcePresence {
+                change: ScopedAppendPresenceChange::Deleted { generation: 2 },
+                ..
+            }
+        ));
+        durable.clear();
+        assert_native_marker_topology_parity(&durable, &projection);
+    }
+
+    #[test]
+    fn native_marker_capacity_rejects_the_whole_decoded_record_atomically() {
+        let fixture = crate::semantic_contract::decode_rfc012c_native_marker_v1(include_str!(
+            "../fixtures/contracts/rfc012c-native-marker-v1.json"
+        ))
+        .unwrap();
+        let selection = observation_contract_selection_for("runtime.message");
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 2,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let record = rfc012c_record(0, 10, 10);
+        let mut batch =
+            FactBatch::new_with_semantic_context(3, 1, rfc012c_semantic_context()).unwrap();
+        for example in [&fixture.compaction, &fixture.progress, &fixture.queue] {
+            batch
+                .append(native_marker_batch(&record, &fixture, example, &example.current).0)
+                .unwrap();
+        }
+        assert_eq!(
+            projection.project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &record,
+                batch,
+            )),
+            Err(ScopedProjectionError::NativeMarkerCapacityFull)
+        );
+        assert!(projection.native_markers.is_empty());
+        assert!(projection.messages.is_empty());
     }
 
     #[test]

@@ -1100,11 +1100,18 @@ revalidated by Rust, including every fact and semantic revision identity. The
 portable TypeScript consumer binds the full semantic value to caller-held
 Rust-produced identity, and the JSON-string-only N-API helper recomputes it in
 Rust with parity negatives for host assessments, omitted nullable fields, and
-semantic drift. Its `CurrentGenerationLog` reducer is still open.
+semantic drift. Its topology-neutral `CurrentGenerationLog` reducer now makes
+exact replay occurrence-independent, treats partial retract as
+non-authoritative, replaces corrections by stable marker identity, and removes
+complete retracts plus reset/deletion-owned state. Durable `FactBatch` and the
+private scoped reducer produce the same path-free reduced-state digest for
+compaction, progress, and queue markers in either fact order. Whole-record
+capacity failure is atomic. The observer family, event union, and replacement
+manifest entry remain unexposed until their portable contracts are frozen.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: native-marker reducer coverage, capability families,
-complete remaining family-by-family
+does not close C1: capability and bounded unknown-evidence families, complete
+remaining family-by-family
 replacement/retraction cases, full semantic reduction, tier/view
 compositionality, and remaining-family durable/scoped reducer digest equality
 remain open.
@@ -3755,10 +3762,9 @@ durable state except for the explicitly versioned usage-v2 correction.
 The next implementation sequence follows the remaining authority and semantic
 gates rather than the prior wave labels:
 
-1. finish C1/C2 family coverage and reducer laws, including qualified
-   effective-state reducer coverage, progress/content/capability facts, complete
-   replacement/retraction fixtures, and equal durable/scoped reduced-state
-   digests;
+1. finish C1/C2 family coverage and reducer laws, including capability and
+   bounded unknown-evidence facts, complete remaining replacement/retraction
+   fixtures, and equal durable/scoped reduced-state digests;
 2. complete B1-B4 with real promoted catalog source compositions, an
    authorization-bound public catalog query/retention policy, selected-session
    hydration, and the cold/warm progressive-host matrix;

@@ -9,8 +9,10 @@ use crate::adapter::{
     AdapterId, CanonicalSourceInstanceKey, ContentBlockRevisionFact, ContentBlockRevisionValue,
     ContractCompleteness, CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension,
     EffectiveStateEvidenceKind, EffectiveStateRevisionFact, EffectiveStateValueAuthority,
-    FactProvenance, FactRevisionId, FactSemanticRevision, QualifiedUnknownReason,
-    QualifiedValueQuality, SourceRecordId, UserInputOperation,
+    FactProvenance, FactRevisionId, FactSemanticRevision, NativeCompactionPhase,
+    NativeProgressState, NativeQueueOperation, NativeRuntimeMarkerRevisionFact,
+    NativeRuntimeMarkerValue, QualifiedUnknownReason, QualifiedValueQuality, SourceRecordId,
+    UserInputOperation,
 };
 use crate::source::SourceRecordState;
 
@@ -59,6 +61,27 @@ fn validate_effective_state_entity(
 fn validate_content_block_entity(
     semantic: &FactSemanticRevision,
     revision: &ContentBlockRevisionFact,
+) -> Result<(), RuntimeSemanticReductionError> {
+    revision
+        .validate()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    Ok(())
+}
+
+fn validate_native_marker_entity(
+    semantic: &FactSemanticRevision,
+    revision: &NativeRuntimeMarkerRevisionFact,
 ) -> Result<(), RuntimeSemanticReductionError> {
     revision
         .validate()
@@ -143,6 +166,38 @@ pub(crate) fn reduce_content_block_revision(
     }
 }
 
+/// Decide one native marker revision using the RFC 012C
+/// `CurrentGenerationLog` entity law.
+///
+/// Stable marker identity replaces its current value, exact replay is silent,
+/// partial retraction is non-authoritative, and complete retraction removes the
+/// entity. Source generation/cursor ordering remains topology-owned.
+pub(crate) fn reduce_native_marker_revision(
+    current: Option<(&FactSemanticRevision, &NativeRuntimeMarkerRevisionFact)>,
+    incoming: (&FactSemanticRevision, &NativeRuntimeMarkerRevisionFact),
+) -> Result<RevisionedEntityReduction, RuntimeSemanticReductionError> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    validate_native_marker_entity(incoming_semantic, incoming_revision)?;
+    if let Some((current_semantic, current_revision)) = current {
+        validate_native_marker_entity(current_semantic, current_revision)?;
+        if current_semantic.fact_id != incoming_semantic.fact_id {
+            return Err(RuntimeSemanticReductionError::InvalidRevision);
+        }
+        if current_semantic.fact_revision_id == incoming_semantic.fact_revision_id {
+            return Ok(RevisionedEntityReduction::Unchanged);
+        }
+    }
+    match incoming_revision.operation {
+        UserInputOperation::Retract
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
+        {
+            Ok(RevisionedEntityReduction::Unchanged)
+        }
+        UserInputOperation::Retract => Ok(RevisionedEntityReduction::Retract),
+        UserInputOperation::Upsert => Ok(RevisionedEntityReduction::Upsert),
+    }
+}
+
 /// Path-free canonical source occurrence used by both durable and scoped
 /// reduced-state digests.  Host observation time, delivery phase, numeric
 /// catalog IDs, and attachment-local tokens are intentionally absent.
@@ -176,6 +231,13 @@ pub(crate) struct ContentBlockReducedDigestEntity<'a> {
     pub revision: &'a ContentBlockRevisionFact,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct NativeMarkerReducedDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub source: RuntimeSemanticSourceRef<'a>,
+    pub revision: &'a NativeRuntimeMarkerRevisionFact,
+}
+
 fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value);
@@ -186,6 +248,18 @@ fn hash_optional_component(hasher: &mut blake3::Hasher, value: Option<&[u8]>) {
         Some(value) => {
             hasher.update(&[1]);
             hash_component(hasher, value);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_optional_u64(hasher: &mut blake3::Hasher, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            hasher.update(&[1]);
+            hasher.update(&value.to_be_bytes());
         }
         None => {
             hasher.update(&[0]);
@@ -435,6 +509,141 @@ pub(crate) fn content_block_reduced_state_digest<'a>(
                 .native_tool_call_or_result_id
                 .as_deref()
                 .map(str::as_bytes),
+        );
+        hasher.update(&[match entity.revision.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        }]);
+        hasher.update(&[match entity.revision.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        }]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Compute the canonical current-state digest for `runtime.native-marker`.
+/// Input order is irrelevant; duplicate fact identities fail closed. The
+/// digest contains only typed marker values and path-free source occurrence.
+pub(crate) fn native_marker_reduced_state_digest<'a>(
+    entities: impl IntoIterator<Item = NativeMarkerReducedDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.semantic.fact_id);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].semantic.fact_id == pair[1].semantic.fact_id)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, b"runtime.native-marker");
+    hasher.update(&1_u32.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in &entities {
+        validate_native_marker_entity(entity.semantic, entity.revision)?;
+        validate_and_hash_semantic_source(&mut hasher, entity.semantic, entity.source)?;
+        hash_component(&mut hasher, entity.revision.session.as_bytes());
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_component(&mut hasher, entity.revision.native_marker_id.as_bytes());
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .correlated_native_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        match &entity.revision.value {
+            NativeRuntimeMarkerValue::Compaction {
+                phase,
+                trigger,
+                pre_tokens,
+            } => {
+                hasher.update(&[1]);
+                hasher.update(&[match phase {
+                    NativeCompactionPhase::Started => 1,
+                    NativeCompactionPhase::Boundary => 2,
+                    NativeCompactionPhase::Completed => 3,
+                    NativeCompactionPhase::Failed => 4,
+                }]);
+                hash_optional_component(&mut hasher, trigger.as_deref().map(str::as_bytes));
+                hash_optional_u64(&mut hasher, *pre_tokens);
+            }
+            NativeRuntimeMarkerValue::Progress {
+                state,
+                completed,
+                total,
+                detail_digest,
+            } => {
+                hasher.update(&[2]);
+                hasher.update(&[match state {
+                    NativeProgressState::Pending => 1,
+                    NativeProgressState::Active => 2,
+                    NativeProgressState::Waiting => 3,
+                    NativeProgressState::Completed => 4,
+                    NativeProgressState::Failed => 5,
+                    NativeProgressState::Cancelled => 6,
+                }]);
+                hash_optional_u64(&mut hasher, *completed);
+                hash_optional_u64(&mut hasher, *total);
+                hash_optional_component(
+                    &mut hasher,
+                    detail_digest.as_ref().map(|digest| digest.as_slice()),
+                );
+            }
+            NativeRuntimeMarkerValue::Queue {
+                operation,
+                depth,
+                item_digest,
+            } => {
+                hasher.update(&[3]);
+                hasher.update(&[match operation {
+                    NativeQueueOperation::Enqueue => 1,
+                    NativeQueueOperation::Dequeue => 2,
+                    NativeQueueOperation::Drain => 3,
+                    NativeQueueOperation::Remove => 4,
+                }]);
+                hash_optional_u64(&mut hasher, *depth);
+                hash_optional_component(
+                    &mut hasher,
+                    item_digest.as_ref().map(|digest| digest.as_slice()),
+                );
+            }
+        }
+        hasher.update(&[match entity.revision.quality {
+            QualifiedValueQuality::Exact => 1,
+            QualifiedValueQuality::NativeClaimed => 2,
+            QualifiedValueQuality::Derived
+            | QualifiedValueQuality::Estimated
+            | QualifiedValueQuality::Unknown => {
+                return Err(RuntimeSemanticReductionError::InvalidRevision);
+            }
+        }]);
+        match entity.revision.effective_at {
+            Some(effective_at) => {
+                hasher.update(&[1]);
+                hasher.update(&effective_at.to_be_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hash_component(
+            &mut hasher,
+            entity.revision.provenance.native_field.as_bytes(),
+        );
+        hasher.update(
+            &entity
+                .revision
+                .provenance
+                .normalization_contract_version
+                .to_be_bytes(),
         );
         hasher.update(&[match entity.revision.operation {
             UserInputOperation::Upsert => 1,
