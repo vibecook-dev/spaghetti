@@ -126,6 +126,7 @@ pub use performance::{
 };
 use performance::{SourcePerformanceRecorder, SourceTelemetry};
 pub(crate) use progressive_startup::ConfiguredObservationSource;
+use progressive_startup::ConfiguredObservationStartupRuntime;
 pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, HistoryProjectIndexSummary,
     HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
@@ -550,6 +551,7 @@ pub struct SpaghettiEngineCore {
     source_telemetry: Arc<SourceTelemetry>,
     observation_workers: Mutex<Option<Arc<rayon::ThreadPool>>>,
     supervisors: Mutex<Vec<ObservationSupervisor>>,
+    configured_observation_startup: Mutex<Option<ConfiguredObservationStartupRuntime>>,
     catalog_refresh: Mutex<ConfiguredCatalogRefreshRuntime>,
     lifecycle: Mutex<Lifecycle>,
     commit_notifications: CommitNotifications,
@@ -722,6 +724,7 @@ impl SpaghettiEngineCore {
             source_telemetry: SourceTelemetry::new(),
             observation_workers: Mutex::new(Some(Arc::new(observation_workers))),
             supervisors: Mutex::new(Vec::new()),
+            configured_observation_startup: Mutex::new(None),
             catalog_refresh: Mutex::new(ConfiguredCatalogRefreshRuntime::default()),
             lifecycle: Mutex::new(Lifecycle {
                 phase: LifecyclePhase::Running,
@@ -770,6 +773,16 @@ impl SpaghettiEngineCore {
                     .unwrap_or_default()
                     .max(latest_commit_seq),
             );
+        }
+        if let Some(startup) = self.configured_observation_startup_status() {
+            if startup.failed {
+                observation.state = "degraded".to_string();
+                observation.recovery_required = true;
+                observation.last_error =
+                    Some("configured background observation startup failed".to_string());
+            } else if startup.active && matches!(observation.state.as_str(), "idle" | "live") {
+                observation.state = "scanning".to_string();
+            }
         }
         let supervisors = self.lock_supervisors();
         for supervisor in supervisors
@@ -2345,26 +2358,45 @@ impl SpaghettiEngineCore {
     }
 
     pub fn stop_observation_supervisor(&self, adapter_id: &str) -> Result<bool, EngineError> {
-        let refresh_result = self.clear_catalog_refresh_for_adapter(adapter_id);
+        let mut first_error = None;
+        let mut startup_stopped = false;
+        match self.clear_configured_observation_startup_for_adapter(adapter_id) {
+            Ok(stopped) => startup_stopped = stopped,
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+        if let Err(error) = self.clear_catalog_refresh_for_adapter(adapter_id) {
+            first_error.get_or_insert(error);
+        }
         let mut supervisors = self.lock_supervisors();
         let Some(index) = supervisors
             .iter()
             .position(|supervisor| supervisor.adapter_id() == adapter_id)
         else {
-            refresh_result?;
-            return Ok(false);
+            return match first_error {
+                Some(error) => Err(error),
+                None => Ok(startup_stopped),
+            };
         };
         let mut supervisor = supervisors.swap_remove(index);
         drop(supervisors);
-        let supervisor_result = supervisor.shutdown();
-        refresh_result?;
-        supervisor_result?;
-        Ok(true)
+        if let Err(error) = supervisor.shutdown() {
+            first_error.get_or_insert(error);
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(true),
+        }
     }
 
     /// Rebuild deferred FTS structures and clear the complete-only search
     /// gate. Catalog/history reads are already admitted. Idempotent.
     pub fn complete_query_bootstrap(&self) -> Result<Option<u64>, EngineError> {
+        // A catalog-first host may return while its full-history supervisors
+        // are still scanning. Query-structure rebuild must begin only after
+        // that batch has installed, otherwise it can race observation writes.
+        self.wait_for_configured_observation_startup()?;
         let (writer, supervisor_clients) = {
             let lifecycle = self.lock_lifecycle();
             if lifecycle.phase != LifecyclePhase::Running {
@@ -2462,6 +2494,9 @@ impl SpaghettiEngineCore {
 
         let mut first_error = None;
         if let Err(error) = self.clear_configured_catalog_refresh() {
+            first_error.get_or_insert(error);
+        }
+        if let Err(error) = self.clear_configured_observation_startup() {
             first_error.get_or_insert(error);
         }
         let mut supervisors = {

@@ -8,7 +8,8 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::thread::{self, JoinHandle};
 
 use crate::adapter::AdapterId;
 use crate::catalog_contract::CatalogAccessPolicyDigest;
@@ -17,9 +18,10 @@ use super::catalog_build::{
     CatalogBuildIntent, CatalogBuildOutcome, CatalogBuildPreparation, CatalogConfiguredSource,
 };
 use super::coordinator::validate_request;
+use super::supervisor::StartingObservationSupervisor;
 use super::{
-    EngineError, ObservationSupervisorOptions, QueryCancellationToken, ReconcileRequest,
-    SpaghettiEngineCore,
+    EngineError, LifecyclePhase, ObservationSupervisorOptions, QueryCancellationToken,
+    ReconcileRequest, SpaghettiEngineCore,
 };
 
 const MAX_CONFIGURED_OBSERVATION_SOURCES: usize = 64;
@@ -56,9 +58,278 @@ pub(crate) enum ConfiguredCatalogStartupOutcome {
 pub(crate) struct ConfiguredObservationStartupOutcome {
     pub(crate) catalog: ConfiguredCatalogStartupOutcome,
     pub(crate) supervisors_started: usize,
+    pub(crate) history_background: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfiguredObservationStartupState {
+    Starting,
+    Installed,
+    Failed,
+    Stopped,
+}
+
+struct ConfiguredObservationStartupShared {
+    state: Mutex<ConfiguredObservationStartupState>,
+    finished: Condvar,
+}
+
+impl ConfiguredObservationStartupShared {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ConfiguredObservationStartupState::Starting),
+            finished: Condvar::new(),
+        })
+    }
+
+    fn set(&self, state: ConfiguredObservationStartupState) {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+        self.finished.notify_all();
+    }
+
+    fn get(&self) -> ConfiguredObservationStartupState {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn wait(&self) -> ConfiguredObservationStartupState {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *state == ConfiguredObservationStartupState::Starting {
+            state = self
+                .finished
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *state
+    }
+}
+
+pub(super) struct ConfiguredObservationStartupRuntime {
+    adapter_ids: BTreeSet<String>,
+    cancellation: QueryCancellationToken,
+    shared: Arc<ConfiguredObservationStartupShared>,
+    join: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ConfiguredObservationStartupStatus {
+    pub(super) active: bool,
+    pub(super) failed: bool,
+}
+
+impl ConfiguredObservationStartupRuntime {
+    fn start(
+        engine: Weak<SpaghettiEngineCore>,
+        adapter_ids: BTreeSet<String>,
+        starting: Vec<StartingObservationSupervisor>,
+        cancellation: QueryCancellationToken,
+    ) -> Result<Self, EngineError> {
+        let shared = ConfiguredObservationStartupShared::new();
+        let thread_shared = Arc::clone(&shared);
+        let thread_cancellation = cancellation.clone();
+        let failure_engine = engine.clone();
+        let join = thread::Builder::new()
+            .name("spaghetti-configured-observation-startup".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    finish_configured_observation_startup(engine, starting, &thread_cancellation)
+                }));
+                let state = match result {
+                    Ok(Ok(())) => ConfiguredObservationStartupState::Installed,
+                    Ok(Err(EngineError::QueryCancelled | EngineError::ShuttingDown))
+                        if thread_cancellation.is_cancelled() =>
+                    {
+                        ConfiguredObservationStartupState::Stopped
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        if let Some(engine) = failure_engine.upgrade() {
+                            let _ = engine.clear_configured_catalog_refresh();
+                        }
+                        ConfiguredObservationStartupState::Failed
+                    }
+                };
+                thread_shared.set(state);
+            })
+            .map_err(|error| EngineError::WorkerStart {
+                worker: "configured observation startup",
+                detail: error.to_string(),
+            })?;
+        Ok(Self {
+            adapter_ids,
+            cancellation,
+            shared,
+            join: Some(join),
+        })
+    }
+
+    fn status(&self) -> ConfiguredObservationStartupStatus {
+        let state = self.shared.get();
+        ConfiguredObservationStartupStatus {
+            active: state == ConfiguredObservationStartupState::Starting,
+            failed: state == ConfiguredObservationStartupState::Failed,
+        }
+    }
+
+    fn shutdown(&mut self) -> Result<(), EngineError> {
+        let Some(join) = self.join.take() else {
+            return Ok(());
+        };
+        self.cancellation.cancel();
+        let result = join.join().map_err(|_| EngineError::WorkerPanic {
+            worker: "configured observation startup",
+        });
+        if self.shared.get() == ConfiguredObservationStartupState::Starting {
+            self.shared.set(ConfiguredObservationStartupState::Stopped);
+        }
+        result
+    }
+}
+
+impl Drop for ConfiguredObservationStartupRuntime {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
+    }
+}
+
+fn finish_configured_observation_startup(
+    engine: Weak<SpaghettiEngineCore>,
+    starting: Vec<StartingObservationSupervisor>,
+    cancellation: &QueryCancellationToken,
+) -> Result<(), EngineError> {
+    let mut started = Vec::with_capacity(starting.len());
+    for supervisor in starting {
+        check_cancelled(cancellation)?;
+        started.push(supervisor.finish()?);
+    }
+    check_cancelled(cancellation)?;
+    let engine = engine.upgrade().ok_or(EngineError::ShuttingDown)?;
+    engine.install_started_observation_supervisors(started)
 }
 
 impl SpaghettiEngineCore {
+    fn ensure_configured_observation_startup_available(&self) -> Result<(), EngineError> {
+        if self
+            .configured_observation_startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+        {
+            return Err(EngineError::InvalidConfig(
+                "configured observation startup is already installed".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn start_configured_observation_background(
+        self: &Arc<Self>,
+        adapter_ids: BTreeSet<String>,
+        starting: Vec<StartingObservationSupervisor>,
+        cancellation: QueryCancellationToken,
+    ) -> Result<(), EngineError> {
+        if adapter_ids.is_empty() || adapter_ids.len() != starting.len() {
+            return Err(EngineError::InvalidConfig(
+                "configured observation startup requires one unique adapter per supervisor"
+                    .to_string(),
+            ));
+        }
+        let lifecycle = self.lock_lifecycle();
+        if lifecycle.phase != LifecyclePhase::Running {
+            return Err(EngineError::ShuttingDown);
+        }
+        let mut installed = self
+            .configured_observation_startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if installed.is_some() {
+            return Err(EngineError::InvalidConfig(
+                "configured observation startup is already installed".to_string(),
+            ));
+        }
+        let runtime = ConfiguredObservationStartupRuntime::start(
+            Arc::downgrade(self),
+            adapter_ids,
+            starting,
+            cancellation,
+        )?;
+        *installed = Some(runtime);
+        Ok(())
+    }
+
+    pub(super) fn configured_observation_startup_status(
+        &self,
+    ) -> Option<ConfiguredObservationStartupStatus> {
+        self.configured_observation_startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(ConfiguredObservationStartupRuntime::status)
+    }
+
+    pub(super) fn wait_for_configured_observation_startup(&self) -> Result<(), EngineError> {
+        let shared = self
+            .configured_observation_startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|runtime| Arc::clone(&runtime.shared));
+        match shared {
+            Some(shared) => match shared.wait() {
+                ConfiguredObservationStartupState::Installed => Ok(()),
+                ConfiguredObservationStartupState::Starting => {
+                    unreachable!("wait returns terminal state")
+                }
+                ConfiguredObservationStartupState::Failed => Err(EngineError::WorkerUnavailable {
+                    worker: "configured observation startup",
+                }),
+                ConfiguredObservationStartupState::Stopped => Err(EngineError::ShuttingDown),
+            },
+            None => Ok(()),
+        }
+    }
+
+    pub(super) fn clear_configured_observation_startup(&self) -> Result<(), EngineError> {
+        let mut runtime = self
+            .configured_observation_startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        match runtime.as_mut() {
+            Some(runtime) => runtime.shutdown(),
+            None => Ok(()),
+        }
+    }
+
+    pub(super) fn clear_configured_observation_startup_for_adapter(
+        &self,
+        adapter_id: &str,
+    ) -> Result<bool, EngineError> {
+        let mut installed = self
+            .configured_observation_startup
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !installed
+            .as_ref()
+            .is_some_and(|runtime| runtime.adapter_ids.contains(adapter_id))
+        {
+            return Ok(false);
+        }
+        let mut runtime = installed.take();
+        drop(installed);
+        if let Some(runtime) = runtime.as_mut() {
+            runtime.shutdown()?;
+        }
+        Ok(true)
+    }
+
     /// Start the complete configured durable host through the RFC 012B global
     /// planning barrier. Catalog publication is withheld when any prepared
     /// watcher backend is unavailable; history still starts under the existing
@@ -68,6 +339,7 @@ impl SpaghettiEngineCore {
         configured: Vec<ConfiguredObservationSource>,
         cancellation: QueryCancellationToken,
     ) -> Result<ConfiguredObservationStartupOutcome, EngineError> {
+        self.ensure_configured_observation_startup_available()?;
         let configured = normalize_configured_sources(configured, &cancellation)?;
         let access_policy_digest = CatalogAccessPolicyDigest::derive(1, WITHHELD_CATALOG_POLICY)
             .expect("fixed withheld catalog policy material is valid");
@@ -93,56 +365,95 @@ impl SpaghettiEngineCore {
             cancellation.clone(),
         )?;
 
-        // Every watcher reaches its prepared boundary before catalog I/O or
-        // history. Dropping this vector tears all prepared workers down if any
-        // later preparation fails.
-        let mut prepared_supervisors = Vec::with_capacity(configured.len());
-        for source in &configured {
-            check_cancelled(&cancellation)?;
-            let mut options = ObservationSupervisorOptions::new(source.roots.clone());
-            options.reason.clone_from(&source.reason);
-            prepared_supervisors.push(self.prepare_registered_observation_cancellable(
-                &source.adapter_id,
-                options,
-                cancellation.clone(),
-            )?);
-        }
-
-        let mut watcher_unavailable = prepared_supervisors
-            .iter()
-            .filter(|supervisor| !supervisor.watcher_available())
-            .map(|supervisor| supervisor.adapter_id().to_string())
-            .collect::<Vec<_>>();
-        watcher_unavailable.sort();
-        let catalog = match catalog_preparation {
-            CatalogBuildPreparation::AuthorizationUnavailable { adapter_ids } => {
-                ConfiguredCatalogStartupOutcome::Catalog(
-                    CatalogBuildOutcome::AuthorizationUnavailable { adapter_ids },
-                )
-            }
-            CatalogBuildPreparation::Prepared(prepared) if watcher_unavailable.is_empty() => {
-                ConfiguredCatalogStartupOutcome::Catalog(
-                    self.publish_prepared_catalog(prepared, cancellation.clone())?,
-                )
-            }
-            CatalogBuildPreparation::Prepared(_) => {
-                ConfiguredCatalogStartupOutcome::WatcherUnavailable {
-                    adapter_ids: watcher_unavailable,
-                }
-            }
-        };
-
-        let refresh_enabled = matches!(
-            &catalog,
-            ConfiguredCatalogStartupOutcome::Catalog(
-                CatalogBuildOutcome::LastCompleteRetained | CatalogBuildOutcome::Published { .. }
-            )
-        );
-        if refresh_enabled {
+        // Install the all-source refresh coordinates before watcher callbacks
+        // become observable. A native change during watcher preparation or
+        // catalog publication is retained as pending and flushed only after a
+        // promoted catalog has published successfully.
+        let refresh_staged = matches!(&catalog_preparation, CatalogBuildPreparation::Prepared(_));
+        if refresh_staged {
             self.stage_configured_catalog_refresh(refresh_sources)?;
         }
 
-        let start_result = (|| {
+        let result = (|| {
+            // Every watcher reaches its prepared boundary before catalog I/O
+            // or history. Dropping this vector tears all prepared workers down
+            // if any later preparation fails.
+            let mut prepared_supervisors = Vec::with_capacity(configured.len());
+            for source in &configured {
+                check_cancelled(&cancellation)?;
+                let mut options = ObservationSupervisorOptions::new(source.roots.clone());
+                options.reason.clone_from(&source.reason);
+                prepared_supervisors.push(self.prepare_registered_observation_cancellable(
+                    &source.adapter_id,
+                    options,
+                    cancellation.clone(),
+                )?);
+            }
+
+            let mut watcher_unavailable = prepared_supervisors
+                .iter()
+                .filter(|supervisor| !supervisor.watcher_available())
+                .map(|supervisor| supervisor.adapter_id().to_string())
+                .collect::<Vec<_>>();
+            watcher_unavailable.sort();
+            let catalog = match catalog_preparation {
+                CatalogBuildPreparation::AuthorizationUnavailable { adapter_ids } => {
+                    ConfiguredCatalogStartupOutcome::Catalog(
+                        CatalogBuildOutcome::AuthorizationUnavailable { adapter_ids },
+                    )
+                }
+                CatalogBuildPreparation::Prepared(prepared) if watcher_unavailable.is_empty() => {
+                    ConfiguredCatalogStartupOutcome::Catalog(
+                        self.publish_prepared_catalog(prepared, cancellation.clone())?,
+                    )
+                }
+                CatalogBuildPreparation::Prepared(_) => {
+                    ConfiguredCatalogStartupOutcome::WatcherUnavailable {
+                        adapter_ids: watcher_unavailable,
+                    }
+                }
+            };
+
+            let refresh_enabled = matches!(
+                &catalog,
+                ConfiguredCatalogStartupOutcome::Catalog(
+                    CatalogBuildOutcome::LastCompleteRetained
+                        | CatalogBuildOutcome::Published { .. }
+                )
+            );
+
+            if refresh_enabled {
+                let background_cancellation = QueryCancellationToken::default();
+                check_cancelled(&cancellation)?;
+                let supervisors_started = prepared_supervisors.len();
+                let mut starting = Vec::with_capacity(supervisors_started);
+                for supervisor in prepared_supervisors {
+                    check_cancelled(&cancellation)?;
+                    starting
+                        .push(supervisor.begin_with_cancellation(background_cancellation.clone())?);
+                }
+                check_cancelled(&cancellation)?;
+                self.activate_configured_catalog_refresh()?;
+                check_cancelled(&cancellation)?;
+                let adapter_ids = configured
+                    .iter()
+                    .map(|source| source.adapter_id.clone())
+                    .collect::<BTreeSet<_>>();
+                self.start_configured_observation_background(
+                    adapter_ids,
+                    starting,
+                    background_cancellation,
+                )?;
+                return Ok(ConfiguredObservationStartupOutcome {
+                    catalog,
+                    supervisors_started,
+                    history_background: true,
+                });
+            }
+
+            if refresh_staged {
+                self.clear_configured_catalog_refresh()?;
+            }
             check_cancelled(&cancellation)?;
             let mut starting = Vec::with_capacity(prepared_supervisors.len());
             for supervisor in prepared_supervisors {
@@ -154,35 +465,20 @@ impl SpaghettiEngineCore {
                 started.push(supervisor.finish()?);
             }
             check_cancelled(&cancellation)?;
-            Ok::<_, EngineError>(started)
+            let supervisors_started = started.len();
+            self.install_started_observation_supervisors(started)?;
+            Ok(ConfiguredObservationStartupOutcome {
+                catalog,
+                supervisors_started,
+                history_background: false,
+            })
         })();
-        let started = match start_result {
-            Ok(started) => started,
-            Err(error) => {
-                if refresh_enabled {
-                    let _ = self.clear_configured_catalog_refresh();
-                }
-                return Err(error);
-            }
-        };
-        if refresh_enabled {
-            if let Err(error) = self.activate_configured_catalog_refresh() {
-                let _ = self.clear_configured_catalog_refresh();
-                return Err(error);
-            }
-        }
-        let supervisors_started = started.len();
-        if let Err(error) = self.install_started_observation_supervisors(started) {
-            if refresh_enabled {
-                let _ = self.clear_configured_catalog_refresh();
-            }
-            return Err(error);
-        }
 
-        Ok(ConfiguredObservationStartupOutcome {
-            catalog,
-            supervisors_started,
-        })
+        if result.is_err() && refresh_staged {
+            let _ = self.clear_configured_observation_startup();
+            let _ = self.clear_configured_catalog_refresh();
+        }
+        result
     }
 }
 
@@ -247,7 +543,10 @@ fn check_cancelled(cancellation: &QueryCancellationToken) -> Result<(), EngineEr
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
 
+    use crossbeam_channel::bounded;
     use rusqlite::Connection;
     use tempfile::TempDir;
 
@@ -268,6 +567,7 @@ mod tests {
         discoveries: Arc<AtomicUsize>,
         final_watcher_topology_discovered: Arc<AtomicBool>,
         marks_final_topology: bool,
+        decode_gate: Option<Arc<DecodeGate>>,
     }
 
     impl OrderedStartupAdapter {
@@ -291,7 +591,13 @@ mod tests {
                 discoveries,
                 final_watcher_topology_discovered,
                 marks_final_topology,
+                decode_gate: None,
             }
+        }
+
+        fn with_decode_gate(mut self, decode_gate: Arc<DecodeGate>) -> Self {
+            self.decode_gate = Some(decode_gate);
+            self
         }
     }
 
@@ -371,12 +677,60 @@ mod tests {
             _record: &SourceRecord,
             _output: &mut FactBatch,
         ) -> Result<DecodeDisposition, AdapterError> {
+            if let Some(gate) = self.decode_gate.as_ref() {
+                gate.enter();
+            }
             assert!(
                 self.final_watcher_topology_discovered
                     .load(Ordering::Acquire),
                 "no full-history decode may begin before every watcher is prepared"
             );
             Ok(DecodeDisposition::IgnoredKnown)
+        }
+    }
+
+    #[derive(Default)]
+    struct DecodeGate {
+        state: Mutex<DecodeGateState>,
+        changed: Condvar,
+    }
+
+    #[derive(Default)]
+    struct DecodeGateState {
+        blocked: bool,
+        released: bool,
+    }
+
+    impl DecodeGate {
+        fn enter(&self) {
+            let mut state = self.state.lock().unwrap();
+            if state.released {
+                return;
+            }
+            state.blocked = true;
+            self.changed.notify_all();
+            while !state.released {
+                state = self.changed.wait(state).unwrap();
+            }
+        }
+
+        fn wait_until_entered(&self, timeout: Duration) {
+            let deadline = Instant::now() + timeout;
+            let mut state = self.state.lock().unwrap();
+            while !state.blocked {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("background observation did not reach the decode gate");
+                let (next, timed_out) = self.changed.wait_timeout(state, remaining).unwrap();
+                state = next;
+                assert!(!timed_out.timed_out(), "background decode timed out");
+            }
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.released = true;
+            self.changed.notify_all();
         }
     }
 
@@ -447,6 +801,7 @@ mod tests {
                     },
                 ),
                 supervisors_started: 2,
+                history_background: false,
             }
         );
         assert!(alpha_calls.load(Ordering::Acquire) >= 3);
@@ -467,6 +822,104 @@ mod tests {
         assert!(
             !engine.configured_catalog_refresh_is_active(),
             "candidate sources must not start the promoted catalog refresh worker"
+        );
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn background_history_installs_after_return_and_bootstrap_waits_for_it() {
+        const WAIT: Duration = Duration::from_secs(15);
+        let directory = TempDir::new().unwrap();
+        let discoveries = Arc::new(AtomicUsize::new(0));
+        let final_watcher_topology_discovered = Arc::new(AtomicBool::new(true));
+        let gate = Arc::new(DecodeGate::default());
+        let registry = AdapterRegistry::builder()
+            .register(
+                OrderedStartupAdapter::new(
+                    "alpha",
+                    discoveries,
+                    final_watcher_topology_discovered,
+                    false,
+                )
+                .with_decode_gate(Arc::clone(&gate)),
+            )
+            .build()
+            .unwrap();
+        let engine = SpaghettiEngineCore::open_with_registry(
+            EngineOptions {
+                database_path: directory.path().join("background-startup.db"),
+                query_workers: Some(1),
+                owner_label: Some("background-startup-test".to_string()),
+                defer_query_structures: true,
+                source_pass_pool: None,
+            },
+            registry,
+        )
+        .unwrap();
+        let root = configured_root(&directory, "alpha");
+        let request_cancellation = QueryCancellationToken::default();
+        let background_cancellation = QueryCancellationToken::default();
+        let prepared = engine
+            .prepare_registered_observation_cancellable(
+                "alpha",
+                ObservationSupervisorOptions::new(vec![root]),
+                request_cancellation.clone(),
+            )
+            .unwrap();
+        let starting = prepared
+            .begin_with_cancellation(background_cancellation.clone())
+            .unwrap();
+        engine
+            .start_configured_observation_background(
+                BTreeSet::from(["alpha".to_string()]),
+                vec![starting],
+                background_cancellation,
+            )
+            .unwrap();
+        gate.wait_until_entered(WAIT);
+
+        let status = engine.status();
+        assert!(
+            matches!(
+                status.observation.state.as_str(),
+                "scanning" | "reconciling"
+            ),
+            "background history must remain visibly in progress: {status:?}"
+        );
+        assert_eq!(status.observation.supervisors_running, 0);
+        assert_eq!(
+            engine.configured_observation_startup_status(),
+            Some(ConfiguredObservationStartupStatus {
+                active: true,
+                failed: false,
+            })
+        );
+
+        request_cancellation.cancel();
+        let (completed_tx, completed_rx) = bounded(1);
+        let bootstrap_engine = Arc::clone(&engine);
+        let bootstrap = std::thread::spawn(move || {
+            completed_tx
+                .send(bootstrap_engine.complete_query_bootstrap())
+                .unwrap();
+        });
+        assert!(
+            completed_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "query bootstrap must wait for the background history batch"
+        );
+
+        gate.release();
+        completed_rx.recv_timeout(WAIT).unwrap().unwrap();
+        bootstrap.join().unwrap();
+        assert_eq!(engine.status().observation.supervisors_running, 1);
+        assert_eq!(
+            engine.configured_observation_startup_status(),
+            Some(ConfiguredObservationStartupStatus {
+                active: false,
+                failed: false,
+            })
         );
         engine.shutdown().unwrap();
     }

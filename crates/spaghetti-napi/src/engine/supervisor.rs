@@ -65,7 +65,9 @@ enum SupervisorCommand {
 }
 
 enum SupervisorStartup {
-    BeginInitialScan,
+    BeginInitialScan {
+        cancellation: QueryCancellationToken,
+    },
     Shutdown,
 }
 
@@ -365,7 +367,15 @@ impl PreparedObservationSupervisor {
         self.begin()?.finish()
     }
 
-    pub(crate) fn begin(mut self) -> Result<StartingObservationSupervisor, EngineError> {
+    pub(crate) fn begin(self) -> Result<StartingObservationSupervisor, EngineError> {
+        let cancellation = self.inner().startup_cancellation.clone();
+        self.begin_with_cancellation(cancellation)
+    }
+
+    pub(crate) fn begin_with_cancellation(
+        mut self,
+        cancellation: QueryCancellationToken,
+    ) -> Result<StartingObservationSupervisor, EngineError> {
         let mut inner = self
             .inner
             .take()
@@ -376,7 +386,7 @@ impl PreparedObservationSupervisor {
         }
         if inner
             .startup
-            .send(SupervisorStartup::BeginInitialScan)
+            .send(SupervisorStartup::BeginInitialScan { cancellation })
             .is_err()
         {
             inner.shutdown();
@@ -609,11 +619,11 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
     {
         return;
     }
-    match startup.recv() {
-        Ok(SupervisorStartup::BeginInitialScan) => {}
+    let scan_cancellation = match startup.recv() {
+        Ok(SupervisorStartup::BeginInitialScan { cancellation }) => cancellation,
         Ok(SupervisorStartup::Shutdown) | Err(_) => return,
-    }
-    if startup_cancellation.is_cancelled() || cancellation.is_cancelled() {
+    };
+    if scan_cancellation.is_cancelled() || cancellation.is_cancelled() {
         let _ = started.send(Err(EngineError::QueryCancelled));
         return;
     }
@@ -626,7 +636,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         let _ = started.send(Err(EngineError::ShuttingDown));
         return;
     };
-    let startup_cancellations = [cancellation.clone(), startup_cancellation.clone()];
+    let startup_cancellations = [cancellation.clone(), scan_cancellation.clone()];
     loop {
         match ObservationCoordinator::with_cancellations(
             Arc::clone(&initial_engine),
@@ -671,7 +681,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         &mut watcher,
         &watcher_available,
         &mut polling,
-        &[cancellation.clone(), startup_cancellation.clone()],
+        &[cancellation.clone(), scan_cancellation.clone()],
     );
     if let Err(error) = initial_summary.result {
         let _ = started.send(Err(error));
@@ -690,7 +700,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                     &mut watcher,
                     &watcher_available,
                     &mut polling,
-                    &[cancellation.clone(), startup_cancellation.clone()],
+                    &[cancellation.clone(), scan_cancellation.clone()],
                 );
                 if let Err(error) = summary.result {
                     let _ = started.send(Err(error));
@@ -1716,6 +1726,40 @@ mod tests {
         second.shutdown().unwrap();
         first_engine.shutdown().unwrap();
         second_engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn begun_scan_can_replace_the_request_cancellation_token() {
+        const WAIT: Duration = Duration::from_secs(15);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("settings.json"), br#"{"model":"claude-sonnet"}"#).unwrap();
+        let engine = open_engine(temp.path().join("detached-start.db"));
+        let gate = Arc::new(DecodeGate::default());
+        let request_cancellation = QueryCancellationToken::default();
+        let background_cancellation = QueryCancellationToken::default();
+
+        let prepared = ObservationSupervisor::prepare_with_watcher_factory(
+            Arc::clone(&engine),
+            GatedClaudeAdapter::new(Arc::clone(&gate)),
+            ObservationSupervisorOptions::new(vec![root]),
+            silent_watcher,
+            request_cancellation.clone(),
+        )
+        .unwrap();
+        let starting = prepared
+            .begin_with_cancellation(background_cancellation)
+            .unwrap();
+        gate.wait_until_blocked(WAIT);
+
+        request_cancellation.cancel();
+        gate.release();
+        let mut supervisor = starting.finish().unwrap();
+        assert!(supervisor.is_alive());
+
+        supervisor.shutdown().unwrap();
+        engine.shutdown().unwrap();
     }
 
     #[test]
