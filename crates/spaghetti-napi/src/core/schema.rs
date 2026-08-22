@@ -207,7 +207,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// v60: immutable RFC 012B source-generation epoch invalidation lineage.
 /// v61: append-only RFC 012B required-source failure evidence for an initial
 /// no-snapshot catalog build, kept separate from retained-refresh authority.
-pub const SCHEMA_VERSION: u32 = 61;
+/// v62: immutable RFC 012B coverage-plan replacement lineage, retaining an
+/// independently safe prior-plan snapshot while the successor builds.
+pub const SCHEMA_VERSION: u32 = 62;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -514,6 +516,7 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.build.scheduled',
         'catalog.library.build.partial',
         'catalog.library.source_generation.invalidated',
+        'catalog.library.coverage_plan.replaced',
         'catalog.library.initial_snapshot.published',
         'catalog.library.build.integrity_failed',
         'catalog.library.build.source_retrying',
@@ -826,6 +829,35 @@ END;
 CREATE TRIGGER IF NOT EXISTS catalog_epoch_invalidations_no_delete
 BEFORE DELETE ON catalog_epoch_invalidations BEGIN
   SELECT RAISE(ABORT, 'catalog epoch-invalidation evidence is immutable');
+END;
+
+CREATE TABLE IF NOT EXISTS catalog_plan_replacements (
+  replacement_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  predecessor_state_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  previous_coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(previous_coverage_plan_id) = 'blob' AND length(previous_coverage_plan_id) = 32),
+  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
+  desired_contract_version INTEGER NOT NULL CHECK (desired_contract_version > 0),
+  previous_epoch INTEGER NOT NULL CHECK (previous_epoch > 0),
+  epoch INTEGER NOT NULL CHECK (epoch > 1),
+  previous_attempt INTEGER NOT NULL CHECK (previous_attempt > 0),
+  previous_state TEXT NOT NULL CHECK (previous_state IN ('pending', 'building', 'partial', 'ready', 'degraded', 'error')),
+  retained_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  committed_at INTEGER NOT NULL,
+  CHECK (previous_coverage_plan_id != coverage_plan_id),
+  CHECK (epoch = previous_epoch + 1),
+  CHECK (predecessor_state_commit_seq < replacement_commit_seq),
+  CHECK (retained_snapshot_commit_seq IS NULL OR retained_snapshot_commit_seq <= predecessor_state_commit_seq),
+  UNIQUE (coverage_plan_id, epoch)
+);
+
+CREATE TRIGGER IF NOT EXISTS catalog_plan_replacements_no_update
+BEFORE UPDATE ON catalog_plan_replacements BEGIN
+  SELECT RAISE(ABORT, 'catalog plan-replacement evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_plan_replacements_no_delete
+BEFORE DELETE ON catalog_plan_replacements BEGIN
+  SELECT RAISE(ABORT, 'catalog plan-replacement evidence is immutable');
 END;
 
 CREATE TABLE IF NOT EXISTS catalog_build_state (
@@ -2726,6 +2758,7 @@ const CURRENT_TABLES: &[&str] = &[
     "catalog_partial_sources",
     "catalog_partial_builds",
     "catalog_epoch_invalidations",
+    "catalog_plan_replacements",
     "catalog_build_state",
     "catalog_snapshots",
     "catalog_coverage_plans",
@@ -4136,6 +4169,17 @@ mod tests {
             "trigger",
             "catalog_epoch_invalidations_no_delete"
         ));
+        assert!(object_exists(&conn, "table", "catalog_plan_replacements"));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "catalog_plan_replacements_no_update"
+        ));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "catalog_plan_replacements_no_delete"
+        ));
         assert!(object_exists(&conn, "table", "catalog_partial_builds"));
         assert!(object_exists(&conn, "table", "catalog_partial_sources"));
         assert!(object_exists(
@@ -4177,6 +4221,8 @@ mod tests {
         for invalid in [
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'observation', 1, 2, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.plan.registered', 1, 2, 1)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.coverage_plan.replaced', 1, NULL, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.coverage_plan.replaced', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.scheduled', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.partial', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.partial', 1, 2, 1)",
@@ -4209,6 +4255,7 @@ mod tests {
 
         for reason in [
             "catalog.library.plan.registered",
+            "catalog.library.coverage_plan.replaced",
             "catalog.library.build.scheduled",
             "catalog.library.build.partial",
             "catalog.library.source_generation.invalidated",
@@ -4234,7 +4281,7 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            15
+            16
         );
     }
 

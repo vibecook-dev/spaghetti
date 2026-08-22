@@ -8,6 +8,7 @@
 //! It still owns no source reads, refresh completion/retirement policy, or
 //! public query authority.
 
+use std::collections::BTreeSet;
 use std::io::{self, Write};
 use std::sync::Arc;
 
@@ -41,6 +42,7 @@ const READY_STATE: &str = "ready";
 const DEGRADED_STATE: &str = "degraded";
 const ERROR_STATE: &str = "error";
 const REGISTER_REASON: &str = "catalog.library.plan.registered";
+pub(super) const PLAN_REPLACED_REASON: &str = "catalog.library.coverage_plan.replaced";
 const SCHEDULE_REASON: &str = "catalog.library.build.scheduled";
 pub(super) const PARTIAL_REASON: &str = "catalog.library.build.partial";
 pub(super) const INITIAL_PUBLICATION_REASON: &str = "catalog.library.initial_snapshot.published";
@@ -64,11 +66,13 @@ const INITIAL_INTEGRITY_FAILURE_CHANGE_SCHEMA_VERSION: u32 = 7;
 const PARTIAL_CHANGE_SCHEMA_VERSION: u32 = 8;
 const EPOCH_INVALIDATION_CHANGE_SCHEMA_VERSION: u32 = 9;
 const INITIAL_SOURCE_CHANGE_SCHEMA_VERSION: u32 = 10;
+const PLAN_REPLACEMENT_CHANGE_SCHEMA_VERSION: u32 = 11;
 const MAX_CATALOG_PLAN_JSON_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PARTIAL_SOURCE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PARTIAL_COVERAGE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_PARTIAL_SOURCES: usize = 4_096;
 const MAX_PARTIAL_HISTORY: usize = 8_192;
+const MAX_CATALOG_PLAN_REPLACEMENTS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CatalogDurableBuildPhase {
@@ -217,6 +221,37 @@ pub(crate) struct CatalogSourceGenerationInvalidationExpectation {
     last_complete_snapshot: Option<CatalogSnapshotId>,
 }
 
+/// Non-transferable compare-and-swap proof for replacing one exact durable
+/// coverage plan. A retained publication, when present, remains labeled by
+/// the predecessor plan carried in its own snapshot identity.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogCoveragePlanReplacementExpectation {
+    scope: CatalogCoverageScope,
+    coverage_plan_id: CatalogCoveragePlanId,
+    desired_contract_version: u32,
+    epoch: u64,
+    attempt: u64,
+    state: CatalogDurableBuildPhase,
+    state_commit_seq: u64,
+    last_complete_snapshot: Option<CatalogSnapshotId>,
+}
+
+impl std::fmt::Debug for CatalogCoveragePlanReplacementExpectation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogCoveragePlanReplacementExpectation")
+            .field("scope", &self.scope)
+            .field("coverage_plan_id", &self.coverage_plan_id)
+            .field("desired_contract_version", &self.desired_contract_version)
+            .field("epoch", &self.epoch)
+            .field("attempt", &self.attempt)
+            .field("state", &self.state)
+            .field("state_commit_seq", &self.state_commit_seq)
+            .field("last_complete_snapshot", &self.last_complete_snapshot)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for CatalogSourceGenerationInvalidationExpectation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -318,8 +353,10 @@ impl std::fmt::Debug for CatalogActiveRefreshPublicationExpectation {
 
 impl CatalogActiveRefreshPublicationExpectation {
     pub(crate) fn predecessor(&self) -> Result<CatalogRefreshPredecessor, EngineError> {
-        self.publication_identity
-            .refresh_predecessor(self.predecessor_snapshot)
+        self.publication_identity.refresh_predecessor(
+            self.predecessor_snapshot,
+            self.predecessor_snapshot.coverage_plan_id != self.coverage_plan_id,
+        )
     }
 
     pub(crate) fn resume_reducer(&self) -> CatalogReducer {
@@ -423,6 +460,12 @@ pub(crate) enum CatalogBuildStateCommand {
         started_at: i64,
         committed_at: i64,
     },
+    ReplaceCoveragePlan {
+        expected: CatalogCoveragePlanReplacementExpectation,
+        plan: CatalogCoveragePlan,
+        started_at: i64,
+        committed_at: i64,
+    },
     BeginRefresh {
         expected: CatalogReadyRefreshExpectation,
         started_at: i64,
@@ -519,6 +562,20 @@ impl CatalogBuildStateCommand {
     ) -> Self {
         Self::InvalidateSourceGeneration {
             expected,
+            started_at,
+            committed_at,
+        }
+    }
+
+    pub(crate) fn replace_coverage_plan(
+        expected: CatalogCoveragePlanReplacementExpectation,
+        plan: CatalogCoveragePlan,
+        started_at: i64,
+        committed_at: i64,
+    ) -> Self {
+        Self::ReplaceCoveragePlan {
+            expected,
+            plan,
             started_at,
             committed_at,
         }
@@ -638,6 +695,7 @@ pub(crate) struct DurableCatalogBuildState {
     pub plan: CatalogCoveragePlan,
     pub readiness: CatalogReadinessSnapshot,
     pub last_commit_seq: u64,
+    ready_publication_plan: Option<CatalogCoveragePlan>,
     ready_publication_identity: Option<Arc<CatalogReadyPublicationIdentity>>,
     ready_publication_coverage: Option<Vec<SourceCoverageSet>>,
     ready_publication_attempt: Option<u64>,
@@ -831,6 +889,34 @@ impl DurableCatalogBuildState {
         })
     }
 
+    pub(crate) fn coverage_plan_replacement_expectation(
+        &self,
+    ) -> Result<CatalogCoveragePlanReplacementExpectation, EngineError> {
+        if self.readiness.scope != CatalogCoverageScope::Library
+            || self.readiness.coverage_plan_id != self.plan.coverage_plan_id
+            || self.last_commit_seq == 0
+            || self
+                .readiness
+                .last_complete_snapshot
+                .is_some_and(|snapshot| snapshot.complete_commit > self.last_commit_seq)
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog coverage-plan replacement requires one exact durable Library lineage"
+                    .to_string(),
+            ));
+        }
+        Ok(CatalogCoveragePlanReplacementExpectation {
+            scope: self.readiness.scope,
+            coverage_plan_id: self.readiness.coverage_plan_id,
+            desired_contract_version: self.readiness.desired_contract_version,
+            epoch: self.readiness.epoch,
+            attempt: self.readiness.attempt,
+            state: durable_phase(self.readiness.state)?,
+            state_commit_seq: self.last_commit_seq,
+            last_complete_snapshot: self.readiness.last_complete_snapshot,
+        })
+    }
+
     pub(super) fn refresh_build_readiness(&self) -> Result<CatalogReadinessSnapshot, EngineError> {
         self.refresh_publication_expectation()?;
         let mut readiness = self.readiness.clone();
@@ -844,6 +930,15 @@ impl DurableCatalogBuildState {
 
     pub(super) fn ready_read_authority(&self) -> Result<CatalogReadyReadAuthority, EngineError> {
         self.plan.validate().map_err(catalog_contract_error)?;
+        let publication_plan = self.ready_publication_plan.as_ref().ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog retained-page reads require the snapshot's validated coverage plan"
+                    .to_string(),
+            )
+        })?;
+        publication_plan
+            .validate()
+            .map_err(catalog_contract_error)?;
         let snapshot_id = self.readiness.last_complete_snapshot.ok_or_else(|| {
             EngineError::InvalidCommit(
                 "catalog retained-page reads require a completed snapshot".to_string(),
@@ -905,7 +1000,11 @@ impl DurableCatalogBuildState {
                         | CatalogReadinessPhase::Error
                 ));
         if self.plan.scope != CatalogCoverageScope::Library
+            || publication_plan.scope != CatalogCoverageScope::Library
             || self.readiness.coverage_plan_id != self.plan.coverage_plan_id
+            || snapshot_id.coverage_plan_id != publication_plan.coverage_plan_id
+            || (snapshot_id.coverage_plan_id != self.plan.coverage_plan_id
+                && !(self.epoch_replacement && self.readiness.epoch > snapshot_id.readiness_epoch))
             || self.readiness.completed_contract_version != Some(snapshot_id.pack_contract_version)
             || !completion_lineage_is_exact
             || self.readiness.epoch < snapshot_id.readiness_epoch
@@ -943,12 +1042,12 @@ impl DurableCatalogBuildState {
             })?;
         published_readiness.reason = None;
         let published_readiness =
-            CatalogReadinessMachine::resume(self.plan.clone(), published_readiness)
+            CatalogReadinessMachine::resume(publication_plan.clone(), published_readiness)
                 .map_err(catalog_contract_error)?
                 .snapshot()
                 .clone();
         Ok(CatalogReadyReadAuthority {
-            plan: self.plan.clone(),
+            plan: publication_plan.clone(),
             readiness: published_readiness,
             snapshot_id,
             publication_identity: self.ready_publication_identity.clone().ok_or_else(|| {
@@ -1191,9 +1290,14 @@ impl CatalogReadyReadAuthority {
             .map_err(|error| sqlite_error("load catalog historical snapshot attempt", error))?;
         let historical_attempt =
             positive_u64(historical_attempt, "catalog historical snapshot attempt")?;
+        let historical_plan = if snapshot_id.coverage_plan_id == self.plan.coverage_plan_id {
+            self.plan.clone()
+        } else {
+            load_catalog_plan(connection, snapshot_id.coverage_plan_id)?
+        };
         let loaded = super::catalog_publication::load_ready_publication(
             connection,
-            &self.plan,
+            &historical_plan,
             snapshot_id,
             historical_attempt,
         )?;
@@ -1214,10 +1318,11 @@ impl CatalogReadyReadAuthority {
         historical_readiness.refreshing_from_snapshot = None;
         historical_readiness.source_coverage = loaded.source_coverage;
         historical_readiness.reason = None;
-        let machine = CatalogReadinessMachine::resume(self.plan.clone(), historical_readiness)
-            .map_err(catalog_contract_error)?;
+        let machine =
+            CatalogReadinessMachine::resume(historical_plan.clone(), historical_readiness)
+                .map_err(catalog_contract_error)?;
         Ok(Self {
-            plan: self.plan.clone(),
+            plan: historical_plan,
             readiness: machine.snapshot().clone(),
             snapshot_id,
             publication_identity: Arc::new(loaded.identity),
@@ -1240,6 +1345,7 @@ pub(super) enum CatalogCommitStage {
     AfterPlanWrite,
     AfterPartialCoverageWrite,
     AfterEpochInvalidationWrite,
+    AfterPlanReplacementWrite,
     AfterFailureEvidenceWrite,
     AfterBuildStateWrite,
     AfterOutboxInsert,
@@ -1293,6 +1399,26 @@ struct CatalogPartialChangedPayload {
 struct CatalogEpochInvalidatedPayload {
     readiness_contract_version: u32,
     scope: &'static str,
+    coverage_plan_id: CatalogCoveragePlanId,
+    desired_contract_version: u32,
+    previous_epoch: u64,
+    previous_attempt: u64,
+    epoch: u64,
+    attempt: u64,
+    previous_state: CatalogReadinessPhase,
+    state: CatalogReadinessPhase,
+    predecessor_state_commit: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_complete_snapshot: Option<CatalogSnapshotId>,
+    commit_seq: u64,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogPlanReplacedPayload {
+    readiness_contract_version: u32,
+    scope: &'static str,
+    previous_coverage_plan_id: CatalogCoveragePlanId,
     coverage_plan_id: CatalogCoveragePlanId,
     desired_contract_version: u32,
     previous_epoch: u64,
@@ -1424,6 +1550,9 @@ enum CatalogBuildStateWrite<'a> {
     },
     InvalidateSourceGeneration {
         expected: &'a CatalogSourceGenerationInvalidationExpectation,
+    },
+    ReplaceCoveragePlan {
+        expected: &'a CatalogCoveragePlanReplacementExpectation,
     },
     BeginRefresh {
         expected: &'a CatalogReadyRefreshExpectation,
@@ -1721,7 +1850,11 @@ fn refresh_execution_reason(expected: &CatalogActiveRefreshPublicationExpectatio
     } else if expected.durable_state() == CatalogDurableBuildPhase::Partial {
         PARTIAL_REASON
     } else if expected.is_epoch_replacement() {
-        SOURCE_GENERATION_INVALIDATED_REASON
+        if expected.predecessor_snapshot.coverage_plan_id != expected.coverage_plan_id {
+            PLAN_REPLACED_REASON
+        } else {
+            SOURCE_GENERATION_INVALIDATED_REASON
+        }
     } else if expected.is_recovery() {
         REFRESH_RECOVERY_STARTED_REASON
     } else {
@@ -1951,6 +2084,66 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
                 *committed_at,
                 SOURCE_GENERATION_INVALIDATED_REASON,
                 CatalogBuildStateWrite::InvalidateSourceGeneration { expected },
+            )
+        }
+        CatalogBuildStateCommand::ReplaceCoveragePlan {
+            expected,
+            plan,
+            started_at,
+            committed_at,
+        } => {
+            let Some(current) = current else {
+                return Err(EngineError::InvalidCommit(
+                    "catalog coverage-plan replacement requires durable readiness".to_string(),
+                ));
+            };
+            if current.plan == *plan
+                && exact_coverage_plan_replacement_exists(
+                    &transaction,
+                    &current,
+                    expected,
+                    *started_at,
+                    *committed_at,
+                )?
+            {
+                transaction.commit().map_err(|error| {
+                    sqlite_error("finish unchanged catalog coverage-plan replacement", error)
+                })?;
+                return Ok(None);
+            }
+            if current.coverage_plan_replacement_expectation()? != *expected {
+                return Err(EngineError::InvalidCommit(
+                    "catalog coverage-plan replacement expectation is stale or foreign".to_string(),
+                ));
+            }
+            let replacement_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM catalog_plan_replacements",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| sqlite_error("count catalog plan replacements", error))?;
+            if usize::try_from(replacement_count)
+                .ok()
+                .is_none_or(|count| count >= MAX_CATALOG_PLAN_REPLACEMENTS)
+            {
+                return Err(EngineError::InvalidCommit(
+                    "catalog coverage-plan replacement exceeds its bounded durable lineage"
+                        .to_string(),
+                ));
+            }
+            let mut machine =
+                CatalogReadinessMachine::resume(current.plan.clone(), current.readiness.clone())
+                    .map_err(catalog_contract_error)?;
+            machine
+                .replace_coverage_plan(plan.clone())
+                .map_err(catalog_contract_error)?;
+            (
+                machine,
+                *started_at,
+                *committed_at,
+                PLAN_REPLACED_REASON,
+                CatalogBuildStateWrite::ReplaceCoveragePlan { expected },
             )
         }
         CatalogBuildStateCommand::BeginRefresh {
@@ -2270,16 +2463,24 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
             let mut machine =
                 CatalogReadinessMachine::resume(current.plan.clone(), current.readiness.clone())
                     .map_err(catalog_contract_error)?;
-            let coverage = if current.readiness.source_coverage.is_empty() {
+            let plan_replacement =
+                expected.predecessor_snapshot.coverage_plan_id != current.plan.coverage_plan_id;
+            let coverage = if plan_replacement {
+                unavailable_initial_source_coverage(
+                    &current.plan,
+                    current.readiness.desired_contract_version,
+                    &current.readiness.source_coverage,
+                )?
+            } else if current.readiness.source_coverage.is_empty() {
                 current
                     .ready_publication_coverage
-                    .as_deref()
+                    .clone()
                     .unwrap_or_default()
             } else {
-                &current.readiness.source_coverage
+                current.readiness.source_coverage.clone()
             };
             machine
-                .source_retrying(reason_code.clone(), retrying_source_coverage(coverage)?)
+                .source_retrying(reason_code.clone(), retrying_source_coverage(&coverage)?)
                 .map_err(catalog_contract_error)?;
             (
                 machine,
@@ -2326,15 +2527,24 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
                     "catalog source-failure expectation is stale or foreign".to_string(),
                 ));
             }
-            let coverage = if current.readiness.source_coverage.is_empty() {
-                current
-                    .ready_publication_coverage
-                    .as_deref()
-                    .unwrap_or_default()
+            let plan_replacement =
+                expected.predecessor_snapshot.coverage_plan_id != current.plan.coverage_plan_id;
+            let source_coverage = if plan_replacement {
+                unavailable_initial_source_coverage(
+                    &current.plan,
+                    current.readiness.desired_contract_version,
+                    &current.readiness.source_coverage,
+                )?
+            } else if current.readiness.source_coverage.is_empty() {
+                unavailable_source_coverage(
+                    current
+                        .ready_publication_coverage
+                        .as_deref()
+                        .unwrap_or_default(),
+                )?
             } else {
-                &current.readiness.source_coverage
+                unavailable_source_coverage(&current.readiness.source_coverage)?
             };
-            let source_coverage = unavailable_source_coverage(coverage)?;
             let mut machine =
                 CatalogReadinessMachine::resume(current.plan.clone(), current.readiness.clone())
                     .map_err(catalog_contract_error)?;
@@ -2391,6 +2601,16 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
             }
             let source_coverage = if current.readiness.last_complete_snapshot.is_none() {
                 Vec::new()
+            } else if current
+                .readiness
+                .last_complete_snapshot
+                .is_some_and(|snapshot| snapshot.coverage_plan_id != current.plan.coverage_plan_id)
+            {
+                unavailable_initial_source_coverage(
+                    &current.plan,
+                    current.readiness.desired_contract_version,
+                    &current.readiness.source_coverage,
+                )?
             } else {
                 let coverage = if current
                     .plan
@@ -2423,7 +2643,10 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
 
     let commit_seq = insert_administrative_commit(&transaction, reason, started_at, committed_at)?;
     hook.reach(CatalogCommitStage::AfterCommitInsert)?;
-    if matches!(write, CatalogBuildStateWrite::InsertPlan) {
+    if matches!(
+        write,
+        CatalogBuildStateWrite::InsertPlan | CatalogBuildStateWrite::ReplaceCoveragePlan { .. }
+    ) {
         insert_plan(&transaction, machine.plan(), commit_seq)?;
     }
     hook.reach(CatalogCommitStage::AfterPlanWrite)?;
@@ -2434,6 +2657,16 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
     if let CatalogBuildStateWrite::InvalidateSourceGeneration { expected } = write {
         insert_source_generation_invalidation(&transaction, commit_seq, expected, committed_at)?;
         hook.reach(CatalogCommitStage::AfterEpochInvalidationWrite)?;
+    }
+    if let CatalogBuildStateWrite::ReplaceCoveragePlan { expected } = write {
+        insert_coverage_plan_replacement(
+            &transaction,
+            commit_seq,
+            expected,
+            machine.plan(),
+            committed_at,
+        )?;
+        hook.reach(CatalogCommitStage::AfterPlanReplacementWrite)?;
     }
     if let CatalogBuildStateWrite::FailInitialBuildIntegrity {
         expected,
@@ -2506,6 +2739,482 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
     }))
 }
 
+struct LoadedCatalogPlanRecord {
+    plan: CatalogCoveragePlan,
+    created_commit_seq: u64,
+    owner_reason: String,
+    committed_at: i64,
+}
+
+fn load_catalog_plan_record(
+    connection: &Connection,
+    coverage_plan_id: &[u8],
+) -> Result<LoadedCatalogPlanRecord, EngineError> {
+    struct StoredPlan {
+        coverage_plan_id: Option<Vec<u8>>,
+        contract_version: i64,
+        plan_json: Option<Vec<u8>>,
+        content_digest: Option<Vec<u8>>,
+        created_commit_seq: i64,
+        owner_source: Option<i64>,
+        owner_reason: Option<String>,
+        owner_committed_at: Option<i64>,
+        owner_fact_count: i64,
+    }
+    let stored = connection
+        .query_row(
+            r#"
+            SELECT CASE WHEN typeof(plan.coverage_plan_id) = 'blob'
+                                  AND length(plan.coverage_plan_id) = 32
+                        THEN plan.coverage_plan_id END,
+                   plan.coverage_plan_contract_version,
+                   CASE WHEN length(plan.plan_json) BETWEEN 1 AND ?2
+                        THEN plan.plan_json END,
+                   CASE WHEN typeof(plan.content_digest) = 'blob'
+                                  AND length(plan.content_digest) = 32
+                        THEN plan.content_digest END,
+                   plan.created_commit_seq,
+                   owner.source_instance_id,
+                   CASE WHEN typeof(owner.reason) = 'text'
+                                  AND owner.reason IN (
+                                      'catalog.library.plan.registered',
+                                      'catalog.library.coverage_plan.replaced'
+                                  )
+                        THEN owner.reason END,
+                   owner.committed_at, owner.fact_count
+            FROM catalog_coverage_plans AS plan
+            LEFT JOIN ingest_commits AS owner
+              ON owner.commit_seq = plan.created_commit_seq
+            WHERE plan.coverage_plan_id = ?1
+            "#,
+            params![coverage_plan_id, MAX_CATALOG_PLAN_JSON_BYTES as i64],
+            |row| {
+                Ok(StoredPlan {
+                    coverage_plan_id: row.get(0)?,
+                    contract_version: row.get(1)?,
+                    plan_json: row.get(2)?,
+                    content_digest: row.get(3)?,
+                    created_commit_seq: row.get(4)?,
+                    owner_source: row.get(5)?,
+                    owner_reason: row.get(6)?,
+                    owner_committed_at: row.get(7)?,
+                    owner_fact_count: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|error| sqlite_error("load catalog coverage-plan record", error))?
+        .ok_or_else(|| corrupt_catalog_state("catalog plan lineage references a missing plan"))?;
+    let plan_json = stored.plan_json.ok_or_else(|| {
+        corrupt_catalog_state("catalog plan lineage JSON exceeds its durable byte bound")
+    })?;
+    let content_digest = stored.content_digest.ok_or_else(|| {
+        corrupt_catalog_state("catalog plan lineage digest exceeds its fixed bound")
+    })?;
+    let owner_reason = stored.owner_reason.ok_or_else(|| {
+        corrupt_catalog_state("catalog plan lineage owner has an unsupported reason")
+    })?;
+    let created_commit_seq = positive_u64(stored.created_commit_seq, "catalog plan commit")?;
+    if stored.coverage_plan_id.as_deref() != Some(coverage_plan_id) {
+        return Err(corrupt_catalog_state(
+            "catalog plan identity exceeds its fixed durable bound",
+        ));
+    }
+    if blake3::hash(&plan_json).as_bytes().as_slice() != content_digest {
+        return Err(corrupt_catalog_state(
+            "catalog plan content digest does not match its stored bytes",
+        ));
+    }
+    if stored.owner_source.is_some()
+        || stored.owner_committed_at.is_none()
+        || stored.owner_fact_count != 0
+    {
+        return Err(corrupt_catalog_state(
+            "catalog plan record differs from its bounded administrative owner",
+        ));
+    }
+    let plan: CatalogCoveragePlan = serde_json::from_slice(&plan_json)
+        .map_err(|_| corrupt_catalog_state("catalog plan lineage JSON is invalid"))?;
+    plan.validate().map_err(catalog_contract_error)?;
+    if plan.scope != CatalogCoverageScope::Library
+        || plan.coverage_plan_id.storage_bytes().as_slice() != coverage_plan_id
+        || i64::from(plan.coverage_plan_contract_version) != stored.contract_version
+    {
+        return Err(corrupt_catalog_state(
+            "catalog plan lineage row differs from its validated Library plan",
+        ));
+    }
+    Ok(LoadedCatalogPlanRecord {
+        plan,
+        created_commit_seq,
+        owner_reason,
+        committed_at: stored
+            .owner_committed_at
+            .expect("catalog plan owner timestamp checked above"),
+    })
+}
+
+pub(super) fn load_catalog_plan(
+    connection: &Connection,
+    coverage_plan_id: CatalogCoveragePlanId,
+) -> Result<CatalogCoveragePlan, EngineError> {
+    load_catalog_plan_record(connection, coverage_plan_id.storage_bytes()).map(|record| record.plan)
+}
+
+struct StoredCatalogPlanReplacement {
+    replacement_commit_seq: i64,
+    predecessor_state_commit_seq: i64,
+    previous_coverage_plan_id: Option<Vec<u8>>,
+    coverage_plan_id: Option<Vec<u8>>,
+    desired_contract_version: i64,
+    previous_epoch: i64,
+    epoch: i64,
+    previous_attempt: i64,
+    previous_state: Option<String>,
+    retained_snapshot_commit_seq: Option<i64>,
+    committed_at: i64,
+    owner_source: Option<i64>,
+    owner_reason: Option<String>,
+    owner_started_at: i64,
+    owner_committed_at: Option<i64>,
+    owner_fact_count: i64,
+}
+
+fn validate_catalog_plan_replacement_change(
+    connection: &Connection,
+    row: &StoredCatalogPlanReplacement,
+    previous_plan: &CatalogCoveragePlan,
+    plan: &CatalogCoveragePlan,
+    retained_snapshot: Option<CatalogSnapshotId>,
+) -> Result<(), EngineError> {
+    let commit_seq = positive_u64(
+        row.replacement_commit_seq,
+        "catalog plan-replacement commit",
+    )?;
+    let predecessor = positive_u64(
+        row.predecessor_state_commit_seq,
+        "catalog plan-replacement predecessor",
+    )?;
+    let previous_epoch = positive_u64(row.previous_epoch, "catalog previous replacement epoch")?;
+    let epoch = positive_u64(row.epoch, "catalog replacement epoch")?;
+    let previous_attempt =
+        positive_u64(row.previous_attempt, "catalog previous replacement attempt")?;
+    let previous_state =
+        CatalogDurableBuildPhase::parse(row.previous_state.as_deref().ok_or_else(|| {
+            corrupt_catalog_state("catalog plan replacement has an invalid prior state")
+        })?)?;
+    let desired_contract_version = positive_u32(
+        row.desired_contract_version,
+        "catalog replacement desired contract version",
+    )?;
+    let payload = serde_json::to_vec(&CatalogPlanReplacedPayload {
+        readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,
+        scope: LIBRARY_SCOPE,
+        previous_coverage_plan_id: previous_plan.coverage_plan_id,
+        coverage_plan_id: plan.coverage_plan_id,
+        desired_contract_version,
+        previous_epoch,
+        previous_attempt,
+        epoch,
+        attempt: 1,
+        previous_state: previous_state.readiness_phase(),
+        state: CatalogReadinessPhase::Building,
+        predecessor_state_commit: predecessor,
+        last_complete_snapshot: retained_snapshot,
+        commit_seq,
+    })
+    .map_err(|_| corrupt_catalog_state("catalog plan-replacement change cannot be encoded"))?;
+    let predecessor_changes: i64 = connection
+        .query_row(
+            r#"
+            SELECT COUNT(*) FROM change_log
+            WHERE commit_seq = ?1 AND topic = ?2 AND entity_key = ?3
+              AND operation = 'upsert'
+            "#,
+            params![
+                to_i64(predecessor, "catalog plan-replacement predecessor")?,
+                READINESS_CHANGE_TOPIC,
+                previous_plan.coverage_plan_id.storage_bytes().as_slice(),
+            ],
+            |value| value.get(0),
+        )
+        .map_err(|error| sqlite_error("validate plan-replacement predecessor change", error))?;
+    let change_matches: i64 = connection
+        .query_row(
+            r#"
+            SELECT COUNT(*) FROM change_log
+            WHERE commit_seq = ?1 AND ordinal = 0 AND topic = ?2
+              AND schema_version = ?3 AND entity_key = ?4
+              AND operation = 'upsert' AND payload = ?5
+            "#,
+            params![
+                to_i64(commit_seq, "catalog plan-replacement change commit")?,
+                READINESS_CHANGE_TOPIC,
+                i64::from(PLAN_REPLACEMENT_CHANGE_SCHEMA_VERSION),
+                plan.coverage_plan_id.storage_bytes().as_slice(),
+                payload,
+            ],
+            |value| value.get(0),
+        )
+        .map_err(|error| sqlite_error("validate catalog plan-replacement change", error))?;
+    if predecessor_changes != 1 || change_matches != 1 {
+        return Err(corrupt_catalog_state(
+            "catalog plan replacement does not bind its exact predecessor and outbox change",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_catalog_plan_lineage(
+    connection: &Connection,
+    current_plan_id: &[u8],
+    plan_count: usize,
+) -> Result<bool, EngineError> {
+    let limit = MAX_CATALOG_PLAN_REPLACEMENTS
+        .checked_add(1)
+        .ok_or_else(|| corrupt_catalog_state("catalog plan-replacement scan limit overflow"))?;
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT replacement.replacement_commit_seq,
+                   replacement.predecessor_state_commit_seq,
+                   CASE WHEN typeof(replacement.previous_coverage_plan_id) = 'blob'
+                                  AND length(replacement.previous_coverage_plan_id) = 32
+                        THEN replacement.previous_coverage_plan_id END,
+                   CASE WHEN typeof(replacement.coverage_plan_id) = 'blob'
+                                  AND length(replacement.coverage_plan_id) = 32
+                        THEN replacement.coverage_plan_id END,
+                   replacement.desired_contract_version,
+                   replacement.previous_epoch, replacement.epoch,
+                   replacement.previous_attempt,
+                   CASE WHEN typeof(replacement.previous_state) = 'text'
+                                  AND replacement.previous_state IN (
+                                      'pending', 'building', 'partial', 'ready', 'degraded', 'error'
+                                  )
+                        THEN replacement.previous_state END,
+                   replacement.retained_snapshot_commit_seq,
+                   replacement.committed_at,
+                   owner.source_instance_id,
+                   CASE WHEN typeof(owner.reason) = 'text'
+                                  AND owner.reason = 'catalog.library.coverage_plan.replaced'
+                        THEN owner.reason END,
+                   owner.started_at, owner.committed_at, owner.fact_count
+            FROM catalog_plan_replacements AS replacement
+            LEFT JOIN ingest_commits AS owner
+              ON owner.commit_seq = replacement.replacement_commit_seq
+            ORDER BY replacement.replacement_commit_seq
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare catalog plan-replacement lineage", error))?;
+    let rows = statement
+        .query_map(
+            [to_i64(limit as u64, "catalog plan lineage limit")?],
+            |row| {
+                Ok(StoredCatalogPlanReplacement {
+                    replacement_commit_seq: row.get(0)?,
+                    predecessor_state_commit_seq: row.get(1)?,
+                    previous_coverage_plan_id: row.get(2)?,
+                    coverage_plan_id: row.get(3)?,
+                    desired_contract_version: row.get(4)?,
+                    previous_epoch: row.get(5)?,
+                    epoch: row.get(6)?,
+                    previous_attempt: row.get(7)?,
+                    previous_state: row.get(8)?,
+                    retained_snapshot_commit_seq: row.get(9)?,
+                    committed_at: row.get(10)?,
+                    owner_source: row.get(11)?,
+                    owner_reason: row.get(12)?,
+                    owner_started_at: row.get(13)?,
+                    owner_committed_at: row.get(14)?,
+                    owner_fact_count: row.get(15)?,
+                })
+            },
+        )
+        .map_err(|error| sqlite_error("load catalog plan-replacement lineage", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("decode catalog plan-replacement lineage", error))?;
+    if rows.len() > MAX_CATALOG_PLAN_REPLACEMENTS
+        || plan_count == 0
+        || plan_count > rows.len().saturating_add(1)
+    {
+        return Err(corrupt_catalog_state(
+            "catalog coverage plans exceed or escape their bounded replacement lineage",
+        ));
+    }
+    if rows.is_empty() {
+        let root = load_catalog_plan_record(connection, current_plan_id)?;
+        if root.owner_reason != REGISTER_REASON {
+            return Err(corrupt_catalog_state(
+                "catalog root plan is not owned by its registration commit",
+            ));
+        }
+        return Ok(false);
+    }
+
+    let mut prior_tip: Option<Vec<u8>> = None;
+    let mut prior_commit = 0_u64;
+    let mut last_epoch = 0_u64;
+    let mut referenced_plans = BTreeSet::new();
+    for row in &rows {
+        let previous_id = row.previous_coverage_plan_id.as_deref().ok_or_else(|| {
+            corrupt_catalog_state("catalog replacement predecessor plan ID is malformed")
+        })?;
+        let plan_id = row
+            .coverage_plan_id
+            .as_deref()
+            .ok_or_else(|| corrupt_catalog_state("catalog replacement plan ID is malformed"))?;
+        let replacement_commit = positive_u64(
+            row.replacement_commit_seq,
+            "catalog plan-replacement commit",
+        )?;
+        let predecessor_commit = positive_u64(
+            row.predecessor_state_commit_seq,
+            "catalog plan-replacement predecessor",
+        )?;
+        let previous_epoch =
+            positive_u64(row.previous_epoch, "catalog previous replacement epoch")?;
+        let epoch = positive_u64(row.epoch, "catalog replacement epoch")?;
+        if prior_tip.as_deref().is_some_and(|tip| tip != previous_id)
+            || replacement_commit <= prior_commit
+            || predecessor_commit < prior_commit
+            || epoch != previous_epoch.saturating_add(1)
+            || previous_epoch < last_epoch
+            || row.owner_source.is_some()
+            || row.owner_reason.as_deref() != Some(PLAN_REPLACED_REASON)
+            || row.owner_started_at > row.committed_at
+            || row.owner_committed_at != Some(row.committed_at)
+            || row.owner_fact_count != 0
+        {
+            return Err(corrupt_catalog_state(
+                "catalog plan replacements do not form one exact administrative chain",
+            ));
+        }
+        let previous_plan = load_catalog_plan_record(connection, previous_id)?;
+        let plan = load_catalog_plan_record(connection, plan_id)?;
+        if prior_tip.is_none() && previous_plan.owner_reason != REGISTER_REASON {
+            return Err(corrupt_catalog_state(
+                "catalog plan replacement chain has no registered root",
+            ));
+        }
+        referenced_plans.insert(previous_id.to_vec());
+        let plan_was_already_referenced = referenced_plans.contains(plan_id);
+        if !plan_was_already_referenced
+            && (plan.owner_reason != PLAN_REPLACED_REASON
+                || plan.created_commit_seq != replacement_commit
+                || plan.committed_at != row.committed_at)
+        {
+            return Err(corrupt_catalog_state(
+                "catalog replacement plan differs from its immutable owner",
+            ));
+        }
+        referenced_plans.insert(plan_id.to_vec());
+        let retained_snapshot = row
+            .retained_snapshot_commit_seq
+            .map(|value| positive_u64(value, "catalog replacement retained snapshot"))
+            .transpose()?
+            .map(|commit| load_snapshot_id_at_commit(connection, &previous_plan.plan, commit))
+            .transpose()?;
+        if retained_snapshot.is_some_and(|snapshot| {
+            snapshot.coverage_plan_id != previous_plan.plan.coverage_plan_id
+                || snapshot.complete_commit > predecessor_commit
+        }) {
+            return Err(corrupt_catalog_state(
+                "catalog plan replacement retained snapshot is outside its prior plan",
+            ));
+        }
+        validate_catalog_plan_replacement_change(
+            connection,
+            row,
+            &previous_plan.plan,
+            &plan.plan,
+            retained_snapshot,
+        )?;
+        prior_tip = Some(plan_id.to_vec());
+        prior_commit = replacement_commit;
+        last_epoch = epoch;
+    }
+    if prior_tip.as_deref() != Some(current_plan_id) {
+        return Err(corrupt_catalog_state(
+            "catalog build state does not name the tip of its plan replacement lineage",
+        ));
+    }
+    if referenced_plans.len() != plan_count {
+        return Err(corrupt_catalog_state(
+            "catalog coverage plans escape their exact replacement lineage",
+        ));
+    }
+    Ok(true)
+}
+
+fn load_current_plan_replacement_commit(
+    connection: &Connection,
+    plan: &CatalogCoveragePlan,
+    desired_contract_version: u32,
+    epoch: u64,
+    retained_snapshot: Option<CatalogSnapshotId>,
+) -> Result<Option<u64>, EngineError> {
+    let row: Option<(i64, i64, Option<i64>)> = connection
+        .query_row(
+            r#"
+            SELECT replacement_commit_seq, desired_contract_version,
+                   retained_snapshot_commit_seq
+            FROM catalog_plan_replacements
+            WHERE coverage_plan_id = ?1 AND epoch = ?2
+            "#,
+            params![
+                plan.coverage_plan_id.storage_bytes().as_slice(),
+                to_i64(epoch, "catalog replacement epoch")?,
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("load current catalog plan replacement", error))?;
+    let Some((commit, stored_version, stored_snapshot)) = row else {
+        return Ok(None);
+    };
+    let stored_snapshot = stored_snapshot
+        .map(|value| positive_u64(value, "catalog replacement retained snapshot"))
+        .transpose()?;
+    if positive_u32(
+        stored_version,
+        "catalog replacement desired contract version",
+    )? != desired_contract_version
+        || stored_snapshot != retained_snapshot.map(|snapshot| snapshot.complete_commit)
+    {
+        return Err(corrupt_catalog_state(
+            "catalog current plan replacement differs from its retained build lineage",
+        ));
+    }
+    positive_u64(commit, "catalog current plan-replacement commit").map(Some)
+}
+
+pub(super) fn validate_catalog_snapshot_plan_successor(
+    connection: &Connection,
+    predecessor: CatalogSnapshotId,
+    plan: &CatalogCoveragePlan,
+    epoch: u64,
+) -> Result<(), EngineError> {
+    let commit = load_current_plan_replacement_commit(
+        connection,
+        plan,
+        predecessor.pack_contract_version,
+        epoch,
+        Some(predecessor),
+    )?
+    .ok_or_else(|| {
+        corrupt_catalog_state(
+            "catalog cross-plan snapshot successor lacks exact replacement evidence",
+        )
+    })?;
+    if commit <= predecessor.complete_commit {
+        return Err(corrupt_catalog_state(
+            "catalog cross-plan snapshot successor does not follow its predecessor",
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn load_catalog_build_state(
     connection: &Connection,
 ) -> Result<Option<DurableCatalogBuildState>, EngineError> {
@@ -2546,7 +3255,10 @@ pub(super) fn load_catalog_build_state(
                    build.updated_at,
                    plan_commit.source_instance_id,
                    CASE WHEN typeof(plan_commit.reason) = 'text'
-                                  AND plan_commit.reason = 'catalog.library.plan.registered'
+                                  AND plan_commit.reason IN (
+                                      'catalog.library.plan.registered',
+                                      'catalog.library.coverage_plan.replaced'
+                                  )
                         THEN plan_commit.reason END,
                    plan_commit.committed_at,
                    plan_commit.fact_count,
@@ -2557,6 +3269,7 @@ pub(super) fn load_catalog_build_state(
                                       'catalog.library.build.scheduled',
                                       'catalog.library.build.partial',
                                       'catalog.library.source_generation.invalidated',
+                                      'catalog.library.coverage_plan.replaced',
                                       'catalog.library.initial_snapshot.published',
                                       'catalog.library.build.integrity_failed',
                                       'catalog.library.build.source_retrying',
@@ -2624,13 +3337,36 @@ pub(super) fn load_catalog_build_state(
         })
         .map_err(|error| sqlite_error("count catalog build states", error))?;
     match row {
-        Some(row) if plan_count == 1 && state_count == 1 => {
-            decode_stored_state(connection, row).map(Some)
+        Some(row) if plan_count > 0 && state_count == 1 => {
+            let current_plan_id = row.coverage_plan_id.as_deref().ok_or_else(|| {
+                corrupt_catalog_state("catalog plan identity exceeds its fixed durable bound")
+            })?;
+            let plan_count = usize::try_from(plan_count).map_err(|_| {
+                corrupt_catalog_state("catalog coverage-plan count is outside usize")
+            })?;
+            let current_plan_is_replacement =
+                validate_catalog_plan_lineage(connection, current_plan_id, plan_count)?;
+            decode_stored_state(connection, row, current_plan_is_replacement).map(Some)
         }
         Some(_) => Err(corrupt_catalog_state(
-            "durable catalog state must contain exactly one joined Library plan and build row",
+            "durable catalog state must contain one joined Library build and bounded plan lineage",
         )),
-        None if plan_count == 0 && state_count == 0 => Ok(None),
+        None if plan_count == 0 && state_count == 0 => {
+            let replacement_count: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM catalog_plan_replacements",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| sqlite_error("count catalog plan replacements", error))?;
+            if replacement_count == 0 {
+                Ok(None)
+            } else {
+                Err(corrupt_catalog_state(
+                    "catalog plan replacements exist without durable readiness",
+                ))
+            }
+        }
         None => Err(corrupt_catalog_state(
             "catalog coverage plan and Library build state do not form one valid lineage",
         )),
@@ -2778,6 +3514,11 @@ fn validate_partial_terminal_anchor(
               OR EXISTS(SELECT 1 FROM catalog_epoch_invalidations
                         WHERE predecessor_state_commit_seq = ?1
                           AND coverage_plan_id = ?2
+                          AND previous_epoch = ?3
+                          AND previous_attempt = ?4)
+              OR EXISTS(SELECT 1 FROM catalog_plan_replacements
+                        WHERE predecessor_state_commit_seq = ?1
+                          AND previous_coverage_plan_id = ?2
                           AND previous_epoch = ?3
                           AND previous_attempt = ?4)
               OR EXISTS(
@@ -2932,7 +3673,8 @@ fn load_and_validate_partial_history(
     // one lineage at a time and retain only the terminal milestone required to
     // reconstruct the current Partial state. The history-row limit bounds SQL
     // work; this streaming shape independently bounds decoded payload memory.
-    let mut active_group: Option<(u64, u64, u64, Vec<SourceCoverageSet>)> = None;
+    let mut active_group: Option<(CatalogCoveragePlan, u64, u64, u64, Vec<SourceCoverageSet>)> =
+        None;
     let mut target_coverage = None;
     for stored in rows {
         let partial_commit = positive_u64(stored.partial_commit_seq, "catalog partial commit")?;
@@ -2947,9 +3689,12 @@ fn load_and_validate_partial_history(
         let encoded_bytes = usize::try_from(stored.encoded_bytes).map_err(|_| {
             corrupt_catalog_state("catalog partial encoded bytes are outside usize")
         })?;
-        if stored.coverage_plan_id.as_deref()
-            != Some(plan.coverage_plan_id.storage_bytes().as_slice())
-            || source_count == 0
+        let stored_plan_id = stored
+            .coverage_plan_id
+            .as_deref()
+            .ok_or_else(|| corrupt_catalog_state("catalog partial plan identity is malformed"))?;
+        let stored_plan = load_catalog_plan_record(connection, stored_plan_id)?.plan;
+        if source_count == 0
             || source_count > MAX_PARTIAL_SOURCES
             || encoded_bytes == 0
             || encoded_bytes > MAX_PARTIAL_COVERAGE_BYTES
@@ -3063,13 +3808,15 @@ fn load_and_validate_partial_history(
                 "catalog partial coverage commitment differs from its entries",
             ));
         }
-        let same_group = active_group
-            .as_ref()
-            .is_some_and(|(prior_epoch, prior_attempt, _, _)| {
-                (*prior_epoch, *prior_attempt) == (epoch, attempt)
-            });
+        let same_group =
+            active_group
+                .as_ref()
+                .is_some_and(|(prior_plan, prior_epoch, prior_attempt, _, _)| {
+                    prior_plan.coverage_plan_id == stored_plan.coverage_plan_id
+                        && (*prior_epoch, *prior_attempt) == (epoch, attempt)
+                });
         if same_group {
-            let (_, _, prior_commit, prior_coverage) = active_group
+            let (_, _, _, prior_commit, prior_coverage) = active_group
                 .as_ref()
                 .expect("same partial-history group exists");
             if predecessor != *prior_commit
@@ -3080,29 +3827,43 @@ fn load_and_validate_partial_history(
                 ));
             }
         } else {
-            if let Some((prior_epoch, prior_attempt, prior_commit, prior_coverage)) =
+            if let Some((prior_plan, prior_epoch, prior_attempt, prior_commit, prior_coverage)) =
                 active_group.take()
             {
-                if (epoch, attempt) <= (prior_epoch, prior_attempt) {
+                if stored_plan.coverage_plan_id == prior_plan.coverage_plan_id
+                    && (epoch, attempt) <= (prior_epoch, prior_attempt)
+                {
                     return Err(corrupt_catalog_state(
                         "catalog partial lineages are not strictly ordered",
                     ));
                 }
                 validate_partial_terminal_anchor(
                     connection,
-                    plan,
+                    &prior_plan,
                     prior_epoch,
                     prior_attempt,
                     prior_commit,
                 )?;
-                if target.is_some_and(|target| {
-                    target.matches_terminal(prior_epoch, prior_attempt, prior_commit)
-                }) {
+                if prior_plan.coverage_plan_id == plan.coverage_plan_id
+                    && target.is_some_and(|target| {
+                        target.matches_terminal(prior_epoch, prior_attempt, prior_commit)
+                    })
+                {
                     target_coverage = Some(prior_coverage);
                 }
             }
             let expected_reason = if attempt == 1 && epoch > 1 {
-                SOURCE_GENERATION_INVALIDATED_REASON
+                let plan_record = load_catalog_plan_record(
+                    connection,
+                    stored_plan.coverage_plan_id.storage_bytes(),
+                )?;
+                if plan_record.created_commit_seq == predecessor
+                    && plan_record.owner_reason == PLAN_REPLACED_REASON
+                {
+                    PLAN_REPLACED_REASON
+                } else {
+                    SOURCE_GENERATION_INVALIDATED_REASON
+                }
             } else if attempt == 1 {
                 SCHEDULE_REASON
             } else {
@@ -3136,19 +3897,21 @@ fn load_and_validate_partial_history(
             }
             validate_partial_base_change(
                 connection,
-                plan,
+                &stored_plan,
                 epoch,
                 attempt,
                 predecessor,
                 expected_reason,
             )?;
         }
-        active_group = Some((epoch, attempt, partial_commit, coverage));
+        active_group = Some((stored_plan, epoch, attempt, partial_commit, coverage));
     }
 
-    if let Some((epoch, attempt, last_partial, coverage)) = active_group {
-        validate_partial_terminal_anchor(connection, plan, epoch, attempt, last_partial)?;
-        if target.is_some_and(|target| target.matches_terminal(epoch, attempt, last_partial)) {
+    if let Some((stored_plan, epoch, attempt, last_partial, coverage)) = active_group {
+        validate_partial_terminal_anchor(connection, &stored_plan, epoch, attempt, last_partial)?;
+        if stored_plan.coverage_plan_id == plan.coverage_plan_id
+            && target.is_some_and(|target| target.matches_terminal(epoch, attempt, last_partial))
+        {
             target_coverage = Some(coverage);
         }
     }
@@ -3190,6 +3953,30 @@ fn load_snapshot_id_at_commit(
         commit,
     )
     .map_err(catalog_contract_error)
+}
+
+pub(super) fn load_snapshot_plan_and_id_at_commit(
+    connection: &Connection,
+    commit: u64,
+) -> Result<(CatalogCoveragePlan, CatalogSnapshotId), EngineError> {
+    let coverage_plan_id: Option<Vec<u8>> = connection
+        .query_row(
+            r#"
+            SELECT CASE WHEN typeof(coverage_plan_id) = 'blob'
+                                  AND length(coverage_plan_id) = 32
+                        THEN coverage_plan_id END
+            FROM catalog_snapshots WHERE snapshot_commit_seq = ?1
+            "#,
+            [to_i64(commit, "catalog snapshot commit")?],
+            |row| row.get(0),
+        )
+        .map_err(|error| sqlite_error("load catalog snapshot plan identity", error))?;
+    let coverage_plan_id = coverage_plan_id.ok_or_else(|| {
+        corrupt_catalog_state("catalog snapshot plan identity exceeds its fixed durable bound")
+    })?;
+    let plan = load_catalog_plan_record(connection, &coverage_plan_id)?.plan;
+    let snapshot_id = load_snapshot_id_at_commit(connection, &plan, commit)?;
+    Ok((plan, snapshot_id))
 }
 
 fn load_and_validate_epoch_invalidation(
@@ -3419,6 +4206,19 @@ fn validate_partial_base_change(
     base_commit: u64,
     expected_reason: &str,
 ) -> Result<(), EngineError> {
+    if expected_reason == PLAN_REPLACED_REASON {
+        let plan_record =
+            load_catalog_plan_record(connection, plan.coverage_plan_id.storage_bytes())?;
+        if attempt != 1
+            || plan_record.owner_reason != PLAN_REPLACED_REASON
+            || plan_record.created_commit_seq != base_commit
+        {
+            return Err(corrupt_catalog_state(
+                "catalog partial plan-replacement base differs from its exact lineage",
+            ));
+        }
+        return Ok(());
+    }
     if expected_reason == SOURCE_GENERATION_INVALIDATED_REASON {
         let retained_snapshot_commit: Option<i64> = connection
             .query_row(
@@ -3638,6 +4438,7 @@ fn validate_partial_base_change(
 fn decode_stored_state(
     connection: &Connection,
     stored: StoredCatalogBuildState,
+    current_plan_is_replacement: bool,
 ) -> Result<DurableCatalogBuildState, EngineError> {
     let Some(plan_json) = stored.plan_json else {
         return Err(corrupt_catalog_state(
@@ -3716,7 +4517,7 @@ fn decode_stored_state(
         plan_commit_reason,
         stored.plan_committed_at,
         stored.plan_fact_count,
-        REGISTER_REASON,
+        plan_commit_reason,
     )?;
     let expected_state_reason =
         if phase == CatalogDurableBuildPhase::Ready && refreshing_from_snapshot_commit.is_none() {
@@ -3762,6 +4563,10 @@ fn decode_stored_state(
             && state_commit_reason == SOURCE_GENERATION_INVALIDATED_REASON
         {
             SOURCE_GENERATION_INVALIDATED_REASON
+        } else if phase == CatalogDurableBuildPhase::Building
+            && state_commit_reason == PLAN_REPLACED_REASON
+        {
+            PLAN_REPLACED_REASON
         } else {
             phase_reason(phase, refreshing_from_snapshot_commit.is_some())?
         };
@@ -3783,7 +4588,11 @@ fn decode_stored_state(
                 "pending catalog build must be owned by its registration commit",
             ));
         }
-        CatalogDurableBuildPhase::Building if last_commit_seq <= created_commit_seq => {
+        CatalogDurableBuildPhase::Building
+            if last_commit_seq < created_commit_seq
+                || (last_commit_seq == created_commit_seq
+                    && state_commit_reason != PLAN_REPLACED_REASON) =>
+        {
             return Err(corrupt_catalog_state(
                 "building catalog state must follow its registration commit",
             ));
@@ -3959,6 +4768,7 @@ fn decode_stored_state(
         machine.schedule_build().map_err(catalog_contract_error)?;
     }
     let (
+        ready_publication_plan,
         ready_publication_identity,
         ready_publication_coverage,
         ready_publication_attempt,
@@ -3966,7 +4776,9 @@ fn decode_stored_state(
         epoch_replacement,
         retired_snapshot_count,
     ) = if let Some(snapshot_commit) = last_complete_snapshot_commit {
-        let snapshot_id = load_snapshot_id_at_commit(connection, &plan, snapshot_commit)?;
+        let (publication_plan, snapshot_id) =
+            load_snapshot_plan_and_id_at_commit(connection, snapshot_commit)?;
+        let plan_replacement = publication_plan.coverage_plan_id != plan.coverage_plan_id;
         if completed_contract_version != Some(snapshot_id.pack_contract_version) {
             return Err(corrupt_catalog_state(
                 "catalog completed contract differs from its retained snapshot",
@@ -3983,14 +4795,14 @@ fn decode_stored_state(
             positive_u64(publication_attempt, "catalog retained snapshot attempt")?;
         let publication = super::catalog_publication::load_ready_publication(
             connection,
-            &plan,
+            &publication_plan,
             snapshot_id,
             publication_attempt,
         )?;
         if !publication.identity.is_refresh() {
             validate_initial_snapshot_epoch_replacement(
                 connection,
-                &plan,
+                &publication_plan,
                 snapshot_id,
                 publication_attempt,
                 publication.identity.build_commit_seq(),
@@ -4116,21 +4928,36 @@ fn decode_stored_state(
             CatalogDurableBuildPhase::Degraded | CatalogDurableBuildPhase::Error
         ) && epoch > snapshot_id.readiness_epoch;
         if terminal_epoch_replacement {
-            let invalidation = load_and_validate_epoch_invalidation(
-                connection,
-                &plan,
-                desired_contract_version,
-                epoch,
-                Some(snapshot_id),
-            )?
-            .ok_or_else(|| {
-                corrupt_catalog_state(
-                    "catalog terminal replacement epoch is missing source-generation invalidation evidence",
-                )
-            })?;
-            if invalidation >= last_commit_seq {
+            let replacement_origin = if plan_replacement {
+                load_current_plan_replacement_commit(
+                    connection,
+                    &plan,
+                    desired_contract_version,
+                    epoch,
+                    Some(snapshot_id),
+                )?
+                .ok_or_else(|| {
+                    corrupt_catalog_state(
+                        "catalog terminal replacement epoch is missing plan-replacement evidence",
+                    )
+                })?
+            } else {
+                load_and_validate_epoch_invalidation(
+                    connection,
+                    &plan,
+                    desired_contract_version,
+                    epoch,
+                    Some(snapshot_id),
+                )?
+                .ok_or_else(|| {
+                    corrupt_catalog_state(
+                        "catalog terminal replacement epoch is missing source-generation invalidation evidence",
+                    )
+                })?
+            };
+            if replacement_origin >= last_commit_seq {
                 return Err(corrupt_catalog_state(
-                    "catalog terminal replacement does not descend from its exact invalidation",
+                    "catalog terminal replacement does not descend from its exact origin",
                 ));
             }
         }
@@ -4162,7 +4989,11 @@ fn decode_stored_state(
                 }
                 (
                     CatalogReadinessPhase::Error,
-                    publication_coverage.clone(),
+                    if plan_replacement {
+                        Vec::new()
+                    } else {
+                        publication_coverage.clone()
+                    },
                     Some(CatalogReadinessReason::IntegrityFailure {
                         code: evidence_reason,
                         snapshot_disposition:
@@ -4196,9 +5027,35 @@ fn decode_stored_state(
                         "catalog degraded reason differs from source-failure evidence",
                     ));
                 }
+                let failed_refresh_commit = positive_u64(
+                    failure.failed_refresh_commit_seq,
+                    "catalog unavailable refresh commit",
+                )?;
+                let current_plan_coverage = if plan_replacement {
+                    load_and_validate_partial_history(
+                        connection,
+                        &plan,
+                        Some(CatalogPartialCoverageTarget::LatestBefore {
+                            epoch,
+                            attempt,
+                            commit: failed_refresh_commit,
+                        }),
+                    )?
+                    .unwrap_or_default()
+                } else {
+                    publication_coverage.clone()
+                };
                 (
                     CatalogReadinessPhase::Degraded,
-                    unavailable_source_coverage(&publication_coverage)?,
+                    if plan_replacement {
+                        unavailable_initial_source_coverage(
+                            &plan,
+                            desired_contract_version,
+                            &current_plan_coverage,
+                        )?
+                    } else {
+                        unavailable_source_coverage(&current_plan_coverage)?
+                    },
                     Some(CatalogReadinessReason::TerminalSourceUnavailable {
                         code: evidence_reason,
                     }),
@@ -4210,27 +5067,42 @@ fn decode_stored_state(
                 CatalogDurableBuildPhase::Building | CatalogDurableBuildPhase::Partial
             ) {
                 if epoch > snapshot_id.readiness_epoch {
-                    let invalidation = load_and_validate_epoch_invalidation(
-                    connection,
-                    &plan,
-                    desired_contract_version,
-                    epoch,
-                    Some(snapshot_id),
-                )?
-                .ok_or_else(|| {
-                    corrupt_catalog_state(
-                        "catalog replacement epoch is missing source-generation invalidation evidence",
-                    )
-                })?;
+                    let replacement_origin = if plan_replacement {
+                        load_current_plan_replacement_commit(
+                            connection,
+                            &plan,
+                            desired_contract_version,
+                            epoch,
+                            Some(snapshot_id),
+                        )?
+                        .ok_or_else(|| {
+                            corrupt_catalog_state(
+                                "catalog replacement epoch is missing plan-replacement evidence",
+                            )
+                        })?
+                    } else {
+                        load_and_validate_epoch_invalidation(
+                            connection,
+                            &plan,
+                            desired_contract_version,
+                            epoch,
+                            Some(snapshot_id),
+                        )?
+                        .ok_or_else(|| {
+                            corrupt_catalog_state(
+                                "catalog replacement epoch is missing source-generation invalidation evidence",
+                            )
+                        })?
+                    };
                     if (attempt == 1
                         && ((phase == CatalogDurableBuildPhase::Building
-                            && invalidation != last_commit_seq)
+                            && replacement_origin != last_commit_seq)
                             || (phase == CatalogDurableBuildPhase::Partial
-                                && invalidation >= last_commit_seq)))
-                        || (attempt > 1 && invalidation >= last_commit_seq)
+                                && replacement_origin >= last_commit_seq)))
+                        || (attempt > 1 && replacement_origin >= last_commit_seq)
                     {
                         return Err(corrupt_catalog_state(
-                            "catalog replacement epoch does not descend from its exact invalidation",
+                            "catalog replacement epoch does not descend from its exact origin",
                         ));
                     }
                     let recovery_origin = if attempt == 1 {
@@ -4320,7 +5192,17 @@ fn decode_stored_state(
                             milestone
                         }
                     } else if attempt == 1 {
-                        Vec::new()
+                        if plan_replacement && replacement_reason.is_some() {
+                            unavailable_initial_source_coverage(
+                                &plan,
+                                desired_contract_version,
+                                &[],
+                            )?
+                        } else {
+                            Vec::new()
+                        }
+                    } else if plan_replacement {
+                        unavailable_initial_source_coverage(&plan, desired_contract_version, &[])?
                     } else {
                         unavailable_source_coverage(&publication_coverage)?
                     };
@@ -4472,6 +5354,7 @@ fn decode_stored_state(
         machine = CatalogReadinessMachine::resume(plan.clone(), reconstructed)
             .map_err(catalog_contract_error)?;
         (
+            Some(publication_plan),
             Some(Arc::new(publication.identity)),
             Some(publication_coverage),
             Some(publication_attempt),
@@ -4488,39 +5371,68 @@ fn decode_stored_state(
         let initial_source_failure = load_latest_initial_source_failure_evidence(connection)?;
         let integrity_failure = load_latest_integrity_failure_evidence(connection)?;
         let no_snapshot_epoch_replacement = epoch > 1;
-        let epoch_invalidation = if no_snapshot_epoch_replacement {
-            Some(
-                load_and_validate_epoch_invalidation(
+        let epoch_replacement_origin = if no_snapshot_epoch_replacement {
+            if current_plan_is_replacement {
+                if let Some(replacement) = load_current_plan_replacement_commit(
                     connection,
                     &plan,
                     desired_contract_version,
                     epoch,
                     None,
-                )?
-                .ok_or_else(|| {
-                    corrupt_catalog_state(
-                        "no-snapshot replacement epoch is missing source-generation invalidation evidence",
+                )? {
+                    Some(replacement)
+                } else {
+                    Some(
+                        load_and_validate_epoch_invalidation(
+                            connection,
+                            &plan,
+                            desired_contract_version,
+                            epoch,
+                            None,
+                        )?
+                        .ok_or_else(|| {
+                            corrupt_catalog_state(
+                                "no-snapshot replacement epoch is missing durable origin evidence",
+                            )
+                        })?,
                     )
-                })?,
-            )
+                }
+            } else {
+                Some(
+                    load_and_validate_epoch_invalidation(
+                        connection,
+                        &plan,
+                        desired_contract_version,
+                        epoch,
+                        None,
+                    )?
+                    .ok_or_else(|| {
+                        corrupt_catalog_state(
+                            "no-snapshot replacement epoch is missing source-generation invalidation evidence",
+                        )
+                    })?,
+                )
+            }
         } else {
             None
         };
-        if let Some(invalidation) = epoch_invalidation {
+        if let Some(replacement_origin) = epoch_replacement_origin {
             let descends_from_invalidation = match (phase, attempt) {
-                (CatalogDurableBuildPhase::Building, 1) => invalidation == last_commit_seq,
+                (CatalogDurableBuildPhase::Building, 1) if stored_reason_code.is_none() => {
+                    replacement_origin == last_commit_seq
+                }
                 (
                     CatalogDurableBuildPhase::Building
                     | CatalogDurableBuildPhase::Partial
                     | CatalogDurableBuildPhase::Degraded
                     | CatalogDurableBuildPhase::Error,
                     _,
-                ) => invalidation < last_commit_seq,
+                ) => replacement_origin < last_commit_seq,
                 _ => false,
             };
             if !descends_from_invalidation {
                 return Err(corrupt_catalog_state(
-                    "no-snapshot replacement state does not descend from its exact invalidation",
+                    "no-snapshot replacement state does not descend from its exact origin",
                 ));
             }
         }
@@ -4621,6 +5533,7 @@ fn decode_stored_state(
                 })?;
                 let (previous_state, evidence_reason) =
                     validate_initial_source_failure_for_restart(
+                        connection,
                         failure,
                         CatalogInitialSourceFailureRestartContext {
                             plan: &plan,
@@ -4712,6 +5625,7 @@ fn decode_stored_state(
                     )
                 })?;
                 let evidence_reason = validate_discarded_integrity_failure_for_restart(
+                    connection,
                     failure,
                     CatalogDiscardedIntegrityRestartContext {
                         plan: &plan,
@@ -4761,6 +5675,7 @@ fn decode_stored_state(
             None,
             None,
             None,
+            None,
             recovery_origin,
             no_snapshot_epoch_replacement,
             super::catalog_retention::load_retired_prefix(connection, &[])?,
@@ -4775,6 +5690,7 @@ fn decode_stored_state(
         plan,
         readiness: machine.snapshot().clone(),
         last_commit_seq,
+        ready_publication_plan,
         ready_publication_identity,
         ready_publication_coverage,
         ready_publication_attempt,
@@ -4801,6 +5717,31 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
             if *desired_contract_version == 0 {
                 return Err(EngineError::InvalidCommit(
                     "catalog desired contract version must be greater than zero".to_string(),
+                ));
+            }
+            (*started_at, *committed_at)
+        }
+        CatalogBuildStateCommand::ReplaceCoveragePlan {
+            expected,
+            plan,
+            started_at,
+            committed_at,
+        } => {
+            plan.validate().map_err(catalog_contract_error)?;
+            if expected.scope != CatalogCoverageScope::Library
+                || plan.scope != CatalogCoverageScope::Library
+                || expected.desired_contract_version == 0
+                || expected.epoch == 0
+                || expected.attempt == 0
+                || expected.state_commit_seq == 0
+                || expected.coverage_plan_id == plan.coverage_plan_id
+                || expected
+                    .last_complete_snapshot
+                    .is_some_and(|snapshot| snapshot.complete_commit > expected.state_commit_seq)
+            {
+                return Err(EngineError::InvalidCommit(
+                    "catalog coverage-plan replacement is outside one exact Library lineage"
+                        .to_string(),
                 ));
             }
             (*started_at, *committed_at)
@@ -4899,7 +5840,8 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
                 || expected.refresh_started_commit_seq == 0
                 || expected.predecessor_snapshot.pack_contract_version
                     != expected.desired_contract_version
-                || expected.predecessor_snapshot.coverage_plan_id != expected.coverage_plan_id
+                || (expected.predecessor_snapshot.coverage_plan_id != expected.coverage_plan_id
+                    && !expected.is_epoch_replacement())
                 || !active_refresh_epoch_lineage_matches(expected)
                 || expected.predecessor_snapshot.complete_commit
                     >= expected.refresh_started_commit_seq
@@ -5003,7 +5945,8 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
                 || expected.refresh_started_commit_seq == 0
                 || expected.predecessor_snapshot.pack_contract_version
                     != expected.desired_contract_version
-                || expected.predecessor_snapshot.coverage_plan_id != expected.coverage_plan_id
+                || (expected.predecessor_snapshot.coverage_plan_id != expected.coverage_plan_id
+                    && !expected.is_epoch_replacement())
                 || !active_refresh_epoch_lineage_matches(expected)
                 || expected.predecessor_snapshot.complete_commit
                     >= expected.refresh_started_commit_seq
@@ -5040,7 +5983,8 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
                 || expected.refresh_started_commit_seq == 0
                 || expected.predecessor_snapshot.pack_contract_version
                     != expected.desired_contract_version
-                || expected.predecessor_snapshot.coverage_plan_id != expected.coverage_plan_id
+                || (expected.predecessor_snapshot.coverage_plan_id != expected.coverage_plan_id
+                    && !expected.is_epoch_replacement())
                 || !active_refresh_epoch_lineage_matches(expected)
                 || expected.predecessor_snapshot.complete_commit
                     >= expected.refresh_started_commit_seq
@@ -5119,6 +6063,27 @@ fn insert_plan(
         )));
     }
     let content_digest = blake3::hash(&plan_json);
+    let existing: Option<i64> = transaction
+        .query_row(
+            "SELECT 1 FROM catalog_coverage_plans WHERE coverage_plan_id = ?1",
+            [plan.coverage_plan_id.storage_bytes().as_slice()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("check existing catalog coverage plan", error))?;
+    if existing.is_some() {
+        let stored = load_catalog_plan_record(
+            transaction,
+            plan.coverage_plan_id.storage_bytes().as_slice(),
+        )?;
+        if stored.plan != *plan {
+            return Err(EngineError::InvalidCommit(
+                "catalog coverage-plan identity conflicts with existing canonical bytes"
+                    .to_string(),
+            ));
+        }
+        return Ok(());
+    }
     transaction
         .execute(
             r#"
@@ -5138,6 +6103,135 @@ fn insert_plan(
         )
         .map_err(|error| sqlite_error("insert catalog coverage plan", error))?;
     Ok(())
+}
+
+fn insert_coverage_plan_replacement(
+    transaction: &Transaction<'_>,
+    commit_seq: u64,
+    expected: &CatalogCoveragePlanReplacementExpectation,
+    plan: &CatalogCoveragePlan,
+    committed_at: i64,
+) -> Result<(), EngineError> {
+    let epoch = expected.epoch.checked_add(1).ok_or_else(|| {
+        EngineError::InvalidCommit("catalog readiness epoch overflow".to_string())
+    })?;
+    transaction
+        .execute(
+            r#"
+            INSERT INTO catalog_plan_replacements (
+                replacement_commit_seq, predecessor_state_commit_seq,
+                previous_coverage_plan_id, coverage_plan_id,
+                desired_contract_version, previous_epoch, epoch,
+                previous_attempt, previous_state,
+                retained_snapshot_commit_seq, committed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            params![
+                to_i64(commit_seq, "catalog plan-replacement commit")?,
+                to_i64(
+                    expected.state_commit_seq,
+                    "catalog plan-replacement predecessor"
+                )?,
+                expected.coverage_plan_id.storage_bytes().as_slice(),
+                plan.coverage_plan_id.storage_bytes().as_slice(),
+                i64::from(expected.desired_contract_version),
+                to_i64(expected.epoch, "catalog previous replacement epoch")?,
+                to_i64(epoch, "catalog replacement epoch")?,
+                to_i64(expected.attempt, "catalog previous replacement attempt")?,
+                expected.state.as_str(),
+                expected
+                    .last_complete_snapshot
+                    .map(|snapshot| {
+                        to_i64(
+                            snapshot.complete_commit,
+                            "catalog plan-replacement retained snapshot",
+                        )
+                    })
+                    .transpose()?,
+                committed_at,
+            ],
+        )
+        .map_err(|error| sqlite_error("insert catalog plan-replacement evidence", error))?;
+    Ok(())
+}
+
+fn exact_coverage_plan_replacement_exists(
+    connection: &Connection,
+    current: &DurableCatalogBuildState,
+    expected: &CatalogCoveragePlanReplacementExpectation,
+    started_at: i64,
+    committed_at: i64,
+) -> Result<bool, EngineError> {
+    let Some(expected_epoch) = expected.epoch.checked_add(1) else {
+        return Ok(false);
+    };
+    if current.readiness.epoch != expected_epoch
+        || current.readiness.attempt != 1
+        || current.readiness.state != CatalogReadinessPhase::Building
+        || current.readiness.complete_through_commit.is_some()
+        || current.readiness.refreshing_from_snapshot.is_some()
+        || current.readiness.reason.is_some()
+        || !current.readiness.source_coverage.is_empty()
+        || current.readiness.last_complete_snapshot != expected.last_complete_snapshot
+        || current.plan.coverage_plan_id == expected.coverage_plan_id
+    {
+        return Ok(false);
+    }
+    let exact: i64 = connection
+        .query_row(
+            r#"
+            SELECT EXISTS(
+              SELECT 1
+              FROM catalog_plan_replacements AS replacement
+              JOIN ingest_commits AS owner
+                ON owner.commit_seq = replacement.replacement_commit_seq
+              WHERE replacement.replacement_commit_seq = ?1
+                AND replacement.predecessor_state_commit_seq = ?2
+                AND replacement.previous_coverage_plan_id = ?3
+                AND replacement.coverage_plan_id = ?4
+                AND replacement.desired_contract_version = ?5
+                AND replacement.previous_epoch = ?6
+                AND replacement.epoch = ?7
+                AND replacement.previous_attempt = ?8
+                AND replacement.previous_state = ?9
+                AND replacement.retained_snapshot_commit_seq IS ?10
+                AND replacement.committed_at = ?11
+                AND owner.source_instance_id IS NULL
+                AND owner.reason = 'catalog.library.coverage_plan.replaced'
+                AND owner.started_at = ?12
+                AND owner.committed_at = ?11
+                AND owner.fact_count = 0
+            )
+            "#,
+            params![
+                to_i64(current.last_commit_seq, "catalog plan-replacement commit")?,
+                to_i64(
+                    expected.state_commit_seq,
+                    "catalog plan-replacement predecessor"
+                )?,
+                expected.coverage_plan_id.storage_bytes().as_slice(),
+                current.plan.coverage_plan_id.storage_bytes().as_slice(),
+                i64::from(expected.desired_contract_version),
+                to_i64(expected.epoch, "catalog previous replacement epoch")?,
+                to_i64(expected_epoch, "catalog replacement epoch")?,
+                to_i64(expected.attempt, "catalog previous replacement attempt")?,
+                expected.state.as_str(),
+                expected
+                    .last_complete_snapshot
+                    .map(|snapshot| {
+                        to_i64(
+                            snapshot.complete_commit,
+                            "catalog plan-replacement retained snapshot",
+                        )
+                    })
+                    .transpose()?,
+                committed_at,
+                started_at,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| sqlite_error("load exact catalog plan replacement", error))?;
+    Ok(exact == 1)
 }
 
 fn insert_partial_coverage(
@@ -5551,7 +6645,8 @@ fn load_latest_initial_source_failure_evidence(
                                       'catalog.library.build.partial',
                                       'catalog.library.build.source_retrying',
                                       'catalog.library.refresh.recovery_started',
-                                      'catalog.library.source_generation.invalidated'
+                                      'catalog.library.source_generation.invalidated',
+                                      'catalog.library.coverage_plan.replaced'
                                   )
                         THEN build.reason END,
                    build.committed_at,
@@ -5628,8 +6723,17 @@ fn validate_initial_source_failure_ledger(connection: &Connection) -> Result<(),
                     'catalog.library.build.partial',
                     'catalog.library.build.source_retrying',
                     'catalog.library.refresh.recovery_started',
-                    'catalog.library.source_generation.invalidated'
+                    'catalog.library.source_generation.invalidated',
+                    'catalog.library.coverage_plan.replaced'
                )
+               OR (build.reason = 'catalog.library.coverage_plan.replaced'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM catalog_plan_replacements AS replacement
+                     WHERE replacement.replacement_commit_seq = f.failed_build_commit_seq
+                       AND replacement.coverage_plan_id = f.coverage_plan_id
+                       AND replacement.epoch = f.readiness_epoch
+                       AND replacement.retained_snapshot_commit_seq IS NULL
+                   ))
                OR (f.previous_state = 'partial'
                    AND build.reason NOT IN (
                        'catalog.library.build.partial',
@@ -5837,6 +6941,7 @@ fn load_latest_source_failure_evidence(
                                       'catalog.library.refresh.source_retrying',
                                       'catalog.library.refresh.recovery_started',
                                       'catalog.library.source_generation.invalidated',
+                                      'catalog.library.coverage_plan.replaced',
                                       'catalog.library.build.partial'
                                   )
                         THEN refresh.reason END,
@@ -5904,38 +7009,68 @@ fn validate_source_failure_ledger(connection: &Connection) -> Result<(), EngineE
                OR refresh.committed_at IS NULL
                OR refresh.fact_count != 0
                OR COALESCE((
-                    (f.readiness_epoch = retained.readiness_epoch AND (
-                      (f.attempt = retained.attempt
-                       AND refresh.reason IN (
-                         'catalog.library.refresh.started',
-                         'catalog.library.refresh.source_retrying'
-                       ))
-                      OR
-                      (f.attempt > retained.attempt
-                       AND refresh.reason IN (
-                         'catalog.library.refresh.recovery_started',
-                         'catalog.library.refresh.source_retrying',
-                         'catalog.library.build.partial'
-                       ))
-                    ))
+                    (
+                      f.coverage_plan_id = retained.coverage_plan_id
+                      AND (
+                        (f.readiness_epoch = retained.readiness_epoch AND (
+                          (f.attempt = retained.attempt
+                           AND refresh.reason IN (
+                             'catalog.library.refresh.started',
+                             'catalog.library.refresh.source_retrying'
+                           ))
+                          OR
+                          (f.attempt > retained.attempt
+                           AND refresh.reason IN (
+                             'catalog.library.refresh.recovery_started',
+                             'catalog.library.refresh.source_retrying',
+                             'catalog.library.build.partial'
+                           ))
+                        ))
+                        OR
+                        (f.readiness_epoch > retained.readiness_epoch AND (
+                          (f.attempt = 1
+                           AND refresh.reason IN (
+                             'catalog.library.source_generation.invalidated',
+                             'catalog.library.refresh.source_retrying',
+                             'catalog.library.build.partial'
+                           ))
+                          OR
+                          (f.attempt > 1
+                           AND refresh.reason IN (
+                             'catalog.library.refresh.recovery_started',
+                             'catalog.library.refresh.source_retrying',
+                             'catalog.library.build.partial'
+                           ))
+                        ))
+                      )
+                    )
                     OR
-                    (f.readiness_epoch > retained.readiness_epoch AND (
-                      (f.attempt = 1
-                       AND refresh.reason IN (
-                         'catalog.library.source_generation.invalidated',
-                         'catalog.library.refresh.source_retrying',
-                         'catalog.library.build.partial'
-                       ))
-                      OR
-                      (f.attempt > 1
-                       AND refresh.reason IN (
-                         'catalog.library.refresh.recovery_started',
-                         'catalog.library.refresh.source_retrying',
-                         'catalog.library.build.partial'
-                       ))
-                    ))
+                    (
+                      f.readiness_epoch > retained.readiness_epoch
+                      AND EXISTS (
+                        SELECT 1 FROM catalog_plan_replacements AS replacement
+                        WHERE replacement.coverage_plan_id = f.coverage_plan_id
+                          AND replacement.previous_coverage_plan_id = retained.coverage_plan_id
+                          AND replacement.epoch = f.readiness_epoch
+                          AND replacement.retained_snapshot_commit_seq = f.retained_snapshot_commit_seq
+                      )
+                      AND (
+                        (f.attempt = 1
+                         AND refresh.reason IN (
+                           'catalog.library.coverage_plan.replaced',
+                           'catalog.library.refresh.source_retrying',
+                           'catalog.library.build.partial'
+                         ))
+                        OR
+                        (f.attempt > 1
+                         AND refresh.reason IN (
+                           'catalog.library.refresh.recovery_started',
+                           'catalog.library.refresh.source_retrying',
+                           'catalog.library.build.partial'
+                         ))
+                      )
+                    )
                ), 0) = 0
-               OR f.coverage_plan_id != retained.coverage_plan_id
                OR f.readiness_epoch < retained.readiness_epoch
                OR f.retained_publication_digest != retained.publication_digest
                OR f.retained_content_digest != retained.content_digest
@@ -6051,7 +7186,8 @@ fn load_latest_integrity_failure_evidence(
                                       'catalog.library.refresh.started',
                                       'catalog.library.refresh.source_retrying',
                                       'catalog.library.refresh.recovery_started',
-                                      'catalog.library.source_generation.invalidated'
+                                      'catalog.library.source_generation.invalidated',
+                                      'catalog.library.coverage_plan.replaced'
                                   )
                         THEN refresh.reason END,
                    refresh.committed_at,
@@ -6129,38 +7265,68 @@ fn validate_integrity_failure_ledger(connection: &Connection) -> Result<(), Engi
                       AND f.retained_snapshot_commit_seq < f.failed_refresh_commit_seq
                       AND f.failed_refresh_commit_seq < f.failure_commit_seq
                       AND (
-                        (f.readiness_epoch = retained.readiness_epoch AND (
-                          (f.attempt = retained.attempt
-                           AND refresh.reason IN (
-                             'catalog.library.refresh.started',
-                             'catalog.library.refresh.source_retrying'
-                           ))
-                          OR
-                          (f.attempt > retained.attempt
-                           AND refresh.reason IN (
-                             'catalog.library.refresh.recovery_started',
-                             'catalog.library.refresh.source_retrying',
-                             'catalog.library.build.partial'
-                           ))
-                        ))
+                        (
+                          f.coverage_plan_id = retained.coverage_plan_id
+                          AND (
+                            (f.readiness_epoch = retained.readiness_epoch AND (
+                              (f.attempt = retained.attempt
+                               AND refresh.reason IN (
+                                 'catalog.library.refresh.started',
+                                 'catalog.library.refresh.source_retrying'
+                               ))
+                              OR
+                              (f.attempt > retained.attempt
+                               AND refresh.reason IN (
+                                 'catalog.library.refresh.recovery_started',
+                                 'catalog.library.refresh.source_retrying',
+                                 'catalog.library.build.partial'
+                               ))
+                            ))
+                            OR
+                            (f.readiness_epoch > retained.readiness_epoch AND (
+                              (f.attempt = 1
+                               AND refresh.reason IN (
+                                 'catalog.library.source_generation.invalidated',
+                                 'catalog.library.refresh.source_retrying',
+                                 'catalog.library.build.partial'
+                               ))
+                              OR
+                              (f.attempt > 1
+                               AND refresh.reason IN (
+                                 'catalog.library.refresh.recovery_started',
+                                 'catalog.library.refresh.source_retrying',
+                                 'catalog.library.build.partial'
+                               ))
+                            ))
+                          )
+                        )
                         OR
-                        (f.readiness_epoch > retained.readiness_epoch AND (
-                          (f.attempt = 1
-                           AND refresh.reason IN (
-                             'catalog.library.source_generation.invalidated',
-                             'catalog.library.refresh.source_retrying',
-                             'catalog.library.build.partial'
-                           ))
-                          OR
-                          (f.attempt > 1
-                           AND refresh.reason IN (
-                             'catalog.library.refresh.recovery_started',
-                             'catalog.library.refresh.source_retrying',
-                             'catalog.library.build.partial'
-                           ))
-                        ))
+                        (
+                          f.readiness_epoch > retained.readiness_epoch
+                          AND EXISTS (
+                            SELECT 1 FROM catalog_plan_replacements AS replacement
+                            WHERE replacement.coverage_plan_id = f.coverage_plan_id
+                              AND replacement.previous_coverage_plan_id = retained.coverage_plan_id
+                              AND replacement.epoch = f.readiness_epoch
+                              AND replacement.retained_snapshot_commit_seq = f.retained_snapshot_commit_seq
+                          )
+                          AND (
+                            (f.attempt = 1
+                             AND refresh.reason IN (
+                               'catalog.library.coverage_plan.replaced',
+                               'catalog.library.refresh.source_retrying',
+                               'catalog.library.build.partial'
+                             ))
+                            OR
+                            (f.attempt > 1
+                             AND refresh.reason IN (
+                               'catalog.library.refresh.recovery_started',
+                               'catalog.library.refresh.source_retrying',
+                               'catalog.library.build.partial'
+                             ))
+                          )
+                        )
                       )
-                      AND f.coverage_plan_id = retained.coverage_plan_id
                       AND f.readiness_epoch >= retained.readiness_epoch
                       AND f.retained_publication_digest = retained.publication_digest
                       AND f.retained_content_digest = retained.content_digest
@@ -6185,17 +7351,36 @@ fn validate_integrity_failure_ledger(connection: &Connection) -> Result<(), Engi
                         OR
                         (f.readiness_epoch > 1
                          AND f.attempt = 1
-                         AND refresh.reason IN (
-                           'catalog.library.source_generation.invalidated',
-                           'catalog.library.build.partial',
-                           'catalog.library.build.source_retrying'
-                         )
-                         AND EXISTS(
-                           SELECT 1 FROM catalog_epoch_invalidations AS invalidation
-                           WHERE invalidation.invalidation_commit_seq <= f.failed_refresh_commit_seq
-                             AND invalidation.coverage_plan_id = f.coverage_plan_id
-                             AND invalidation.epoch = f.readiness_epoch
-                             AND invalidation.retained_snapshot_commit_seq IS NULL
+                         AND (
+                           (
+                             refresh.reason IN (
+                               'catalog.library.source_generation.invalidated',
+                               'catalog.library.build.partial',
+                               'catalog.library.build.source_retrying'
+                             )
+                             AND EXISTS(
+                               SELECT 1 FROM catalog_epoch_invalidations AS invalidation
+                               WHERE invalidation.invalidation_commit_seq <= f.failed_refresh_commit_seq
+                                 AND invalidation.coverage_plan_id = f.coverage_plan_id
+                                 AND invalidation.epoch = f.readiness_epoch
+                                 AND invalidation.retained_snapshot_commit_seq IS NULL
+                             )
+                           )
+                           OR
+                           (
+                             refresh.reason IN (
+                               'catalog.library.coverage_plan.replaced',
+                               'catalog.library.build.partial',
+                               'catalog.library.build.source_retrying'
+                             )
+                             AND EXISTS(
+                               SELECT 1 FROM catalog_plan_replacements AS replacement
+                               WHERE replacement.replacement_commit_seq <= f.failed_refresh_commit_seq
+                                 AND replacement.coverage_plan_id = f.coverage_plan_id
+                                 AND replacement.epoch = f.readiness_epoch
+                                 AND replacement.retained_snapshot_commit_seq IS NULL
+                             )
+                           )
                          ))
                         OR
                         (f.attempt > 1
@@ -6301,18 +7486,29 @@ fn exact_integrity_failure_exists(
 }
 
 fn initial_build_execution_reason(
+    connection: &Connection,
+    plan: &CatalogCoveragePlan,
     epoch: u64,
     attempt: u64,
     state: CatalogDurableBuildPhase,
-) -> &'static str {
+    execution_commit: u64,
+) -> Result<&'static str, EngineError> {
     if state == CatalogDurableBuildPhase::Partial {
-        PARTIAL_REASON
+        Ok(PARTIAL_REASON)
     } else if attempt > 1 {
-        REFRESH_RECOVERY_STARTED_REASON
+        Ok(REFRESH_RECOVERY_STARTED_REASON)
     } else if epoch > 1 {
-        SOURCE_GENERATION_INVALIDATED_REASON
+        let plan_record =
+            load_catalog_plan_record(connection, plan.coverage_plan_id.storage_bytes().as_slice())?;
+        if plan_record.created_commit_seq == execution_commit
+            && plan_record.owner_reason == PLAN_REPLACED_REASON
+        {
+            Ok(PLAN_REPLACED_REASON)
+        } else {
+            Ok(SOURCE_GENERATION_INVALIDATED_REASON)
+        }
     } else {
-        SCHEDULE_REASON
+        Ok(SCHEDULE_REASON)
     }
 }
 
@@ -6330,7 +7526,14 @@ fn exact_initial_integrity_failure_exists(
     let expected_execution_reason = if expected.retry_reason_code.is_some() {
         INITIAL_SOURCE_RETRYING_REASON
     } else {
-        initial_build_execution_reason(expected.epoch, expected.attempt, expected.state)
+        initial_build_execution_reason(
+            connection,
+            &current.plan,
+            expected.epoch,
+            expected.attempt,
+            expected.state,
+            expected.build_started_commit_seq,
+        )?
     };
     Ok(current.readiness.state == CatalogReadinessPhase::Error
         && current.readiness.scope == expected.scope
@@ -6515,7 +7718,14 @@ fn exact_initial_source_failure_exists(
             == Some(if expected.retry_reason_code.is_some() {
                 INITIAL_SOURCE_RETRYING_REASON
             } else {
-                initial_build_execution_reason(expected.epoch, expected.attempt, expected.state)
+                initial_build_execution_reason(
+                    connection,
+                    &current.plan,
+                    expected.epoch,
+                    expected.attempt,
+                    expected.state,
+                    expected.build_state_commit_seq,
+                )?
             })
         && stored.build_committed_at.is_some()
         && stored.build_fact_count == 0)
@@ -6788,7 +7998,11 @@ fn validate_source_failure_for_restart(
     };
     let epoch_replacement = context.state_epoch > context.retained_snapshot.readiness_epoch;
     let expected_refresh_reason = if epoch_replacement && failure_attempt == 1 {
-        SOURCE_GENERATION_INVALIDATED_REASON
+        if context.plan.coverage_plan_id != context.retained_snapshot.coverage_plan_id {
+            PLAN_REPLACED_REASON
+        } else {
+            SOURCE_GENERATION_INVALIDATED_REASON
+        }
     } else if epoch_replacement || failure_attempt > context.publication_attempt {
         REFRESH_RECOVERY_STARTED_REASON
     } else {
@@ -6884,7 +8098,11 @@ fn validate_integrity_failure_for_restart(
     };
     let epoch_replacement = context.state_epoch > context.retained_snapshot.readiness_epoch;
     let expected_refresh_reason = if epoch_replacement && failure_attempt == 1 {
-        SOURCE_GENERATION_INVALIDATED_REASON
+        if context.plan.coverage_plan_id != context.retained_snapshot.coverage_plan_id {
+            PLAN_REPLACED_REASON
+        } else {
+            SOURCE_GENERATION_INVALIDATED_REASON
+        }
     } else if epoch_replacement || failure_attempt > context.publication_attempt {
         REFRESH_RECOVERY_STARTED_REASON
     } else {
@@ -6937,6 +8155,7 @@ struct CatalogDiscardedIntegrityRestartContext<'a> {
 }
 
 fn validate_discarded_integrity_failure_for_restart(
+    connection: &Connection,
     stored: &StoredCatalogIntegrityFailure,
     context: CatalogDiscardedIntegrityRestartContext<'_>,
 ) -> Result<String, EngineError> {
@@ -6962,10 +8181,13 @@ fn validate_discarded_integrity_failure_for_restart(
         context.state_attempt == failure_attempt && context.state_commit_seq == failure_commit
     };
     let base_execution_reason = initial_build_execution_reason(
+        connection,
+        context.plan,
         context.state_epoch,
         failure_attempt,
         CatalogDurableBuildPhase::Building,
-    );
+        execution_commit,
+    )?;
     if !state_matches
         || execution_commit >= failure_commit
         || stored.coverage_plan_id.as_deref()
@@ -7010,6 +8232,7 @@ struct CatalogInitialSourceFailureRestartContext<'a> {
 }
 
 fn validate_initial_source_failure_for_restart(
+    connection: &Connection,
     stored: &StoredCatalogInitialSourceFailure,
     context: CatalogInitialSourceFailureRestartContext<'_>,
 ) -> Result<(CatalogDurableBuildPhase, String), EngineError> {
@@ -7039,8 +8262,14 @@ fn validate_initial_source_failure_for_restart(
     validate_reason_code(reason_code).map_err(|_| {
         corrupt_catalog_state("catalog initial source failure reason is outside its bound")
     })?;
-    let base_execution_reason =
-        initial_build_execution_reason(context.state_epoch, expected_attempt, previous_state);
+    let base_execution_reason = initial_build_execution_reason(
+        connection,
+        context.plan,
+        context.state_epoch,
+        expected_attempt,
+        previous_state,
+        failed_build_commit,
+    )?;
     if stored.coverage_plan_id.as_deref()
         != Some(context.plan.coverage_plan_id.storage_bytes().as_slice())
         || positive_u64(
@@ -7129,6 +8358,7 @@ fn validate_cold_recovery_origin(
     ) {
         (true, false, Some(failure), _) => {
             let (previous_state, reason_code) = validate_initial_source_failure_for_restart(
+                connection,
                 failure,
                 CatalogInitialSourceFailureRestartContext {
                     plan: context.plan,
@@ -7193,6 +8423,7 @@ fn validate_cold_recovery_origin(
         }
         (false, true, _, Some(failure)) => {
             validate_discarded_integrity_failure_for_restart(
+                connection,
                 failure,
                 CatalogDiscardedIntegrityRestartContext {
                     plan: context.plan,
@@ -7381,6 +8612,72 @@ fn write_build_state(
                     ],
                 )
                 .map_err(|error| sqlite_error("invalidate catalog source generation", error))?
+        }
+        CatalogBuildStateWrite::ReplaceCoveragePlan { expected } => {
+            if phase != CatalogDurableBuildPhase::Building
+                || snapshot.coverage_plan_id == expected.coverage_plan_id
+                || snapshot.epoch != expected.epoch.saturating_add(1)
+                || snapshot.attempt != 1
+                || snapshot.complete_through_commit.is_some()
+                || snapshot.refreshing_from_snapshot.is_some()
+                || snapshot.reason.is_some()
+                || !snapshot.source_coverage.is_empty()
+                || snapshot.last_complete_snapshot != expected.last_complete_snapshot
+            {
+                return Err(EngineError::InvalidCommit(
+                    "catalog coverage-plan replacement differs from its exact successor lineage"
+                        .to_string(),
+                ));
+            }
+            transaction
+                .execute(
+                    r#"
+                    UPDATE catalog_build_state
+                    SET coverage_plan_id = ?1,
+                        epoch = ?2,
+                        attempt = 1,
+                        state = 'building',
+                        complete_through_commit = NULL,
+                        refreshing_from_snapshot_commit = NULL,
+                        reason_code = NULL,
+                        last_commit_seq = ?3,
+                        updated_at = ?4
+                    WHERE scope_kind = ?5
+                      AND coverage_plan_id = ?6
+                      AND desired_contract_version = ?7
+                      AND epoch = ?8
+                      AND attempt = ?9
+                      AND state = ?10
+                      AND last_complete_snapshot_commit IS ?11
+                      AND last_commit_seq = ?12
+                    "#,
+                    params![
+                        snapshot.coverage_plan_id.storage_bytes().as_slice(),
+                        to_i64(snapshot.epoch, "catalog replacement epoch")?,
+                        to_i64(commit_seq, "catalog plan-replacement commit")?,
+                        updated_at,
+                        LIBRARY_SCOPE,
+                        expected.coverage_plan_id.storage_bytes().as_slice(),
+                        i64::from(snapshot.desired_contract_version),
+                        to_i64(expected.epoch, "catalog previous replacement epoch")?,
+                        to_i64(expected.attempt, "catalog previous replacement attempt")?,
+                        expected.state.as_str(),
+                        expected
+                            .last_complete_snapshot
+                            .map(|value| {
+                                to_i64(
+                                    value.complete_commit,
+                                    "catalog replacement retained snapshot",
+                                )
+                            })
+                            .transpose()?,
+                        to_i64(
+                            expected.state_commit_seq,
+                            "catalog plan-replacement predecessor",
+                        )?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("replace catalog coverage plan", error))?
         }
         CatalogBuildStateWrite::BeginRefresh { expected } => {
             let refreshing = snapshot.refreshing_from_snapshot.ok_or_else(|| {
@@ -8106,6 +9403,39 @@ fn write_readiness_change(
             commit_seq,
         });
         (INITIAL_SOURCE_CHANGE_SCHEMA_VERSION, payload)
+    } else if let CatalogBuildStateWrite::ReplaceCoveragePlan { expected } = write {
+        if snapshot.state != CatalogReadinessPhase::Building
+            || snapshot.coverage_plan_id == expected.coverage_plan_id
+            || snapshot.epoch != expected.epoch.saturating_add(1)
+            || snapshot.attempt != 1
+            || snapshot.complete_through_commit.is_some()
+            || snapshot.refreshing_from_snapshot.is_some()
+            || snapshot.reason.is_some()
+            || !snapshot.source_coverage.is_empty()
+            || snapshot.last_complete_snapshot != expected.last_complete_snapshot
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog plan replacement does not identify its exact successor lineage"
+                    .to_string(),
+            ));
+        }
+        let payload = serde_json::to_vec(&CatalogPlanReplacedPayload {
+            readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,
+            scope: LIBRARY_SCOPE,
+            previous_coverage_plan_id: expected.coverage_plan_id,
+            coverage_plan_id: snapshot.coverage_plan_id,
+            desired_contract_version: snapshot.desired_contract_version,
+            previous_epoch: expected.epoch,
+            previous_attempt: expected.attempt,
+            epoch: snapshot.epoch,
+            attempt: snapshot.attempt,
+            previous_state: expected.state.readiness_phase(),
+            state: snapshot.state,
+            predecessor_state_commit: expected.state_commit_seq,
+            last_complete_snapshot: snapshot.last_complete_snapshot,
+            commit_seq,
+        });
+        (PLAN_REPLACEMENT_CHANGE_SCHEMA_VERSION, payload)
     } else if let CatalogBuildStateWrite::InvalidateSourceGeneration { expected } = write {
         if snapshot.state != CatalogReadinessPhase::Building
             || snapshot.epoch != expected.epoch.saturating_add(1)
@@ -8581,6 +9911,7 @@ mod tests {
             CatalogCommitStage::AfterEpochInvalidationWrite => {
                 "after catalog epoch-invalidation write"
             }
+            CatalogCommitStage::AfterPlanReplacementWrite => "after catalog plan-replacement write",
             CatalogCommitStage::AfterFailureEvidenceWrite => {
                 "after catalog integrity-failure evidence write"
             }
@@ -8626,6 +9957,19 @@ mod tests {
             vec![
                 plan_source("claude-code", b"local-library-view"),
                 plan_source("codex", b"restricted-library-view"),
+            ],
+            vec![plan_source("grok", b"local-library-view")],
+        )
+        .unwrap()
+    }
+
+    fn replacement_plan(index: u8) -> CatalogCoveragePlan {
+        let policy = format!("replacement-library-view-{index}");
+        CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            vec![
+                plan_source("claude-code", b"local-library-view"),
+                plan_source("codex", policy.as_bytes()),
             ],
             vec![plan_source("grok", b"local-library-view")],
         )
@@ -9017,6 +10361,7 @@ mod tests {
             "ingest_commits" => "SELECT COUNT(*) FROM ingest_commits",
             "catalog_coverage_plans" => "SELECT COUNT(*) FROM catalog_coverage_plans",
             "catalog_build_state" => "SELECT COUNT(*) FROM catalog_build_state",
+            "catalog_plan_replacements" => "SELECT COUNT(*) FROM catalog_plan_replacements",
             "catalog_initial_source_failures" => {
                 "SELECT COUNT(*) FROM catalog_initial_source_failures"
             }
@@ -9129,6 +10474,326 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn coverage_plan_replacement_is_durable_bounded_and_exactly_replayable() {
+        let (mut connection, original_plan) = scheduled_database();
+        let replacement_plan = other_plan();
+        let before = load_catalog_build_state(&connection).unwrap().unwrap();
+        let expected = before.coverage_plan_replacement_expectation().unwrap();
+        let command = CatalogBuildStateCommand::replace_coverage_plan(
+            expected.clone(),
+            replacement_plan.clone(),
+            30,
+            31,
+        );
+        let receipt = apply_catalog_build_state_commit(&mut connection, &command)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt.readiness.coverage_plan_id,
+            replacement_plan.coverage_plan_id
+        );
+        assert_eq!(receipt.readiness.epoch, 2);
+        assert_eq!(receipt.readiness.attempt, 1);
+        assert_eq!(receipt.readiness.state, CatalogReadinessPhase::Building);
+        assert!(receipt.readiness.source_coverage.is_empty());
+        assert_eq!(count(&connection, "catalog_coverage_plans"), 2);
+        assert_eq!(count(&connection, "catalog_plan_replacements"), 1);
+
+        let restarted = load_catalog_build_state(&connection).unwrap().unwrap();
+        assert_eq!(restarted.plan, replacement_plan);
+        assert_eq!(restarted.readiness, receipt.readiness);
+        assert_eq!(
+            apply_catalog_build_state_commit(&mut connection, &command).unwrap(),
+            None
+        );
+        assert!(apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::replace_coverage_plan(expected, original_plan, 32, 33,),
+        )
+        .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE catalog_plan_replacements SET previous_epoch = 2",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn coverage_plan_replacement_is_atomic_and_durably_bounded() {
+        let precommit_stages = [
+            CatalogCommitStage::BeforeTransaction,
+            CatalogCommitStage::AfterCommitInsert,
+            CatalogCommitStage::AfterPlanWrite,
+            CatalogCommitStage::AfterPlanReplacementWrite,
+            CatalogCommitStage::AfterBuildStateWrite,
+            CatalogCommitStage::AfterOutboxInsert,
+            CatalogCommitStage::BeforeCommit,
+        ];
+        for stage in precommit_stages {
+            let (mut connection, original_plan) = scheduled_database();
+            let current = load_catalog_build_state(&connection).unwrap().unwrap();
+            let command = CatalogBuildStateCommand::replace_coverage_plan(
+                current.coverage_plan_replacement_expectation().unwrap(),
+                replacement_plan(0),
+                30,
+                31,
+            );
+            assert!(matches!(
+                apply_catalog_build_state_commit_with_hook(
+                    &mut connection,
+                    &command,
+                    &FailAt(stage),
+                ),
+                Err(EngineError::InjectedFailure { .. })
+            ));
+            let retained = load_catalog_build_state(&connection).unwrap().unwrap();
+            assert_eq!(retained.plan, original_plan);
+            assert_eq!(retained.readiness.state, CatalogReadinessPhase::Building);
+            assert_eq!(count(&connection, "catalog_coverage_plans"), 1);
+            assert_eq!(count(&connection, "catalog_plan_replacements"), 0);
+        }
+
+        let (mut connection, _) = scheduled_database();
+        let current = load_catalog_build_state(&connection).unwrap().unwrap();
+        let command = CatalogBuildStateCommand::replace_coverage_plan(
+            current.coverage_plan_replacement_expectation().unwrap(),
+            replacement_plan(0),
+            30,
+            31,
+        );
+        assert!(matches!(
+            apply_catalog_build_state_commit_with_hook(
+                &mut connection,
+                &command,
+                &FailAt(CatalogCommitStage::AfterCommit),
+            ),
+            Err(EngineError::InjectedFailure { .. })
+        ));
+        assert_eq!(
+            apply_catalog_build_state_commit(&mut connection, &command).unwrap(),
+            None
+        );
+
+        let (mut bounded, _) = scheduled_database();
+        for index in 0..MAX_CATALOG_PLAN_REPLACEMENTS {
+            let current = load_catalog_build_state(&bounded).unwrap().unwrap();
+            apply_catalog_build_state_commit(
+                &mut bounded,
+                &CatalogBuildStateCommand::replace_coverage_plan(
+                    current.coverage_plan_replacement_expectation().unwrap(),
+                    replacement_plan(u8::try_from(index).unwrap()),
+                    100 + i64::try_from(index).unwrap() * 2,
+                    101 + i64::try_from(index).unwrap() * 2,
+                ),
+            )
+            .unwrap()
+            .unwrap();
+        }
+        let current = load_catalog_build_state(&bounded).unwrap().unwrap();
+        assert!(apply_catalog_build_state_commit(
+            &mut bounded,
+            &CatalogBuildStateCommand::replace_coverage_plan(
+                current.coverage_plan_replacement_expectation().unwrap(),
+                replacement_plan(u8::try_from(MAX_CATALOG_PLAN_REPLACEMENTS).unwrap()),
+                200,
+                201,
+            ),
+        )
+        .is_err());
+        assert_eq!(
+            count(&bounded, "catalog_plan_replacements"),
+            i64::try_from(MAX_CATALOG_PLAN_REPLACEMENTS).unwrap()
+        );
+    }
+
+    #[test]
+    fn coverage_plan_replacement_can_return_to_a_prior_canonical_plan() {
+        let (mut connection, original_plan) = scheduled_database();
+        let current = load_catalog_build_state(&connection).unwrap().unwrap();
+        apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::replace_coverage_plan(
+                current.coverage_plan_replacement_expectation().unwrap(),
+                replacement_plan(0),
+                30,
+                31,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let current = load_catalog_build_state(&connection).unwrap().unwrap();
+        let return_command = CatalogBuildStateCommand::replace_coverage_plan(
+            current.coverage_plan_replacement_expectation().unwrap(),
+            original_plan.clone(),
+            40,
+            41,
+        );
+        apply_catalog_build_state_commit(&mut connection, &return_command)
+            .unwrap()
+            .unwrap();
+        let returned = load_catalog_build_state(&connection).unwrap().unwrap();
+        assert_eq!(returned.plan, original_plan);
+        assert_eq!(returned.readiness.epoch, 3);
+        assert_eq!(returned.readiness.attempt, 1);
+        assert_eq!(returned.readiness.state, CatalogReadinessPhase::Building);
+        assert_eq!(count(&connection, "catalog_coverage_plans"), 2);
+        assert_eq!(count(&connection, "catalog_plan_replacements"), 2);
+        assert_eq!(
+            apply_catalog_build_state_commit(&mut connection, &return_command).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn coverage_plan_replacement_rejects_coordinated_durable_drift() {
+        let corrupt = |statement: &str| {
+            let (mut connection, _) = scheduled_database();
+            let current = load_catalog_build_state(&connection).unwrap().unwrap();
+            apply_catalog_build_state_commit(
+                &mut connection,
+                &CatalogBuildStateCommand::replace_coverage_plan(
+                    current.coverage_plan_replacement_expectation().unwrap(),
+                    replacement_plan(0),
+                    30,
+                    31,
+                ),
+            )
+            .unwrap()
+            .unwrap();
+            connection
+                .execute_batch(
+                    "DROP TRIGGER catalog_plan_replacements_no_update; \
+                     PRAGMA foreign_keys = OFF; \
+                     PRAGMA ignore_check_constraints = ON;",
+                )
+                .unwrap();
+            connection.execute_batch(statement).unwrap();
+            load_catalog_build_state(&connection).unwrap_err()
+        };
+
+        assert!(corrupt(
+            "UPDATE catalog_plan_replacements SET previous_epoch = previous_epoch + 1;"
+        )
+        .to_string()
+        .contains("replacement"));
+        assert!(corrupt(
+            "UPDATE catalog_plan_replacements SET predecessor_state_commit_seq = replacement_commit_seq;"
+        )
+        .to_string()
+        .contains("replacement"));
+        assert!(
+            corrupt("UPDATE change_log SET payload = x'7b7d' WHERE schema_version = 11;")
+                .to_string()
+                .contains("replacement")
+        );
+    }
+
+    #[test]
+    fn cold_plan_replacement_preserves_terminal_failure_and_recovery_lineage() {
+        let replaced = |connection: &mut Connection| {
+            let current = load_catalog_build_state(connection).unwrap().unwrap();
+            apply_catalog_build_state_commit(
+                connection,
+                &CatalogBuildStateCommand::replace_coverage_plan(
+                    current.coverage_plan_replacement_expectation().unwrap(),
+                    other_plan(),
+                    30,
+                    31,
+                ),
+            )
+            .unwrap()
+            .unwrap();
+        };
+
+        let (mut source_connection, _) = scheduled_database();
+        replaced(&mut source_connection);
+        let building = load_catalog_build_state(&source_connection)
+            .unwrap()
+            .unwrap();
+        let retrying = CatalogBuildStateCommand::mark_initial_build_source_retrying(
+            building.initial_source_expectation().unwrap(),
+            "replacement_source_retrying",
+            40,
+            41,
+        );
+        apply_catalog_build_state_commit(&mut source_connection, &retrying)
+            .unwrap()
+            .unwrap();
+        let retrying = load_catalog_build_state(&source_connection)
+            .unwrap()
+            .unwrap();
+        let unavailable = CatalogBuildStateCommand::degrade_initial_build_source(
+            retrying.initial_source_expectation().unwrap(),
+            "replacement_source_unavailable",
+            50,
+            51,
+        );
+        apply_catalog_build_state_commit(&mut source_connection, &unavailable)
+            .unwrap()
+            .unwrap();
+        let degraded = load_catalog_build_state(&source_connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(degraded.readiness.state, CatalogReadinessPhase::Degraded);
+        assert_eq!(degraded.readiness.epoch, 2);
+        assert_eq!(degraded.readiness.attempt, 1);
+        let recover = CatalogBuildStateCommand::retry_terminal_refresh(
+            degraded.expectation().unwrap(),
+            60,
+            61,
+        );
+        apply_catalog_build_state_commit(&mut source_connection, &recover)
+            .unwrap()
+            .unwrap();
+        let recovered = load_catalog_build_state(&source_connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.readiness.state, CatalogReadinessPhase::Building);
+        assert_eq!(recovered.readiness.epoch, 2);
+        assert_eq!(recovered.readiness.attempt, 2);
+        assert_eq!(
+            recovered.recovery_origin,
+            Some(CatalogDurableBuildPhase::Degraded)
+        );
+
+        let (mut integrity_connection, _) = scheduled_database();
+        replaced(&mut integrity_connection);
+        let building = load_catalog_build_state(&integrity_connection)
+            .unwrap()
+            .unwrap();
+        let failure = CatalogBuildStateCommand::fail_initial_build_integrity(
+            building.initial_integrity_expectation().unwrap(),
+            "replacement_integrity_failure",
+            40,
+            41,
+        );
+        apply_catalog_build_state_commit(&mut integrity_connection, &failure)
+            .unwrap()
+            .unwrap();
+        let failed = load_catalog_build_state(&integrity_connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.readiness.state, CatalogReadinessPhase::Error);
+        assert_eq!(failed.readiness.epoch, 2);
+        let recover =
+            CatalogBuildStateCommand::retry_terminal_refresh(failed.expectation().unwrap(), 50, 51);
+        apply_catalog_build_state_commit(&mut integrity_connection, &recover)
+            .unwrap()
+            .unwrap();
+        let recovered = load_catalog_build_state(&integrity_connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.readiness.state, CatalogReadinessPhase::Building);
+        assert_eq!(recovered.readiness.epoch, 2);
+        assert_eq!(recovered.readiness.attempt, 2);
+        assert_eq!(
+            recovered.recovery_origin,
+            Some(CatalogDurableBuildPhase::Error)
+        );
     }
 
     #[test]
@@ -10095,7 +11760,7 @@ mod tests {
 
         match WriterRuntime::start(database_path) {
             Err(EngineError::InvalidCommit(message)) => {
-                assert!(message.contains("content digest"));
+                assert!(message.contains("content digest"), "{message}");
             }
             Err(other) => panic!("unexpected writer restart error: {other}"),
             Ok(mut runtime) => {
@@ -10137,7 +11802,10 @@ mod tests {
             )
             .unwrap();
         let error = load_catalog_build_state(&connection).unwrap_err();
-        assert!(error.to_string().contains("plan identity exceeds"));
+        assert!(
+            error.to_string().contains("plan identity exceeds"),
+            "{error}"
+        );
         connection
             .execute(
                 "UPDATE catalog_coverage_plans SET coverage_plan_id = ?1",

@@ -92,11 +92,12 @@ impl CatalogSnapshotRetirementExpectation {
             || self.attempt == 0
             || self.state_commit_seq == 0
             || self.retired_prefix_len >= MAX_RETAINED_REFRESH_LINEAGE_DEPTH
-            || target.coverage_plan_id != self.coverage_plan_id
             || successor.coverage_plan_id != self.coverage_plan_id
             || target.pack_contract_version != successor.pack_contract_version
-            || target.readiness_epoch != self.epoch
             || successor.readiness_epoch != self.epoch
+            || target.readiness_epoch > successor.readiness_epoch
+            || (target.coverage_plan_id != successor.coverage_plan_id
+                && target.readiness_epoch >= successor.readiness_epoch)
             || target.complete_commit >= successor.complete_commit
             || successor.complete_commit != self.state_commit_seq
             || self.contract_selection.query_pack_version != Some(successor.pack_contract_version)
