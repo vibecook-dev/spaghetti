@@ -739,6 +739,8 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                                     MAX_RECONCILE_PASSES_PER_WAKE,
                                     &[cancellation.clone(), refresh_cancellation],
                                 );
+                                let mut summary = summary;
+                                schedule_catalog_refresh_after_drain(&engine, &mut summary);
                                 update_polling_after_drain(&mut polling, &summary);
                                 handle_backend_failure(
                                     &summary,
@@ -805,7 +807,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                         }
                     }
                     let Some(engine) = engine.upgrade() else { break; };
-                    let summary = drain_pending(
+                    let mut summary = drain_pending(
                         &engine,
                         &adapter,
                         &options,
@@ -813,6 +815,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                         MAX_RECONCILE_PASSES_PER_WAKE,
                         std::slice::from_ref(&cancellation),
                     );
+                    schedule_catalog_refresh_after_drain(&engine, &mut summary);
                     update_polling_after_drain(&mut polling, &summary);
                     handle_backend_failure(
                         &summary,
@@ -848,7 +851,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                         DirtyReason::PollDetectedChange,
                     );
                 }
-                let summary = drain_pending(
+                let mut summary = drain_pending(
                     &engine,
                     &adapter,
                     &options,
@@ -856,6 +859,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                     MAX_RECONCILE_PASSES_PER_WAKE,
                     std::slice::from_ref(&cancellation),
                 );
+                schedule_catalog_refresh_after_drain(&engine, &mut summary);
                 update_polling_after_drain(&mut polling, &summary);
                 handle_backend_failure(
                     &summary,
@@ -900,7 +904,7 @@ fn drain_until_caught_up<A: AgentAdapter>(
     cancellations: &[QueryCancellationToken],
 ) -> DrainSummary {
     loop {
-        let summary = drain_pending(
+        let mut summary = drain_pending(
             engine,
             adapter,
             options,
@@ -908,6 +912,7 @@ fn drain_until_caught_up<A: AgentAdapter>(
             MAX_RECONCILE_PASSES_PER_WAKE,
             cancellations,
         );
+        schedule_catalog_refresh_after_drain(engine, &mut summary);
         update_polling_after_drain(polling, &summary);
         handle_backend_failure(&summary, watcher, watcher_available, polling);
         if summary.result.is_err() || !summary.immediate_retry {
@@ -1189,7 +1194,10 @@ fn drain_pending<A: AgentAdapter>(
         match drain_pending_once(engine, adapter, options, topology, cancellations) {
             Ok(Some(drained)) => {
                 completed_passes += 1;
-                summary.changed |= drained.outcome.objects_changed > 0;
+                summary.changed |= drained.outcome.objects_registered > 0
+                    || drained.outcome.objects_changed > 0
+                    || drained.outcome.objects_removed > 0
+                    || drained.outcome.commits > 0;
                 summary.watcher_failure |= matches!(
                     drained.reason,
                     DirtyReason::WatcherOverflow
@@ -1352,6 +1360,14 @@ fn update_polling_after_drain(policy: &mut PollingPolicy, summary: &DrainSummary
         policy.record_watcher_failure();
     } else if summary.watcher_success {
         policy.record_watcher_success();
+    }
+}
+
+fn schedule_catalog_refresh_after_drain(engine: &SpaghettiEngineCore, summary: &mut DrainSummary) {
+    if summary.result.is_ok() && summary.changed {
+        if let Err(error) = engine.request_configured_catalog_refresh() {
+            summary.result = Err(error);
+        }
     }
 }
 

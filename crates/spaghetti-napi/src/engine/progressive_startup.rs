@@ -80,7 +80,8 @@ impl SpaghettiEngineCore {
                     access_policy_digest,
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let refresh_sources = catalog_sources.clone();
 
         // Register and freeze catalog authority before any watcher thread can
         // begin a full-history scan.
@@ -131,19 +132,52 @@ impl SpaghettiEngineCore {
             }
         };
 
-        check_cancelled(&cancellation)?;
-        let mut starting = Vec::with_capacity(prepared_supervisors.len());
-        for supervisor in prepared_supervisors {
+        let refresh_enabled = matches!(
+            &catalog,
+            ConfiguredCatalogStartupOutcome::Catalog(
+                CatalogBuildOutcome::LastCompleteRetained | CatalogBuildOutcome::Published { .. }
+            )
+        );
+        if refresh_enabled {
+            self.stage_configured_catalog_refresh(refresh_sources)?;
+        }
+
+        let start_result = (|| {
             check_cancelled(&cancellation)?;
-            starting.push(supervisor.begin()?);
+            let mut starting = Vec::with_capacity(prepared_supervisors.len());
+            for supervisor in prepared_supervisors {
+                check_cancelled(&cancellation)?;
+                starting.push(supervisor.begin()?);
+            }
+            let mut started = Vec::with_capacity(starting.len());
+            for supervisor in starting {
+                started.push(supervisor.finish()?);
+            }
+            check_cancelled(&cancellation)?;
+            Ok::<_, EngineError>(started)
+        })();
+        let started = match start_result {
+            Ok(started) => started,
+            Err(error) => {
+                if refresh_enabled {
+                    let _ = self.clear_configured_catalog_refresh();
+                }
+                return Err(error);
+            }
+        };
+        if refresh_enabled {
+            if let Err(error) = self.activate_configured_catalog_refresh() {
+                let _ = self.clear_configured_catalog_refresh();
+                return Err(error);
+            }
         }
-        let mut started = Vec::with_capacity(starting.len());
-        for supervisor in starting {
-            started.push(supervisor.finish()?);
-        }
-        check_cancelled(&cancellation)?;
         let supervisors_started = started.len();
-        self.install_started_observation_supervisors(started)?;
+        if let Err(error) = self.install_started_observation_supervisors(started) {
+            if refresh_enabled {
+                let _ = self.clear_configured_catalog_refresh();
+            }
+            return Err(error);
+        }
 
         Ok(ConfiguredObservationStartupOutcome {
             catalog,
@@ -430,6 +464,10 @@ mod tests {
         assert_eq!(source_count, 2);
         assert_eq!(object_count, 2);
         assert_eq!(engine.status().observation.supervisors_running, 2);
+        assert!(
+            !engine.configured_catalog_refresh_is_active(),
+            "candidate sources must not start the promoted catalog refresh worker"
+        );
         engine.shutdown().unwrap();
     }
 

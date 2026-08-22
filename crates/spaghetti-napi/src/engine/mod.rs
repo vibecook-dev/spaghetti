@@ -9,6 +9,7 @@ mod capability_query;
 mod catalog_build;
 mod catalog_publication;
 mod catalog_query;
+mod catalog_refresh;
 mod catalog_retention;
 mod catalog_state;
 mod commit;
@@ -81,6 +82,7 @@ pub(crate) use catalog_query::{
     CatalogPageQueryRequest, CatalogReadinessQueryRequest, CatalogReadinessQueryResult,
     CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
 };
+use catalog_refresh::ConfiguredCatalogRefreshRuntime;
 use catalog_retention::{CatalogSnapshotRetirementCommand, CatalogSnapshotRetirementReceipt};
 use catalog_state::CatalogBuildStateCommand;
 pub use commit::{
@@ -548,6 +550,7 @@ pub struct SpaghettiEngineCore {
     source_telemetry: Arc<SourceTelemetry>,
     observation_workers: Mutex<Option<Arc<rayon::ThreadPool>>>,
     supervisors: Mutex<Vec<ObservationSupervisor>>,
+    catalog_refresh: Mutex<ConfiguredCatalogRefreshRuntime>,
     lifecycle: Mutex<Lifecycle>,
     commit_notifications: CommitNotifications,
     stopped: Condvar,
@@ -719,6 +722,7 @@ impl SpaghettiEngineCore {
             source_telemetry: SourceTelemetry::new(),
             observation_workers: Mutex::new(Some(Arc::new(observation_workers))),
             supervisors: Mutex::new(Vec::new()),
+            catalog_refresh: Mutex::new(ConfiguredCatalogRefreshRuntime::default()),
             lifecycle: Mutex::new(Lifecycle {
                 phase: LifecyclePhase::Running,
                 runtime: Some(EngineRuntime {
@@ -2341,16 +2345,20 @@ impl SpaghettiEngineCore {
     }
 
     pub fn stop_observation_supervisor(&self, adapter_id: &str) -> Result<bool, EngineError> {
+        let refresh_result = self.clear_catalog_refresh_for_adapter(adapter_id);
         let mut supervisors = self.lock_supervisors();
         let Some(index) = supervisors
             .iter()
             .position(|supervisor| supervisor.adapter_id() == adapter_id)
         else {
+            refresh_result?;
             return Ok(false);
         };
         let mut supervisor = supervisors.swap_remove(index);
         drop(supervisors);
-        supervisor.shutdown()?;
+        let supervisor_result = supervisor.shutdown();
+        refresh_result?;
+        supervisor_result?;
         Ok(true)
     }
 
@@ -2453,6 +2461,9 @@ impl SpaghettiEngineCore {
         self.commit_notifications.stop();
 
         let mut first_error = None;
+        if let Err(error) = self.clear_configured_catalog_refresh() {
+            first_error.get_or_insert(error);
+        }
         let mut supervisors = {
             let mut owned = self.lock_supervisors();
             std::mem::take(&mut *owned)

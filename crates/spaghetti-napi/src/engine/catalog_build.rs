@@ -41,6 +41,10 @@ impl CatalogConfiguredSource {
             access_policy_digest,
         }
     }
+
+    pub(crate) fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
