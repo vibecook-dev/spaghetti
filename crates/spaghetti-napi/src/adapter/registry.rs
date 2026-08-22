@@ -3183,6 +3183,17 @@ pub(crate) mod tests {
         assert!(listing.selected_entry_count() >= 1);
         while listing.read_next_member().unwrap().is_some() {}
         assert!(listing.member_reads_complete());
+        let verification_binding = host
+            .bind_directory_relation_source("descendant-objects", &identity, AccessPhase::Initial)
+            .unwrap();
+        let verification = match host
+            .scan_directory_membership(verification_binding, Some(&listing))
+            .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected a verification snapshot, got {other:?}"),
+        };
+        listing.confirm_membership_unchanged(verification).unwrap();
         let membership = ScopedRelationMembershipObservation::from_directory_listing(listing)
             .expect("membership observation");
         admission
@@ -4598,6 +4609,21 @@ pub(crate) mod tests {
             .all(|entry| entry.operation == AccessOperation::ObjectRead
                 && entry.reserved_bytes == 1_024
                 && entry.outcome == AccessOutcome::Available));
+        let (_refresh_verify_plan, refresh_verify_binding) = make_bound(b"secret-session-id");
+        let refresh_verification = match scan_observation_directory_membership_for_test(
+            refresh_verify_binding,
+            Some(&refreshed),
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected a final refresh verification snapshot, got {other:?}"),
+        };
+        refreshed
+            .confirm_membership_unchanged(refresh_verification)
+            .unwrap();
+        let observation =
+            ScopedRelationMembershipObservation::from_directory_listing(refreshed).unwrap();
 
         let (capacity_plan, capacity_binding) = make_bound(b"secret-session-id");
         let mut capacity_listing =
@@ -4607,6 +4633,19 @@ pub(crate) mod tests {
             };
         while capacity_listing.read_next_member().unwrap().is_some() {}
         assert!(capacity_listing.member_reads_complete());
+        let (_capacity_verify_plan, capacity_verify_binding) = make_bound(b"secret-session-id");
+        let capacity_verification = match scan_observation_directory_membership_for_test(
+            capacity_verify_binding,
+            Some(&capacity_listing),
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected a capacity verification snapshot, got {other:?}"),
+        };
+        capacity_listing
+            .confirm_membership_unchanged(capacity_verification)
+            .unwrap();
         let capacity_observation =
             ScopedRelationMembershipObservation::from_directory_listing(capacity_listing).unwrap();
         let mut undersized_admission = admission_lane_for_objects(2);
@@ -4654,6 +4693,36 @@ pub(crate) mod tests {
             AccessOutcome::Failed
         );
 
+        let late_root = approved_root
+            .root
+            .join("sessions/late-member-session-id/children");
+        std::fs::create_dir_all(&late_root).unwrap();
+        std::fs::write(late_root.join("first.jsonl"), b"first").unwrap();
+        let (late_plan, late_binding) = make_bound(b"late-member-session-id");
+        let mut late_listing =
+            match scan_observation_directory_membership_for_test(late_binding, None).unwrap() {
+                ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+                other => panic!("expected a late-member listing, got {other:?}"),
+            };
+        while late_listing.read_next_member().unwrap().is_some() {}
+        assert!(late_listing.member_reads_complete());
+        std::fs::write(late_root.join("created-after-read.jsonl"), b"late").unwrap();
+        let (_late_verify_plan, late_verify_binding) = make_bound(b"late-member-session-id");
+        let late_verification = match scan_observation_directory_membership_for_test(
+            late_verify_binding,
+            Some(&late_listing),
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected a changed late-member snapshot, got {other:?}"),
+        };
+        assert!(late_listing
+            .confirm_membership_unchanged(late_verification)
+            .is_err());
+        assert!(ScopedRelationMembershipObservation::from_directory_listing(late_listing).is_err());
+        assert!(late_plan.report().verify_digest());
+
         let oversized_root = approved_root
             .root
             .join("sessions/oversized-session-id/children");
@@ -4690,6 +4759,20 @@ pub(crate) mod tests {
             assert!(!oversized_rendered.contains(private));
         }
         assert!(oversized_listing.member_reads_complete());
+        let (_oversized_verify_plan, oversized_verify_binding) =
+            make_bound(b"oversized-session-id");
+        let oversized_verification = match scan_observation_directory_membership_for_test(
+            oversized_verify_binding,
+            Some(&oversized_listing),
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected an oversized verification snapshot, got {other:?}"),
+        };
+        oversized_listing
+            .confirm_membership_unchanged(oversized_verification)
+            .unwrap();
         assert!(
             ScopedRelationMembershipObservation::from_directory_listing(oversized_listing).is_ok()
         );
@@ -4877,8 +4960,6 @@ pub(crate) mod tests {
             );
         }
 
-        let observation =
-            ScopedRelationMembershipObservation::from_directory_listing(refreshed).unwrap();
         let mut admission = admission_lane_for_objects(3);
         admission
             .record_relation_membership(7, ScopedAppendDeliveryPhase::Correction, observation)
@@ -5040,6 +5121,19 @@ pub(crate) mod tests {
             other => panic!("expected a decoded unknown record, got {other:?}"),
         }
         let nested_source = nested.source().clone();
+        let (_present_verify_plan, present_verify_binding) = make_bound(b"secret-session-id");
+        let present_verification = match scan_observation_directory_membership_for_test(
+            present_verify_binding,
+            Some(&present_listing),
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected a present-member verification snapshot, got {other:?}"),
+        };
+        present_listing
+            .confirm_membership_unchanged(present_verification)
+            .unwrap();
         let observation =
             ScopedRelationMembershipObservation::from_directory_listing(present_listing).unwrap();
         let mut admission = admission_lane_for_objects(2);
@@ -5106,24 +5200,31 @@ pub(crate) mod tests {
         for private in ["retained-child-session-id", "child.jsonl", "nested-child"] {
             assert!(!retained_rendered.contains(private));
         }
-        let retained_observation =
-            ScopedRelationMembershipObservation::from_directory_listing(retained_listing).unwrap();
+        let (_retained_verify_plan, retained_verify_binding) =
+            make_bound(b"retained-child-session-id");
+        let retained_verification = match scan_observation_directory_membership_for_test(
+            retained_verify_binding,
+            Some(&retained_listing),
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected a changed retained-member snapshot, got {other:?}"),
+        };
+        assert!(retained_listing
+            .confirm_membership_unchanged(retained_verification)
+            .is_err());
+        assert!(
+            ScopedRelationMembershipObservation::from_directory_listing(retained_listing).is_err()
+        );
         let mut retained_admission = admission_lane_for_objects(2);
-        retained_admission
-            .record_relation_membership(
-                8,
-                ScopedAppendDeliveryPhase::Bootstrap,
-                retained_observation,
-            )
-            .unwrap();
-        let retained_receipt = retained_admission
+        let retained_failure = retained_admission
             .admit_directory_member(8, ScopedAppendDeliveryPhase::Bootstrap, retained_lifecycle)
-            .unwrap();
-        assert_eq!(retained_receipt.data_events, 1);
-        assert!(matches!(
-            retained_admission.pop_next(),
-            Some(ScopedQueuedObservationFrame::Decoded { .. })
-        ));
+            .unwrap_err();
+        assert_eq!(
+            retained_failure.error,
+            ScopedAdmissionError::InvalidCoverage
+        );
         assert!(retained_admission.pop_next().is_none());
         let retained_report = retained_plan.report();
         let retained_relation = retained_report
@@ -5172,6 +5273,20 @@ pub(crate) mod tests {
         for private in ["oversized-child-session-id", "large.jsonl"] {
             assert!(!oversized_rendered.contains(private));
         }
+        let (_oversized_verify_plan, oversized_verify_binding) =
+            make_bound(b"oversized-child-session-id");
+        let oversized_verification = match scan_observation_directory_membership_for_test(
+            oversized_verify_binding,
+            Some(&oversized_listing),
+        )
+        .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected an oversized-member verification snapshot, got {other:?}"),
+        };
+        oversized_listing
+            .confirm_membership_unchanged(oversized_verification)
+            .unwrap();
         let oversized_observation =
             ScopedRelationMembershipObservation::from_directory_listing(oversized_listing).unwrap();
         let mut oversized_admission = admission_lane_for_objects(2);

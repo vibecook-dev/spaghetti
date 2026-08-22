@@ -577,6 +577,9 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "confined_relative_path_from_key(",
         "read_stable_file_confined(",
         "directory_member_stamp_matches(",
+        "confirm_membership_unchanged(",
+        "verification.checkpoint != self.checkpoint",
+        "!self.membership_revalidated",
         ".finalize_for_membership()",
     )
     if any(

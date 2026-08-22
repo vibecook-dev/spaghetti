@@ -327,6 +327,7 @@ pub(crate) struct ScopedObservationDirectoryListing {
     completed_members: Vec<ScopedObservationDirectoryMemberIdentity>,
     next_member_read: usize,
     member_read_failed: bool,
+    membership_revalidated: bool,
 }
 
 #[derive(Debug)]
@@ -496,6 +497,7 @@ impl fmt::Debug for ScopedObservationDirectoryListing {
             .field("member_read_count", &self.members.len())
             .field("completed_member_reads", &self.completed_members.len())
             .field("member_read_failed", &self.member_read_failed)
+            .field("membership_revalidated", &self.membership_revalidated)
             .field("has_membership_source", &true)
             .finish_non_exhaustive()
     }
@@ -790,6 +792,7 @@ impl ScopedObservationDirectoryScanAuthority {
                         completed_members: Vec::new(),
                         next_member_read: 0,
                         member_read_failed: false,
+                        membership_revalidated: false,
                     },
                 )))
             }
@@ -1048,6 +1051,31 @@ impl ScopedObservationDirectoryListing {
             && self.completed_members.len() == self.members.len()
     }
 
+    /// Bind the retained child reads to one final audited directory snapshot.
+    /// The verification listing must come from a fresh authorized scan using
+    /// this listing as its previous checkpoint. It is intentionally consumed:
+    /// its child-read authority cannot later be substituted for the authority
+    /// under which the retained bytes were read.
+    pub(crate) fn confirm_membership_unchanged(
+        &mut self,
+        verification: ScopedObservationDirectoryListing,
+    ) -> Result<(), ScopedObservationRuntimeSourceError> {
+        if !self.member_reads_complete()
+            || self.membership_revalidated
+            || verification.identity != self.identity
+            || verification.checkpoint != self.checkpoint
+            || verification.root_moved
+            || !verification.changes.is_empty()
+            || verification.member_read_failed
+            || verification.next_member_read != 0
+            || !verification.completed_members.is_empty()
+        {
+            return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+        }
+        self.membership_revalidated = true;
+        Ok(())
+    }
+
     /// Observe one already-bootstrapped selected child through the declaration-
     /// owned ReplaceDocument framing and the store-agnostic decode runtime.
     /// The only native bytes consumed here are those retained by the listing's
@@ -1084,7 +1112,7 @@ impl ScopedObservationDirectoryListing {
     pub(super) fn finalize_for_membership(
         &mut self,
     ) -> Option<BTreeSet<ScopedSourceObjectIdentity>> {
-        if !self.member_reads_complete() {
+        if !self.member_reads_complete() || !self.membership_revalidated {
             return None;
         }
         let mut sources = BTreeSet::new();
@@ -2147,6 +2175,7 @@ impl ScopedObservationDirectoryListing {
             completed_members: Vec::new(),
             next_member_read: 0,
             member_read_failed: false,
+            membership_revalidated: true,
         }
     }
 }
