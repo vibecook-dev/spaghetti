@@ -11,10 +11,13 @@ use std::time::{Duration, Instant};
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, BoundedNativeEvidence,
     CapabilityId, DecodeContext, DecodeDisposition, DecoderId, FactBatch, FactSemanticContext,
-    RawRetentionPolicy, RecordMappingDisposition, SourceAccess, SourceInstance,
+    RawRetentionPolicy, RecordMappingDisposition, ScopeJoinCandidate, SourceAccess, SourceInstance,
     SourceObjectDescriptor,
 };
 use crate::source::SourceRecord;
+
+const MAX_SCOPE_JOIN_CANDIDATES_PER_RECORD: usize = 256;
+const MAX_SCOPE_JOIN_RETAINED_BYTES_PER_RECORD: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DecodeRuntimeLimits {
@@ -42,6 +45,7 @@ pub(crate) struct DecodedFactBatch {
     pub quarantined: bool,
     pub unscoped_permanent_diagnostic: bool,
     pub diagnostic_coverage_gaps: Vec<CapabilityId>,
+    pub scope_join_candidates: Vec<ScopeJoinCandidate>,
 }
 
 /// A decode attempt always reports timing, including controlled failures.
@@ -91,7 +95,7 @@ pub(crate) fn decode_record<A: AgentAdapter + ?Sized>(
 
     let adapter_started = Instant::now();
     let adapter_result = catch_unwind(AssertUnwindSafe(|| {
-        request.adapter.decode_with_access(
+        let disposition = request.adapter.decode_with_access(
             DecodeContext {
                 decoder: request.decoder,
                 object_context: request.object_context,
@@ -100,7 +104,17 @@ pub(crate) fn decode_record<A: AgentAdapter + ?Sized>(
             request.record,
             &mut batch,
             request.source_access,
-        )
+        )?;
+        let candidates = request.adapter.join_scope_relations(
+            DecodeContext {
+                decoder: request.decoder,
+                object_context: request.object_context,
+                decoder_state: request.decoder_state,
+            },
+            request.record,
+            &batch,
+        )?;
+        Ok::<_, AdapterError>((disposition, candidates))
     }));
     let adapter_elapsed = adapter_started.elapsed();
     let fact_build_time = batch.fact_build_time();
@@ -114,7 +128,21 @@ pub(crate) fn decode_record<A: AgentAdapter + ?Sized>(
             "adapter panicked at the controlled decode boundary",
         )),
         Ok(Err(error)) => Err(error),
-        Ok(Ok(disposition)) => finish_decode(request.record, request.retention, disposition, batch),
+        Ok(Ok((disposition, candidates))) => {
+            finish_decode(request.record, request.retention, disposition, batch).and_then(
+                |mut decoded| {
+                    validate_scope_join_candidates(
+                        request.record,
+                        request.semantic_context,
+                        decoded.disposition,
+                        &decoded.batch,
+                        &candidates,
+                    )?;
+                    decoded.scope_join_candidates = candidates;
+                    Ok(decoded)
+                },
+            )
+        }
     };
     DecodeRuntimeAttempt {
         result,
@@ -172,7 +200,66 @@ fn finish_decode(
         quarantined,
         unscoped_permanent_diagnostic,
         diagnostic_coverage_gaps,
+        scope_join_candidates: Vec::new(),
     })
+}
+
+fn validate_scope_join_candidates(
+    record: &SourceRecord,
+    semantic_context: &FactSemanticContext,
+    disposition: DecodeDisposition,
+    batch: &FactBatch,
+    candidates: &[ScopeJoinCandidate],
+) -> Result<(), AdapterError> {
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    if disposition != DecodeDisposition::Applied
+        || candidates.len() > MAX_SCOPE_JOIN_CANDIDATES_PER_RECORD
+    {
+        return Err(AdapterError::invalid_contract(
+            "scope join candidates are invalid for the decoded record",
+        ));
+    }
+    let retained_bytes = candidates.iter().try_fold(0_usize, |total, candidate| {
+        total
+            .checked_add(candidate.retained_bytes())
+            .ok_or_else(|| AdapterError::invalid_contract("scope join candidate bytes overflow"))
+    })?;
+    if retained_bytes > MAX_SCOPE_JOIN_RETAINED_BYTES_PER_RECORD {
+        return Err(AdapterError::invalid_contract(
+            "scope join candidates exceed the common retained-byte bound",
+        ));
+    }
+    if candidates
+        .iter()
+        .enumerate()
+        .any(|(index, candidate)| candidates[..index].contains(candidate))
+    {
+        return Err(AdapterError::invalid_contract(
+            "scope join candidates must be unique",
+        ));
+    }
+
+    let expected_source_record_id = semantic_context.source_record_id(record)?;
+    let semantic_revisions = batch
+        .facts()
+        .iter()
+        .filter_map(|envelope| envelope.semantic_revision)
+        .collect::<Vec<_>>();
+    if candidates.iter().any(|candidate| {
+        candidate.evidence().iter().any(|evidence| {
+            !semantic_revisions.iter().any(|semantic| {
+                semantic.source_record_id == expected_source_record_id
+                    && semantic.semantic_revision_ref == *evidence
+            })
+        })
+    }) {
+        return Err(AdapterError::invalid_contract(
+            "scope join evidence is not owned by the decoded record",
+        ));
+    }
+    Ok(())
 }
 
 const LEGACY_IGNORED_REASON_CODE: &str = "known_record_ignored";
@@ -374,7 +461,8 @@ impl SourceAccess for DecoderDependenciesDenied {
 mod tests {
     use crate::adapter::{
         AdapterDiagnostic, AdapterId, AdapterManifest, DiscoveryContext, EntityKey, EvidenceKind,
-        EvidenceStrength, Fact, RunEvidenceFact, SourceInstance, SourceInstanceKey,
+        EvidenceStrength, Fact, FactRevisionId, RunEvidenceFact, ScopeJoinCandidate,
+        ScopeJoinIdentityInput, SemanticRevisionRef, SourceInstance, SourceInstanceKey,
         SourceInstanceSpec, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest,
         SourceQuery, SourceRows, SourceSnapshot, StreamId, StreamSpec,
     };
@@ -387,6 +475,16 @@ mod tests {
         StatefulUnknown,
         AppliedEmpty,
         RetryWithFact,
+        Joined,
+        Panic,
+    }
+
+    #[derive(Clone, Copy)]
+    enum FixtureJoinMode {
+        None,
+        Valid,
+        ForeignEvidence,
+        Duplicate,
         Panic,
     }
 
@@ -401,6 +499,7 @@ mod tests {
         manifest: AdapterManifest,
         mode: FixtureMode,
         bootstrap_mode: FixtureBootstrapMode,
+        join_mode: FixtureJoinMode,
     }
 
     impl FixtureAdapter {
@@ -418,11 +517,17 @@ mod tests {
                 },
                 mode,
                 bootstrap_mode: FixtureBootstrapMode::Unsupported,
+                join_mode: FixtureJoinMode::None,
             }
         }
 
         fn with_bootstrap_mode(mut self, bootstrap_mode: FixtureBootstrapMode) -> Self {
             self.bootstrap_mode = bootstrap_mode;
+            self
+        }
+
+        fn with_join_mode(mut self, join_mode: FixtureJoinMode) -> Self {
+            self.join_mode = join_mode;
             self
         }
     }
@@ -468,6 +573,25 @@ mod tests {
             match self.mode {
                 FixtureMode::AppliedEmpty => Ok(DecodeDisposition::Applied),
                 FixtureMode::Panic => panic!("fixture decode panic"),
+                FixtureMode::Joined => {
+                    output.push_derived(
+                        record,
+                        b"joined-run",
+                        Fact::RunEvidence(RunEvidenceFact {
+                            run: EntityKey::native(
+                                &AdapterId::new("decode-fixture").unwrap(),
+                                1,
+                                "run",
+                                b"joined-run",
+                            )?,
+                            kind: EvidenceKind::ActivityObserved,
+                            strength: EvidenceStrength::NativeActivity,
+                            native_state: None,
+                            source_time: None,
+                        }),
+                    )?;
+                    Ok(DecodeDisposition::Applied)
+                }
                 FixtureMode::StatefulUnknown | FixtureMode::RetryWithFact => {
                     output.push_derived(
                         record,
@@ -493,6 +617,56 @@ mod tests {
                         FixtureMode::RetryWithFact => DecodeDisposition::RetryTransient,
                         _ => unreachable!(),
                     })
+                }
+            }
+        }
+
+        fn join_scope_relations(
+            &self,
+            _context: DecodeContext<'_>,
+            _record: &SourceRecord,
+            decoded: &FactBatch,
+        ) -> Result<Vec<ScopeJoinCandidate>, AdapterError> {
+            let candidate = || {
+                let semantic = decoded
+                    .facts()
+                    .first()
+                    .and_then(|fact| fact.semantic_revision)
+                    .ok_or_else(|| AdapterError::invalid_contract("fixture join lacks evidence"))?;
+                let evidence =
+                    match self.join_mode {
+                        FixtureJoinMode::ForeignEvidence => SemanticRevisionRef::new(
+                            FactRevisionId::derive(
+                                &semantic.fact_id,
+                                1,
+                                b"foreign-private-revision",
+                            )
+                            .map_err(|_| {
+                                AdapterError::invalid_contract("fixture revision failed")
+                            })?,
+                        ),
+                        _ => semantic.semantic_revision_ref,
+                    };
+                ScopeJoinCandidate::new(
+                    "related-object",
+                    vec![ScopeJoinIdentityInput::new(
+                        "native-id",
+                        b"/Users/alice/private/session.jsonl".to_vec(),
+                    )
+                    .map_err(|_| AdapterError::invalid_contract("fixture input failed"))?],
+                    vec![evidence],
+                )
+                .map_err(|_| AdapterError::invalid_contract("fixture candidate failed"))
+            };
+            match self.join_mode {
+                FixtureJoinMode::None => Ok(Vec::new()),
+                FixtureJoinMode::Valid | FixtureJoinMode::ForeignEvidence => Ok(vec![candidate()?]),
+                FixtureJoinMode::Duplicate => {
+                    let candidate = candidate()?;
+                    Ok(vec![candidate.clone(), candidate])
+                }
+                FixtureJoinMode::Panic => {
+                    panic!("private join panic /Users/alice/private/session.jsonl")
                 }
             }
         }
@@ -691,6 +865,64 @@ mod tests {
             panic!("expected retained unknown fact");
         };
         assert!(raw_payload.is_empty());
+    }
+
+    #[test]
+    fn shared_decode_boundary_validates_bounded_scope_join_evidence() {
+        let record = record(b"joined");
+        let valid = run(
+            &FixtureAdapter::new(FixtureMode::Joined).with_join_mode(FixtureJoinMode::Valid),
+            &record,
+            None,
+            RawRetentionPolicy::None,
+        )
+        .result
+        .unwrap();
+        assert_eq!(valid.scope_join_candidates.len(), 1);
+        assert_eq!(
+            valid.scope_join_candidates[0].evidence(),
+            &[valid.batch.facts()[0]
+                .semantic_revision
+                .unwrap()
+                .semantic_revision_ref]
+        );
+        let debug = format!("{:?}", valid.scope_join_candidates[0]);
+        for private in ["/Users/", "alice", "private", "session.jsonl"] {
+            assert!(!debug.contains(private));
+        }
+
+        for mode in [FixtureJoinMode::ForeignEvidence, FixtureJoinMode::Duplicate] {
+            let result = run(
+                &FixtureAdapter::new(FixtureMode::Joined).with_join_mode(mode),
+                &record,
+                None,
+                RawRetentionPolicy::None,
+            )
+            .result;
+            let Err(error) = result else {
+                panic!("invalid scope join evidence must fail closed");
+            };
+            assert_eq!(error.class, AdapterErrorClass::InvalidContract);
+            for private in ["/Users/", "alice", "private", "session.jsonl"] {
+                assert!(!error.message.contains(private));
+            }
+        }
+
+        let result = run(
+            &FixtureAdapter::new(FixtureMode::Joined).with_join_mode(FixtureJoinMode::Panic),
+            &record,
+            None,
+            RawRetentionPolicy::None,
+        )
+        .result;
+        let Err(panic) = result else {
+            panic!("scope join panic must fail closed");
+        };
+        assert_eq!(panic.class, AdapterErrorClass::AdapterFatal);
+        assert_eq!(panic.code, "adapter_panic");
+        for private in ["/Users/", "alice", "private", "session.jsonl"] {
+            assert!(!panic.message.contains(private));
+        }
     }
 
     #[test]

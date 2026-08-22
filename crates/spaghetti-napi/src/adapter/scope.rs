@@ -7,12 +7,18 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use super::semantic::SemanticRevisionRef;
+
 pub const SCOPE_PROGRAM_SCHEMA_VERSION: u32 = 1;
 
 const MAX_SCOPE_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_LOCATOR_BYTES: usize = 4 * 1024;
 const MAX_BLOCKER_BYTES: usize = 16 * 1024;
+const MAX_SCOPE_JOIN_IDENTITY_INPUTS: usize = 32;
+const MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES: usize = 8 * 1024;
+const MAX_SCOPE_JOIN_IDENTITY_BYTES: usize = 64 * 1024;
+const MAX_SCOPE_JOIN_EVIDENCE_REFS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -25,6 +31,166 @@ impl ScopeContractError {
         Self {
             message: message.into(),
         }
+    }
+}
+
+/// One adapter-produced identity coordinate for a declared scoped relation.
+///
+/// Values remain private native material. They are neither serializable nor
+/// printable and cannot authorize source access without a matching promoted
+/// declaration and common-runtime access pass.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopeJoinIdentityInput {
+    name: String,
+    value: Vec<u8>,
+}
+
+impl ScopeJoinIdentityInput {
+    pub fn new(
+        name: impl Into<String>,
+        value: impl Into<Vec<u8>>,
+    ) -> Result<Self, ScopeContractError> {
+        let name = name.into();
+        let value = value.into();
+        validate_identifier("scope join identity input", &name)?;
+        if value.is_empty() || value.len() > MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES {
+            return Err(ScopeContractError::invalid(
+                "scope join identity value is empty or oversized",
+            ));
+        }
+        Ok(Self { name, value })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn value(&self) -> &[u8] {
+        &self.value
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.name.len().saturating_add(self.value.len())
+    }
+}
+
+impl std::fmt::Debug for ScopeJoinIdentityInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopeJoinIdentityInput")
+            .field("name", &self.name)
+            .field("value_bytes", &self.value.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A bounded adapter-native join result. The common runtime still validates
+/// the relation and exact ordered inputs against the selected program before
+/// rendering or opening anything. Every candidate must cite at least one
+/// semantic revision emitted from the supplied decoded record.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopeJoinCandidate {
+    relation_id: String,
+    identity_inputs: Vec<ScopeJoinIdentityInput>,
+    evidence: Vec<SemanticRevisionRef>,
+}
+
+impl ScopeJoinCandidate {
+    pub fn new(
+        relation_id: impl Into<String>,
+        identity_inputs: Vec<ScopeJoinIdentityInput>,
+        evidence: Vec<SemanticRevisionRef>,
+    ) -> Result<Self, ScopeContractError> {
+        let relation_id = relation_id.into();
+        validate_identifier("scope join relation id", &relation_id)?;
+        if identity_inputs.is_empty()
+            || identity_inputs.len() > MAX_SCOPE_JOIN_IDENTITY_INPUTS
+            || evidence.is_empty()
+            || evidence.len() > MAX_SCOPE_JOIN_EVIDENCE_REFS
+        {
+            return Err(ScopeContractError::invalid(
+                "scope join candidate shape is outside common bounds",
+            ));
+        }
+        let mut names = BTreeSet::new();
+        let mut retained_identity_bytes = 0_usize;
+        for input in &identity_inputs {
+            if !names.insert(input.name.as_str()) {
+                return Err(ScopeContractError::invalid(
+                    "scope join identity input names must be unique",
+                ));
+            }
+            retained_identity_bytes = retained_identity_bytes
+                .checked_add(input.retained_bytes())
+                .ok_or_else(|| {
+                    ScopeContractError::invalid("scope join identity input bytes overflow")
+                })?;
+        }
+        if retained_identity_bytes > MAX_SCOPE_JOIN_IDENTITY_BYTES {
+            return Err(ScopeContractError::invalid(
+                "scope join identity inputs exceed the common byte bound",
+            ));
+        }
+        let mut evidence_ids = BTreeSet::new();
+        if evidence
+            .iter()
+            .any(|reference| !evidence_ids.insert(reference.fact_revision_id))
+        {
+            return Err(ScopeContractError::invalid(
+                "scope join evidence references must be unique",
+            ));
+        }
+        Ok(Self {
+            relation_id,
+            identity_inputs,
+            evidence,
+        })
+    }
+
+    pub fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub fn identity_inputs(&self) -> &[ScopeJoinIdentityInput] {
+        &self.identity_inputs
+    }
+
+    pub fn evidence(&self) -> &[SemanticRevisionRef] {
+        &self.evidence
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.relation_id
+            .len()
+            .saturating_add(
+                self.identity_inputs
+                    .iter()
+                    .map(ScopeJoinIdentityInput::retained_bytes)
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                self.evidence
+                    .len()
+                    .saturating_mul(std::mem::size_of::<SemanticRevisionRef>()),
+            )
+    }
+}
+
+impl std::fmt::Debug for ScopeJoinCandidate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopeJoinCandidate")
+            .field("relation_id", &self.relation_id)
+            .field(
+                "identity_input_names",
+                &self
+                    .identity_inputs
+                    .iter()
+                    .map(ScopeJoinIdentityInput::name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("evidence_count", &self.evidence.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -837,5 +1003,52 @@ mod tests {
             .unwrap()
             .relative_selector = Some("../escape".to_string());
         assert!(manifest.validate().is_err());
+    }
+
+    #[test]
+    fn scope_join_candidates_are_bounded_unique_and_value_private() {
+        use crate::adapter::{CanonicalFactId, CanonicalSourceInstanceKey, FactRevisionId};
+
+        let source = CanonicalSourceInstanceKey::derive(1, b"scope-join-source").unwrap();
+        let fact = CanonicalFactId::native("fixture", &source, "fixture", b"fact").unwrap();
+        let evidence =
+            SemanticRevisionRef::new(FactRevisionId::derive(&fact, 1, b"revision").unwrap());
+        let private_value = b"/Users/alice/private/session.jsonl".to_vec();
+        let candidate = ScopeJoinCandidate::new(
+            "related-object",
+            vec![ScopeJoinIdentityInput::new("native-id", private_value.clone()).unwrap()],
+            vec![evidence],
+        )
+        .unwrap();
+
+        assert_eq!(candidate.relation_id(), "related-object");
+        assert_eq!(candidate.identity_inputs()[0].value(), private_value);
+        assert_eq!(candidate.evidence(), &[evidence]);
+        let debug = format!("{candidate:?}");
+        for private in ["/Users/", "alice", "private", "session.jsonl"] {
+            assert!(!debug.contains(private));
+        }
+
+        let duplicate_name = ScopeJoinCandidate::new(
+            "related-object",
+            vec![
+                ScopeJoinIdentityInput::new("native-id", b"one".to_vec()).unwrap(),
+                ScopeJoinIdentityInput::new("native-id", b"two".to_vec()).unwrap(),
+            ],
+            vec![evidence],
+        )
+        .unwrap_err();
+        assert!(duplicate_name.to_string().contains("must be unique"));
+        assert!(ScopeJoinIdentityInput::new(
+            "native-id",
+            vec![0; MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES + 1],
+        )
+        .is_err());
+        assert!(ScopeJoinCandidate::new(
+            "related-object",
+            vec![ScopeJoinIdentityInput::new("native-id", b"one".to_vec()).unwrap()],
+            vec![evidence, evidence],
+        )
+        .is_err());
     }
 }

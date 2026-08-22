@@ -9,7 +9,7 @@ use crate::source::{
     SqliteSnapshotConfig,
 };
 
-use super::scope::ScopeProgramManifest;
+use super::scope::{ScopeJoinCandidate, ScopeProgramManifest};
 use super::support::AdapterSupportBinding;
 use super::FactBatch;
 
@@ -654,6 +654,21 @@ pub trait AgentAdapter: Send + Sync + 'static {
     ) -> Result<DecodeDisposition, AdapterError> {
         self.decode(context, record, output)
     }
+
+    /// Interpret an already-decoded record into bounded candidate parameters
+    /// for declared scope relations. This pure seam receives no source-access
+    /// capability. The common decode boundary validates that every returned
+    /// candidate cites semantic evidence emitted from this exact record; a
+    /// later authorized scope pass must still validate the declared relation,
+    /// inputs, locator, and budget before native I/O.
+    fn join_scope_relations(
+        &self,
+        _context: DecodeContext<'_>,
+        _record: &SourceRecord,
+        _decoded: &FactBatch,
+    ) -> Result<Vec<ScopeJoinCandidate>, AdapterError> {
+        Ok(Vec::new())
+    }
 }
 
 impl<T> AgentAdapter for std::sync::Arc<T>
@@ -717,6 +732,15 @@ where
         source_access: &dyn SourceAccess,
     ) -> Result<DecodeDisposition, AdapterError> {
         (**self).decode_with_access(context, record, output, source_access)
+    }
+
+    fn join_scope_relations(
+        &self,
+        context: DecodeContext<'_>,
+        record: &SourceRecord,
+        decoded: &FactBatch,
+    ) -> Result<Vec<ScopeJoinCandidate>, AdapterError> {
+        (**self).join_scope_relations(context, record, decoded)
     }
 }
 
