@@ -994,6 +994,13 @@ pub(crate) struct ActorAffiliationReducedDigestEntity<'a> {
     pub revision: &'a ActorAffiliationRevisionFact,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct UsageV2ReducedDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub source: RuntimeSemanticSourceRef<'a>,
+    pub revision: &'a UsageRevisionV2Fact,
+}
+
 struct ActorAffiliationDigestContext<'a> {
     session: CanonicalEntityKey,
     team: Option<&'a ActorAffiliationRevisionFact>,
@@ -1037,15 +1044,7 @@ fn validate_and_hash_semantic_source(
     semantic: &FactSemanticRevision,
     source: RuntimeSemanticSourceRef<'_>,
 ) -> Result<(), RuntimeSemanticReductionError> {
-    if source.generation == 0
-        || source.source_record_id != semantic.source_record_id
-        || source.provenance.generation != source.generation
-        || source.provenance.cursor_start.as_slice() != source.cursor_start
-        || source.provenance.cursor_end.as_slice() != source.cursor_end
-        || &source.provenance.record_hash != source.payload_hash
-    {
-        return Err(RuntimeSemanticReductionError::InvalidSource);
-    }
+    validate_semantic_source(semantic, source)?;
     hash_component(hasher, semantic.fact_id.as_bytes());
     hasher.update(
         &semantic
@@ -1068,6 +1067,22 @@ fn validate_and_hash_semantic_source(
         SourceRecordState::Present => 1,
         SourceRecordState::Absent => 2,
     }]);
+    Ok(())
+}
+
+fn validate_semantic_source(
+    semantic: &FactSemanticRevision,
+    source: RuntimeSemanticSourceRef<'_>,
+) -> Result<(), RuntimeSemanticReductionError> {
+    if source.generation == 0
+        || source.source_record_id != semantic.source_record_id
+        || source.provenance.generation != source.generation
+        || source.provenance.cursor_start.as_slice() != source.cursor_start
+        || source.provenance.cursor_end.as_slice() != source.cursor_end
+        || &source.provenance.record_hash != source.payload_hash
+    {
+        return Err(RuntimeSemanticReductionError::InvalidSource);
+    }
     Ok(())
 }
 
@@ -1374,6 +1389,61 @@ pub(crate) fn actor_affiliation_reduced_state_digest<'a>(
             hasher.update(&reference.semantic_reference_contract_version.to_be_bytes());
             hash_component(&mut hasher, reference.fact_revision_id.as_bytes());
         }
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Compute the canonical current-state digest for `runtime.usage-v2` while
+/// preserving the original selected-family v1 byte layout. The semantic
+/// revision key binds the complete normalized response value; source identity
+/// is retained through canonical fact/source-record identity and path-free
+/// occurrence coordinates.
+pub(crate) fn usage_v2_reduced_state_digest<'a>(
+    entities: impl IntoIterator<Item = UsageV2ReducedDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.semantic.fact_id);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].semantic.fact_id == pair[1].semantic.fact_id)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, b"runtime.usage-v2");
+    hasher.update(&1_u32.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in &entities {
+        validate_usage_v2_entity(entity.semantic, entity.revision)?;
+        validate_semantic_source(entity.semantic, entity.source)?;
+        let revision_key = entity
+            .revision
+            .semantic_revision_key()
+            .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+        hash_component(&mut hasher, entity.semantic.fact_id.as_bytes());
+        hasher.update(
+            &entity
+                .semantic
+                .semantic_revision_ref
+                .semantic_reference_contract_version
+                .to_be_bytes(),
+        );
+        hash_component(&mut hasher, entity.semantic.fact_revision_id.as_bytes());
+        hash_component(&mut hasher, entity.semantic.source_record_id.as_bytes());
+        hash_component(&mut hasher, &revision_key);
+        hasher.update(&entity.source.generation.to_be_bytes());
+        hash_component(&mut hasher, entity.source.cursor_start);
+        hash_component(&mut hasher, entity.source.cursor_end);
+        hasher.update(entity.source.payload_hash);
+        hash_component(&mut hasher, entity.source.media_type.as_bytes());
+        hasher.update(&[match entity.source.state {
+            SourceRecordState::Present => 1,
+            SourceRecordState::Absent => 2,
+        }]);
     }
     Ok(*hasher.finalize().as_bytes())
 }

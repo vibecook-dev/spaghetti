@@ -1150,6 +1150,12 @@ scoped snapshot cannot inject a forged derived context. Reverse-order initial
 state, present-to-removed replacement, explicit unknown ambiguity, exact
 replay, dimension retarget rejection, and generation reset preserve the exact
 durable/scoped digest.
+`runtime.usage-v2` is now the third selected family on that common digest
+boundary. Its pre-existing v1 byte layout remains unchanged, including the
+intentional exclusion of auxiliary actor/affiliation overlay context, while
+semantic/source validation is topology-neutral. A-to-B value correction,
+exact replay, revisionable actor attribution, response retarget rejection, and
+generation reset now have durable/scoped state and digest equality.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,

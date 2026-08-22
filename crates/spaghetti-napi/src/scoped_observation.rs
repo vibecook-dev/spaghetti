@@ -55,11 +55,12 @@ use crate::runtime_semantic_reducer::{
     reduce_actor_run_revision, reduce_content_block_revision, reduce_effective_state_revision,
     reduce_message_revision, reduce_native_marker_revision, reduce_plan_revision,
     reduce_task_revision, reduce_tool_revision, reduce_usage_v2_revision,
-    reduce_user_input_revision, ActorAffiliationReducedDigestEntity, ActorRunReducedDigestEntity,
-    EffectiveStateReducedDigestEntity, MessageReducedDigestEntity, PlanReducedDigestEntity,
-    RevisionedEntityReduction, RevisionedEntityValueReduction, RuntimeSemanticReductionError,
-    RuntimeSemanticSourceRef, TaskReducedDigestEntity, ToolReducedDigestEntity,
-    UserInputReducedDigestEntity, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    reduce_user_input_revision, usage_v2_reduced_state_digest, ActorAffiliationReducedDigestEntity,
+    ActorRunReducedDigestEntity, EffectiveStateReducedDigestEntity, MessageReducedDigestEntity,
+    PlanReducedDigestEntity, RevisionedEntityReduction, RevisionedEntityValueReduction,
+    RuntimeSemanticReductionError, RuntimeSemanticSourceRef, TaskReducedDigestEntity,
+    ToolReducedDigestEntity, UsageV2ReducedDigestEntity, UserInputReducedDigestEntity,
+    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -17368,48 +17369,19 @@ fn revisioned_entity_event_id(
 fn usage_v2_replacement_digest(
     states: &BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
-    let entity_count = u64::try_from(states.len())
-        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = replacement_family_digest(
-        b"runtime.usage-v2",
-        RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION,
-        entity_count,
-    );
     // BTreeMap iteration supplies canonical fact-ID order. The digest retains
     // topology-independent occurrence provenance while deliberately excluding
     // attachment phase, observer sequence, local numeric IDs, admission batch
     // ordinal, and observation time. Auxiliary actor/affiliation context is
     // also excluded: it is a conservative current overlay, not a selected
     // usage-v2 semantic contribution or a replacement-integrity claim.
-    for state in states.values() {
-        let revision_key = state
-            .revision
-            .semantic_revision_key()
-            .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
-        hash_event_component(&mut hasher, state.semantic.fact_id.as_bytes());
-        hasher.update(
-            &state
-                .semantic
-                .semantic_revision_ref
-                .semantic_reference_contract_version
-                .to_be_bytes(),
-        );
-        hash_event_component(&mut hasher, state.semantic.fact_revision_id.as_bytes());
-        hash_event_component(&mut hasher, state.semantic.source_record_id.as_bytes());
-        hash_event_component(&mut hasher, &revision_key);
-        hasher.update(&state.generation.to_be_bytes());
-        hash_event_component(&mut hasher, state.source.cursor_start.as_bytes());
-        hash_event_component(&mut hasher, state.source.cursor_end.as_bytes());
-        hasher.update(state.source.payload_hash.as_bytes());
-        hash_event_component(&mut hasher, state.source.media_type.as_str().as_bytes());
-        hasher.update(&[match state.source.state {
-            SourceRecordState::Present => 1,
-            SourceRecordState::Absent => 2,
-        }]);
-    }
-    Ok(ScopedReplacementSemanticDigest(
-        *hasher.finalize().as_bytes(),
-    ))
+    usage_v2_reduced_state_digest(states.values().map(|state| UsageV2ReducedDigestEntity {
+        semantic: &state.semantic,
+        source: runtime_semantic_source_ref(state.generation, &state.source),
+        revision: &state.revision,
+    }))
+    .map(ScopedReplacementSemanticDigest)
+    .map_err(runtime_semantic_projection_error)
 }
 
 fn actor_run_replacement_digest(
@@ -17479,64 +17451,6 @@ fn actor_affiliation_replacement_digest(
     }))
     .map(ScopedReplacementSemanticDigest)
     .map_err(runtime_semantic_projection_error)
-}
-
-fn replacement_family_digest(
-    family: &[u8],
-    family_contract_version: u32,
-    entity_count: u64,
-) -> blake3::Hasher {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
-    hasher.update(&SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION.to_be_bytes());
-    hash_event_component(&mut hasher, family);
-    hasher.update(&family_contract_version.to_be_bytes());
-    hasher.update(&entity_count.to_be_bytes());
-    hasher
-}
-
-fn validate_and_hash_replacement_source(
-    hasher: &mut blake3::Hasher,
-    semantic: &FactSemanticRevision,
-    generation: u64,
-    source: &ScopedUsageV2Source,
-) -> Result<(), ScopedProjectionError> {
-    if generation == 0
-        || semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id
-        || source.source_record_id != semantic.source_record_id
-    {
-        return Err(ScopedProjectionError::InvalidSemanticRevision);
-    }
-    if source.provenance.generation != generation
-        || source.provenance.cursor_start != source.cursor_start.as_bytes()
-        || source.provenance.cursor_end != source.cursor_end.as_bytes()
-        || source.provenance.record_hash != *source.payload_hash.as_bytes()
-    {
-        return Err(ScopedProjectionError::ProvenanceMismatch);
-    }
-    hash_event_component(hasher, semantic.fact_id.as_bytes());
-    hasher.update(
-        &semantic
-            .semantic_revision_ref
-            .semantic_reference_contract_version
-            .to_be_bytes(),
-    );
-    hash_event_component(hasher, semantic.fact_revision_id.as_bytes());
-    hash_event_component(hasher, semantic.source_record_id.as_bytes());
-    hash_event_component(hasher, source.object.adapter_id.as_str().as_bytes());
-    hash_event_component(hasher, source.object.source_instance_key.as_bytes());
-    hash_event_component(hasher, source.object.stream_key.as_bytes());
-    hash_event_component(hasher, source.object.object_key.as_bytes());
-    hasher.update(&generation.to_be_bytes());
-    hash_event_component(hasher, source.cursor_start.as_bytes());
-    hash_event_component(hasher, source.cursor_end.as_bytes());
-    hasher.update(source.payload_hash.as_bytes());
-    hash_event_component(hasher, source.media_type.as_str().as_bytes());
-    hasher.update(&[match source.state {
-        SourceRecordState::Present => 1,
-        SourceRecordState::Absent => 2,
-    }]);
-    Ok(())
 }
 
 fn hash_optional_event_component(hasher: &mut blake3::Hasher, value: Option<&[u8]>) {
@@ -26895,6 +26809,13 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurableUsageV2Entity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
     fn reduce_durable_actor_run(
         current: &mut BTreeMap<CanonicalEntityKey, DurableActorRunEntity>,
         source: ScopedSourceObjectIdentity,
@@ -27089,6 +27010,107 @@ mod projection_tests {
             let scoped_entity = scoped.actor_affiliations.get(affiliation).unwrap();
             let Fact::ActorAffiliationRevision(durable_revision) = &durable_entity.envelope.value
             else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn reduce_durable_usage_v2(
+        current: &mut BTreeMap<CanonicalFactId, DurableUsageV2Entity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        envelope: FactEnvelope,
+    ) -> Result<RevisionedEntityReduction, RuntimeSemanticReductionError> {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("usage-v2 durable fact has semantic identity");
+        let Fact::UsageRevisionV2(revision) = &envelope.value else {
+            panic!("durable usage-v2 reducer received another family");
+        };
+        let fact_id = semantic.fact_id;
+        let decision = reduce_usage_v2_revision(
+            current.get(&fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::UsageRevisionV2(current_revision) = &entity.envelope.value else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )?;
+        match decision {
+            RevisionedEntityReduction::Unchanged => {}
+            RevisionedEntityReduction::Upsert => {
+                current.insert(
+                    fact_id,
+                    DurableUsageV2Entity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+            }
+            RevisionedEntityReduction::Retract => {
+                current.remove(&fact_id);
+            }
+        }
+        Ok(decision)
+    }
+
+    fn durable_usage_v2_digest(
+        current: &BTreeMap<CanonicalFactId, DurableUsageV2Entity>,
+    ) -> [u8; 32] {
+        usage_v2_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::UsageRevisionV2(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            UsageV2ReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_usage_v2_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurableUsageV2Entity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        let snapshot = scoped
+            .usage_v2_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(snapshot.entity_count as usize, durable.len());
+        assert_eq!(
+            snapshot.semantic_digest.as_bytes(),
+            &durable_usage_v2_digest(durable),
+            "durable and scoped usage-v2 reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.usage_v2.get(fact_id).unwrap();
+            let Fact::UsageRevisionV2(durable_revision) = &durable_entity.envelope.value else {
                 unreachable!();
             };
             assert_eq!(
@@ -28585,6 +28607,187 @@ mod projection_tests {
             })
             .unwrap();
         assert_actor_affiliation_topology_parity(&durable, &scoped);
+    }
+
+    #[test]
+    fn usage_v2_common_reducer_matches_scoped_replacement_digest() {
+        let fixture = rfc012c_fixture();
+        let source = rfc012c_source_identity();
+        let first = rfc012c_record(0, 3, 4);
+        let initial_durable = rfc012c_initial_batch(&fixture, &first);
+        let initial_usage = initial_durable
+            .facts()
+            .iter()
+            .find(|envelope| matches!(envelope.value, Fact::UsageRevisionV2(_)))
+            .unwrap()
+            .clone();
+        let mut durable = BTreeMap::new();
+        assert_eq!(
+            reduce_durable_usage_v2(&mut durable, source.clone(), first.clone(), initial_usage,)
+                .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
+        let mut scoped = seeded_rfc012c_projection(&fixture);
+        assert_usage_v2_topology_parity(&durable, &scoped);
+
+        let correction = rfc012c_record(3, 6, 5);
+        let usage_b = fixture.usage.response_revisions.b.revision.clone();
+        let usage_stable_key = usage_b.response_key.clone();
+        let usage_revision_key = usage_b.semantic_revision_key().unwrap();
+        let mut correction_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        correction_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_stable_key,
+                &usage_revision_key,
+                Fact::UsageRevisionV2(usage_b.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_usage_v2(
+                &mut durable,
+                source.clone(),
+                correction.clone(),
+                correction_batch.facts()[0].clone(),
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_eq!(
+            scoped
+                .project(&rfc012c_decoded_frame(
+                    2,
+                    ScopedAppendDeliveryPhase::Live,
+                    &correction,
+                    correction_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_usage_v2_topology_parity(&durable, &scoped);
+
+        let mut replay_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        replay_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_stable_key,
+                &usage_revision_key,
+                Fact::UsageRevisionV2(usage_b.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_usage_v2(
+                &mut durable,
+                source.clone(),
+                correction.clone(),
+                replay_batch.facts()[0].clone(),
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert!(scoped
+            .project(&rfc012c_decoded_frame(
+                3,
+                ScopedAppendDeliveryPhase::Live,
+                &correction,
+                replay_batch,
+            ))
+            .unwrap()
+            .is_empty());
+        assert_usage_v2_topology_parity(&durable, &scoped);
+
+        let attribution_record = rfc012c_record(6, 9, 6);
+        let mut attribution = usage_b;
+        attribution.actor_run = fixture.actors.root.revision.actor_run;
+        let attribution_revision_key = attribution.semantic_revision_key().unwrap();
+        let mut attribution_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        attribution_batch
+            .push_native_object_scoped_with_revision(
+                &attribution_record,
+                &usage_stable_key,
+                &attribution_revision_key,
+                Fact::UsageRevisionV2(attribution.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_usage_v2(
+                &mut durable,
+                source.clone(),
+                attribution_record.clone(),
+                attribution_batch.facts()[0].clone(),
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_eq!(
+            scoped
+                .project(&rfc012c_decoded_frame(
+                    4,
+                    ScopedAppendDeliveryPhase::Live,
+                    &attribution_record,
+                    attribution_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_usage_v2_topology_parity(&durable, &scoped);
+
+        let drift_record = rfc012c_record(9, 12, 7);
+        let mut response_drift = attribution;
+        response_drift.response_key = b"retargeted-response".to_vec();
+        response_drift.native_message_id = Some("retargeted-response".to_string());
+        let response_drift_key = response_drift.semantic_revision_key().unwrap();
+        let mut drift_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        drift_batch
+            .push_native_object_scoped_with_revision(
+                &drift_record,
+                &usage_stable_key,
+                &response_drift_key,
+                Fact::UsageRevisionV2(response_drift),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_usage_v2(
+                &mut durable,
+                source.clone(),
+                drift_record.clone(),
+                drift_batch.facts()[0].clone(),
+            ),
+            Err(RuntimeSemanticReductionError::InvalidRevision)
+        );
+        assert_eq!(
+            scoped.project(&rfc012c_decoded_frame(
+                5,
+                ScopedAppendDeliveryPhase::Live,
+                &drift_record,
+                drift_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_usage_v2_topology_parity(&durable, &scoped);
+
+        durable.clear();
+        scoped
+            .project(&ScopedQueuedObservationFrame::Reset {
+                object_token: OBJECT_TOKEN,
+                source,
+                lane_ordinal: 6,
+                observed_at: 88,
+                phase: ScopedAppendDeliveryPhase::Correction,
+                reset: ScopedAppendReset {
+                    old_generation: 1,
+                    new_generation: 2,
+                    reason: AppendTransition::Truncated,
+                },
+            })
+            .unwrap();
+        assert_usage_v2_topology_parity(&durable, &scoped);
     }
 
     #[test]
