@@ -28,9 +28,9 @@ use crate::adapter::{
     RecordMappingDisposition, ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest,
     SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceObjectList,
     SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
-    SupportOperation, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
-    TypedAccessAuthorization, UsageRevisionV2Fact, UserInputOperation,
-    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    SupportOperation, TaskRevisionFact, ToolRevisionFact, TypedAccessAuthorization,
+    UsageRevisionV2Fact, UserInputOperation, UserInputRequestRevisionFact,
+    EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -50,15 +50,16 @@ use crate::observation_contract::{
     ObservationNegotiationError,
 };
 use crate::runtime_semantic_reducer::{
-    actor_run_reduced_state_digest, effective_state_reduced_state_digest,
-    reduce_actor_affiliation_revision, reduce_actor_run_revision, reduce_content_block_revision,
-    reduce_effective_state_revision, reduce_message_revision, reduce_native_marker_revision,
-    reduce_plan_revision, reduce_task_revision, reduce_tool_revision, reduce_usage_v2_revision,
-    reduce_user_input_revision, ActorRunReducedDigestEntity, EffectiveStateReducedDigestEntity,
-    MessageReducedDigestEntity, PlanReducedDigestEntity, RevisionedEntityReduction,
-    RevisionedEntityValueReduction, RuntimeSemanticReductionError, RuntimeSemanticSourceRef,
-    TaskReducedDigestEntity, ToolReducedDigestEntity, UserInputReducedDigestEntity,
-    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    actor_affiliation_reduced_state_digest, actor_run_reduced_state_digest,
+    effective_state_reduced_state_digest, reduce_actor_affiliation_revision,
+    reduce_actor_run_revision, reduce_content_block_revision, reduce_effective_state_revision,
+    reduce_message_revision, reduce_native_marker_revision, reduce_plan_revision,
+    reduce_task_revision, reduce_tool_revision, reduce_usage_v2_revision,
+    reduce_user_input_revision, ActorAffiliationReducedDigestEntity, ActorRunReducedDigestEntity,
+    EffectiveStateReducedDigestEntity, MessageReducedDigestEntity, PlanReducedDigestEntity,
+    RevisionedEntityReduction, RevisionedEntityValueReduction, RuntimeSemanticReductionError,
+    RuntimeSemanticSourceRef, TaskReducedDigestEntity, ToolReducedDigestEntity,
+    UserInputReducedDigestEntity, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -17431,65 +17432,53 @@ fn actor_run_replacement_digest(
 fn actor_affiliation_replacement_digest(
     entities: &[ScopedActorAffiliationReplacementEntity],
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
-    let entity_count = u64::try_from(entities.len())
-        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = replacement_family_digest(
-        b"runtime.actor-affiliation",
-        RUNTIME_ACTOR_AFFILIATION_FACT_FAMILY_CONTRACT_VERSION,
-        entity_count,
-    );
+    let mut states = BTreeMap::new();
     for entity in entities {
-        validate_and_hash_replacement_source(
-            &mut hasher,
-            &entity.semantic,
-            entity.generation,
-            &entity.source,
-        )?;
-        hash_event_component(&mut hasher, entity.revision.affiliation.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
-        hasher.update(&[match entity.revision.dimension {
-            ActorAffiliationDimension::Team => 1,
-            ActorAffiliationDimension::Workflow => 2,
-        }]);
-        hash_event_component(&mut hasher, entity.revision.target.as_bytes());
-        hash_optional_entity_key(&mut hasher, entity.revision.member.as_ref());
-        hash_optional_event_component(
-            &mut hasher,
-            entity
-                .revision
-                .native_target_id
-                .as_deref()
-                .map(str::as_bytes),
-        );
-        hash_optional_event_component(
-            &mut hasher,
-            entity
-                .revision
-                .native_member_id
-                .as_deref()
-                .map(str::as_bytes),
-        );
-        hasher.update(&[match entity.revision.state {
-            ActorAffiliationState::Present => 1,
-            ActorAffiliationState::Removed => 2,
-            ActorAffiliationState::Unknown => 3,
-        }]);
-        match &entity.revision.effective_at {
-            Some(timestamp) => {
-                hasher.update(&[1]);
-                hash_event_component(&mut hasher, timestamp.value.as_bytes());
-                hasher.update(&[timestamp_quality_tag(timestamp.quality)]);
-            }
-            None => {
-                hasher.update(&[0]);
-            }
+        if entity.actor.as_ref().is_some_and(|actor| {
+            actor.run_key != entity.revision.actor_run
+                || actor.root_session_key != entity.revision.session
+        }) {
+            return Err(ScopedProjectionError::InvalidActorContext);
         }
-        hash_actor_affiliation_context(&mut hasher, &entity.context);
+        if states
+            .insert(
+                entity.revision.affiliation,
+                ScopedActorAffiliationProjectionState {
+                    object_token: 1,
+                    generation: entity.generation,
+                    semantic: entity.semantic,
+                    source: entity.source.clone(),
+                    revision: entity.revision.clone(),
+                },
+            )
+            .is_some()
+        {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
     }
-    Ok(ScopedReplacementSemanticDigest(
-        *hasher.finalize().as_bytes(),
-    ))
+    let empty_actors = BTreeMap::new();
+    let empty_affiliations = BTreeMap::new();
+    let contexts =
+        scoped_actor_context_index(&empty_actors, &empty_actors, &empty_affiliations, &states)?;
+    for entity in entities {
+        if contexts
+            .affiliations
+            .get(&entity.revision.actor_run)
+            .map(|(_, context)| context)
+            != Some(&entity.context)
+        {
+            return Err(ScopedProjectionError::InvalidActorContext);
+        }
+    }
+    actor_affiliation_reduced_state_digest(entities.iter().map(|entity| {
+        ActorAffiliationReducedDigestEntity {
+            semantic: &entity.semantic,
+            source: runtime_semantic_source_ref(entity.generation, &entity.source),
+            revision: &entity.revision,
+        }
+    }))
+    .map(ScopedReplacementSemanticDigest)
+    .map_err(runtime_semantic_projection_error)
 }
 
 fn replacement_family_digest(
@@ -17550,32 +17539,6 @@ fn validate_and_hash_replacement_source(
     Ok(())
 }
 
-fn hash_actor_affiliation_context(
-    hasher: &mut blake3::Hasher,
-    context: &ScopedActorAffiliationContext,
-) {
-    hash_event_component(hasher, context.actor_run_key.as_bytes());
-    hash_optional_entity_key(hasher, context.team_key.as_ref());
-    hash_optional_event_component(hasher, context.native_team_id.as_deref().map(str::as_bytes));
-    hash_optional_event_component(hasher, context.team_name.as_deref().map(str::as_bytes));
-    hash_optional_entity_key(hasher, context.member_key.as_ref());
-    hash_optional_entity_key(hasher, context.workflow_key.as_ref());
-    hash_optional_event_component(
-        hasher,
-        context.native_workflow_id.as_deref().map(str::as_bytes),
-    );
-    hasher.update(&[match context.completeness {
-        ContractCompleteness::Complete => 1,
-        ContractCompleteness::Partial => 2,
-        ContractCompleteness::Unknown => 3,
-    }]);
-    hasher.update(&(context.derived_from_revision_refs.len() as u64).to_be_bytes());
-    for reference in &context.derived_from_revision_refs {
-        hasher.update(&reference.semantic_reference_contract_version.to_be_bytes());
-        hash_event_component(hasher, reference.fact_revision_id.as_bytes());
-    }
-}
-
 fn hash_optional_event_component(hasher: &mut blake3::Hasher, value: Option<&[u8]>) {
     match value {
         Some(value) => {
@@ -17585,19 +17548,6 @@ fn hash_optional_event_component(hasher: &mut blake3::Hasher, value: Option<&[u8
         None => {
             hasher.update(&[0]);
         }
-    }
-}
-
-fn hash_optional_entity_key(hasher: &mut blake3::Hasher, value: Option<&CanonicalEntityKey>) {
-    hash_optional_event_component(hasher, value.map(|key| key.as_bytes().as_slice()));
-}
-
-fn timestamp_quality_tag(quality: TimestampQuality) -> u8 {
-    match quality {
-        TimestampQuality::NativeExact => 1,
-        TimestampQuality::NativeApproximate => 2,
-        TimestampQuality::FileMetadataFallback => 3,
-        TimestampQuality::Derived => 4,
     }
 }
 
@@ -26938,6 +26888,13 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurableActorAffiliationEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
     fn reduce_durable_actor_run(
         current: &mut BTreeMap<CanonicalEntityKey, DurableActorRunEntity>,
         source: ScopedSourceObjectIdentity,
@@ -27029,6 +26986,109 @@ mod projection_tests {
         for (actor_run, durable_entity) in durable {
             let scoped_entity = scoped.actor_runs.get(actor_run).unwrap();
             let Fact::ActorRunRevision(durable_revision) = &durable_entity.envelope.value else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn reduce_durable_actor_affiliation(
+        current: &mut BTreeMap<CanonicalEntityKey, DurableActorAffiliationEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        envelope: FactEnvelope,
+    ) -> Result<RevisionedEntityReduction, RuntimeSemanticReductionError> {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("actor-affiliation durable fact has semantic identity");
+        let Fact::ActorAffiliationRevision(revision) = &envelope.value else {
+            panic!("durable actor-affiliation reducer received another family");
+        };
+        let affiliation = revision.affiliation;
+        let decision = reduce_actor_affiliation_revision(
+            current.get(&affiliation).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::ActorAffiliationRevision(current_revision) = &entity.envelope.value
+                else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )?;
+        match decision {
+            RevisionedEntityReduction::Unchanged => {}
+            RevisionedEntityReduction::Upsert => {
+                current.insert(
+                    affiliation,
+                    DurableActorAffiliationEntity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+            }
+            RevisionedEntityReduction::Retract => {
+                current.remove(&affiliation);
+            }
+        }
+        Ok(decision)
+    }
+
+    fn durable_actor_affiliation_digest(
+        current: &BTreeMap<CanonicalEntityKey, DurableActorAffiliationEntity>,
+    ) -> [u8; 32] {
+        actor_affiliation_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::ActorAffiliationRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            ActorAffiliationReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_actor_affiliation_topology_parity(
+        durable: &BTreeMap<CanonicalEntityKey, DurableActorAffiliationEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        let snapshot = scoped
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(snapshot.entity_count as usize, durable.len());
+        assert_eq!(
+            snapshot.semantic_digest.as_bytes(),
+            &durable_actor_affiliation_digest(durable),
+            "durable and scoped actor-affiliation reduced digests diverged"
+        );
+        for (affiliation, durable_entity) in durable {
+            let scoped_entity = scoped.actor_affiliations.get(affiliation).unwrap();
+            let Fact::ActorAffiliationRevision(durable_revision) = &durable_entity.envelope.value
+            else {
                 unreachable!();
             };
             assert_eq!(
@@ -28331,6 +28391,200 @@ mod projection_tests {
             })
             .unwrap();
         assert_actor_run_topology_parity(&durable, &scoped);
+    }
+
+    #[test]
+    fn actor_affiliation_common_reducer_matches_scoped_replacement_digest() {
+        let fixture = rfc012c_fixture();
+        let source = rfc012c_source_identity();
+        let first = rfc012c_record(0, 3, 4);
+        let initial_durable = rfc012c_initial_batch(&fixture, &first);
+        let mut durable = BTreeMap::new();
+        let mut affiliation_envelopes = initial_durable
+            .facts()
+            .iter()
+            .filter(|envelope| matches!(envelope.value, Fact::ActorAffiliationRevision(_)))
+            .cloned()
+            .collect::<Vec<_>>();
+        affiliation_envelopes.reverse();
+        for envelope in affiliation_envelopes {
+            assert_eq!(
+                reduce_durable_actor_affiliation(
+                    &mut durable,
+                    source.clone(),
+                    first.clone(),
+                    envelope,
+                )
+                .unwrap(),
+                RevisionedEntityReduction::Upsert
+            );
+        }
+        let mut scoped = seeded_rfc012c_projection(&fixture);
+        assert_actor_affiliation_topology_parity(&durable, &scoped);
+
+        let removed_record = rfc012c_record(3, 6, 5);
+        let removed = fixture.affiliations.child_workflow_removed.revision.clone();
+        let mut removed_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        removed_batch
+            .push_native(
+                &removed_record,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(removed),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_actor_affiliation(
+                &mut durable,
+                source.clone(),
+                removed_record.clone(),
+                removed_batch.facts()[0].clone(),
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_eq!(
+            scoped
+                .project(&rfc012c_decoded_frame(
+                    2,
+                    ScopedAppendDeliveryPhase::Live,
+                    &removed_record,
+                    removed_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_actor_affiliation_topology_parity(&durable, &scoped);
+
+        let unknown_record = rfc012c_record(6, 9, 6);
+        let mut team_unknown = fixture.affiliations.child_team_present.revision.clone();
+        team_unknown.state = ActorAffiliationState::Unknown;
+        let mut unknown_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        unknown_batch
+            .push_native(
+                &unknown_record,
+                b"fixture-child-actor/team/fixture-team-1",
+                Fact::ActorAffiliationRevision(team_unknown.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_actor_affiliation(
+                &mut durable,
+                source.clone(),
+                unknown_record.clone(),
+                unknown_batch.facts()[0].clone(),
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_eq!(
+            scoped
+                .project(&rfc012c_decoded_frame(
+                    3,
+                    ScopedAppendDeliveryPhase::Live,
+                    &unknown_record,
+                    unknown_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_actor_affiliation_topology_parity(&durable, &scoped);
+        let snapshot = scoped
+            .actor_affiliation_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert!(snapshot.entities.iter().all(|entity| {
+            entity.context.completeness == ContractCompleteness::Unknown
+                && entity.context.team_key.is_none()
+                && entity.context.workflow_key.is_none()
+        }));
+        let mut forged_context = snapshot.entities.clone();
+        forged_context[0].context.team_name = Some("forged-topology-context".to_string());
+        assert_eq!(
+            actor_affiliation_replacement_digest(&forged_context),
+            Err(ScopedProjectionError::InvalidActorContext)
+        );
+
+        let mut replay_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        replay_batch
+            .push_native(
+                &unknown_record,
+                b"fixture-child-actor/team/fixture-team-1",
+                Fact::ActorAffiliationRevision(team_unknown),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_actor_affiliation(
+                &mut durable,
+                source.clone(),
+                unknown_record.clone(),
+                replay_batch.facts()[0].clone(),
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert!(scoped
+            .project(&rfc012c_decoded_frame(
+                4,
+                ScopedAppendDeliveryPhase::Live,
+                &unknown_record,
+                replay_batch,
+            ))
+            .unwrap()
+            .is_empty());
+        assert_actor_affiliation_topology_parity(&durable, &scoped);
+
+        let drift_record = rfc012c_record(9, 12, 7);
+        let mut dimension_drift = fixture.affiliations.child_workflow_removed.revision.clone();
+        dimension_drift.dimension = ActorAffiliationDimension::Team;
+        let mut drift_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        drift_batch
+            .push_native(
+                &drift_record,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(dimension_drift),
+            )
+            .unwrap();
+        assert_eq!(
+            reduce_durable_actor_affiliation(
+                &mut durable,
+                source.clone(),
+                drift_record.clone(),
+                drift_batch.facts()[0].clone(),
+            ),
+            Err(RuntimeSemanticReductionError::InvalidRevision)
+        );
+        assert_eq!(
+            scoped.project(&rfc012c_decoded_frame(
+                5,
+                ScopedAppendDeliveryPhase::Live,
+                &drift_record,
+                drift_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_actor_affiliation_topology_parity(&durable, &scoped);
+
+        durable.clear();
+        scoped
+            .project(&ScopedQueuedObservationFrame::Reset {
+                object_token: OBJECT_TOKEN,
+                source,
+                lane_ordinal: 6,
+                observed_at: 88,
+                phase: ScopedAppendDeliveryPhase::Correction,
+                reset: ScopedAppendReset {
+                    old_generation: 1,
+                    new_generation: 2,
+                    reason: AppendTransition::Truncated,
+                },
+            })
+            .unwrap();
+        assert_actor_affiliation_topology_parity(&durable, &scoped);
     }
 
     #[test]

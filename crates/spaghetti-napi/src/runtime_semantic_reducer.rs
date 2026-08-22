@@ -5,18 +5,19 @@
 //! state digest at an equal source/family coverage vector.  This module owns
 //! that shared law; it deliberately contains no database or observer types.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::adapter::{
-    ActorAffiliationRevisionFact, ActorRunRevisionFact, ActorRunRole, AdapterId,
-    CanonicalSourceInstanceKey, ContentBlockRevisionFact, ContentBlockRevisionValue,
-    ContractCompleteness, CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension,
-    EffectiveStateEvidenceKind, EffectiveStateRevisionFact, EffectiveStateValueAuthority,
-    FactProvenance, FactRevisionId, FactSemanticRevision, MessageRevisionFact, MessageRevisionRole,
-    NativeCompactionPhase, NativeProgressState, NativeQueueOperation,
-    NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PlanRevisionFact,
-    QualifiedUnknownReason, QualifiedValueQuality, SourceRecordId, TaskLifecycleState,
-    TaskRevisionFact, ToolRevisionFact, ToolRevisionKind, UsageRevisionV2Fact, UserInputKind,
+    ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
+    ActorRunRevisionFact, ActorRunRole, AdapterId, CanonicalEntityKey, CanonicalSourceInstanceKey,
+    ContentBlockRevisionFact, ContentBlockRevisionValue, ContractCompleteness, CoverageObjectKey,
+    CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
+    EffectiveStateRevisionFact, EffectiveStateValueAuthority, FactProvenance, FactRevisionId,
+    FactSemanticRevision, MessageRevisionFact, MessageRevisionRole, NativeCompactionPhase,
+    NativeProgressState, NativeQueueOperation, NativeRuntimeMarkerRevisionFact,
+    NativeRuntimeMarkerValue, PlanRevisionFact, QualifiedUnknownReason, QualifiedValueQuality,
+    SemanticRevisionRef, SourceRecordId, TaskLifecycleState, TaskRevisionFact, TimestampQuality,
+    ToolRevisionFact, ToolRevisionKind, UsageRevisionV2Fact, UserInputKind,
     UserInputLifecycleState, UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
 };
 use crate::source::SourceRecordState;
@@ -986,6 +987,22 @@ pub(crate) struct ActorRunReducedDigestEntity<'a> {
     pub revision: &'a ActorRunRevisionFact,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ActorAffiliationReducedDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub source: RuntimeSemanticSourceRef<'a>,
+    pub revision: &'a ActorAffiliationRevisionFact,
+}
+
+struct ActorAffiliationDigestContext<'a> {
+    session: CanonicalEntityKey,
+    team: Option<&'a ActorAffiliationRevisionFact>,
+    workflow: Option<&'a ActorAffiliationRevisionFact>,
+    team_ambiguous: bool,
+    workflow_ambiguous: bool,
+    revision_refs: Vec<SemanticRevisionRef>,
+}
+
 fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value);
@@ -1167,6 +1184,196 @@ pub(crate) fn actor_run_reduced_state_digest<'a>(
                 .as_deref()
                 .map(str::as_bytes),
         );
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Compute the canonical current-state digest for
+/// `runtime.actor-affiliation`. The actor-level delivery context is derived
+/// from the accepted common revisions, so neither durable nor scoped storage
+/// can supply a divergent union overlay.
+pub(crate) fn actor_affiliation_reduced_state_digest<'a>(
+    entities: impl IntoIterator<Item = ActorAffiliationReducedDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.revision.affiliation);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].revision.affiliation == pair[1].revision.affiliation)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let mut fact_ids = BTreeSet::new();
+    if entities
+        .iter()
+        .any(|entity| !fact_ids.insert(entity.semantic.fact_id))
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+
+    let mut contexts = BTreeMap::<CanonicalEntityKey, ActorAffiliationDigestContext<'_>>::new();
+    for entity in &entities {
+        validate_actor_affiliation_entity(entity.semantic, entity.revision)?;
+        let context = contexts
+            .entry(entity.revision.actor_run)
+            .or_insert_with(|| ActorAffiliationDigestContext {
+                session: entity.revision.session,
+                team: None,
+                workflow: None,
+                team_ambiguous: false,
+                workflow_ambiguous: false,
+                revision_refs: Vec::new(),
+            });
+        if context.session != entity.revision.session {
+            return Err(RuntimeSemanticReductionError::InvalidRevision);
+        }
+        context
+            .revision_refs
+            .push(entity.semantic.semantic_revision_ref);
+        match (entity.revision.dimension, entity.revision.state) {
+            (ActorAffiliationDimension::Team, ActorAffiliationState::Present) => {
+                if context.team.replace(entity.revision).is_some() {
+                    context.team_ambiguous = true;
+                }
+            }
+            (ActorAffiliationDimension::Workflow, ActorAffiliationState::Present) => {
+                if context.workflow.replace(entity.revision).is_some() {
+                    context.workflow_ambiguous = true;
+                }
+            }
+            (ActorAffiliationDimension::Team, ActorAffiliationState::Unknown) => {
+                context.team_ambiguous = true;
+            }
+            (ActorAffiliationDimension::Workflow, ActorAffiliationState::Unknown) => {
+                context.workflow_ambiguous = true;
+            }
+            (_, ActorAffiliationState::Removed) => {}
+        }
+    }
+    for context in contexts.values_mut() {
+        context
+            .revision_refs
+            .sort_unstable_by_key(|reference| reference.fact_revision_id);
+        if context
+            .revision_refs
+            .windows(2)
+            .any(|pair| pair[0].fact_revision_id == pair[1].fact_revision_id)
+        {
+            return Err(RuntimeSemanticReductionError::InvalidRevision);
+        }
+        if context.team_ambiguous {
+            context.team = None;
+        }
+        if context.workflow_ambiguous {
+            context.workflow = None;
+        }
+    }
+
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, b"runtime.actor-affiliation");
+    hasher.update(&1_u32.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in &entities {
+        validate_and_hash_semantic_source(&mut hasher, entity.semantic, entity.source)?;
+        hash_component(&mut hasher, entity.revision.affiliation.as_bytes());
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_component(&mut hasher, entity.revision.session.as_bytes());
+        hasher.update(&[match entity.revision.dimension {
+            ActorAffiliationDimension::Team => 1,
+            ActorAffiliationDimension::Workflow => 2,
+        }]);
+        hash_component(&mut hasher, entity.revision.target.as_bytes());
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .member
+                .as_ref()
+                .map(|key| key.as_bytes().as_slice()),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_target_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_member_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hasher.update(&[match entity.revision.state {
+            ActorAffiliationState::Present => 1,
+            ActorAffiliationState::Removed => 2,
+            ActorAffiliationState::Unknown => 3,
+        }]);
+        match &entity.revision.effective_at {
+            Some(timestamp) => {
+                hasher.update(&[1]);
+                hash_component(&mut hasher, timestamp.value.as_bytes());
+                hasher.update(&[match timestamp.quality {
+                    TimestampQuality::NativeExact => 1,
+                    TimestampQuality::NativeApproximate => 2,
+                    TimestampQuality::FileMetadataFallback => 3,
+                    TimestampQuality::Derived => 4,
+                }]);
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+
+        let context = contexts
+            .get(&entity.revision.actor_run)
+            .ok_or(RuntimeSemanticReductionError::InvalidRevision)?;
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        let team = context.team;
+        hash_optional_component(
+            &mut hasher,
+            team.map(|revision| revision.target.as_bytes().as_slice()),
+        );
+        hash_optional_component(
+            &mut hasher,
+            team.and_then(|revision| revision.native_target_id.as_deref())
+                .map(str::as_bytes),
+        );
+        // team_name is intentionally absent in the v1 derived context.
+        hash_optional_component(&mut hasher, None);
+        hash_optional_component(
+            &mut hasher,
+            team.and_then(|revision| revision.member.as_ref())
+                .map(|key| key.as_bytes().as_slice()),
+        );
+        let workflow = context.workflow;
+        hash_optional_component(
+            &mut hasher,
+            workflow.map(|revision| revision.target.as_bytes().as_slice()),
+        );
+        hash_optional_component(
+            &mut hasher,
+            workflow
+                .and_then(|revision| revision.native_target_id.as_deref())
+                .map(str::as_bytes),
+        );
+        hasher.update(&[if context.team_ambiguous || context.workflow_ambiguous {
+            3
+        } else {
+            2
+        }]);
+        hasher.update(&(context.revision_refs.len() as u64).to_be_bytes());
+        for reference in &context.revision_refs {
+            hasher.update(&reference.semantic_reference_contract_version.to_be_bytes());
+            hash_component(&mut hasher, reference.fact_revision_id.as_bytes());
+        }
     }
     Ok(*hasher.finalize().as_bytes())
 }

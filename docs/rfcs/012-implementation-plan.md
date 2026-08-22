@@ -1143,6 +1143,13 @@ frozen v1 digest order and derived `ActorRunRef` binding are preserved, while a
 scoped wrapper can no longer supply an actor reference that diverges from the
 validated common revision. Reverse-order creation, value correction, exact
 replay, identity drift, and generation reset all retain digest equality.
+`runtime.actor-affiliation` now uses the same topology-neutral digest boundary.
+The actor-level team/workflow union, ambiguity, completeness, and contributing
+semantic-reference set are recomputed from accepted common revisions; a
+scoped snapshot cannot inject a forged derived context. Reverse-order initial
+state, present-to-removed replacement, explicit unknown ambiguity, exact
+replay, dimension retarget rejection, and generation reset preserve the exact
+durable/scoped digest.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,
