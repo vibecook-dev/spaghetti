@@ -799,6 +799,7 @@ pub(crate) struct CatalogRefreshPredecessor {
     member_identity_contract_id: Option<String>,
     reducer_revision: super::evidence::CatalogReducerPublicationRevision,
     member_history_revision: CatalogMemberHistoryRevision,
+    plan_replacement: bool,
 }
 
 impl CatalogRefreshPredecessor {
@@ -811,6 +812,51 @@ impl CatalogRefreshPredecessor {
         member_identity_contract_id: Option<String>,
         reducer_revision: super::evidence::CatalogReducerPublicationRevision,
         member_history_revision: CatalogMemberHistoryRevision,
+    ) -> Result<Self, CatalogContractError> {
+        Self::new_with_plan_lineage(
+            snapshot_id,
+            publication_digest,
+            content_digest,
+            contract_selection,
+            member_identity_contract_id,
+            reducer_revision,
+            member_history_revision,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_coverage_plan_replacement(
+        snapshot_id: CatalogSnapshotId,
+        publication_digest: [u8; DIGEST_BYTES],
+        content_digest: [u8; DIGEST_BYTES],
+        contract_selection: ContractVersionSelection,
+        member_identity_contract_id: Option<String>,
+        reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+        member_history_revision: CatalogMemberHistoryRevision,
+    ) -> Result<Self, CatalogContractError> {
+        Self::new_with_plan_lineage(
+            snapshot_id,
+            publication_digest,
+            content_digest,
+            contract_selection,
+            member_identity_contract_id,
+            reducer_revision,
+            member_history_revision,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_plan_lineage(
+        snapshot_id: CatalogSnapshotId,
+        publication_digest: [u8; DIGEST_BYTES],
+        content_digest: [u8; DIGEST_BYTES],
+        contract_selection: ContractVersionSelection,
+        member_identity_contract_id: Option<String>,
+        reducer_revision: super::evidence::CatalogReducerPublicationRevision,
+        member_history_revision: CatalogMemberHistoryRevision,
+        plan_replacement: bool,
     ) -> Result<Self, CatalogContractError> {
         CatalogSnapshotId::new(
             snapshot_id.pack_contract_version,
@@ -846,6 +892,7 @@ impl CatalogRefreshPredecessor {
             member_identity_contract_id,
             reducer_revision,
             member_history_revision,
+            plan_replacement,
         })
     }
 
@@ -868,6 +915,10 @@ impl CatalogRefreshPredecessor {
     pub(crate) fn member_history_revision(&self) -> CatalogMemberHistoryRevision {
         self.member_history_revision
     }
+
+    pub(crate) fn is_plan_replacement(&self) -> bool {
+        self.plan_replacement
+    }
 }
 
 impl fmt::Debug for CatalogRefreshPredecessor {
@@ -882,6 +933,7 @@ impl fmt::Debug for CatalogRefreshPredecessor {
             )
             .field("reducer_revision", &self.reducer_revision)
             .field("member_history_revision", &self.member_history_revision)
+            .field("plan_replacement", &self.plan_replacement)
             .field("digests", &"<opaque>")
             .finish()
     }
@@ -1172,6 +1224,7 @@ pub(crate) struct CatalogRefreshBuildExpectation {
     pub attempt: u64,
     pub refresh_started_commit_seq: u64,
     pub predecessor_snapshot: CatalogSnapshotId,
+    pub plan_replacement: bool,
 }
 
 /// Fully checked, store-independent input for one atomic initial catalog
@@ -2267,6 +2320,9 @@ pub(crate) fn derive_durable_refresh_content_digest(
     hasher.update(&build.attempt.to_be_bytes());
     hasher.update(&build.refresh_started_commit_seq.to_be_bytes());
     hash_snapshot_id(&mut hasher, build.predecessor_snapshot);
+    if build.plan_replacement {
+        hasher.update(b"spaghetti/rfc012b/catalog-coverage-plan-replacement-v1\0");
+    }
     hasher.update(predecessor.publication_digest());
     hasher.update(predecessor.content_digest());
     hasher.update(predecessor.reducer_revision().storage_bytes());
@@ -2431,6 +2487,13 @@ fn validate_refresh_build(
         )
         && ((snapshot.readiness_epoch == readiness.epoch && readiness.attempt > 1)
             || snapshot.readiness_epoch < readiness.epoch);
+    let plan_lineage_is_exact = if predecessor.is_plan_replacement() {
+        snapshot.coverage_plan_id != plan.coverage_plan_id
+            && recovery_building
+            && snapshot.readiness_epoch < readiness.epoch
+    } else {
+        snapshot.coverage_plan_id == plan.coverage_plan_id
+    };
     if plan.scope != CatalogCoverageScope::Library
         || (!active_ready && !recovery_building)
         || readiness.coverage_plan_id != plan.coverage_plan_id
@@ -2440,7 +2503,7 @@ fn validate_refresh_build(
         || refresh_started_commit_seq <= snapshot.complete_commit
         || selection != &predecessor.contract_selection
         || selection.query_pack_version != Some(readiness.desired_contract_version)
-        || snapshot.coverage_plan_id != plan.coverage_plan_id
+        || !plan_lineage_is_exact
         || snapshot.pack_contract_version != readiness.desired_contract_version
         || snapshot.readiness_epoch > readiness.epoch
     {
@@ -2455,6 +2518,7 @@ fn validate_refresh_build(
         attempt: readiness.attempt,
         refresh_started_commit_seq,
         predecessor_snapshot: snapshot,
+        plan_replacement: predecessor.is_plan_replacement(),
     })
 }
 
@@ -2935,6 +2999,9 @@ fn derive_refresh_publication_digest(
     hasher.update(&build.attempt.to_be_bytes());
     hasher.update(&build.refresh_started_commit_seq.to_be_bytes());
     hash_snapshot_id(&mut hasher, build.predecessor_snapshot);
+    if build.plan_replacement {
+        hasher.update(b"spaghetti/rfc012b/catalog-coverage-plan-replacement-v1\0");
+    }
     hasher.update(&predecessor.publication_digest);
     hasher.update(&predecessor.content_digest);
     hasher.update(predecessor.reducer_revision.storage_bytes());

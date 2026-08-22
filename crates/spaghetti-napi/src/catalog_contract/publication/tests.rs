@@ -1063,3 +1063,106 @@ fn refresh_binds_exact_predecessor_reducer_and_cumulative_member_history() {
     .unwrap_err();
     assert!(error.to_string().contains("predecessor member history"));
 }
+
+#[test]
+fn coverage_plan_replacement_requires_explicit_cross_plan_predecessor_authority() {
+    let alpha = fixture_source("plan-replacement-alpha");
+    let prior_plan = plan(&[&alpha], &[]);
+    let replacement_plan = plan(&[], &[&alpha]);
+    assert_ne!(
+        prior_plan.coverage_plan_id,
+        replacement_plan.coverage_plan_id
+    );
+    let reducer = reducer_with(&[&alpha], 10);
+    let initial = CatalogInitialPublicationAssembly::assemble(
+        &prior_plan,
+        &building(&prior_plan),
+        selection(),
+        vec![alpha.assembly.clone()],
+        &reducer,
+        bindings(&[&alpha]),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    let durable_initial = initial.prepare_durable().unwrap();
+    let prior_history = initial.member_history().unwrap();
+    let snapshot = CatalogSnapshotId::new(
+        CATALOG_QUERY_PACK_CONTRACT_VERSION,
+        prior_plan.coverage_plan_id,
+        1,
+        30,
+    )
+    .unwrap();
+    let mut readiness =
+        CatalogReadinessMachine::register(prior_plan, CATALOG_QUERY_PACK_CONTRACT_VERSION).unwrap();
+    readiness.schedule_build().unwrap();
+    readiness
+        .publish_ready(snapshot, vec![alpha.assembly.source_coverage().clone()])
+        .unwrap();
+    readiness
+        .replace_coverage_plan(replacement_plan.clone())
+        .unwrap();
+
+    let ordinary = CatalogRefreshPredecessor::new(
+        snapshot,
+        *durable_initial.publication_digest().storage_bytes(),
+        *durable_initial.content_digest(),
+        selection(),
+        durable_initial
+            .member_identity_contract_id()
+            .map(str::to_owned),
+        durable_initial.reducer_revision(),
+        prior_history.revision(),
+    )
+    .unwrap();
+    assert!(CatalogRefreshPublicationAssembly::assemble(
+        &replacement_plan,
+        readiness.snapshot(),
+        31,
+        ordinary,
+        initial.reducer_publication(),
+        &prior_history,
+        selection(),
+        vec![alpha.assembly.clone()],
+        &reducer,
+        bindings(&[&alpha]),
+        CatalogPublicationLimits::default(),
+    )
+    .is_err());
+
+    let replacement = CatalogRefreshPredecessor::for_coverage_plan_replacement(
+        snapshot,
+        *durable_initial.publication_digest().storage_bytes(),
+        *durable_initial.content_digest(),
+        selection(),
+        durable_initial
+            .member_identity_contract_id()
+            .map(str::to_owned),
+        durable_initial.reducer_revision(),
+        prior_history.revision(),
+    )
+    .unwrap();
+    let publication = CatalogRefreshPublicationAssembly::assemble(
+        &replacement_plan,
+        readiness.snapshot(),
+        31,
+        replacement,
+        initial.reducer_publication(),
+        &prior_history,
+        selection(),
+        vec![alpha.assembly.clone()],
+        &reducer,
+        bindings(&[&alpha]),
+        CatalogPublicationLimits::default(),
+    )
+    .unwrap();
+    assert!(publication.build().plan_replacement);
+    assert_eq!(
+        publication.build().predecessor_snapshot.coverage_plan_id,
+        snapshot.coverage_plan_id
+    );
+    assert_eq!(
+        publication.build().coverage_plan_id,
+        replacement_plan.coverage_plan_id
+    );
+}

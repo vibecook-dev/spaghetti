@@ -2340,6 +2340,7 @@ fn load_ready_publication_at_depth(
                         attempt: expected_attempt,
                         refresh_started_commit_seq: build_commit_seq,
                         predecessor_snapshot,
+                        plan_replacement: false,
                     },
                     &predecessor,
                     &contract_selection_json,
