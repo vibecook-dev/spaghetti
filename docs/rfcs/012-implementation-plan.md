@@ -1289,6 +1289,23 @@ automatic source-reset detection, coverage-plan and contract-version
 replacement, compaction, local policy, richer queries, and promotion evidence
 remain open.
 
+The eighteenth bounded B3 slice (`c12fd74`) closes that configured production
+dispatch. Cold startup now applies the same fixed three-attempt source policy as
+the refresh worker, commits `SourceRetrying` between attempts, and returns only
+after an initial snapshot is Ready or the no-snapshot aggregate is durably
+`Degraded`. The degraded outcome grants no query authority but does release the
+configured history/watch path, whose next source signal enters `attempt + 1`;
+the shared refresh worker routes that lineage back through initial publication
+and accepts the resulting Initial successor. Source-retrying builds suppress
+intermediate Partial relabeling while retaining their exact state commit, so a
+successful all-source replay can publish in the same attempt. If assembly then
+fails, discarded integrity evidence binds the intervening source-retry commit
+and restarts safely rather than losing the classified lineage. Startup policy,
+cold/retained dispatch, terminal no-query behavior, restart, recovery, and the
+source-retry-to-integrity edge are executable. Automatic source-reset
+detection, coverage-plan and contract-version replacement, compaction, local
+policy, richer queries, and promotion evidence remain open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
