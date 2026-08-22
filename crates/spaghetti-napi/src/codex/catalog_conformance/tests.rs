@@ -11,8 +11,9 @@ use crate::adapter::{
 };
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::codex::catalog_runtime::{
-    codex_catalog_source_instance, codex_conformance_promoted_composition,
-    codex_conformance_source_declaration_bytes, codex_conformance_support_release_bytes,
+    codex_authorized_catalog_composition, codex_catalog_source_instance,
+    codex_conformance_promoted_composition, codex_conformance_source_declaration_bytes,
+    codex_conformance_source_declaration_id, codex_conformance_support_release_bytes,
     codex_conformance_support_release_id, codex_planned_catalog_composition,
     produce_codex_library_coverage, produce_codex_library_coverage_with_post_head_mutation,
 };
@@ -409,6 +410,33 @@ fn synthetic_producer_matches_frozen_identity_and_complete_coverage() {
 }
 
 #[test]
+fn typed_authorization_derives_the_runtime_composition_binding() {
+    let selection = catalog_contract_selection();
+    let access = synthetic_codex_catalog_access(&selection, CompatibilityClass::ExactSupported);
+    let composition = codex_authorized_catalog_composition(&access).unwrap();
+    assert_eq!(
+        composition.support_release_id(),
+        codex_conformance_support_release_id()
+    );
+    assert_eq!(
+        composition.source_declaration_id(),
+        codex_conformance_source_declaration_id()
+    );
+    let executable = composition.authorize_execution(access).unwrap();
+    let instance = codex_catalog_source_instance(&fixture_root(), FIXTURE_SOURCE_INSTANCE).unwrap();
+    let bound = executable.bind_source_instance(&instance).unwrap();
+    let produced = produce_codex_library_coverage(
+        &bound,
+        CatalogAccessPolicyDigest::derive(1, b"authorized-runtime-composition").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        produced.assembly.source_coverage().completeness,
+        crate::adapter::CoverageSetCompleteness::Complete
+    );
+}
+
+#[test]
 fn planned_composition_cannot_authorize_synthetic_producer() {
     let selection = catalog_contract_selection();
     let planned = codex_planned_catalog_composition().unwrap();
@@ -466,7 +494,7 @@ fn producer_rejects_composition_drift_before_source_access() {
     )
     .unwrap_err()
     .to_string();
-    assert!(error.contains("exact synthetic conformance composition"));
+    assert!(error.contains("exact compiled source declaration and component topology"));
     assert!(!error.contains("failed to read"));
     assert!(!error.contains(absent.path().to_string_lossy().as_ref()));
 }

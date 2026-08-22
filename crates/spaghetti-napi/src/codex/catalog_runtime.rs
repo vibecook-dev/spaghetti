@@ -1,11 +1,11 @@
 //! Crate-private Codex catalog source/coverage producer.
 //!
 //! The current built-in support release remains Candidate and cannot authorize
-//! this producer. The catalog component owns a disjoint catalog family rather
-//! than treating legacy durable facts as semantic-tier parity. Tests execute an
-//! exact synthetic composition so the bounded source mechanics, membership
-//! identity, and complete coverage proof can be reviewed without granting
-//! product authority.
+//! this producer. Production execution requires a borrowed typed catalog
+//! authorization that binds the reviewed release, source declaration, selected
+//! contracts, and exact source streams. The catalog component owns a disjoint
+//! catalog family rather than treating legacy durable facts as semantic-tier
+//! parity. Native paths stay out of returned types, Debug, and error messages.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -14,21 +14,23 @@ use sha2::{Digest as _, Sha256};
 
 use super::adapter::CodexAdapter;
 use crate::adapter::{
-    AdapterId, AgentAdapter, DecodeDisposition, DriverSpec, Fact, FactSemanticContext,
-    SourceInstance, SourceObjectDescriptor, StreamSpec,
+    AdapterId, AgentAdapter, AuthorizedCatalogAccess, DecodeDisposition, DriverSpec, Fact,
+    FactSemanticContext, SourceObjectDescriptor, StreamSpec,
 };
-use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
+#[cfg(test)]
+use crate::adapter::{SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceRoot};
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::decode_runtime::{
     decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecoderDependenciesDenied,
 };
+#[cfg(test)]
+use crate::source::catalog_composition::CatalogPromotedBinding;
 use crate::source::catalog_composition::{
     CatalogBoundSourceAccess, CatalogCompletedCoverageObject, CatalogComponentCoverageCompletion,
     CatalogCompositionError, CatalogContribution, CatalogDecoderStateBoundary,
     CatalogDiscoveryBounds, CatalogLibraryCoverageAssembly, CatalogMemberRef,
     CatalogMembershipAuthorityEvidence, CatalogMembershipEntry, CatalogOverlapStrategy,
-    CatalogPromotedBinding, CatalogSourceComponent, CatalogSourceComposition,
-    CatalogSourcePrimitive,
+    CatalogSourceComponent, CatalogSourceComposition, CatalogSourcePrimitive,
 };
 use crate::source::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
@@ -41,13 +43,19 @@ const STREAM_ID: &str = "rollout-sessions";
 const SESSIONS_ROOT_ID: &str = "sessions";
 const COMPONENT_ID: &str = "rollout-session-meta-head";
 const MEMBER_IDENTITY_CONTRACT: &str = "catalog-session-identity-v1";
+const SOURCE_DECLARATION_ID: &str = "codex-sources-2026-08-15-candidate";
+#[cfg(test)]
 const PLANNING_EVIDENCE_ID: &str = "phase0-catalog-census-2026-08-15";
+#[cfg(test)]
 const PLANNED_SUPPORT_RELEASE_ID: &str = "codex.catalog-candidate-2026-08-15";
+#[cfg(test)]
 const PLANNED_SOURCE_DECLARATION_ID: &str = "codex.catalog-sources-v1";
+#[cfg(test)]
 const CONFORMANCE_SUPPORT_RELEASE_ID: &str = "codex.catalog-conformance-support-v1";
-const CONFORMANCE_SOURCE_DECLARATION_ID: &str = "codex.catalog-conformance-sources-v1";
+#[cfg(test)]
 const CONFORMANCE_SOURCE_DECLARATION: &[u8] =
     b"spaghetti/rfc012b/codex-catalog-conformance-declaration/v1";
+#[cfg(test)]
 const CONFORMANCE_SUPPORT_RELEASE: &[u8] =
     b"spaghetti/rfc012b/codex-catalog-conformance-support/v1";
 const MAX_ENTRIES: usize = 250_000;
@@ -101,6 +109,20 @@ pub(crate) fn codex_catalog_components() -> Vec<CatalogSourceComponent> {
     }]
 }
 
+/// Build the exact compiled Codex catalog topology from a non-transferable
+/// typed authorization. Candidate releases cannot produce this proof, and the
+/// returned value must still consume it through `authorize_execution`.
+pub(crate) fn codex_authorized_catalog_composition(
+    authorization: &AuthorizedCatalogAccess<'_>,
+) -> Result<CatalogSourceComposition, CatalogCompositionError> {
+    CatalogSourceComposition::from_authorized_catalog_access(
+        authorization,
+        SOURCE_DECLARATION_ID,
+        codex_catalog_components(),
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn codex_planned_catalog_composition(
 ) -> Result<CatalogSourceComposition, CatalogCompositionError> {
     CatalogSourceComposition::new_planned(
@@ -112,12 +134,13 @@ pub(crate) fn codex_planned_catalog_composition(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn codex_conformance_promoted_composition(
 ) -> Result<CatalogSourceComposition, CatalogCompositionError> {
     CatalogSourceComposition::new_promoted(
         ADAPTER_ID,
         CONFORMANCE_SUPPORT_RELEASE_ID,
-        CONFORMANCE_SOURCE_DECLARATION_ID,
+        SOURCE_DECLARATION_ID,
         CatalogPromotedBinding::from_digests(
             Sha256::digest(CONFORMANCE_SOURCE_DECLARATION).into(),
             Sha256::digest(CONFORMANCE_SUPPORT_RELEASE).into(),
@@ -126,18 +149,27 @@ pub(crate) fn codex_conformance_promoted_composition(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn codex_conformance_source_declaration_bytes() -> &'static [u8] {
     CONFORMANCE_SOURCE_DECLARATION
 }
 
+#[cfg(test)]
 pub(crate) fn codex_conformance_support_release_bytes() -> &'static [u8] {
     CONFORMANCE_SUPPORT_RELEASE
 }
 
+#[cfg(test)]
 pub(crate) fn codex_conformance_support_release_id() -> &'static str {
     CONFORMANCE_SUPPORT_RELEASE_ID
 }
 
+#[cfg(test)]
+pub(crate) fn codex_conformance_source_declaration_id() -> &'static str {
+    SOURCE_DECLARATION_ID
+}
+
+#[cfg(test)]
 pub(crate) fn codex_catalog_source_instance(
     catalog_root: &Path,
     source_instance_discriminator: &[u8],
@@ -192,7 +224,7 @@ fn produce_codex_library_coverage_after_heads(
     let executable = access.executable();
     executable.validate_complete_coverage_authority()?;
     let composition = executable.composition();
-    require_exact_conformance_composition(composition)?;
+    require_exact_runtime_composition(composition)?;
     let component = composition
         .components()
         .iter()
@@ -420,13 +452,20 @@ fn produce_codex_library_coverage_after_heads(
     })
 }
 
-fn require_exact_conformance_composition(
+fn require_exact_runtime_composition(
     composition: &CatalogSourceComposition,
 ) -> Result<(), CatalogCompositionError> {
-    let expected = codex_conformance_promoted_composition()?;
-    if composition != &expected {
+    let mut expected_components = codex_catalog_components()
+        .into_iter()
+        .map(CatalogSourceComponent::normalize)
+        .collect::<Result<Vec<_>, _>>()?;
+    expected_components.sort_by(|left, right| left.component_id.cmp(&right.component_id));
+    if composition.adapter_id() != ADAPTER_ID
+        || composition.source_declaration_id() != SOURCE_DECLARATION_ID
+        || composition.components() != expected_components
+    {
         return Err(CatalogCompositionError::invalid(
-            "Codex catalog producer requires the exact synthetic conformance composition",
+            "Codex catalog producer requires the exact compiled source declaration and component topology",
         ));
     }
     Ok(())
