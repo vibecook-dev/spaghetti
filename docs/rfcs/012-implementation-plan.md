@@ -1229,6 +1229,27 @@ automatic retirement/compaction beyond the bounded 8,192-milestone restart
 window, caller-authorized local policy, richer queries, and promotion evidence
 remain open.
 
+The fifteenth bounded B3 slice (`e98beb6`) adds schema-v60 and the first durable
+same-plan, same-contract source-generation replacement. An exact caller-held
+compare-and-swap authority can move any non-`Error` Library lineage to
+`Building` at `epoch + 1`, `attempt = 1`; one source-neutral transaction appends
+an immutable invalidation row, advances build state, and emits the canonical
+path-free v9 readiness change. A prior independently-safe publication remains
+queryable with its own plan, pack, epoch, attempt, coverage, and reducer
+identity while the replacement keeps `complete_through_commit = NULL` until a
+new complete successor publishes. Replacement `Partial`, terminal
+`Degraded`/`Error`, restart, `attempt + 1` recovery, and a successor whose
+predecessor belongs to an older epoch are all authenticated rather than
+inferred. Restart validates the exact administrative owners, immutable ledger,
+epoch arithmetic, predecessor state/change payload, retained snapshot, and
+partial or terminal anchors. Every invalidation write seam, post-commit
+lost-ack replay, repeated invalidation after `Partial`, coordinated corruption,
+historical reads, and terminal recovery are executable. This closes the
+durability and publication seam only: automatic source-reset detection and
+scheduler triggering, coverage-plan replacement, contract-version replacement,
+compaction beyond retained bounds, caller-authorized local policy, richer
+queries, and promotion evidence remain open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
