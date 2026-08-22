@@ -713,6 +713,12 @@ impl VerifiedSupportRelease {
         self.observation_source_contracts.get(stream_id)
     }
 
+    pub(crate) fn source_contracts(
+        &self,
+    ) -> &BTreeMap<String, AuthorizedObservationSourceContract> {
+        &self.observation_source_contracts
+    }
+
     pub fn verify_adapter_binding(
         &self,
         adapter_id: &str,
@@ -2047,6 +2053,7 @@ impl TypedAccessAuthorization {
             source_declaration_digest: self.source_declaration_digest,
             contracts: &self.contracts,
             compatibility_class: self.operation.compatibility_class,
+            source_contracts: Some(self.observation_source_contracts.clone()),
         })
     }
 
@@ -2167,6 +2174,7 @@ pub struct AuthorizedCatalogAccess<'a> {
     source_declaration_digest: Sha256Digest,
     contracts: &'a ContractVersionSelection,
     compatibility_class: CompatibilityClass,
+    source_contracts: Option<BTreeMap<String, AuthorizedObservationSourceContract>>,
 }
 
 impl std::fmt::Debug for AuthorizedCatalogAccess<'_> {
@@ -2209,6 +2217,12 @@ impl<'a> AuthorizedCatalogAccess<'a> {
         self.compatibility_class
     }
 
+    pub(crate) fn source_contracts(
+        &self,
+    ) -> Option<&BTreeMap<String, AuthorizedObservationSourceContract>> {
+        self.source_contracts.as_ref()
+    }
+
     #[cfg(test)]
     pub(crate) fn fixture(
         adapter_id: &'a str,
@@ -2243,6 +2257,28 @@ impl<'a> AuthorizedCatalogAccess<'a> {
             source_declaration_digest,
             contracts,
             compatibility_class,
+            source_contracts: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture_with_source_contracts(
+        adapter_id: &'a str,
+        support_release_id: &'a str,
+        support_release_digest: Sha256Digest,
+        source_declaration_digest: Sha256Digest,
+        contracts: &'a ContractVersionSelection,
+        compatibility_class: CompatibilityClass,
+        source_contracts: BTreeMap<String, AuthorizedObservationSourceContract>,
+    ) -> Self {
+        Self {
+            adapter_id,
+            support_release_id,
+            support_release_digest,
+            source_declaration_digest,
+            contracts,
+            compatibility_class,
+            source_contracts: Some(source_contracts),
         }
     }
 }
@@ -4070,6 +4106,7 @@ mod tests {
             catalog_access.contracts(),
             &fixture.expected_contract_selection
         );
+        assert!(catalog_access.source_contracts().is_some());
         assert!(catalog_authorization
             .select_scope_program("observe-session")
             .is_err());
@@ -4139,6 +4176,7 @@ mod tests {
             forward_access.contracts(),
             &fixture.expected_contract_selection
         );
+        assert!(forward_access.source_contracts().is_some());
 
         let restricted = fixture
             .runtime_cases

@@ -107,6 +107,7 @@ fn component(
     let (component_id, stream_id, root_id) = identifiers;
     CatalogSourceComponent {
         component_id: component_id.to_owned(),
+        source_stream_id: stream_id.to_owned(),
         stream_id: stream_id.to_owned(),
         root_id: root_id.to_owned(),
         relative_selectors: relative_selectors

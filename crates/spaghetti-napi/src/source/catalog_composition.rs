@@ -17,12 +17,14 @@ use serde::{Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 
 use crate::adapter::{
-    AuthorizedCatalogAccess, CanonicalEntityKey, CanonicalSourceInstanceKey, CompatibilityClass,
-    ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
-    CoverageDomain, CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
-    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, FactBatch,
-    FactEnvelope, RecordMappingDisposition, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
-    SourceRecordId, SourceRoot, SOURCE_COVERAGE_CONTRACT_VERSION,
+    AuthorizedCatalogAccess, AuthorizedObservationSourceContract,
+    AuthorizedObservationSourceDriver, CanonicalEntityKey, CanonicalSourceInstanceKey,
+    CompatibilityClass, ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind,
+    CoverageDeclarationDigest, CoverageDomain, CoverageObjectKey, CoveragePosition,
+    CoveragePositionKind, CoverageProvenance, CoverageSetCompleteness, CoverageStatus,
+    CoverageStreamKey, DecodeDisposition, FactBatch, FactEnvelope, RecordMappingDisposition,
+    SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceRecordId, SourceRoot,
+    SOURCE_COVERAGE_CONTRACT_VERSION,
 };
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogPublicationMemberRef, CatalogSourceCompletionRevision,
@@ -726,6 +728,10 @@ impl CatalogContribution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CatalogSourceComponent {
     pub(crate) component_id: String,
+    /// Digest-verified native source declaration stream used for I/O.
+    pub(crate) source_stream_id: String,
+    /// Logical RFC 012A coverage stream. This may differ when one native
+    /// object contributes independently completed membership and metadata.
     pub(crate) stream_id: String,
     pub(crate) root_id: String,
     pub(crate) relative_selectors: Vec<String>,
@@ -761,6 +767,7 @@ impl CatalogSourceComponent {
 
     fn validate(&self) -> Result<(), CatalogCompositionError> {
         validate_identifier("component_id", &self.component_id)?;
+        validate_identifier("source_stream_id", &self.source_stream_id)?;
         validate_identifier("stream_id", &self.stream_id)?;
         validate_identifier("root_id", &self.root_id)?;
         validate_identifier("decoder_contract_id", &self.decoder_contract_id)?;
@@ -818,8 +825,83 @@ impl CatalogSourceComponent {
         Ok(())
     }
 
+    fn validate_source_contract(
+        &self,
+        contract: &AuthorizedObservationSourceContract,
+    ) -> Result<(), CatalogCompositionError> {
+        if contract.stream_id() != self.source_stream_id
+            || contract.root_id() != self.root_id
+            || !self
+                .relative_selectors
+                .iter()
+                .all(|selector| contract.relative_patterns().contains(selector))
+            || contract
+                .max_entries()
+                .is_none_or(|bound| u64::from(self.discovery_bounds.max_entries) > bound)
+            || contract
+                .max_depth()
+                .is_none_or(|bound| u64::from(self.discovery_bounds.max_depth) > bound)
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog component differs from its digest-verified source stream",
+            ));
+        }
+
+        let driver_matches = match (&self.primitive, contract.driver()) {
+            (
+                CatalogSourcePrimitive::DirectoryMembership,
+                AuthorizedObservationSourceDriver::DirectoryMembership { .. },
+            ) => contract.decoder_id() == self.decoder_contract_id,
+            (CatalogSourcePrimitive::DirectoryMembership, _) => true,
+            (
+                CatalogSourcePrimitive::ReplaceDocument { max_object_bytes },
+                AuthorizedObservationSourceDriver::ReplaceDocument {
+                    max_object_bytes: declared,
+                },
+            ) => *max_object_bytes <= declared && contract.decoder_id() == self.decoder_contract_id,
+            (
+                CatalogSourcePrimitive::DelimitedHead { max_record_bytes },
+                AuthorizedObservationSourceDriver::AppendDelimited {
+                    max_record_bytes: declared_record,
+                    max_batch_bytes,
+                    max_records_per_batch,
+                },
+            ) => {
+                *max_record_bytes <= declared_record
+                    && *max_record_bytes <= max_batch_bytes
+                    && max_records_per_batch >= 1
+                    && contract.decoder_id() == self.decoder_contract_id
+            }
+            (
+                CatalogSourcePrimitive::DelimitedPrefix {
+                    max_record_bytes,
+                    max_window_bytes,
+                    max_records,
+                },
+                AuthorizedObservationSourceDriver::AppendDelimited {
+                    max_record_bytes: declared_record,
+                    max_batch_bytes,
+                    max_records_per_batch,
+                },
+            ) => {
+                *max_record_bytes <= declared_record
+                    && *max_window_bytes <= max_batch_bytes
+                    && u64::from(*max_records) <= max_records_per_batch
+                    && contract.decoder_id() == self.decoder_contract_id
+            }
+            _ => false,
+        };
+        if !driver_matches {
+            return Err(CatalogCompositionError::invalid(
+                "catalog component primitive or decoder differs from its digest-verified source stream",
+            ));
+        }
+        Ok(())
+    }
+
     fn hash_into(&self, hasher: &mut blake3::Hasher) {
         hash_string(hasher, &self.component_id);
+        hash_string(hasher, &self.source_stream_id);
         hash_string(hasher, &self.stream_id);
         hash_string(hasher, &self.root_id);
         hasher.update(&(self.relative_selectors.len() as u64).to_be_bytes());
@@ -1096,6 +1178,23 @@ impl CatalogSourceComposition {
         if self.binding.promoted_binding() != Some(expected_binding) {
             return Err(CatalogCompositionError::invalid(
                 "catalog composition is planned/unbound or does not match the authorized promoted declaration binding",
+            ));
+        }
+        if let Some(source_contracts) = authorization.source_contracts() {
+            for component in &self.components {
+                let contract = source_contracts
+                    .get(&component.source_stream_id)
+                    .ok_or_else(|| {
+                        CatalogCompositionError::invalid(
+                            "catalog component names no digest-verified source stream",
+                        )
+                    })?;
+                component.validate_source_contract(contract)?;
+            }
+        } else {
+            #[cfg(not(test))]
+            return Err(CatalogCompositionError::invalid(
+                "catalog authorization contains no digest-verified source contracts",
             ));
         }
         Ok(CatalogExecutableComposition {

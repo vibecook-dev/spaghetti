@@ -39,6 +39,7 @@
           "root_id": "projects",
           "safe_decoder_state_boundary": "full_snapshot",
           "source_record_contract_version": 1,
+          "source_stream_id": "subagent-transcripts",
           "stream_id": "nested-transcript-membership"
         },
         {
@@ -72,6 +73,7 @@
           "root_id": "projects",
           "safe_decoder_state_boundary": "object_generation_revision",
           "source_record_contract_version": 1,
+          "source_stream_id": "session-indexes",
           "stream_id": "session-indexes"
         },
         {
@@ -105,6 +107,7 @@
           "root_id": "projects",
           "safe_decoder_state_boundary": "full_snapshot",
           "source_record_contract_version": 1,
+          "source_stream_id": "session-transcripts",
           "stream_id": "top-level-transcript-membership"
         },
         {
@@ -139,11 +142,12 @@
           "root_id": "projects",
           "safe_decoder_state_boundary": "object_generation_cursor",
           "source_record_contract_version": 1,
+          "source_stream_id": "session-transcripts",
           "stream_id": "session-transcripts"
         }
       ],
       "composition_contract_version": 1,
-      "composition_id": "catalog-composition-v1:m2BFDZcH8hcn3_h-TiM5liIVGm4SZwsp4Mk9jf9ZaLE",
+      "composition_id": "catalog-composition-v1:F-chZixxgLOSFbFzspVfLS28kEHX5d5XlxOKIQUM9-s",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "source_declaration_id": "claude-code.catalog-sources-v1",
       "support_release_id": "claude-code.catalog-candidate-2026-08-15"
@@ -187,11 +191,12 @@
           "root_id": "sessions",
           "safe_decoder_state_boundary": "object_generation_cursor",
           "source_record_contract_version": 1,
+          "source_stream_id": "rollout-sessions",
           "stream_id": "rollout-sessions"
         }
       ],
       "composition_contract_version": 1,
-      "composition_id": "catalog-composition-v1:goi4z2E6M4eXP352qle7EAV42vS4-W3TEGsCJzGGThc",
+      "composition_id": "catalog-composition-v1:xrhBqJKnhQBM6ZYuh8JYp3CmXziuGtJTe1MeL6IuqVc",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "source_declaration_id": "codex.catalog-sources-v1",
       "support_release_id": "codex.catalog-candidate-2026-08-15"
@@ -237,6 +242,7 @@
           "root_id": "sessions",
           "safe_decoder_state_boundary": "full_snapshot",
           "source_record_contract_version": 1,
+          "source_stream_id": "session-membership",
           "stream_id": "session-membership"
         },
         {
@@ -269,11 +275,12 @@
           "root_id": "sessions",
           "safe_decoder_state_boundary": "object_generation_revision",
           "source_record_contract_version": 1,
+          "source_stream_id": "session-summaries",
           "stream_id": "session-summaries"
         }
       ],
       "composition_contract_version": 1,
-      "composition_id": "catalog-composition-v1:QKbt38V5dt0UuvoBwJq7fB7YbIof4rnbF-92n-kvRBA",
+      "composition_id": "catalog-composition-v1:Om855sZzK8UsehYnlPoarbMKMAYca6nL3EsxzV6Q6_I",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "source_declaration_id": "grok.catalog-sources-v1",
       "support_release_id": "grok.catalog-candidate-2026-08-15"
@@ -306,7 +313,7 @@
           "generation": 1
         }
       ],
-      "composition_id": "catalog-composition-v1:m2BFDZcH8hcn3_h-TiM5liIVGm4SZwsp4Mk9jf9ZaLE",
+      "composition_id": "catalog-composition-v1:F-chZixxgLOSFbFzspVfLS28kEHX5d5XlxOKIQUM9-s",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "members": [
         {
@@ -338,7 +345,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:NkQnEll3J-ML6QZ2ATSSj-S6RP07RmdM3p1XWQwF_GI"
+      "membership_revision": "catalog-membership-v1:ESUOhvO2PtHIOjciL9nkf9O7GWz34vF2sFzvynctdiM"
     },
     "codex": {
       "authority_evidence": [
@@ -350,7 +357,7 @@
           "generation": 1
         }
       ],
-      "composition_id": "catalog-composition-v1:goi4z2E6M4eXP352qle7EAV42vS4-W3TEGsCJzGGThc",
+      "composition_id": "catalog-composition-v1:xrhBqJKnhQBM6ZYuh8JYp3CmXziuGtJTe1MeL6IuqVc",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "members": [
         {
@@ -364,7 +371,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:3lY1UNpYoFbD1EPGSQO4s4yNQ64YDYZCTKShlCNU388"
+      "membership_revision": "catalog-membership-v1:Y0Xcx_YpAADkFinZa2HjJQVF4a4y3jTFQNQldpa-CSc"
     },
     "grok": {
       "authority_evidence": [
@@ -376,7 +383,7 @@
           "generation": 1
         }
       ],
-      "composition_id": "catalog-composition-v1:QKbt38V5dt0UuvoBwJq7fB7YbIof4rnbF-92n-kvRBA",
+      "composition_id": "catalog-composition-v1:Om855sZzK8UsehYnlPoarbMKMAYca6nL3EsxzV6Q6_I",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "members": [
         {
@@ -390,7 +397,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:OmnMUhX1JFjDlYwVoYOM6ovspE0hsE2hagNrswkqPe0"
+      "membership_revision": "catalog-membership-v1:J3SGweJYaPUD1k3RNBUZvRa_iZQsCFVr1xsUszZO5tM"
     }
   },
   "overlap_conformance": {
@@ -403,16 +410,16 @@
       "full_only": {
         "final_decoder_state": "catalog-conformance-v1:9QuX8Yu_8DFEE8iKtfJyxvm7Ytr_2XBzuSH5RDjFFGM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:V7VyIWGxN-AYM4n_49-7VbEEFDpQWJqoMCQtwM1sJNs"
+        "trace_digest": "catalog-conformance-v1:rJ9gUy80xE8u8jUZepef9j6KdTp0uWw60JYt2X_FYgM"
       },
       "head_or_prefix_plus_continuation": {
         "final_decoder_state": "catalog-conformance-v1:9QuX8Yu_8DFEE8iKtfJyxvm7Ytr_2XBzuSH5RDjFFGM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:V7VyIWGxN-AYM4n_49-7VbEEFDpQWJqoMCQtwM1sJNs"
+        "trace_digest": "catalog-conformance-v1:rJ9gUy80xE8u8jUZepef9j6KdTp0uWw60JYt2X_FYgM"
       },
       "windows": [
         {
-          "continuation": "catalog-window-continuation-v1:67yf33nL2dYHx9XHwgS4goG_54s49tnVuT3PsyK8r3U",
+          "continuation": "catalog-window-continuation-v1:iVaLw1UodhNlwyKoyHvZrTSB7HbuNhloQ1WrvnEsYnc",
           "window": {
             "remainder": {
               "kind": "continue_at",
@@ -446,16 +453,16 @@
       "full_only": {
         "final_decoder_state": "catalog-conformance-v1:i9T6SUCWY7dZG1xNjG3SunBs5MXRWvY9mf7jN5ojHsM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:vdff3w-JGtJdy2E00UHndyr2zbqWOFrANL6EfcVCH_g"
+        "trace_digest": "catalog-conformance-v1:Vp0_G6jWGysCIau8mPtMTTLCXJ7ODQSQ5XSA9qBb5Hw"
       },
       "head_or_prefix_plus_continuation": {
         "final_decoder_state": "catalog-conformance-v1:i9T6SUCWY7dZG1xNjG3SunBs5MXRWvY9mf7jN5ojHsM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:vdff3w-JGtJdy2E00UHndyr2zbqWOFrANL6EfcVCH_g"
+        "trace_digest": "catalog-conformance-v1:Vp0_G6jWGysCIau8mPtMTTLCXJ7ODQSQ5XSA9qBb5Hw"
       },
       "windows": [
         {
-          "continuation": "catalog-window-continuation-v1:gvObqBRU9efQG00O5vHu3bIdOMPKh8qWQoFCjnlfEL0",
+          "continuation": "catalog-window-continuation-v1:44BU49aB5-cWJVtI-JEiP95kLXNKzRYMTkZjb01ITmI",
           "window": {
             "remainder": {
               "kind": "continue_at",
@@ -467,7 +474,7 @@
           }
         },
         {
-          "continuation": "catalog-window-continuation-v1:0mXZnq6yPD0qaY_ms5nd4RhfNHVXY9mFaqFXBF-kHJU",
+          "continuation": "catalog-window-continuation-v1:zNLVnrmHuUYMAw2YIkBodvXGwGvCve_Wp05XFFycmnY",
           "window": {
             "remainder": {
               "kind": "continue_at",

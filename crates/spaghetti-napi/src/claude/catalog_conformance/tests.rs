@@ -702,13 +702,14 @@ fn synthetic_claude_catalog_access(
     selection: &ContractVersionSelection,
     compatibility: CompatibilityClass,
 ) -> AuthorizedCatalogAccess<'_> {
-    AuthorizedCatalogAccess::fixture_with_compatibility(
+    AuthorizedCatalogAccess::fixture_with_source_contracts(
         ADAPTER_ID,
         claude_conformance_support_release_id(),
         Sha256Digest::of(claude_conformance_support_release_bytes()),
         Sha256Digest::of(claude_conformance_source_declaration_bytes()),
         selection,
         compatibility,
+        verified_candidate_release().source_contracts().clone(),
     )
 }
 

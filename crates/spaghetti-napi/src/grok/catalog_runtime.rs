@@ -82,6 +82,7 @@ pub(crate) fn grok_catalog_components() -> Vec<CatalogSourceComponent> {
     vec![
         CatalogSourceComponent {
             component_id: MEMBERSHIP_COMPONENT_ID.to_owned(),
+            source_stream_id: MEMBERSHIP_STREAM_ID.to_owned(),
             stream_id: MEMBERSHIP_STREAM_ID.to_owned(),
             root_id: SESSIONS_ROOT_ID.to_owned(),
             relative_selectors: ADMITTED_SIDECARS.map(|name| format!("**/{name}")).to_vec(),
@@ -105,6 +106,7 @@ pub(crate) fn grok_catalog_components() -> Vec<CatalogSourceComponent> {
         },
         CatalogSourceComponent {
             component_id: SUMMARY_COMPONENT_ID.to_owned(),
+            source_stream_id: SUMMARY_STREAM_ID.to_owned(),
             stream_id: SUMMARY_STREAM_ID.to_owned(),
             root_id: SESSIONS_ROOT_ID.to_owned(),
             relative_selectors: vec!["**/summary.json".to_owned()],

@@ -879,6 +879,16 @@ ceiling. Candidate status and catalog authority are unchanged; this only makes
 future Grok promotion fail closed on real declaration/runtime drift instead of
 being structurally impossible.
 
+Catalog execution now also binds each logical composition component to the
+exact digest-verified native source stream that supplies its objects. The
+logical RFC 012A coverage stream remains a separate coordinate, so one native
+stream may prove independently completed membership and metadata families
+without letting either family alias another native I/O authority. Component
+selectors, root, discovery bounds, primitive bounds, and decoder must fit the
+retained source contract before execution. Planned compositions and Candidate
+releases still cannot authorize catalog discovery; this closes an authority
+binding gap without changing support status or promoting a release.
+
 The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
 `ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,
 Codex, and Grok candidate catalog paths and freezes regression guards against

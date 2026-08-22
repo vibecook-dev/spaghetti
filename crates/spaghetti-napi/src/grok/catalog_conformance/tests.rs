@@ -403,13 +403,14 @@ fn synthetic_grok_catalog_access(
     selection: &ContractVersionSelection,
     compatibility: CompatibilityClass,
 ) -> AuthorizedCatalogAccess<'_> {
-    AuthorizedCatalogAccess::fixture_with_compatibility(
+    AuthorizedCatalogAccess::fixture_with_source_contracts(
         ADAPTER_ID,
         grok_conformance_support_release_id(),
         Sha256Digest::of(grok_conformance_support_release_bytes()),
         Sha256Digest::of(grok_conformance_source_declaration_bytes()),
         selection,
         compatibility,
+        verified_candidate_release().source_contracts().clone(),
     )
 }
 
@@ -583,6 +584,47 @@ fn planned_composition_cannot_authorize_synthetic_producer() {
 #[test]
 fn producer_rejects_composition_drift_before_source_access() {
     let reviewed = grok_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+
+    let mut source_drift = reviewed.components().to_vec();
+    source_drift[0].source_stream_id = "unverified-membership-stream".to_owned();
+    let source_drift = crate::source::catalog_composition::CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        reviewed.support_release_id(),
+        reviewed.source_declaration_id(),
+        reviewed.promoted_binding().unwrap(),
+        source_drift,
+    )
+    .unwrap();
+    let error = match source_drift.authorize_execution(synthetic_grok_catalog_access(
+        &selection,
+        CompatibilityClass::ExactSupported,
+    )) {
+        Ok(_) => panic!("unverified catalog source stream authorized execution"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("digest-verified source stream"));
+
+    let mut selector_drift = reviewed.components().to_vec();
+    selector_drift[0].relative_selectors = vec!["**/unreviewed.json".to_owned()];
+    let selector_drift =
+        crate::source::catalog_composition::CatalogSourceComposition::new_promoted(
+            ADAPTER_ID,
+            reviewed.support_release_id(),
+            reviewed.source_declaration_id(),
+            reviewed.promoted_binding().unwrap(),
+            selector_drift,
+        )
+        .unwrap();
+    let error = match selector_drift.authorize_execution(synthetic_grok_catalog_access(
+        &selection,
+        CompatibilityClass::ExactSupported,
+    )) {
+        Ok(_) => panic!("unreviewed catalog selector authorized execution"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("digest-verified source stream"));
+
     let mut components = reviewed.components().to_vec();
     components[0].disposition_ownership = vec!["native-family:drifted".to_owned()];
     let drifted = crate::source::catalog_composition::CatalogSourceComposition::new_promoted(
@@ -593,7 +635,6 @@ fn producer_rejects_composition_drift_before_source_access() {
         components,
     )
     .unwrap();
-    let selection = catalog_contract_selection();
     let executable = drifted
         .authorize_execution(synthetic_grok_catalog_access(
             &selection,

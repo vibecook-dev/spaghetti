@@ -75,6 +75,7 @@ pub(crate) struct CodexCatalogProduction {
 pub(crate) fn codex_catalog_components() -> Vec<CatalogSourceComponent> {
     vec![CatalogSourceComponent {
         component_id: COMPONENT_ID.to_owned(),
+        source_stream_id: STREAM_ID.to_owned(),
         stream_id: STREAM_ID.to_owned(),
         root_id: SESSIONS_ROOT_ID.to_owned(),
         relative_selectors: vec!["**/rollout-*.jsonl".to_owned()],

@@ -87,7 +87,12 @@ pub(crate) struct ClaudeCatalogProduction {
 pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {
     vec![
         catalog_component(
-            (HEAD_COMPONENT_ID, "session-transcripts", PROJECTS_ROOT_ID),
+            (
+                HEAD_COMPONENT_ID,
+                "session-transcripts",
+                "session-transcripts",
+                PROJECTS_ROOT_ID,
+            ),
             &["*/*.jsonl"],
             CatalogSourcePrimitive::DelimitedPrefix {
                 max_record_bytes: CANDIDATE_HEAD_BYTES,
@@ -109,6 +114,7 @@ pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {
             (
                 NESTED_COMPONENT_ID,
                 "nested-transcript-membership",
+                "subagent-transcripts",
                 PROJECTS_ROOT_ID,
             ),
             &["*/*/subagents/**/agent-*.jsonl"],
@@ -128,7 +134,12 @@ pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {
             ),
         ),
         catalog_component(
-            (INDEX_COMPONENT_ID, INDEX_STREAM_ID, PROJECTS_ROOT_ID),
+            (
+                INDEX_COMPONENT_ID,
+                INDEX_STREAM_ID,
+                INDEX_STREAM_ID,
+                PROJECTS_ROOT_ID,
+            ),
             &["*/sessions-index.json"],
             CatalogSourcePrimitive::ReplaceDocument {
                 max_object_bytes: 1024 * 1024,
@@ -146,6 +157,7 @@ pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {
             (
                 TOP_LEVEL_COMPONENT_ID,
                 "top-level-transcript-membership",
+                "session-transcripts",
                 PROJECTS_ROOT_ID,
             ),
             &["*/*.jsonl"],
@@ -796,7 +808,7 @@ struct PathCoordinates {
 }
 
 fn catalog_component(
-    identifiers: (&str, &str, &str),
+    identifiers: (&str, &str, &str, &str),
     relative_selectors: &[&str],
     primitive: CatalogSourcePrimitive,
     contribution: CatalogContribution,
@@ -804,9 +816,10 @@ fn catalog_component(
     boundary: CatalogDecoderStateBoundary,
     contract_axes: (&str, &[&str]),
 ) -> CatalogSourceComponent {
-    let (component_id, stream_id, root_id) = identifiers;
+    let (component_id, stream_id, source_stream_id, root_id) = identifiers;
     CatalogSourceComponent {
         component_id: component_id.to_owned(),
+        source_stream_id: source_stream_id.to_owned(),
         stream_id: stream_id.to_owned(),
         root_id: root_id.to_owned(),
         relative_selectors: relative_selectors
