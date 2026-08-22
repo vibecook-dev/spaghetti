@@ -160,26 +160,7 @@ fn claude_composition() -> CatalogSourceComposition {
 }
 
 fn codex_composition() -> CatalogSourceComposition {
-    planned_composition(
-        "codex",
-        "codex.catalog-candidate-2026-08-15",
-        "codex.catalog-sources-v1",
-        vec![component(
-            ("rollout-session-meta-head", "rollout-sessions", "sessions"),
-            &["**/rollout-*.jsonl"],
-            CatalogSourcePrimitive::DelimitedHead {
-                max_record_bytes: CANDIDATE_HEAD_BYTES,
-            },
-            membership("noninternal-session-meta-admission-v1", true),
-            CatalogOverlapStrategy::IdempotentOverlap,
-            CatalogDecoderStateBoundary::ObjectGenerationCursor,
-            (
-                "codex-rollout-record",
-                &["native-family:rollout-transcript"],
-            ),
-        )],
-    )
-    .unwrap()
+    crate::codex::catalog_runtime::codex_planned_catalog_composition().unwrap()
 }
 
 fn grok_composition() -> CatalogSourceComposition {

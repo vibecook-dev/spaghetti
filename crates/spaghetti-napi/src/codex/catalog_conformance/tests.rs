@@ -5,8 +5,16 @@ use tempfile::TempDir;
 use super::super::adapter::{normalize_session_meta, CodexSessionMetaError};
 use super::*;
 use crate::adapter::{
-    verify_support_release_bundle, AdapterSupportRegistration, CompatibilityClass,
-    SupportBundleDocument, SupportCatalog, SupportOperation, VerifiedSupportRelease,
+    verify_support_release_bundle, AdapterSupportRegistration, AuthorizedCatalogAccess,
+    CompatibilityClass, ContractVersionSelection, Sha256Digest, SupportBundleDocument,
+    SupportCatalog, SupportOperation, VerifiedSupportRelease, CONTRACT_VERSION_SELECTION_VERSION,
+};
+use crate::catalog_contract::CatalogAccessPolicyDigest;
+use crate::codex::catalog_runtime::{
+    codex_catalog_source_instance, codex_conformance_promoted_composition,
+    codex_conformance_source_declaration_bytes, codex_conformance_support_release_bytes,
+    codex_conformance_support_release_id, codex_planned_catalog_composition,
+    produce_codex_library_coverage, produce_codex_library_coverage_with_post_head_mutation,
 };
 
 const FROZEN_FIXTURE: &str = include_str!(concat!(
@@ -222,6 +230,362 @@ fn exact_candidate_bundle_remains_non_authorizing_for_catalog_access() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("forbidden"));
+}
+
+fn catalog_contract_selection() -> ContractVersionSelection {
+    ContractVersionSelection {
+        selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+        model_major: 1,
+        external_entity_reference_version: 1,
+        semantic_revision_reference_version: 1,
+        coverage_contract_version: 1,
+        fact_family_versions: std::collections::BTreeMap::from([
+            ("catalog.project".to_owned(), 1),
+            ("catalog.session".to_owned(), 1),
+        ]),
+        query_pack_version: Some(1),
+        observation_contract_version: None,
+    }
+}
+
+fn synthetic_codex_catalog_access(
+    selection: &ContractVersionSelection,
+    compatibility: CompatibilityClass,
+) -> AuthorizedCatalogAccess<'_> {
+    AuthorizedCatalogAccess::fixture_with_compatibility(
+        ADAPTER_ID,
+        codex_conformance_support_release_id(),
+        Sha256Digest::of(codex_conformance_support_release_bytes()),
+        Sha256Digest::of(codex_conformance_source_declaration_bytes()),
+        selection,
+        compatibility,
+    )
+}
+
+fn produce_catalog_from_root(
+    root: &Path,
+    discriminator: &[u8],
+    compatibility: CompatibilityClass,
+    policy: &[u8],
+) -> Result<crate::codex::catalog_runtime::CodexCatalogProduction, String> {
+    let composition = codex_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let executable = composition
+        .authorize_execution(synthetic_codex_catalog_access(&selection, compatibility))
+        .map_err(|error| error.to_string())?;
+    let instance =
+        codex_catalog_source_instance(root, discriminator).map_err(|error| error.to_string())?;
+    let bound = executable
+        .bind_source_instance(&instance)
+        .map_err(|error| error.to_string())?;
+    produce_codex_library_coverage(
+        &bound,
+        CatalogAccessPolicyDigest::derive(1, policy).unwrap(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn produce_catalog_fixture(
+    compatibility: CompatibilityClass,
+    policy: &[u8],
+) -> crate::codex::catalog_runtime::CodexCatalogProduction {
+    produce_catalog_from_root(
+        &fixture_root(),
+        FIXTURE_SOURCE_INSTANCE,
+        compatibility,
+        policy,
+    )
+    .unwrap()
+}
+
+#[test]
+fn synthetic_producer_matches_frozen_identity_and_complete_coverage() {
+    let report = head_projection(&fixture_root(), 7).unwrap().report();
+    let oracle = report.independent_oracle;
+    let durable = full_decoder_identities(&fixture_root(), 7).unwrap();
+    let produced = produce_catalog_fixture(
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    );
+
+    assert_eq!(produced.identity.adapter_id, ADAPTER_ID);
+    assert_eq!(produced.identity.project_count, oracle.project_count);
+    assert_eq!(produced.identity.session_count, oracle.session_count);
+    assert_eq!(
+        produced.identity.project_identity_digest,
+        oracle.project_identity_digest
+    );
+    assert_eq!(
+        produced.identity.session_identity_digest,
+        oracle.session_identity_digest
+    );
+    assert_eq!(
+        produced.identity.project_count,
+        durable.projects.len() as u64
+    );
+    assert_eq!(
+        produced.identity.session_count,
+        durable.sessions.len() as u64
+    );
+    assert_eq!(
+        produced.assembly.source_coverage().completeness,
+        crate::adapter::CoverageSetCompleteness::Complete
+    );
+    assert_eq!(
+        produced.assembly.source_coverage().points.len() as u64,
+        report.rust_conformance.source_record_count
+    );
+    assert_ne!(
+        produced.assembly.catalog_membership_revision().as_bytes(),
+        produced
+            .assembly
+            .source_coverage()
+            .membership_revision
+            .as_bytes()
+    );
+    assert_ne!(
+        produced.assembly.catalog_membership_revision().as_bytes(),
+        produced.assembly.component_completion_revision().as_bytes()
+    );
+
+    let replayed = produce_catalog_fixture(
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    );
+    assert_eq!(produced, replayed);
+    let range = produce_catalog_fixture(
+        CompatibilityClass::RangeSupported,
+        b"fixture-local-catalog-policy",
+    );
+    assert_eq!(produced.identity, range.identity);
+    assert_eq!(
+        produced.assembly.catalog_membership_revision(),
+        range.assembly.catalog_membership_revision()
+    );
+
+    let policy_drift = produce_catalog_fixture(
+        CompatibilityClass::ExactSupported,
+        b"fixture-other-catalog-policy",
+    );
+    assert_eq!(produced.identity, policy_drift.identity);
+    assert_eq!(
+        produced.assembly.catalog_membership_revision(),
+        policy_drift.assembly.catalog_membership_revision()
+    );
+    assert_ne!(
+        produced.assembly.component_completion_revision(),
+        policy_drift.assembly.component_completion_revision()
+    );
+
+    let another_instance = produce_catalog_from_root(
+        &fixture_root(),
+        b"another-canonical-source-instance",
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap();
+    assert_eq!(produced.identity, another_instance.identity);
+    assert_ne!(
+        produced.assembly.catalog_membership_revision(),
+        another_instance.assembly.catalog_membership_revision()
+    );
+
+    let publication = produced.assembly.complete_publication_source().unwrap();
+    assert_eq!(
+        publication.member_count(),
+        produced.identity.session_count as usize
+    );
+    assert_eq!(publication.plan_source(), produced.assembly.plan_source());
+    assert_eq!(
+        publication.source_coverage(),
+        produced.assembly.source_coverage()
+    );
+
+    let debug = format!("{produced:?}");
+    assert!(!debug.contains("/Users/"));
+    assert!(!debug.contains("/Volumes/"));
+    assert!(!debug.contains("small-codex"));
+}
+
+#[test]
+fn planned_composition_cannot_authorize_synthetic_producer() {
+    let selection = catalog_contract_selection();
+    let planned = codex_planned_catalog_composition().unwrap();
+    assert!(planned
+        .authorize_execution(synthetic_codex_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .is_err());
+
+    let promoted = codex_conformance_promoted_composition().unwrap();
+    let executable = promoted
+        .authorize_execution(synthetic_codex_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    assert_ne!(planned.composition_id(), executable.composition_id());
+    assert_ne!(
+        planned.support_release_id(),
+        executable.composition().support_release_id()
+    );
+    assert_ne!(
+        executable.composition().support_release_id(),
+        SUPPORT_RELEASE_ID
+    );
+}
+
+#[test]
+fn producer_rejects_composition_drift_before_source_access() {
+    let reviewed = codex_conformance_promoted_composition().unwrap();
+    let mut components = reviewed.components().to_vec();
+    components[0].disposition_ownership = vec!["native-family:drifted".to_owned()];
+    let drifted = crate::source::catalog_composition::CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        reviewed.support_release_id(),
+        reviewed.source_declaration_id(),
+        reviewed.promoted_binding().unwrap(),
+        components,
+    )
+    .unwrap();
+    let selection = catalog_contract_selection();
+    let executable = drifted
+        .authorize_execution(synthetic_codex_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    let absent = TempDir::new().unwrap();
+    let instance = codex_catalog_source_instance(absent.path(), FIXTURE_SOURCE_INSTANCE).unwrap();
+    let bound = executable.bind_source_instance(&instance).unwrap();
+    let error = produce_codex_library_coverage(
+        &bound,
+        CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("exact synthetic conformance composition"));
+    assert!(!error.contains("failed to read"));
+    assert!(!error.contains(absent.path().to_string_lossy().as_ref()));
+}
+
+fn produce_with_post_head_mutation(
+    root: &Path,
+    mutate: impl FnOnce(&Path),
+) -> Result<crate::codex::catalog_runtime::CodexCatalogProduction, String> {
+    let composition = codex_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let executable = composition
+        .authorize_execution(synthetic_codex_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    let instance = codex_catalog_source_instance(root, FIXTURE_SOURCE_INSTANCE)
+        .map_err(|error| error.to_string())?;
+    let bound = executable
+        .bind_source_instance(&instance)
+        .map_err(|error| error.to_string())?;
+    produce_codex_library_coverage_with_post_head_mutation(
+        &bound,
+        CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap(),
+        mutate,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn session_meta(id: &str, cwd: &str) -> String {
+    serde_json::json!({
+        "type": "session_meta",
+        "payload": {"id": id, "cwd": cwd}
+    })
+    .to_string()
+}
+
+#[test]
+fn producer_fails_closed_when_membership_or_heads_change_during_production() {
+    let membership = TempDir::new().unwrap();
+    write_rollout(
+        membership.path(),
+        "rollout-first.jsonl",
+        &session_meta("first", "/sanitized/project"),
+    );
+    let membership_error = produce_with_post_head_mutation(membership.path(), |sessions_root| {
+        let directory = sessions_root.join("2026/01/01");
+        fs::write(
+            directory.join("rollout-late.jsonl"),
+            format!("{}\n", session_meta("late", "/sanitized/project")),
+        )
+        .unwrap();
+    })
+    .unwrap_err();
+    assert!(membership_error.contains("membership changed during head revalidation"));
+    assert!(!membership_error.contains("rollout-late"));
+    assert!(!membership_error.contains("/sanitized/"));
+
+    let head = TempDir::new().unwrap();
+    write_rollout(
+        head.path(),
+        "rollout-first.jsonl",
+        &session_meta("first", "/sanitized/project"),
+    );
+    let head_error = produce_with_post_head_mutation(head.path(), |sessions_root| {
+        fs::write(
+            sessions_root.join("2026/01/01/rollout-first.jsonl"),
+            format!("{}\n", session_meta("changed", "/sanitized/project")),
+        )
+        .unwrap();
+    })
+    .unwrap_err();
+    assert!(head_error.contains("head changed during revalidation"));
+    assert!(!head_error.contains("rollout-first"));
+    assert!(!head_error.contains("/sanitized/"));
+}
+
+#[test]
+fn producer_rejects_competing_identity_and_oversized_head_without_path_leakage() {
+    let competing = TempDir::new().unwrap();
+    write_rollout(
+        competing.path(),
+        "rollout-first.jsonl",
+        &session_meta("shared", "/sanitized/one"),
+    );
+    write_rollout(
+        competing.path(),
+        "rollout-second.jsonl",
+        &session_meta("shared", "/sanitized/two"),
+    );
+    let competing_error = produce_catalog_from_root(
+        competing.path(),
+        FIXTURE_SOURCE_INSTANCE,
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap_err();
+    assert!(competing_error.contains("competing projects"));
+    assert!(!competing_error.contains("/sanitized/"));
+    assert!(!competing_error.contains("rollout-"));
+
+    let oversized = TempDir::new().unwrap();
+    write_rollout(
+        oversized.path(),
+        "rollout-secret.jsonl",
+        &sized_session_meta(CANDIDATE_HEAD_RECORD_PAYLOAD_BYTES + 1),
+    );
+    let oversized_error = produce_catalog_from_root(
+        oversized.path(),
+        FIXTURE_SOURCE_INSTANCE,
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap_err();
+    assert!(
+        oversized_error.contains("declared source bound")
+            || oversized_error.contains("declared record bound")
+    );
+    assert!(!oversized_error.contains("rollout-secret"));
+    assert!(!oversized_error.contains("/Users/"));
 }
 
 fn write_rollout(root: &Path, name: &str, first_record: &str) {

@@ -174,7 +174,8 @@
           ],
           "framing_contract_version": 1,
           "overlap_strategy": {
-            "kind": "idempotent_overlap"
+            "kind": "disjoint_catalog_family",
+            "ownership_contract_id": "codex-session-meta-catalog-family-v1"
           },
           "primitive": {
             "kind": "delimited_head",
@@ -190,7 +191,7 @@
         }
       ],
       "composition_contract_version": 1,
-      "composition_id": "catalog-composition-v1:drsv2VwjyrBeI0RsvMFG_JritwFF-LmAZdtliTeLsbA",
+      "composition_id": "catalog-composition-v1:goi4z2E6M4eXP352qle7EAV42vS4-W3TEGsCJzGGThc",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "source_declaration_id": "codex.catalog-sources-v1",
       "support_release_id": "codex.catalog-candidate-2026-08-15"
@@ -345,7 +346,7 @@
           "generation": 1
         }
       ],
-      "composition_id": "catalog-composition-v1:drsv2VwjyrBeI0RsvMFG_JritwFF-LmAZdtliTeLsbA",
+      "composition_id": "catalog-composition-v1:goi4z2E6M4eXP352qle7EAV42vS4-W3TEGsCJzGGThc",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "members": [
         {
@@ -359,7 +360,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:iNgwRUOjjq_usQG4rQS40lDQxpjQBVTq3JgEHOYemIE"
+      "membership_revision": "catalog-membership-v1:3lY1UNpYoFbD1EPGSQO4s4yNQ64YDYZCTKShlCNU388"
     },
     "grok": {
       "authority_evidence": [
@@ -441,16 +442,16 @@
       "full_only": {
         "final_decoder_state": "catalog-conformance-v1:i9T6SUCWY7dZG1xNjG3SunBs5MXRWvY9mf7jN5ojHsM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:RgofI4crYnyLuS0f0BCh8jlHju57n1WuLg85cB0M7G0"
+        "trace_digest": "catalog-conformance-v1:vdff3w-JGtJdy2E00UHndyr2zbqWOFrANL6EfcVCH_g"
       },
       "head_or_prefix_plus_continuation": {
         "final_decoder_state": "catalog-conformance-v1:i9T6SUCWY7dZG1xNjG3SunBs5MXRWvY9mf7jN5ojHsM",
         "record_count": 3,
-        "trace_digest": "catalog-conformance-v1:RgofI4crYnyLuS0f0BCh8jlHju57n1WuLg85cB0M7G0"
+        "trace_digest": "catalog-conformance-v1:vdff3w-JGtJdy2E00UHndyr2zbqWOFrANL6EfcVCH_g"
       },
       "windows": [
         {
-          "continuation": "catalog-window-continuation-v1:xbt2kQR9bnuL542kOTTv0hhYwx4mZ-NPxRelfirypXw",
+          "continuation": "catalog-window-continuation-v1:gvObqBRU9efQG00O5vHu3bIdOMPKh8qWQoFCjnlfEL0",
           "window": {
             "remainder": {
               "kind": "continue_at",
@@ -462,7 +463,7 @@
           }
         },
         {
-          "continuation": "catalog-window-continuation-v1:8wAetka9RzcTkaiwd_yjzTHb4XJGkD5iTQ0MLvAV2Iw",
+          "continuation": "catalog-window-continuation-v1:0mXZnq6yPD0qaY_ms5nd4RhfNHVXY9mFaqFXBF-kHJU",
           "window": {
             "remainder": {
               "kind": "continue_at",

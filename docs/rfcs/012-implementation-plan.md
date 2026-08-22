@@ -835,8 +835,18 @@ crate-private runtime and replaces the raw `Path` argument with
 `CatalogBoundSourceAccess` on `CatalogExecutableComposition`. Missing roots
 fail closed before filesystem reads. The built-in Candidate still cannot
 authorize `CatalogDiscovery`. Synthetic conformance constructors stay
-`#[cfg(test)]`. Codex/Grok producers, persistence, and public catalog N-API
-remain open.
+`#[cfg(test)]`.
+
+The Codex B2 follow-on adds the same complete-only, synthetic conformance seam
+for bounded rollout `session_meta` heads. Its one canonical planned component
+owns a disjoint catalog family instead of treating legacy durable facts as
+semantic-tier parity. The producer decodes through the common runtime, excludes
+known internal sessions, binds canonical source-instance member identity,
+revalidates every head, and performs the complete membership scan last. Exact
+and range identity, policy-view separation, competing project identity,
+oversized input, and in-flight membership/head mutation are covered. The module
+is `#[cfg(test)]`; the built-in Candidate remains non-authorizing. The Grok
+producer, persistence, and public catalog N-API remain open.
 
 The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
 `ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,
