@@ -17,11 +17,13 @@ use super::adapter::{
     GrokCatalogCoordinates,
 };
 use crate::adapter::{
-    AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
-    DecodeContext, DecodeDisposition, DriverSpec, Fact, FactBatch, FactRevisionId,
-    FactSemanticContext, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceRecordId, SourceRoot, StreamSpec,
+    AdapterError, AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId,
+    CanonicalSourceInstanceKey, DecodeDisposition, DriverSpec, Fact, FactRevisionId,
+    FactSemanticContext, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
+    SourceRoot, SourceRows, SourceSnapshot, StreamSpec,
 };
+use crate::decode_runtime::{decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest};
 use crate::source::{
     DirectoryEntryKind, DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySnapshot,
     RecordOrigin, ReplaceDocument, ReplaceRead, SourceMediaType,
@@ -499,27 +501,42 @@ fn enrich_summary(
         );
     }
 
+    let adapter_id = AdapterId::new(ADAPTER_ID)?;
+    let semantic_context = FactSemanticContext::new(
+        &adapter_id,
+        1,
+        FIXTURE_SOURCE_INSTANCE,
+        SUMMARY_STREAM_ID.as_bytes(),
+        &entry.path_key,
+        FRAMING_CONTRACT_VERSION,
+    )?;
     let descriptor = SourceObjectDescriptor {
         stream_id: summary_stream.id.clone(),
         object_key: entry.path_key.clone(),
         relative_path: relative_path.clone(),
     };
     let object_context = adapter.bootstrap_object(instance, &descriptor)?;
-    let mut batch = FactBatch::new(8, 4)?;
-    let disposition = adapter.decode(
-        DecodeContext {
-            decoder: &summary_stream.decoder,
-            object_context: &object_context,
-            decoder_state: None,
+    let decoded = decode_record(DecodeRuntimeRequest {
+        adapter,
+        decoder: &summary_stream.decoder,
+        object_context: &object_context,
+        source_access: &CatalogDecoderDependencyAccessDenied,
+        record: &record,
+        semantic_context: &semantic_context,
+        decoder_state: None,
+        retention: summary_stream.retention,
+        limits: DecodeRuntimeLimits {
+            max_facts: 8,
+            max_diagnostics: 4,
         },
-        &record,
-        &mut batch,
-    )?;
-    if disposition != DecodeDisposition::Applied {
+    })
+    .result
+    .map_err(|_| "Grok catalog record failed at the common decode boundary")?;
+    if decoded.disposition != DecodeDisposition::Applied {
         return Err("valid Grok summary did not apply through the durable decoder".into());
     }
     let mut decoded_session = None;
-    for envelope in batch.facts() {
+    for envelope in decoded.batch.facts() {
         if let Fact::Session(session) = &envelope.value {
             if decoded_session.replace(session).is_some() {
                 return Err("Grok summary emitted more than one session fact".into());
@@ -543,15 +560,6 @@ fn enrich_summary(
         decoded_session.native_session_id.clone(),
     ));
 
-    let adapter_id = AdapterId::new(ADAPTER_ID)?;
-    let semantic_context = FactSemanticContext::new(
-        &adapter_id,
-        1,
-        FIXTURE_SOURCE_INSTANCE,
-        SUMMARY_STREAM_ID.as_bytes(),
-        &entry.path_key,
-        FRAMING_CONTRACT_VERSION,
-    )?;
     let source_record_id = semantic_context.source_record_id(&record)?;
     let summary_fact = CanonicalFactId::native(
         ADAPTER_ID,
@@ -572,6 +580,36 @@ fn enrich_summary(
         )?,
     ));
     Ok(())
+}
+
+struct CatalogDecoderDependencyAccessDenied;
+
+impl SourceAccess for CatalogDecoderDependencyAccessDenied {
+    fn read_object(
+        &self,
+        _root_name: &str,
+        _relative_path: &Path,
+        _max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Grok summary catalog decoder has no declared dependency read",
+        ))
+    }
+
+    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Grok summary catalog decoder has no declared dependency query",
+        ))
+    }
+
+    fn list_objects(
+        &self,
+        _request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Grok summary catalog decoder has no declared dependency listing",
+        ))
+    }
 }
 
 fn pair_key(left: &[u8], right: &[u8]) -> Vec<u8> {
