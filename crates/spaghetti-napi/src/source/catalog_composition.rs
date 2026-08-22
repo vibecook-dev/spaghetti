@@ -6,6 +6,7 @@
 //! bytes or mint catalog authorization. A promoted adapter declaration must
 //! bind these values before the runtime may execute the composition.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
@@ -19,8 +20,9 @@ use crate::adapter::{
     AuthorizedCatalogAccess, CanonicalEntityKey, CanonicalSourceInstanceKey, CompatibilityClass,
     ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
     CoverageDomain, CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
-    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, SourceCoveragePoint,
-    SourceCoverageSet, SourceInstance, SourceRoot, SOURCE_COVERAGE_CONTRACT_VERSION,
+    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, FactBatch,
+    FactEnvelope, RecordMappingDisposition, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
+    SourceRecordId, SourceRoot, SOURCE_COVERAGE_CONTRACT_VERSION,
 };
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogPublicationMemberRef, CatalogSourceCompletionRevision,
@@ -2897,6 +2899,7 @@ pub(crate) struct CatalogDecodeWitness {
 }
 
 impl CatalogDecodeWitness {
+    #[cfg(test)]
     pub(crate) fn from_digests(
         source_record_id: [u8; DIGEST_BYTES],
         disposition: [u8; DIGEST_BYTES],
@@ -2913,6 +2916,331 @@ impl CatalogDecodeWitness {
             qualified_provenance,
             decoder_state_after,
         }
+    }
+
+    /// Construct the RFC 012A tier-composition witness from a completed
+    /// common decode result. Unlike `from_digests`, this path does not accept
+    /// caller-asserted fact or provenance digests. Every emitted fact must
+    /// carry its canonical semantic revision, and that revision must belong
+    /// to the supplied logical source record.
+    pub(crate) fn from_decoded(
+        source_record_id: SourceRecordId,
+        disposition: DecodeDisposition,
+        mapping_disposition: &RecordMappingDisposition,
+        batch: &FactBatch,
+        decoder_state_after: Option<&[u8]>,
+    ) -> Result<Self, CatalogCompositionError> {
+        validate_decode_mapping(disposition, mapping_disposition, batch, source_record_id)?;
+
+        let mut fact_revisions = blake3::Hasher::new();
+        fact_revisions.update(b"spaghetti/rfc012a/decode-fact-revisions-v1\0");
+        fact_revisions.update(&(batch.facts().len() as u64).to_be_bytes());
+        let mut semantic_payload = blake3::Hasher::new();
+        semantic_payload.update(b"spaghetti/rfc012a/decode-semantic-payload-v1\0");
+        semantic_payload.update(&(batch.facts().len() as u64).to_be_bytes());
+        let mut qualified_provenance = blake3::Hasher::new();
+        qualified_provenance.update(b"spaghetti/rfc012a/decode-qualified-provenance-v1\0");
+        qualified_provenance.update(&(batch.facts().len() as u64).to_be_bytes());
+
+        for (index, envelope) in batch.facts().iter().enumerate() {
+            let semantic = validated_semantic_revision(envelope, source_record_id)?;
+            let index = u64::try_from(index).map_err(|_| {
+                CatalogCompositionError::invalid(
+                    "decoded fact ordinal exceeds the conformance digest range",
+                )
+            })?;
+
+            fact_revisions.update(&index.to_be_bytes());
+            hash_string(&mut fact_revisions, envelope.value.kind());
+            fact_revisions.update(semantic.source_record_id.as_bytes());
+            fact_revisions.update(semantic.fact_id.as_bytes());
+            fact_revisions.update(semantic.fact_revision_id.as_bytes());
+            fact_revisions.update(
+                &semantic
+                    .semantic_revision_ref
+                    .semantic_reference_contract_version
+                    .to_be_bytes(),
+            );
+            fact_revisions.update(semantic.semantic_revision_ref.fact_revision_id.as_bytes());
+
+            semantic_payload.update(&index.to_be_bytes());
+            hash_string(&mut semantic_payload, envelope.value.kind());
+            let payload = canonical_fact_json(envelope)?;
+            hash_bytes(&mut semantic_payload, &payload);
+
+            qualified_provenance.update(&index.to_be_bytes());
+            qualified_provenance.update(semantic.source_record_id.as_bytes());
+            qualified_provenance.update(&envelope.provenance.generation.to_be_bytes());
+            hash_bytes(&mut qualified_provenance, &envelope.provenance.cursor_start);
+            hash_bytes(&mut qualified_provenance, &envelope.provenance.cursor_end);
+            qualified_provenance.update(&envelope.provenance.record_hash);
+            qualified_provenance.update(&envelope.provenance.local_fact_ordinal.to_be_bytes());
+        }
+
+        Ok(Self {
+            source_record_id: *source_record_id.as_bytes(),
+            disposition: decode_disposition_digest(disposition, mapping_disposition),
+            fact_revisions: *fact_revisions.finalize().as_bytes(),
+            semantic_payload: *semantic_payload.finalize().as_bytes(),
+            qualified_provenance: *qualified_provenance.finalize().as_bytes(),
+            decoder_state_after: decoder_state_digest(decoder_state_after),
+        })
+    }
+}
+
+fn validate_decode_mapping(
+    disposition: DecodeDisposition,
+    mapping_disposition: &RecordMappingDisposition,
+    batch: &FactBatch,
+    source_record_id: SourceRecordId,
+) -> Result<(), CatalogCompositionError> {
+    if batch.record_mapping_dispositions() != std::slice::from_ref(mapping_disposition) {
+        return Err(CatalogCompositionError::invalid(
+            "tier-composition witness requires exactly one committed record mapping",
+        ));
+    }
+    let coherent = match (disposition, mapping_disposition) {
+        (DecodeDisposition::Applied, RecordMappingDisposition::Mapped { fact_count }) => {
+            usize::try_from(*fact_count).ok() == Some(batch.facts().len())
+        }
+        (DecodeDisposition::IgnoredKnown, RecordMappingDisposition::IgnoredKnown { .. })
+        | (DecodeDisposition::RetryTransient, RecordMappingDisposition::BufferedIncomplete) => {
+            batch.facts().is_empty()
+        }
+        (
+            DecodeDisposition::PreservedUnknown,
+            RecordMappingDisposition::RetainedUnknown {
+                bounded_evidence, ..
+            },
+        ) => bounded_evidence.source_record_id == source_record_id && batch.facts().len() == 1,
+        _ => false,
+    };
+    if !coherent {
+        return Err(CatalogCompositionError::invalid(
+            "decode disposition and record mapping are not one completed common decode result",
+        ));
+    }
+    Ok(())
+}
+
+fn validated_semantic_revision(
+    envelope: &FactEnvelope,
+    source_record_id: SourceRecordId,
+) -> Result<crate::adapter::FactSemanticRevision, CatalogCompositionError> {
+    let semantic = envelope.semantic_revision.ok_or_else(|| {
+        CatalogCompositionError::invalid(
+            "tier-composition conformance rejects facts without canonical semantic revisions",
+        )
+    })?;
+    if semantic.source_record_id != source_record_id
+        || semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id
+    {
+        return Err(CatalogCompositionError::invalid(
+            "decoded fact semantic identity is not bound to its logical source record",
+        ));
+    }
+    Ok(semantic)
+}
+
+fn canonical_fact_json(envelope: &FactEnvelope) -> Result<Vec<u8>, CatalogCompositionError> {
+    // Raw unknown payload retention is a storage policy, not semantic decode
+    // content. Its bounded digest and byte count are already carried by the
+    // record mapping disposition and the provenance record hash.
+    let mut value = match &envelope.value {
+        crate::adapter::Fact::UnknownRecord {
+            native_kind,
+            reason,
+            raw_payload: _,
+        } => serde_json::json!({
+            "UnknownRecord": {
+                "native_kind": native_kind,
+                "raw_payload": "retention_excluded",
+                "reason": reason,
+            }
+        }),
+        value => serde_json::to_value(value).map_err(|_| {
+            CatalogCompositionError::invalid(
+                "decoded semantic fact cannot enter the conformance digest",
+            )
+        })?,
+    };
+    sort_json_value(&mut value);
+    serde_json::to_vec(&value).map_err(|_| {
+        CatalogCompositionError::invalid(
+            "decoded semantic fact cannot enter the conformance digest",
+        )
+    })
+}
+
+fn sort_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                sort_json_value(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let mut fields = std::mem::take(object).into_iter().collect::<Vec<_>>();
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
+            for (key, mut value) in fields {
+                sort_json_value(&mut value);
+                object.insert(key, value);
+            }
+        }
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => {}
+    }
+}
+
+fn decode_disposition_digest(
+    disposition: DecodeDisposition,
+    mapping_disposition: &RecordMappingDisposition,
+) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012a/decode-disposition-v1\0");
+    hash_string(
+        &mut hasher,
+        match disposition {
+            DecodeDisposition::Applied => "applied",
+            DecodeDisposition::IgnoredKnown => "ignored_known",
+            DecodeDisposition::PreservedUnknown => "preserved_unknown",
+            DecodeDisposition::RetryTransient => "retry_transient",
+        },
+    );
+    match mapping_disposition {
+        RecordMappingDisposition::Mapped { fact_count } => {
+            hash_string(&mut hasher, "mapped");
+            hasher.update(&fact_count.to_be_bytes());
+        }
+        RecordMappingDisposition::IgnoredKnown { reason_code } => {
+            hash_string(&mut hasher, "ignored_known");
+            hash_string(&mut hasher, reason_code);
+        }
+        RecordMappingDisposition::RetainedUnknown {
+            family_hint,
+            bounded_evidence,
+        } => {
+            hash_string(&mut hasher, "retained_unknown");
+            match family_hint {
+                Some(value) => {
+                    hasher.update(&[1]);
+                    hash_string(&mut hasher, value);
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+            hasher.update(bounded_evidence.source_record_id.as_bytes());
+            hasher.update(&bounded_evidence.observed_bytes.to_be_bytes());
+            hasher.update(&bounded_evidence.payload_digest);
+            hash_bytes(&mut hasher, &bounded_evidence.sanitized_excerpt);
+        }
+        RecordMappingDisposition::BufferedIncomplete => {
+            hash_string(&mut hasher, "buffered_incomplete");
+        }
+        RecordMappingDisposition::Malformed {
+            reason_code,
+            bounded_diagnostic,
+        } => {
+            hash_string(&mut hasher, "malformed");
+            hash_string(&mut hasher, reason_code);
+            hash_bytes(&mut hasher, bounded_diagnostic);
+        }
+        RecordMappingDisposition::UnsupportedVersion { observed_version } => {
+            hash_string(&mut hasher, "unsupported_version");
+            hash_string(&mut hasher, observed_version);
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn decoder_state_digest(decoder_state: Option<&[u8]>) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012a/decoder-state-v1\0");
+    match decoder_state {
+        Some(state) => {
+            hasher.update(&[1]);
+            hash_bytes(&mut hasher, state);
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Ordered last-revision projection used by the tier-composition gate. It is
+/// deliberately separate from the trace digest: equal record traces alone do
+/// not prove that idempotent overlap or replacement yielded equal final facts.
+pub(crate) struct CatalogFactReplacementState {
+    facts: BTreeMap<[u8; DIGEST_BYTES], ([u8; DIGEST_BYTES], [u8; DIGEST_BYTES])>,
+    seen_revisions: BTreeMap<[u8; DIGEST_BYTES], [u8; DIGEST_BYTES]>,
+}
+
+impl CatalogFactReplacementState {
+    pub(crate) fn new() -> Self {
+        Self {
+            facts: BTreeMap::new(),
+            seen_revisions: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn apply(
+        &mut self,
+        source_record_id: SourceRecordId,
+        batch: &FactBatch,
+    ) -> Result<(), CatalogCompositionError> {
+        for envelope in batch.facts() {
+            let semantic = validated_semantic_revision(envelope, source_record_id)?;
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"spaghetti/rfc012a/catalog-replacement-fact-v1\0");
+            hasher.update(semantic.source_record_id.as_bytes());
+            hasher.update(semantic.fact_revision_id.as_bytes());
+            hasher.update(
+                &semantic
+                    .semantic_revision_ref
+                    .semantic_reference_contract_version
+                    .to_be_bytes(),
+            );
+            hasher.update(semantic.semantic_revision_ref.fact_revision_id.as_bytes());
+            hash_bytes(&mut hasher, &canonical_fact_json(envelope)?);
+            hasher.update(&envelope.provenance.generation.to_be_bytes());
+            hash_bytes(&mut hasher, &envelope.provenance.cursor_start);
+            hash_bytes(&mut hasher, &envelope.provenance.cursor_end);
+            hasher.update(&envelope.provenance.record_hash);
+            hasher.update(&envelope.provenance.local_fact_ordinal.to_be_bytes());
+            let replacement = *hasher.finalize().as_bytes();
+            let fact_id = *semantic.fact_id.as_bytes();
+            let revision_id = *semantic.fact_revision_id.as_bytes();
+            if let Some(existing) = self.seen_revisions.get(&revision_id) {
+                if *existing != replacement {
+                    return Err(CatalogCompositionError::invalid(
+                        "one semantic fact revision produced different replacement state",
+                    ));
+                }
+                // A later tier may reread an already-committed overlap. The
+                // repeated revision is an idempotent no-op; it must not roll
+                // the current replacement state back past a newer revision.
+                continue;
+            }
+            self.seen_revisions.insert(revision_id, replacement);
+            self.facts.insert(fact_id, (revision_id, replacement));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn digest(&self) -> CatalogConformanceDigest {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"spaghetti/rfc012a/catalog-replacement-state-v1\0");
+        hasher.update(&(self.facts.len() as u64).to_be_bytes());
+        for (fact_id, (revision_id, replacement)) in &self.facts {
+            hasher.update(fact_id);
+            hasher.update(revision_id);
+            hasher.update(replacement);
+        }
+        CatalogConformanceDigest::from_digest(*hasher.finalize().as_bytes())
     }
 }
 

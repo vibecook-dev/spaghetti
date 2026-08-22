@@ -4,13 +4,21 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::adapter::{
+    AdapterError, AdapterId, AdapterManifest, AdapterObjectContext, AgentAdapter,
     AuthorizedCatalogAccess, CanonicalSourceInstanceKey, CompatibilityClass,
     ContractVersionSelection, CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain,
     CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance,
-    CoverageSetCompleteness, CoverageStatus, Sha256Digest, SourceInstance, SourceInstanceKey,
-    SourceInstanceSpec, SourceRoot, CONTRACT_VERSION_SELECTION_VERSION,
+    CoverageSetCompleteness, CoverageStatus, DecodeContext, DecodeDisposition, DecoderId,
+    EntityKey, Fact, FactBatch, FactSemanticContext, RawRetentionPolicy, SessionFact, Sha256Digest,
+    SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectList,
+    SourceObjectListRequest, SourceQuery, SourceRoot, SourceRows, SourceSnapshot, StreamSpec,
+    CONTRACT_VERSION_SELECTION_VERSION,
 };
 use crate::catalog_contract::CatalogAccessPolicyDigest;
+use crate::decode_runtime::{
+    decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecodedFactBatch,
+};
+use crate::source::{RecordOrigin, SourceCursor, SourceMediaType, SourceRecord};
 
 use super::*;
 
@@ -394,6 +402,275 @@ fn coverage_bound_membership(
 
 fn digest(label: &str) -> [u8; DIGEST_BYTES] {
     *blake3::hash(label.as_bytes()).as_bytes()
+}
+
+struct TierConformanceAdapter {
+    manifest: AdapterManifest,
+}
+
+impl TierConformanceAdapter {
+    fn new() -> Self {
+        Self {
+            manifest: AdapterManifest {
+                id: AdapterId::new("tier-conformance").unwrap(),
+                display_name: "tier conformance fixture".to_owned(),
+                adapter_version: "1".to_owned(),
+                contract_version: 1,
+                support_binding: None,
+                scope_programs: None,
+                source_schema_versions: Vec::new(),
+                capabilities: Vec::new(),
+            },
+        }
+    }
+}
+
+impl AgentAdapter for TierConformanceAdapter {
+    fn manifest(&self) -> &AdapterManifest {
+        &self.manifest
+    }
+
+    fn discover(
+        &self,
+        _context: &crate::adapter::DiscoveryContext,
+    ) -> Result<Vec<SourceInstanceSpec>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+        Ok(Vec::new())
+    }
+
+    fn decode(
+        &self,
+        context: DecodeContext<'_>,
+        record: &SourceRecord,
+        output: &mut FactBatch,
+    ) -> Result<DecodeDisposition, AdapterError> {
+        let prior = match context.decoder_state {
+            None => 0_u32,
+            Some(bytes) => u32::from_be_bytes(bytes.try_into().map_err(|_| {
+                AdapterError::invalid_contract("fixture decoder state has an invalid shape")
+            })?),
+        };
+        let next = prior.checked_add(1).ok_or_else(|| {
+            AdapterError::invalid_contract("fixture decoder state counter overflowed")
+        })?;
+        let native_value = std::str::from_utf8(&record.payload)
+            .map_err(|_| AdapterError::invalid_contract("fixture record is not UTF-8"))?;
+        if native_value.is_empty() {
+            return Err(AdapterError::invalid_contract("fixture record is empty"));
+        }
+        let session = EntityKey::native(
+            &self.manifest.id,
+            record.source_instance_id,
+            "session",
+            b"tier-session",
+        )?;
+        let project = EntityKey::native(
+            &self.manifest.id,
+            record.source_instance_id,
+            "project",
+            b"tier-project",
+        )?;
+        output.push_native(
+            record,
+            b"tier-session",
+            Fact::Session(SessionFact {
+                session,
+                project,
+                native_session_id: "tier-session".to_owned(),
+                native_project_key: "tier-project".to_owned(),
+                cwd: None,
+                git_branch: None,
+                first_prompt: Some(format!("step-{next}:{native_value}")),
+                ai_title: None,
+                custom_title: None,
+                source_time: None,
+            }),
+        )?;
+        output.set_next_decoder_state(next.to_be_bytes().to_vec())?;
+        Ok(DecodeDisposition::Applied)
+    }
+}
+
+struct TierConformanceNoSourceAccess;
+
+impl SourceAccess for TierConformanceNoSourceAccess {
+    fn read_object(
+        &self,
+        _root_name: &str,
+        _relative_path: &Path,
+        _max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "tier conformance decoder attempted source access",
+        ))
+    }
+
+    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "tier conformance decoder attempted source access",
+        ))
+    }
+
+    fn list_objects(
+        &self,
+        _request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "tier conformance decoder attempted source access",
+        ))
+    }
+}
+
+fn tier_conformance_composition() -> CatalogSourceComposition {
+    planned_composition(
+        "tier-conformance",
+        "tier-conformance-support-v1",
+        "tier-conformance-sources-v1",
+        vec![component(
+            ("fixture-prefix", "fixture-records", "fixture-root"),
+            &["fixture.jsonl"],
+            CatalogSourcePrimitive::DelimitedPrefix {
+                max_record_bytes: 8,
+                max_window_bytes: 10,
+                max_records: 2,
+            },
+            membership("fixture-membership-v1", true),
+            CatalogOverlapStrategy::IdempotentOverlap,
+            CatalogDecoderStateBoundary::ObjectGenerationCursor,
+            ("tier-fixture-v1", &["native-family:tier-session"]),
+        )],
+    )
+    .unwrap()
+}
+
+fn tier_records(observed_at: i64) -> Vec<SourceRecord> {
+    let origin = RecordOrigin {
+        source_instance_id: 41,
+        stream_id: 42,
+        object_id: 43,
+        observed_at,
+        source_timestamp_hint: None,
+        media_type: SourceMediaType::new("application/x-ndjson").unwrap(),
+    };
+    let mut start = 0_u64;
+    [
+        b"alpha".as_slice(),
+        b"bravo".as_slice(),
+        b"charlie".as_slice(),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(ordinal, payload)| {
+        let end = start + payload.len() as u64;
+        let record = SourceRecord::new(
+            &origin,
+            7,
+            SourceCursor::append_offset(start),
+            SourceCursor::append_offset(end),
+            ordinal as u32,
+            payload.to_vec(),
+        );
+        start = end;
+        record
+    })
+    .collect()
+}
+
+fn decode_tier_record(
+    adapter: &TierConformanceAdapter,
+    decoder: &DecoderId,
+    object_context: &AdapterObjectContext,
+    semantic_context: &FactSemanticContext,
+    record: &SourceRecord,
+    decoder_state: Option<&[u8]>,
+) -> DecodedFactBatch {
+    decode_record(DecodeRuntimeRequest {
+        adapter,
+        decoder,
+        object_context,
+        source_access: &TierConformanceNoSourceAccess,
+        record,
+        semantic_context,
+        decoder_state,
+        retention: RawRetentionPolicy::None,
+        limits: DecodeRuntimeLimits {
+            max_facts: 8,
+            max_diagnostics: 8,
+        },
+    })
+    .result
+    .unwrap()
+}
+
+fn actual_tier_trace(
+    composition: &CatalogSourceComposition,
+    records: &[SourceRecord],
+    windows: Option<&[CatalogRecordWindowStep]>,
+    reset_state_at_window: bool,
+) -> (CatalogDecodeTraceSummary, CatalogConformanceDigest) {
+    let adapter = TierConformanceAdapter::new();
+    let decoder = DecoderId::new("tier-fixture-v1").unwrap();
+    let object_context = AdapterObjectContext::empty();
+    let semantic_context = FactSemanticContext::new(
+        &adapter.manifest.id,
+        1,
+        b"tier-fixture-source-instance",
+        b"fixture-records",
+        b"fixture.jsonl",
+        1,
+    )
+    .unwrap();
+    let mut trace = CatalogDecodeTraceAccumulator::new(composition, "fixture-prefix").unwrap();
+    let mut replacement = CatalogFactReplacementState::new();
+    let mut decoder_state = None::<Vec<u8>>;
+
+    let ranges = windows
+        .map(|windows| {
+            windows
+                .iter()
+                .map(|step| {
+                    (
+                        step.window.start_record as usize,
+                        step.window.end_record() as usize,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![(0, records.len())]);
+    for (window_index, (start, end)) in ranges.into_iter().enumerate() {
+        if reset_state_at_window && window_index > 0 {
+            decoder_state = None;
+        }
+        for record in &records[start..end] {
+            let decoded = decode_tier_record(
+                &adapter,
+                &decoder,
+                &object_context,
+                &semantic_context,
+                record,
+                decoder_state.as_deref(),
+            );
+            let source_record_id = decoded.batch.source_record_id(record).unwrap();
+            let witness = CatalogDecodeWitness::from_decoded(
+                source_record_id,
+                decoded.disposition,
+                &decoded.mapping_disposition,
+                &decoded.batch,
+                decoded.next_decoder_state.as_deref(),
+            )
+            .unwrap();
+            replacement.apply(source_record_id, &decoded.batch).unwrap();
+            trace.push(witness).unwrap();
+            decoder_state = decoded.next_decoder_state;
+        }
+    }
+    (
+        trace.finish(decoder_state_digest(decoder_state.as_deref())),
+        replacement.digest(),
+    )
 }
 
 fn witnesses(label: &str, record_count: usize) -> Vec<CatalogDecodeWitness> {
@@ -1894,6 +2171,163 @@ fn head_or_prefix_plus_continuation_has_the_full_only_trace() {
     assert!(CatalogDecodeTraceAccumulator::new(&codex, "missing-component").is_err());
     let grok = grok_composition();
     assert!(CatalogDecodeTraceAccumulator::new(&grok, "session-directory-membership").is_err());
+}
+
+#[test]
+fn common_decode_output_composes_to_the_full_only_trace_and_replacement_digest() {
+    let composition = tier_conformance_composition();
+    let full_records = tier_records(100);
+    let tiered_records = tier_records(9_999);
+    let layout = full_records
+        .iter()
+        .map(|record| record.payload.len() as u64)
+        .collect::<Vec<_>>();
+    let mut planner = CatalogRecordWindowPlanner::new(&composition, "fixture-prefix").unwrap();
+    let mut windows = Vec::new();
+    let mut step = planner.plan_initial(&layout, 0).unwrap();
+    loop {
+        let continuation = step.continuation;
+        let remainder = step.window.remainder;
+        windows.push(step);
+        match (remainder, continuation) {
+            (CatalogRecordWindowRemainder::ContinueAt { .. }, Some(continuation)) => {
+                step = planner.plan_continuation(continuation, &layout, 0).unwrap();
+            }
+            (CatalogRecordWindowRemainder::AtSnapshotBoundary { .. }, None) => break,
+            _ => panic!("complete fixture produced an invalid continuation shape"),
+        }
+    }
+    assert_eq!(windows.len(), 2);
+
+    let full_only = actual_tier_trace(&composition, &full_records, None, false);
+    let composed = actual_tier_trace(&composition, &tiered_records, Some(&windows), false);
+    assert_eq!(
+        full_only, composed,
+        "observation time and window scheduling cannot change semantic conformance"
+    );
+
+    let reset_between_windows =
+        actual_tier_trace(&composition, &tiered_records, Some(&windows), true);
+    assert_ne!(
+        full_only.0, reset_between_windows.0,
+        "decoder state must continue across the declared safe boundary"
+    );
+    assert_ne!(
+        full_only.1, reset_between_windows.1,
+        "a state reset must also change the final replacement projection"
+    );
+}
+
+#[test]
+fn decoded_conformance_rejects_legacy_or_revision_ambiguous_facts() {
+    let record = tier_records(100).remove(0);
+    let semantic_context = FactSemanticContext::new(
+        &AdapterId::new("tier-conformance").unwrap(),
+        1,
+        b"tier-fixture-source-instance",
+        b"fixture-records",
+        b"fixture.jsonl",
+        1,
+    )
+    .unwrap();
+    let source_record_id = semantic_context.source_record_id(&record).unwrap();
+    let mut legacy = FactBatch::new(1, 1).unwrap();
+    legacy
+        .push(
+            &record,
+            Fact::Session(SessionFact {
+                session: EntityKey::native(
+                    &AdapterId::new("tier-conformance").unwrap(),
+                    record.source_instance_id,
+                    "session",
+                    b"legacy-session",
+                )
+                .unwrap(),
+                project: EntityKey::native(
+                    &AdapterId::new("tier-conformance").unwrap(),
+                    record.source_instance_id,
+                    "project",
+                    b"legacy-project",
+                )
+                .unwrap(),
+                native_session_id: "legacy-session".to_owned(),
+                native_project_key: "legacy-project".to_owned(),
+                cwd: None,
+                git_branch: None,
+                first_prompt: None,
+                ai_title: None,
+                custom_title: None,
+                source_time: None,
+            }),
+        )
+        .unwrap();
+    let legacy_mapping = RecordMappingDisposition::Mapped { fact_count: 1 };
+    legacy
+        .add_record_mapping_disposition(legacy_mapping.clone())
+        .unwrap();
+    assert!(CatalogDecodeWitness::from_decoded(
+        source_record_id,
+        DecodeDisposition::Applied,
+        &legacy_mapping,
+        &legacy,
+        None,
+    )
+    .is_err());
+
+    let adapter = TierConformanceAdapter::new();
+    let decoder = DecoderId::new("tier-fixture-v1").unwrap();
+    let object_context = AdapterObjectContext::empty();
+    let original = decode_tier_record(
+        &adapter,
+        &decoder,
+        &object_context,
+        &semantic_context,
+        &record,
+        None,
+    );
+    let second_record = tier_records(200).remove(1);
+    let second = decode_tier_record(
+        &adapter,
+        &decoder,
+        &object_context,
+        &semantic_context,
+        &second_record,
+        original.next_decoder_state.as_deref(),
+    );
+    let second_source_record_id = semantic_context.source_record_id(&second_record).unwrap();
+    let mut expected_replacement = CatalogFactReplacementState::new();
+    expected_replacement
+        .apply(source_record_id, &original.batch)
+        .unwrap();
+    expected_replacement
+        .apply(second_source_record_id, &second.batch)
+        .unwrap();
+    let expected_digest = expected_replacement.digest();
+    expected_replacement
+        .apply(source_record_id, &original.batch)
+        .unwrap();
+    assert_eq!(
+        expected_replacement.digest(),
+        expected_digest,
+        "an overlap replay cannot roll a newer replacement back"
+    );
+
+    let mut drifted_record = record.clone();
+    drifted_record.payload = b"omega".to_vec();
+    drifted_record.payload_hash = crate::source::RecordHash::digest(&drifted_record.payload);
+    let drifted = decode_tier_record(
+        &adapter,
+        &decoder,
+        &object_context,
+        &semantic_context,
+        &drifted_record,
+        None,
+    );
+    let mut replacement = CatalogFactReplacementState::new();
+    replacement
+        .apply(source_record_id, &original.batch)
+        .unwrap();
+    assert!(replacement.apply(source_record_id, &drifted.batch).is_err());
 }
 
 #[test]
