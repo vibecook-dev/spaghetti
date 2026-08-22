@@ -1154,9 +1154,23 @@ rollback seams, source-evidence corruption, transient success from both retry
 lineages, historical reads across attempts, and retry-wake pressure are
 executable. This closes the required-source retry/degraded/recovery path for
 the configured Library refresh scheduler. `Partial` publication, retry from an
-integrity `Error`, automatic integrity classification, changed-plan/epoch
+integrity `Error`, initial/no-snapshot integrity publication, changed-plan/epoch
 replacement, physical compaction, caller-authorized local policy, richer
 queries, and promotion evidence remain open.
+
+The eleventh bounded B3 slice (`b1cdf88`) closes automatic failure
+classification for that configured same-plan refresh path. Catalog composition
+failures now carry a typed internal class: bounded native I/O, instability, and
+declared-limit exhaustion follow the existing retry-to-`Degraded` policy,
+while invalid configuration, cursor, confinement, database, plan binding,
+coverage binding, and projection invariants fail immediately to durable
+`Error`. The public error and persisted reason are source-neutral; native paths
+and adapter diagnostics are not retained or echoed. Ordinary and recovery
+refreshes both append the immutable integrity-failure evidence and preserve
+only the restart-authenticated independently-safe snapshot. Recovery restart,
+lost-ack replay, exact CAS ownership, retry suppression after classification,
+and privacy-safe error projection are executable. This does not add discarded
+initial-build errors or authorize retry from `Error`.
 
 ### B4. Progressive host and UX
 
