@@ -2573,6 +2573,102 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn configured_dynamic_directory_bootstrap_joins_members_before_ready() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_dynamic_directory_registry(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp
+            .path()
+            .join("configured-directory-bootstrap-private-root");
+        let children = root.join("sessions/fixture-session/children");
+        std::fs::create_dir_all(children.join("nested")).unwrap();
+        std::fs::write(root.join("sessions/session.jsonl"), b"fixture\n").unwrap();
+        std::fs::write(
+            children.join("nested/child.jsonl"),
+            b"{\"type\":\"child\"}\n",
+        )
+        .unwrap();
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(vec![root], PathBuf::from("sessions/session.jsonl")),
+        )
+        .unwrap()
+        .unwrap();
+        let prepared = attachment.prepare_append_runtime(16, 16).unwrap();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opened = prepared
+            .open_with_watcher_factory(ConfiguredScopedObservationRuntimeOptions::default(), {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let (mut runtime, handle, supervisor) = opened.into_parts();
+        let mut supervisor_task = tokio::spawn(supervisor.run_until_stopped());
+        let mut bootstrap = None;
+        for _ in 0..8 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("dynamic configured supervisor stopped before bootstrap: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            if let ScopedObservationEvent::ObserverBootstrapComplete { barrier } =
+                &yielded.envelope.event
+            {
+                bootstrap = Some(Arc::clone(barrier));
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if bootstrap.is_some() {
+                break;
+            }
+        }
+        let bootstrap = bootstrap.expect("dynamic membership must enter the bootstrap barrier");
+        assert_eq!(bootstrap.scope_coverage.relations().len(), 2);
+        let decode = bootstrap
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            decode.points.len() + decode.explicit_absence_or_deletion.len(),
+            3,
+            "root, directory membership, and selected child must be complete before Ready"
+        );
+        assert_eq!(registrations.lock().unwrap().len(), 1);
+
+        let close = handle.request_close();
+        let stopped = tokio::time::timeout(Duration::from_secs(2), supervisor_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ConfiguredScopedObservationSupervisorRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert!(runtime.next_event().await.unwrap().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(callback_slot.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn configured_append_supervisor_watches_before_scan_and_closes_structurally() {
         let probe_calls = Arc::new(AtomicUsize::new(0));
         let discover_calls = Arc::new(AtomicUsize::new(0));

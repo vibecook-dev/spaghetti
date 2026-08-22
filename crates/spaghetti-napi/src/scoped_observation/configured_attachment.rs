@@ -25,26 +25,31 @@ use crate::source::{
     SourceMediaType, MAX_IDENTITY_VALUE_BYTES,
 };
 
+use super::observation_source_access::{
+    ScopedObservationDirectoryMemberContent, ScopedObservationDirectoryMemberRead,
+};
+
 use super::{
     artifact_access, prepare_scoped_observation_support, PreparedScopedObservationSupport,
     ScopedAccessRootGrant, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
-    ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy, ScopedArtifactRelationGrant,
-    ScopedBootstrapBarrierError, ScopedDeliveryError, ScopedKnownAppendObject,
-    ScopedKnownObjectGrant, ScopedObjectFailureClassification, ScopedObservationAccessError,
-    ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAdmissionLane,
-    ScopedObservationAppendPassBinding, ScopedObservationAppendPassRequest,
-    ScopedObservationAsyncHandle, ScopedObservationAsyncOwnerRunResult,
-    ScopedObservationAsyncResyncFailure, ScopedObservationAsyncRuntime,
-    ScopedObservationAsyncStoppedOwners, ScopedObservationConsumerOfferError,
-    ScopedObservationDeliveryLimits, ScopedObservationNativeWatchBackend,
-    ScopedObservationNativeWatchCallback, ScopedObservationNativeWatcher,
-    ScopedObservationNativeWatcherRecoveryPolicy, ScopedObservationOpenDrainError,
-    ScopedObservationOwnedIdentityInput, ScopedObservationProjectionLimits,
-    ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-    ScopedObservationSourceOwnerRetryPolicy, ScopedObservationStartupError,
-    ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
-    ScopedObservationUnknownWireNegotiation, ScopedObserverFailureReason,
-    ScopedProjectionDeliveryError, ScopedRootIdentityRequest, ScopedSourceObjectErrorRuntime,
+    ScopedAppendDeliveryPhase, ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy,
+    ScopedArtifactRelationGrant, ScopedBootstrapBarrierError, ScopedDeliveryError,
+    ScopedKnownAppendObject, ScopedKnownObjectGrant, ScopedObjectFailureClassification,
+    ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAccessPass,
+    ScopedObservationAdmissionLane, ScopedObservationAppendPassBinding,
+    ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
+    ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncResyncFailure,
+    ScopedObservationAsyncRuntime, ScopedObservationAsyncStoppedOwners,
+    ScopedObservationConsumerOfferError, ScopedObservationDeliveryLimits,
+    ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
+    ScopedObservationNativeWatcher, ScopedObservationNativeWatcherRecoveryPolicy,
+    ScopedObservationOpenDrainError, ScopedObservationOwnedIdentityInput,
+    ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
+    ScopedObservationQueueLimits, ScopedObservationSourceOwnerRetryPolicy,
+    ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
+    ScopedObservationTrustedAccessRequest, ScopedObservationUnknownWireNegotiation,
+    ScopedObserverFailureReason, ScopedProjectionDeliveryError,
+    ScopedRelationMembershipObservation, ScopedRootIdentityRequest, ScopedSourceObjectErrorRuntime,
     ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
 };
 
@@ -393,6 +398,16 @@ impl PreparedScopedDirectoryRelationBinding {
     pub(crate) fn bounds(&self) -> ScopeRelationBounds {
         self.bounds
     }
+
+    fn borrowed_identity_inputs(&self) -> Vec<ScopeIdentityInput<'_>> {
+        self.identity_inputs
+            .iter()
+            .map(|input| ScopeIdentityInput {
+                name: &input.name,
+                value: &input.value,
+            })
+            .collect()
+    }
 }
 
 impl std::fmt::Debug for PreparedScopedDirectoryRelationBinding {
@@ -548,6 +563,7 @@ pub(crate) struct ConfiguredScopedObservationSupervisor {
     watcher: ScopedObservationNativeWatcher,
     objects: Vec<ScopedKnownAppendObject>,
     bindings: Vec<ScopedObservationAppendPassBinding>,
+    directory_bindings: Vec<PreparedScopedDirectoryRelationBinding>,
     admission: ScopedObservationAdmissionLane,
     projection: ScopedObservationProjectionSink,
     bootstrap_object_errors: BTreeMap<String, ScopedSourceObjectErrorRuntime>,
@@ -570,6 +586,14 @@ impl std::fmt::Debug for ConfiguredScopedObservationSupervisor {
                     .bindings
                     .iter()
                     .map(ScopedObservationAppendPassBinding::relation_id)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "directory_relation_ids",
+                &self
+                    .directory_bindings
+                    .iter()
+                    .map(PreparedScopedDirectoryRelationBinding::relation_id)
                     .collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()
@@ -642,23 +666,28 @@ impl PreparedConfiguredAppendRuntime {
         self,
         options: ConfiguredScopedObservationRuntimeOptions,
     ) -> Result<OpenedConfiguredAppendRuntime, ConfiguredScopedObservationRuntimeError> {
-        self.open_with_watcher_factory_inner(options, |callback| {
-            let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
-            Ok(Box::new(watcher))
-        })
+        self.open_with_watcher_factory_inner(
+            options,
+            |callback| {
+                let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+                Ok(Box::new(watcher))
+            },
+            false,
+        )
     }
 
     fn open_with_watcher_factory_inner<F>(
         self,
         options: ConfiguredScopedObservationRuntimeOptions,
         factory: F,
+        allow_bootstrap_only_directory_runtime: bool,
     ) -> Result<OpenedConfiguredAppendRuntime, ConfiguredScopedObservationRuntimeError>
     where
         F: FnOnce(
             ScopedObservationNativeWatchCallback,
         ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
     {
-        if !self.directory_bindings.is_empty() {
+        if !self.directory_bindings.is_empty() && !allow_bootstrap_only_directory_runtime {
             // Preparation retains exact declaration-owned coordinates, but
             // opening remains closed until bootstrap and whole-epoch replay
             // both execute the directory snapshot. Never expose a runtime
@@ -686,6 +715,7 @@ impl PreparedConfiguredAppendRuntime {
             watcher,
             objects: self.objects,
             bindings: self.bindings,
+            directory_bindings: self.directory_bindings,
             admission,
             projection,
             bootstrap_object_errors: BTreeMap::new(),
@@ -709,7 +739,7 @@ impl PreparedConfiguredAppendRuntime {
             ScopedObservationNativeWatchCallback,
         ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
     {
-        self.open_with_watcher_factory_inner(options, factory)
+        self.open_with_watcher_factory_inner(options, factory, true)
     }
 
     #[cfg(test)]
@@ -774,6 +804,7 @@ impl ConfiguredScopedObservationSupervisor {
             mut watcher,
             objects,
             bindings,
+            directory_bindings: _,
             admission,
             projection,
             bootstrap_object_errors,
@@ -860,6 +891,16 @@ impl ConfiguredScopedObservationSupervisor {
             configured_observed_at(),
         )
         .await?;
+        configured_execute_directory_pass(
+            &self.handle,
+            scan.access_pass(),
+            &self.directory_bindings,
+            &mut self.admission,
+            &mut self.projection,
+            AccessPhase::Initial,
+            configured_observed_at(),
+        )
+        .await?;
         self.handle
             .with_attachment(|host, drain| {
                 self.watcher.coordinator().finish_initial_scan(
@@ -907,6 +948,16 @@ impl ConfiguredScopedObservationSupervisor {
                             &mut self.projection,
                             &mut self.bootstrap_object_errors,
                             self.options.source_retry,
+                            AccessPhase::Revalidation,
+                            configured_observed_at(),
+                        )
+                        .await?;
+                        configured_execute_directory_pass(
+                            &self.handle,
+                            reconcile.access_pass(),
+                            &self.directory_bindings,
+                            &mut self.admission,
+                            &mut self.projection,
                             AccessPhase::Revalidation,
                             configured_observed_at(),
                         )
@@ -965,6 +1016,123 @@ fn configured_fail_watcher(watcher: &mut ScopedObservationNativeWatcher) {
         ScopedObserverFailureReason::InternalControlFailure,
         configured_observed_at(),
     );
+}
+
+async fn configured_execute_directory_pass(
+    handle: &ScopedObservationAsyncHandle,
+    pass: &ScopedObservationAccessPass,
+    bindings: &[PreparedScopedDirectoryRelationBinding],
+    admission: &mut ScopedObservationAdmissionLane,
+    projection: &mut ScopedObservationProjectionSink,
+    phase: AccessPhase,
+    observed_at: i64,
+) -> Result<(), ConfiguredScopedObservationRuntimeError> {
+    let delivery_phase = match phase {
+        AccessPhase::Initial => ScopedAppendDeliveryPhase::Bootstrap,
+        AccessPhase::Revalidation => ScopedAppendDeliveryPhase::Correction,
+    };
+    let media_type = SourceMediaType::new("application/octet-stream")
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+
+    for (relation_index, binding) in bindings.iter().enumerate() {
+        if !admission.is_empty() {
+            return Err(ConfiguredScopedObservationRuntimeError::Admission);
+        }
+        let identity_inputs = binding.borrowed_identity_inputs();
+        let previous = admission.directory_relation_listing(binding.relation_id());
+        let mut listing = match handle.host().scan_directory_relation_membership(
+            pass,
+            binding.relation_id(),
+            &identity_inputs,
+            phase,
+            previous,
+        ) {
+            Ok(super::ScopedObservationDirectoryScan::Snapshot(listing)) => *listing,
+            Ok(
+                super::ScopedObservationDirectoryScan::Unavailable
+                | super::ScopedObservationDirectoryScan::RetryTransient,
+            )
+            | Err(_) => return Err(ConfiguredScopedObservationRuntimeError::SourcePass),
+        };
+
+        let mut contents = Vec::<ScopedObservationDirectoryMemberContent>::new();
+        while let Some(read) = listing
+            .read_next_member()
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?
+        {
+            match read {
+                ScopedObservationDirectoryMemberRead::Stable(content) => contents.push(content),
+                ScopedObservationDirectoryMemberRead::RetryTransient
+                | ScopedObservationDirectoryMemberRead::Oversized { .. } => {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
+                }
+            }
+        }
+
+        let relation_ordinal = u64::try_from(relation_index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(ConfiguredScopedObservationRuntimeError::SourcePass)?;
+        let mut lifecycles = Vec::with_capacity(contents.len());
+        for (member_index, content) in contents.into_iter().enumerate() {
+            let source_instance_id = content.source_instance().id;
+            let prior_decoder_state = admission
+                .directory_member_decoder_state(content.identity().source())
+                .map(<[u8]>::to_vec);
+            let input = content
+                .bootstrap()
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+            let object_id = u64::try_from(member_index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourcePass)?;
+            let origin = RecordOrigin {
+                source_instance_id,
+                stream_id: relation_ordinal,
+                object_id,
+                observed_at,
+                source_timestamp_hint: None,
+                media_type: media_type.clone(),
+            };
+            lifecycles.push(
+                listing
+                    .observe_bootstrapped_member(input, &origin, prior_decoder_state.as_deref())
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?,
+            );
+        }
+
+        let verification = match handle.host().scan_directory_relation_membership(
+            pass,
+            binding.relation_id(),
+            &identity_inputs,
+            phase,
+            Some(&listing),
+        ) {
+            Ok(super::ScopedObservationDirectoryScan::Snapshot(verification)) => *verification,
+            Ok(
+                super::ScopedObservationDirectoryScan::Unavailable
+                | super::ScopedObservationDirectoryScan::RetryTransient,
+            )
+            | Err(_) => return Err(ConfiguredScopedObservationRuntimeError::SourcePass),
+        };
+        listing
+            .confirm_membership_unchanged(verification)
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+        let membership = ScopedRelationMembershipObservation::from_directory_listing(listing)
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+        admission
+            .record_relation_membership(pass.pass_id(), delivery_phase, membership)
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+        configured_offer_pending(handle, admission, projection).await?;
+
+        for lifecycle in lifecycles {
+            admission
+                .admit_directory_member(pass.pass_id(), delivery_phase, lifecycle)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            configured_offer_pending(handle, admission, projection).await?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
