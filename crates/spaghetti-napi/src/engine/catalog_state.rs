@@ -4014,7 +4014,42 @@ fn decode_stored_state(
             ));
         }
         let integrity_failure = load_latest_integrity_failure_evidence(connection)?;
-        let mut no_snapshot_epoch_replacement = false;
+        let no_snapshot_epoch_replacement = epoch > 1;
+        let epoch_invalidation = if no_snapshot_epoch_replacement {
+            Some(
+                load_and_validate_epoch_invalidation(
+                    connection,
+                    &plan,
+                    desired_contract_version,
+                    epoch,
+                    None,
+                )?
+                .ok_or_else(|| {
+                    corrupt_catalog_state(
+                        "no-snapshot replacement epoch is missing source-generation invalidation evidence",
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        if let Some(invalidation) = epoch_invalidation {
+            let descends_from_invalidation = match (phase, attempt) {
+                (CatalogDurableBuildPhase::Building, 1) => invalidation == last_commit_seq,
+                (
+                    CatalogDurableBuildPhase::Building
+                    | CatalogDurableBuildPhase::Partial
+                    | CatalogDurableBuildPhase::Error,
+                    _,
+                ) => invalidation < last_commit_seq,
+                _ => false,
+            };
+            if !descends_from_invalidation {
+                return Err(corrupt_catalog_state(
+                    "no-snapshot replacement state does not descend from its exact invalidation",
+                ));
+            }
+        }
         let recovery_origin = match phase {
             CatalogDurableBuildPhase::Pending => {
                 if integrity_failure.is_some() {
@@ -4036,24 +4071,7 @@ fn decode_stored_state(
                             "initial catalog Partial state contains prior integrity-failure evidence",
                         ));
                     }
-                    if epoch > 1 {
-                        let invalidation = load_and_validate_epoch_invalidation(
-                            connection,
-                            &plan,
-                            desired_contract_version,
-                            epoch,
-                            None,
-                        )?
-                        .ok_or_else(|| {
-                            corrupt_catalog_state(
-                                "no-snapshot Partial epoch is missing source-generation invalidation evidence",
-                            )
-                        })?;
-                        if invalidation >= last_commit_seq {
-                            return Err(corrupt_catalog_state(
-                                "no-snapshot Partial epoch does not descend from its invalidation",
-                            ));
-                        }
+                    if no_snapshot_epoch_replacement {
                         machine = CatalogReadinessMachine::resume(
                             plan.clone(),
                             CatalogReadinessSnapshot {
@@ -4073,7 +4091,6 @@ fn decode_stored_state(
                             },
                         )
                         .map_err(catalog_contract_error)?;
-                        no_snapshot_epoch_replacement = true;
                     }
                     None
                 } else {
@@ -4130,24 +4147,7 @@ fn decode_stored_state(
                         "initial catalog build contains prior integrity-failure evidence",
                     ));
                 }
-                if epoch > 1 {
-                    let invalidation = load_and_validate_epoch_invalidation(
-                        connection,
-                        &plan,
-                        desired_contract_version,
-                        epoch,
-                        None,
-                    )?
-                    .ok_or_else(|| {
-                        corrupt_catalog_state(
-                            "no-snapshot Building epoch is missing source-generation invalidation evidence",
-                        )
-                    })?;
-                    if invalidation != last_commit_seq {
-                        return Err(corrupt_catalog_state(
-                            "no-snapshot Building epoch differs from its exact invalidation",
-                        ));
-                    }
+                if no_snapshot_epoch_replacement {
                     machine = CatalogReadinessMachine::resume(
                         plan.clone(),
                         CatalogReadinessSnapshot {
@@ -4167,7 +4167,6 @@ fn decode_stored_state(
                         },
                     )
                     .map_err(catalog_contract_error)?;
-                    no_snapshot_epoch_replacement = true;
                 }
                 None
             }
@@ -5444,10 +5443,25 @@ fn validate_integrity_failure_ledger(connection: &Connection) -> Result<(), Engi
                       AND retained.snapshot_commit_seq IS NULL
                       AND f.failed_refresh_commit_seq < f.failure_commit_seq
                       AND (
-                        (f.attempt = 1
+                        (f.readiness_epoch = 1
+                         AND f.attempt = 1
                          AND refresh.reason IN (
                            'catalog.library.build.scheduled',
                            'catalog.library.build.partial'
+                         ))
+                        OR
+                        (f.readiness_epoch > 1
+                         AND f.attempt = 1
+                         AND refresh.reason IN (
+                           'catalog.library.source_generation.invalidated',
+                           'catalog.library.build.partial'
+                         )
+                         AND EXISTS(
+                           SELECT 1 FROM catalog_epoch_invalidations AS invalidation
+                           WHERE invalidation.invalidation_commit_seq <= f.failed_refresh_commit_seq
+                             AND invalidation.coverage_plan_id = f.coverage_plan_id
+                             AND invalidation.epoch = f.readiness_epoch
+                             AND invalidation.retained_snapshot_commit_seq IS NULL
                          ))
                         OR
                         (f.attempt > 1
@@ -5551,6 +5565,22 @@ fn exact_integrity_failure_exists(
         && stored.refresh_fact_count == 0)
 }
 
+fn initial_build_execution_reason(
+    epoch: u64,
+    attempt: u64,
+    state: CatalogDurableBuildPhase,
+) -> &'static str {
+    if state == CatalogDurableBuildPhase::Partial {
+        PARTIAL_REASON
+    } else if attempt > 1 {
+        REFRESH_RECOVERY_STARTED_REASON
+    } else if epoch > 1 {
+        SOURCE_GENERATION_INVALIDATED_REASON
+    } else {
+        SCHEDULE_REASON
+    }
+}
+
 fn exact_initial_integrity_failure_exists(
     connection: &Connection,
     current: &DurableCatalogBuildState,
@@ -5562,13 +5592,8 @@ fn exact_initial_integrity_failure_exists(
     let Some(stored) = load_latest_integrity_failure_evidence(connection)? else {
         return Ok(false);
     };
-    let expected_execution_reason = if expected.state == CatalogDurableBuildPhase::Partial {
-        PARTIAL_REASON
-    } else if expected.attempt == 1 {
-        SCHEDULE_REASON
-    } else {
-        REFRESH_RECOVERY_STARTED_REASON
-    };
+    let expected_execution_reason =
+        initial_build_execution_reason(expected.epoch, expected.attempt, expected.state);
     Ok(current.readiness.state == CatalogReadinessPhase::Error
         && current.readiness.scope == expected.scope
         && current.readiness.coverage_plan_id == expected.coverage_plan_id
@@ -5944,11 +5969,11 @@ fn validate_discarded_integrity_failure_for_restart(
     } else {
         context.state_attempt == failure_attempt && context.state_commit_seq == failure_commit
     };
-    let base_execution_reason = if failure_attempt == 1 {
-        SCHEDULE_REASON
-    } else {
-        REFRESH_RECOVERY_STARTED_REASON
-    };
+    let base_execution_reason = initial_build_execution_reason(
+        context.state_epoch,
+        failure_attempt,
+        CatalogDurableBuildPhase::Building,
+    );
     if !state_matches
         || execution_commit >= failure_commit
         || stored.coverage_plan_id.as_deref()

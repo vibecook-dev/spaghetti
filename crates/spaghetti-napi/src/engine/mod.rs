@@ -3292,6 +3292,68 @@ mod tests {
     }
 
     #[test]
+    fn cold_replacement_integrity_failure_restarts_and_publishes_the_same_epoch() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("catalog-cold-replacement-integrity.db");
+        let plan = CatalogCoveragePlan::new(
+            crate::catalog_contract::CatalogCoverageScope::Library,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let engine = SpaghettiEngineCore::open(options(database.clone())).unwrap();
+        let first = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        let invalidation = engine
+            .prepare_catalog_source_generation_invalidation(&plan)
+            .unwrap();
+        let invalidation_commit = engine
+            .invalidate_catalog_source_generation(invalidation)
+            .unwrap()
+            .unwrap();
+        let replacement = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(replacement.readiness.epoch, 2);
+        assert_eq!(replacement.readiness.attempt, 1);
+        assert_eq!(replacement.last_commit_seq, invalidation_commit);
+        assert!(engine
+            .fail_active_initial_catalog_integrity("cold_projection_invalid")
+            .unwrap()
+            .is_some());
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let engine = SpaghettiEngineCore::open(options(database.clone())).unwrap();
+        let failed = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(failed.readiness.state, CatalogReadinessPhase::Error);
+        assert_eq!(failed.readiness.epoch, 2);
+        assert_eq!(failed.readiness.attempt, 1);
+        let retry = engine.begin_initial_catalog_build(plan).unwrap();
+        assert_eq!(retry.readiness.state, CatalogReadinessPhase::Building);
+        assert_eq!(retry.readiness.epoch, 2);
+        assert_eq!(retry.readiness.attempt, 2);
+        assert_ne!(retry.observation_commit(), first.observation_commit());
+        let batch = CatalogInitialProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            retry.observation_commit(),
+        )
+        .unwrap();
+        engine
+            .commit_initial_catalog_projection(retry, batch)
+            .unwrap()
+            .unwrap();
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let engine = SpaghettiEngineCore::open(options(database)).unwrap();
+        let ready = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(ready.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(ready.readiness.epoch, 2);
+        assert_eq!(ready.readiness.attempt, 2);
+        assert!(ready.ready_read_authority().is_ok());
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
     fn ordinary_catalog_refresh_resumes_after_restart_and_replays_exactly() {
         let dir = tempdir().unwrap();
         let database = dir.path().join("catalog-refresh-pipeline.db");
