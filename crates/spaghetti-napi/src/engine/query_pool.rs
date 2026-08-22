@@ -27,8 +27,9 @@ use super::capability_query::{
 };
 use super::catalog_query::{
     execute_catalog_page_query, execute_catalog_readiness_query, execute_catalog_resolution_query,
-    CatalogPageQueryRequest, CatalogReadinessQueryRequest, CatalogReadinessQueryResult,
-    CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
+    prepare_catalog_hydration, CatalogHydrationPreparationRequest, CatalogPageQueryRequest,
+    CatalogReadinessQueryRequest, CatalogReadinessQueryResult, CatalogResolutionQueryRequest,
+    CatalogRetainedPageOutcome, PreparedCatalogHydration,
 };
 use super::coverage_query::{
     read_fact_family_coverage_page, read_fact_family_replay_target,
@@ -568,6 +569,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: CatalogResolutionQueryRequest,
         response: Sender<Result<CatalogEntityResolutionResponse, EngineError>>,
+    },
+    CatalogHydrationPreparation {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: CatalogHydrationPreparationRequest,
+        response: Sender<Result<PreparedCatalogHydration, EngineError>>,
     },
     SourceCatalog {
         cancellation_epoch: u64,
@@ -1668,6 +1675,24 @@ impl QueryClient {
         )
     }
 
+    pub(crate) fn prepare_catalog_hydration(
+        &self,
+        request: CatalogHydrationPreparationRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<PreparedCatalogHydration, EngineError> {
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| {
+                QueryCommand::CatalogHydrationPreparation {
+                    cancellation_epoch,
+                    cancellation,
+                    request,
+                    response,
+                }
+            },
+        )
+    }
+
     pub fn source_catalog(
         &self,
         adapter_id: &str,
@@ -2579,6 +2604,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || execute_catalog_resolution_query(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::CatalogHydrationPreparation {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || prepare_catalog_hydration(&connection, &request),
                 );
                 let _ = response.send(result);
             }

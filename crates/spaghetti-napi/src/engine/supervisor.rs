@@ -10,7 +10,7 @@ use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::{after, bounded, select, Receiver, Sender};
+use crossbeam_channel::{after, bounded, select, Receiver, RecvTimeoutError, Sender, TrySendError};
 use notify::{event::ModifyKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::adapter::{
@@ -519,20 +519,35 @@ impl ObservationSupervisorClient {
             });
         }
         let (response_tx, response_rx) = bounded(1);
-        self.commands
-            .send(SupervisorCommand::HydrateSelectedCatalogObject {
+        match self
+            .commands
+            .try_send(SupervisorCommand::HydrateSelectedCatalogObject {
                 authorization: Box::new(authorization),
-                cancellation,
+                cancellation: cancellation.clone(),
                 response: response_tx,
-            })
-            .map_err(|_| EngineError::WorkerUnavailable {
-                worker: "observation supervisor",
-            })?;
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable {
-                worker: "observation supervisor",
-            })?
+            }) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => return Err(EngineError::ObservationBusy),
+            Err(TrySendError::Disconnected(_)) => {
+                return Err(EngineError::WorkerUnavailable {
+                    worker: "observation supervisor",
+                });
+            }
+        }
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(EngineError::QueryCancelled);
+            }
+            match response_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(result) => return result,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(EngineError::WorkerUnavailable {
+                        worker: "observation supervisor",
+                    });
+                }
+            }
+        }
     }
 
     pub(crate) fn pause_for_bootstrap(&self) -> Result<PausedObservationSupervisor, EngineError> {
@@ -2159,6 +2174,45 @@ mod tests {
         assert!(!rendered.contains("foreign.jsonl"));
         assert!(!rendered.contains(root.to_string_lossy().as_ref()));
         engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn selected_hydration_client_is_bounded_and_cancellable_while_queued() {
+        use crate::catalog_contract::hydration::tests::scheduler_fixture_authorization;
+
+        let (full_tx, _full_rx) = bounded(CONTROL_CAPACITY);
+        for _ in 0..CONTROL_CAPACITY {
+            full_tx.send(SupervisorCommand::Shutdown).unwrap();
+        }
+        let full_client = ObservationSupervisorClient {
+            commands: full_tx,
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(matches!(
+            full_client.hydrate_selected_catalog_object(
+                scheduler_fixture_authorization(),
+                QueryCancellationToken::default(),
+            ),
+            Err(EngineError::ObservationBusy)
+        ));
+
+        let (queued_tx, _queued_rx) = bounded(CONTROL_CAPACITY);
+        let queued_client = ObservationSupervisorClient {
+            commands: queued_tx,
+            alive: Arc::new(AtomicBool::new(true)),
+        };
+        let cancellation = QueryCancellationToken::default();
+        let cancelling = cancellation.clone();
+        let cancel = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            cancelling.cancel();
+        });
+        assert!(matches!(
+            queued_client
+                .hydrate_selected_catalog_object(scheduler_fixture_authorization(), cancellation,),
+            Err(EngineError::QueryCancelled)
+        ));
+        cancel.join().unwrap();
     }
 
     #[test]

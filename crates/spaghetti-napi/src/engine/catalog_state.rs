@@ -481,6 +481,10 @@ impl CatalogReadyReadAuthority {
         self.publication_identity.as_ref()
     }
 
+    pub(super) fn resume_reducer(&self) -> CatalogReducer {
+        self.publication_identity.resume_reducer()
+    }
+
     pub(super) fn contract_selection(&self) -> &crate::adapter::ContractVersionSelection {
         self.publication_identity.contract_selection()
     }

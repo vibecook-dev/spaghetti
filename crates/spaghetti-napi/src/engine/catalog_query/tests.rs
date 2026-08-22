@@ -14,9 +14,10 @@ use crate::adapter::{
 };
 use crate::catalog_contract::evidence::{
     decode_durable_project_row, CatalogAvailability, CatalogDisclosureClass, CatalogEntityRef,
-    CatalogEvidenceOwner, CatalogFieldAuthority, CatalogProjectAssertion, CatalogQualifiedField,
-    CatalogReducer, CatalogRetractionCause, CatalogRetractionEvidence, CatalogSessionAssertion,
-    CatalogUnknownReferenceReason, IdentityRelationFact, IdentityRelationKind,
+    CatalogEvidenceOwner, CatalogFieldAuthority, CatalogLocatorKind, CatalogProjectAssertion,
+    CatalogQualifiedField, CatalogReducer, CatalogRetractionCause, CatalogRetractionEvidence,
+    CatalogSessionAssertion, CatalogUnknownReferenceReason, IdentityRelationFact,
+    IdentityRelationKind, NativeLocatorClaim, ProjectAssociationBasis,
 };
 use crate::catalog_contract::page::{
     CatalogCount, CatalogEntityResolution, CatalogOptionalField, CatalogPortableLiveRow,
@@ -48,6 +49,8 @@ use crate::engine::catalog_state::{
     self, CatalogBuildStateCommand, CatalogCommitHook, CatalogCommitStage, DurableCatalogBuildState,
 };
 use crate::engine::query_pool::QueryPool;
+use crate::source::catalog_projection::encode_catalog_confined_locator;
+use crate::source::confined_relative_path_key;
 
 const FIXTURE_ADAPTER: &str = "retained-page-fixture";
 
@@ -309,6 +312,43 @@ fn sensitive_text(owner: &CatalogEvidenceOwner, label: &str) -> CatalogQualified
     .unwrap()
 }
 
+fn session_locator(
+    owner: &CatalogEvidenceOwner,
+    session_ref: CatalogEntityRef,
+    label: &str,
+    stable_key: &[u8],
+) -> NativeLocatorClaim {
+    let relative_path = PathBuf::from(format!("{label}.jsonl"));
+    let locator_value = encode_catalog_confined_locator(
+        "projects",
+        &confined_relative_path_key(&relative_path).unwrap(),
+    )
+    .unwrap();
+    NativeLocatorClaim::new(
+        owner.clone(),
+        stable_key,
+        session_ref,
+        CatalogLocatorKind::Filesystem,
+        CatalogQualifiedField::new(
+            QualifiedValue::from_parts(
+                Some(locator_value),
+                QualifiedValueQuality::Exact,
+                CatalogFieldAuthority::new("catalog-locator", 100, true).unwrap(),
+                ContractCompleteness::Complete,
+                None,
+                None,
+                vec![semantic_revision(owner, &format!("{label}-locator-value"))],
+            )
+            .unwrap(),
+            CatalogDisclosureClass::LocalSensitive,
+        )
+        .unwrap(),
+        ProjectAssociationBasis::SessionDirectory,
+        vec![semantic_revision(owner, &format!("{label}-locator"))],
+    )
+    .unwrap()
+}
+
 fn database() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     schema::initialize_schema(&connection).unwrap();
@@ -342,9 +382,18 @@ fn publish_catalog(project_count: usize, session_count: usize) -> PublishedCatal
 }
 
 fn publish_catalog_in(
+    connection: Connection,
+    project_count: usize,
+    session_count: usize,
+) -> PublishedCatalog {
+    publish_catalog_in_with_hydration(connection, project_count, session_count, false)
+}
+
+fn publish_catalog_in_with_hydration(
     mut connection: Connection,
     project_count: usize,
     session_count: usize,
+    hydratable_first_session: bool,
 ) -> PublishedCatalog {
     let selection = query_selection();
     let (plan, assembly) = if project_count == 0 && session_count == 0 {
@@ -486,6 +535,15 @@ fn publish_catalog_in(
                 )
                 .unwrap(),
             );
+            let locator = (hydratable_first_session && index == 0).then(|| {
+                session_locator(
+                    &owner,
+                    session_ref,
+                    &label,
+                    format!("session-{index}-locator").as_bytes(),
+                )
+            });
+            let locator_claim_key = locator.as_ref().map(|claim| claim.locator_claim_key);
             let assertion = CatalogSessionAssertion::new(
                 owner.clone(),
                 label.as_bytes(),
@@ -496,7 +554,7 @@ fn publish_catalog_in(
                 None,
                 None,
                 None,
-                None,
+                locator_claim_key,
                 availability(&owner, &format!("{label}-availability")),
                 vec![semantic_revision(&owner, &format!("{label}-assertion"))],
             )
@@ -507,6 +565,9 @@ fn publish_catalog_in(
                     .unwrap(),
             );
             reducer.upsert_session_assertion(assertion, 10).unwrap();
+            if let Some(locator) = locator {
+                reducer.upsert_locator_claim(locator, 10).unwrap();
+            }
         }
         let assembly = CatalogInitialPublicationAssembly::assemble(
             &plan,
@@ -539,6 +600,123 @@ fn publish_catalog_in(
         state,
         selection,
     }
+}
+
+#[test]
+fn selected_hydration_preparation_binds_the_authenticated_retained_session_row() {
+    let published = publish_catalog_in_with_hydration(database(), 1, 2, true);
+    let authority = published.state.ready_read_authority().unwrap();
+    let source = &authority.plan().required_sources[0];
+    let owner = CatalogEvidenceOwner::new(
+        FIXTURE_ADAPTER,
+        source.source_instance_key,
+        CoverageStreamKey::derive(FIXTURE_ADAPTER, b"catalog-rows").unwrap(),
+        CoverageObjectKey::derive("catalog-rows", b"all").unwrap(),
+        1,
+    )
+    .unwrap();
+    let session_ref = CatalogEntityRef::session(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source.source_instance_key,
+            "session",
+            b"session-0",
+        )
+        .unwrap(),
+    );
+    let locator_claim_key =
+        session_locator(&owner, session_ref, "session-0", b"session-0-locator").locator_claim_key;
+    let request = CatalogHydrationPreparationRequest::new(
+        public_query_request(),
+        authority.plan().coverage_plan_id,
+        authority.snapshot_id(),
+        session_ref,
+        locator_claim_key,
+        b"selected-session-request",
+    )
+    .unwrap();
+    let prepared = prepare_catalog_hydration(&published.connection, &request).unwrap();
+    assert_eq!(prepared.command().snapshot_id, authority.snapshot_id());
+    assert_eq!(prepared.command().source, *source);
+    assert_eq!(
+        prepared
+            .command()
+            .authorization
+            .handoff
+            .selected_base_session_ref,
+        session_ref
+    );
+    assert_eq!(
+        prepared.command().authorization.handoff.locator_claim_key,
+        locator_claim_key
+    );
+    assert_eq!(
+        prepared.authorization().attach_target().locator_claim_key,
+        locator_claim_key
+    );
+    assert_eq!(
+        prepared
+            .command()
+            .requested_scope
+            .max_source_objects_per_pass,
+        1
+    );
+    request.validate_replay_command(prepared.command()).unwrap();
+
+    let unknown_locator =
+        session_locator(&owner, session_ref, "session-0", b"unadvertised-locator")
+            .locator_claim_key;
+    let replay_retarget = CatalogHydrationPreparationRequest::new(
+        public_query_request(),
+        authority.plan().coverage_plan_id,
+        authority.snapshot_id(),
+        session_ref,
+        unknown_locator,
+        b"selected-session-request",
+    )
+    .unwrap();
+    assert!(matches!(
+        replay_retarget.validate_replay_command(prepared.command()),
+        Err(EngineError::InvalidQuery(_))
+    ));
+    let wrong_locator = CatalogHydrationPreparationRequest::new(
+        public_query_request(),
+        authority.plan().coverage_plan_id,
+        authority.snapshot_id(),
+        session_ref,
+        unknown_locator,
+        b"wrong-locator-request",
+    )
+    .unwrap();
+    let error = match prepare_catalog_hydration(&published.connection, &wrong_locator) {
+        Ok(_) => panic!("unadvertised catalog locator was accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, EngineError::InvalidQuery(_)));
+    assert!(!error.to_string().contains("session-0.jsonl"));
+
+    let project_ref = CatalogEntityRef::project(
+        CanonicalEntityKey::derive(
+            FIXTURE_ADAPTER,
+            &source.source_instance_key,
+            "project",
+            b"project-0",
+        )
+        .unwrap(),
+    );
+    let wrong_kind = CatalogHydrationPreparationRequest::new(
+        public_query_request(),
+        authority.plan().coverage_plan_id,
+        authority.snapshot_id(),
+        project_ref,
+        locator_claim_key,
+        b"wrong-kind-request",
+    )
+    .unwrap();
+    assert!(matches!(
+        prepare_catalog_hydration(&published.connection, &wrong_kind),
+        Err(EngineError::InvalidQuery(_))
+    ));
 }
 
 fn prepare_refresh_catalog(

@@ -96,6 +96,29 @@ struct Fixture {
     command: CatalogHydrationCommand,
 }
 
+pub(crate) fn scheduler_fixture_command(
+    request_token: &[u8],
+    selected_label: &str,
+) -> CatalogHydrationCommand {
+    build_fixture(FixtureConfig {
+        request_token: request_token.to_vec(),
+        selected_label: selected_label.to_owned(),
+        ..FixtureConfig::default()
+    })
+    .command
+}
+
+pub(crate) fn scheduler_fixture_authorization() -> CatalogHydrationExecutionAuthorization {
+    let fixture = build_fixture(FixtureConfig::default());
+    CatalogHydrationExecutionAuthorization::authorize(
+        &fixture.reducer,
+        fixture.handoff,
+        CatalogPolicyView::LOCAL,
+        &fixture.source,
+    )
+    .unwrap()
+}
+
 fn source_key(label: &[u8]) -> CanonicalSourceInstanceKey {
     CanonicalSourceInstanceKey::derive(1, label).unwrap()
 }

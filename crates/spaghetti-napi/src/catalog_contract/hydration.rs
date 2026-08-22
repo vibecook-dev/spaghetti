@@ -4,7 +4,7 @@
 //! contains no scheduler, source-access, persistence, or transport authority.
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

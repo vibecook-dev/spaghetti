@@ -7,6 +7,7 @@
 mod artifact_projection;
 mod capability_query;
 mod catalog_build;
+mod catalog_hydration;
 mod catalog_publication;
 mod catalog_query;
 mod catalog_refresh;
@@ -74,6 +75,7 @@ pub use capability_query::{
     ToolResultDetail, ToolResultPage, ToolResultPageRequest, CAPABILITY_QUERY_CONTRACT_VERSION,
     DEFAULT_CAPABILITY_PAGE_LIMIT, MAX_CAPABILITY_PAGE_PAYLOAD_BYTES,
 };
+use catalog_hydration::CatalogHydrationRuntime;
 use catalog_publication::{
     CatalogInitialPublicationCommand, CatalogInitialPublicationReceipt,
     CatalogRefreshPublicationCommand, CatalogRefreshPublicationReceipt,
@@ -552,6 +554,7 @@ pub struct SpaghettiEngineCore {
     observation_workers: Mutex<Option<Arc<rayon::ThreadPool>>>,
     supervisors: Mutex<Vec<ObservationSupervisor>>,
     configured_observation_startup: Mutex<Option<ConfiguredObservationStartupRuntime>>,
+    catalog_hydration: Mutex<CatalogHydrationRuntime>,
     catalog_refresh: Mutex<ConfiguredCatalogRefreshRuntime>,
     lifecycle: Mutex<Lifecycle>,
     commit_notifications: CommitNotifications,
@@ -725,6 +728,7 @@ impl SpaghettiEngineCore {
             observation_workers: Mutex::new(Some(Arc::new(observation_workers))),
             supervisors: Mutex::new(Vec::new()),
             configured_observation_startup: Mutex::new(None),
+            catalog_hydration: Mutex::new(CatalogHydrationRuntime::default()),
             catalog_refresh: Mutex::new(ConfiguredCatalogRefreshRuntime::default()),
             lifecycle: Mutex::new(Lifecycle {
                 phase: LifecyclePhase::Running,
@@ -2369,6 +2373,7 @@ impl SpaghettiEngineCore {
                 first_error.get_or_insert(error);
             }
         }
+        self.cancel_catalog_hydration_for_adapter(adapter_id);
         if let Err(error) = self.clear_catalog_refresh_for_adapter(adapter_id) {
             first_error.get_or_insert(error);
         }
@@ -2496,6 +2501,9 @@ impl SpaghettiEngineCore {
         self.commit_notifications.stop();
 
         let mut first_error = None;
+        if let Err(error) = self.clear_catalog_hydration() {
+            first_error.get_or_insert(error);
+        }
         if let Err(error) = self.clear_configured_catalog_refresh() {
             first_error.get_or_insert(error);
         }

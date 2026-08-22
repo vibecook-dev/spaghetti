@@ -16,7 +16,12 @@ use serde_json::Value as JsonValue;
 use crate::adapter::ExternalEntityRef;
 use crate::catalog_contract::evidence::{
     decode_durable_project_row, decode_durable_session_row, CatalogEntityKind, CatalogLiveRow,
-    CatalogResolvedLifecycle,
+    CatalogLocatorClaimKey, CatalogPolicyView, CatalogResolvedLifecycle,
+    CatalogSessionAttachHandoff,
+};
+use crate::catalog_contract::hydration::{
+    CatalogHydrationCommand, CatalogHydrationExecutionAuthorization, CatalogHydrationReason,
+    CatalogHydrationRequestedScope,
 };
 use crate::catalog_contract::page::{
     validate_continuation_retention, CatalogContinuationDisposition, CatalogCount,
@@ -36,7 +41,8 @@ use crate::catalog_contract::query::{
 };
 use crate::catalog_contract::{
     CatalogContractError, CatalogCoveragePlanId, CatalogCoverageScope, CatalogCursor,
-    CatalogQueryFingerprint, CatalogQueryKind, CatalogSnapshotId, CatalogSortKey,
+    CatalogHydrationRequestKey, CatalogQueryFingerprint, CatalogQueryKind, CatalogSnapshotId,
+    CatalogSortKey,
 };
 
 use super::catalog_publication::{
@@ -48,6 +54,8 @@ use super::EngineError;
 const CATALOG_ENTITY_KEY_SORT_SPEC_VERSION: u32 = 1;
 const CATALOG_ALL_FILTER_V1: &[u8] = b"rfc012b/catalog-filter/all-v1";
 const MAX_RETAINED_PAGE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const SELECTED_HYDRATION_MAX_RECORDS_PER_PASS: u32 = 4_096;
+const SELECTED_HYDRATION_MAX_BYTES_PER_PASS: u64 = 256 * 1024 * 1024;
 
 // Keep these as two simple PK ranges. Tests ratchet the planner and prohibit
 // OFFSET/temp sorting; do not merge them behind an OR predicate.
@@ -180,6 +188,94 @@ pub(crate) struct CatalogReadinessQueryRequest {
     contract_request: CatalogQueryContractRequest,
 }
 
+#[derive(Clone)]
+pub(crate) struct CatalogHydrationPreparationRequest {
+    contract_request: CatalogQueryContractRequest,
+    expected_coverage_plan_id: CatalogCoveragePlanId,
+    expected_snapshot_id: CatalogSnapshotId,
+    selected_base_session_ref: crate::catalog_contract::evidence::CatalogEntityRef,
+    locator_claim_key: CatalogLocatorClaimKey,
+    request_key: CatalogHydrationRequestKey,
+}
+
+impl CatalogHydrationPreparationRequest {
+    pub(crate) fn new(
+        contract_request: CatalogQueryContractRequest,
+        expected_coverage_plan_id: CatalogCoveragePlanId,
+        expected_snapshot_id: CatalogSnapshotId,
+        selected_base_session_ref: crate::catalog_contract::evidence::CatalogEntityRef,
+        locator_claim_key: CatalogLocatorClaimKey,
+        stable_request_token: &[u8],
+    ) -> Result<Self, EngineError> {
+        let request_key = CatalogHydrationRequestKey::derive(stable_request_token)
+            .map_err(|_| invalid_catalog_query_input("hydration request token is invalid"))?;
+        Ok(Self {
+            contract_request,
+            expected_coverage_plan_id,
+            expected_snapshot_id,
+            selected_base_session_ref,
+            locator_claim_key,
+            request_key,
+        })
+    }
+
+    pub(crate) fn request_key(&self) -> CatalogHydrationRequestKey {
+        self.request_key
+    }
+
+    pub(crate) fn validate_replay_command(
+        &self,
+        command: &CatalogHydrationCommand,
+    ) -> Result<(), EngineError> {
+        if self.request_key != command.request_key
+            || self.expected_coverage_plan_id != command.snapshot_id.coverage_plan_id
+            || self.expected_snapshot_id != command.snapshot_id
+            || self.selected_base_session_ref
+                != command.authorization.handoff.selected_base_session_ref
+            || self.locator_claim_key != command.authorization.handoff.locator_claim_key
+        {
+            return Err(invalid_catalog_query_input(
+                "hydration request key cannot retarget retained command coordinates",
+            ));
+        }
+        let selected = negotiate_exact_query(
+            &self.contract_request,
+            &command.contract_selection.contract_versions,
+        )?;
+        if selected != command.contract_selection {
+            return Err(invalid_catalog_query_input(
+                "hydration replay contract differs from the retained command",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct PreparedCatalogHydration {
+    command: CatalogHydrationCommand,
+    authorization: CatalogHydrationExecutionAuthorization,
+}
+
+impl PreparedCatalogHydration {
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        CatalogHydrationCommand,
+        CatalogHydrationExecutionAuthorization,
+    ) {
+        (self.command, self.authorization)
+    }
+
+    pub(super) fn command(&self) -> &CatalogHydrationCommand {
+        &self.command
+    }
+
+    #[cfg(test)]
+    pub(super) fn authorization(&self) -> &CatalogHydrationExecutionAuthorization {
+        &self.authorization
+    }
+}
+
 impl CatalogReadinessQueryRequest {
     pub(crate) const fn new(contract_request: CatalogQueryContractRequest) -> Self {
         Self { contract_request }
@@ -203,16 +299,21 @@ fn negotiate_durable_query(
     request: &CatalogQueryContractRequest,
     authority: &CatalogReadyReadAuthority,
 ) -> Result<CatalogQueryContractSelection, EngineError> {
-    negotiate_catalog_query_contract_for_selection(request, authority.contract_selection()).map_err(
-        |error| match error {
-            CatalogQueryNegotiationError::IncompatibleCatalogContract { axis } => {
-                EngineError::InvalidQuery(format!("IncompatibleCatalogContract: {axis}"))
-            }
-            CatalogQueryNegotiationError::InvalidCatalogContract { .. } => {
-                invalid_catalog_query_input("contract negotiation is invalid")
-            }
-        },
-    )
+    negotiate_exact_query(request, authority.contract_selection())
+}
+
+fn negotiate_exact_query(
+    request: &CatalogQueryContractRequest,
+    exact: &crate::adapter::ContractVersionSelection,
+) -> Result<CatalogQueryContractSelection, EngineError> {
+    negotiate_catalog_query_contract_for_selection(request, exact).map_err(|error| match error {
+        CatalogQueryNegotiationError::IncompatibleCatalogContract { axis } => {
+            EngineError::InvalidQuery(format!("IncompatibleCatalogContract: {axis}"))
+        }
+        CatalogQueryNegotiationError::InvalidCatalogContract { .. } => {
+            invalid_catalog_query_input("contract negotiation is invalid")
+        }
+    })
 }
 
 fn require_expected_plan(
@@ -335,6 +436,145 @@ pub(crate) fn execute_catalog_resolution_query(
     )
     .map_err(|_| invalid_catalog_query_input("external reference is invalid"))?;
     resolve_retained_catalog_entity(connection, &authority, &binding)
+}
+
+pub(crate) fn prepare_catalog_hydration(
+    connection: &Connection,
+    request: &CatalogHydrationPreparationRequest,
+) -> Result<PreparedCatalogHydration, EngineError> {
+    let state = catalog_state::load_catalog_build_state(connection)?.ok_or_else(|| {
+        EngineError::InvalidQuery("catalog readiness is not available".to_string())
+    })?;
+    require_expected_plan(&state, request.expected_coverage_plan_id)?;
+    let current_authority = state.ready_read_authority()?;
+    let chain_index = current_authority
+        .retained_chain()
+        .iter()
+        .position(|commitment| commitment.snapshot_id() == request.expected_snapshot_id)
+        .ok_or_else(|| {
+            invalid_catalog_query_input("snapshot is outside the current retained ancestry")
+        })?;
+
+    let transaction = connection.unchecked_transaction().map_err(|error| {
+        catalog_state::sqlite_error("begin catalog hydration preparation", error)
+    })?;
+    let fresh = catalog_state::load_catalog_build_state(&transaction)?
+        .ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog hydration preparation requires durable Ready authority".to_string(),
+            )
+        })?
+        .ready_read_authority()?;
+    if fresh != current_authority {
+        return Err(EngineError::InvalidCommit(
+            "catalog hydration authority became stale before preparation".to_string(),
+        ));
+    }
+    let retired_prefix =
+        super::catalog_retention::load_retired_prefix(&transaction, fresh.retained_chain())?;
+    if chain_index < retired_prefix {
+        return Err(invalid_catalog_query_input(
+            "snapshot is no longer retained for hydration",
+        ));
+    }
+    let authority = fresh.for_historical_snapshot(
+        &transaction,
+        request.expected_snapshot_id,
+        retired_prefix,
+    )?;
+    let selection = negotiate_durable_query(&request.contract_request, &authority)?;
+    if request.selected_base_session_ref.kind != CatalogEntityKind::Session {
+        return Err(invalid_catalog_query_input(
+            "selected catalog hydration target is not a session",
+        ));
+    }
+    let header = load_retained_query_header(
+        &transaction,
+        authority.plan(),
+        authority.snapshot_id(),
+        authority.readiness().attempt,
+        authority.publication_identity(),
+    )?;
+    let selected_row = load_resolution_row(
+        &transaction,
+        &header,
+        authority.publication_identity(),
+        authority.snapshot_id(),
+        request.selected_base_session_ref,
+    )?;
+    match selected_row {
+        CatalogLiveRow::Session(row)
+            if row.session_ref == request.selected_base_session_ref
+                && row
+                    .transcript_locator_claim_keys
+                    .binary_search(&request.locator_claim_key)
+                    .is_ok() => {}
+        CatalogLiveRow::Session(_) | CatalogLiveRow::Project(_) => {
+            return Err(invalid_catalog_query_input(
+                "selected catalog hydration locator is not advertised by the retained session",
+            ));
+        }
+    }
+    let reducer = authority.resume_reducer();
+    let handoff = CatalogSessionAttachHandoff::new(
+        request.selected_base_session_ref,
+        vec![request.selected_base_session_ref],
+        Vec::new(),
+        request.selected_base_session_ref,
+        request.locator_claim_key,
+    )
+    .map_err(|_| invalid_catalog_query_input("selected catalog session handoff is invalid"))?;
+    let target = reducer
+        .resolve_attach_target(&handoff, CatalogPolicyView::LOCAL)
+        .map_err(|_| invalid_catalog_query_input("selected catalog locator is unavailable"))?;
+    let source = authority
+        .plan()
+        .required_sources
+        .iter()
+        .chain(authority.plan().optional_sources.iter())
+        .find(|source| {
+            source.adapter_id == target.locator_owner.adapter_id
+                && source.source_instance_key == target.locator_owner.source_instance_key
+        })
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "selected catalog locator owner is outside its publication plan".to_string(),
+            )
+        })?;
+    let authorization = CatalogHydrationExecutionAuthorization::authorize(
+        &reducer,
+        handoff,
+        CatalogPolicyView::LOCAL,
+        &source,
+    )
+    .map_err(catalog_state::catalog_contract_error)?;
+    let requested_scope = CatalogHydrationRequestedScope::new(
+        selection.contract_versions.fact_family_versions.clone(),
+        1,
+        SELECTED_HYDRATION_MAX_RECORDS_PER_PASS,
+        SELECTED_HYDRATION_MAX_BYTES_PER_PASS,
+        &selection,
+    )
+    .map_err(catalog_state::catalog_contract_error)?;
+    let command = CatalogHydrationCommand::new(
+        request.request_key,
+        selection,
+        authority.snapshot_id(),
+        authority.plan(),
+        source,
+        authorization.portable().clone(),
+        requested_scope,
+        CatalogHydrationReason::SelectedSession,
+    )
+    .map_err(catalog_state::catalog_contract_error)?;
+    transaction.commit().map_err(|error| {
+        catalog_state::sqlite_error("commit catalog hydration preparation", error)
+    })?;
+    Ok(PreparedCatalogHydration {
+        command,
+        authorization,
+    })
 }
 
 #[derive(Clone, PartialEq, Eq)]
