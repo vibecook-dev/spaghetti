@@ -7,6 +7,18 @@
  */
 
 import type { SpaghettiEngine } from '../native.js';
+import type {
+  CatalogEntityResolutionRequest,
+  CatalogLibraryPageRequest,
+  CatalogPageTransportRequest,
+  CatalogProjectPageResult,
+  CatalogQueryContext,
+  CatalogReadinessTransportRequest,
+  CatalogResolutionTransportRequest,
+  CatalogSessionPageResult,
+} from '../contracts/rfc012b-client.js';
+import type { CatalogQueryContractRequest } from '../contracts/rfc012b.js';
+import type { CatalogEntityResolutionResponse } from '../contracts/rfc012b-pages.js';
 
 export const SPAGHETTI_CLIENT_PROTOCOL_VERSION = 1 as const;
 export const SPAGHETTI_QUERY_CONTRACT_VERSION = 1 as const;
@@ -39,6 +51,10 @@ export interface GetTeamRequest {
 export interface SpaghettiClientRequestMap {
   getHealth: undefined;
   getOverview: undefined;
+  getCatalogReadiness: CatalogReadinessTransportRequest;
+  listLibraryProjects: CatalogPageTransportRequest;
+  listLibrarySessions: CatalogPageTransportRequest;
+  resolveCatalogEntity: CatalogResolutionTransportRequest;
   replayChanges: EngineRequest<'replayChanges'>;
   waitForCommit: EngineRequest<'waitForCommit'>;
   listProjects: EngineRequest<'listHistoryProjects'>;
@@ -77,6 +93,10 @@ export interface SpaghettiClientRequestMap {
 export interface SpaghettiClientResponseMap {
   getHealth: EngineResult<'health'>;
   getOverview: EngineResult<'overview'>;
+  getCatalogReadiness: unknown;
+  listLibraryProjects: unknown;
+  listLibrarySessions: unknown;
+  resolveCatalogEntity: unknown;
   replayChanges: EngineResult<'replayChanges'>;
   waitForCommit: EngineResult<'waitForCommit'>;
   listProjects: EngineResult<'listHistoryProjects'>;
@@ -116,6 +136,10 @@ export type SpaghettiClientMethod = keyof SpaghettiClientRequestMap & keyof Spag
 export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'getHealth',
   'getOverview',
+  'getCatalogReadiness',
+  'listLibraryProjects',
+  'listLibrarySessions',
+  'resolveCatalogEntity',
   'replayChanges',
   'waitForCommit',
   'listProjects',
@@ -325,6 +349,22 @@ export interface SpaghettiClient {
   readonly info: SpaghettiClientInfo;
   getHealth(options?: SpaghettiQueryOptions): Promise<SpaghettiClientResponseMap['getHealth']>;
   getOverview(options?: SpaghettiQueryOptions): Promise<SpaghettiClientResponseMap['getOverview']>;
+  getCatalogReadiness(
+    request?: CatalogQueryContractRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogQueryContext>;
+  listLibraryProjects(
+    request: CatalogLibraryPageRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogProjectPageResult>;
+  listLibrarySessions(
+    request: CatalogLibraryPageRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogSessionPageResult>;
+  resolveCatalogEntity(
+    request: CatalogEntityResolutionRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogEntityResolutionResponse>;
   replayChanges(
     request?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>,
     options?: SpaghettiQueryOptions,

@@ -6,6 +6,7 @@ import {
   SPAGHETTI_QUERY_CONTRACT_VERSION,
   type AnySpaghettiProtocolRequest,
   type SpaghettiClientMethod,
+  type SpaghettiClientRequestMap,
   type SpaghettiClientResponseMap,
   type SpaghettiClientTransport,
   type SpaghettiProtocolRequest,
@@ -200,6 +201,30 @@ async function executeEngineRequest(
       return engine.health(signal);
     case 'getOverview':
       return engine.overview(signal);
+    case 'getCatalogReadiness':
+      return parseNativeCatalogJson(
+        await engine.getCatalogReadinessJson(JSON.stringify(request.payload.contractRequest), signal),
+      );
+    case 'listLibraryProjects':
+      return parseNativeCatalogJson(
+        await engine.listLibraryProjectsJson(catalogPageRequestJson(request.payload), signal),
+      );
+    case 'listLibrarySessions':
+      return parseNativeCatalogJson(
+        await engine.listLibrarySessionsJson(catalogPageRequestJson(request.payload), signal),
+      );
+    case 'resolveCatalogEntity':
+      return parseNativeCatalogJson(
+        await engine.resolveCatalogEntityJson(
+          JSON.stringify({
+            contract_request: request.payload.contractRequest,
+            coverage_plan_id: request.payload.coveragePlanId,
+            snapshot_id: request.payload.snapshotId,
+            external_ref: request.payload.externalRef,
+          }),
+          signal,
+        ),
+      );
     case 'replayChanges':
       return engine.replayChanges(request.payload, signal);
     case 'waitForCommit':
@@ -264,5 +289,25 @@ async function executeEngineRequest(
       return engine.listTeamInboxes(request.payload, signal);
     case 'listTeamInboxMessages':
       return engine.listTeamInboxMessages(request.payload, signal);
+    default:
+      return assertUnreachableMethod(request);
   }
+}
+
+function assertUnreachableMethod(request: never): never {
+  throw new Error(`unsupported client method: ${String(request)}`);
+}
+
+function catalogPageRequestJson(request: SpaghettiClientRequestMap['listLibraryProjects']): string {
+  return JSON.stringify({
+    contract_request: request.contractRequest,
+    coverage_plan_id: request.coveragePlanId,
+    snapshot_id: request.snapshotId,
+    page_size: request.pageSize,
+    ...(request.continuation === undefined ? {} : { continuation: request.continuation }),
+  });
+}
+
+function parseNativeCatalogJson(value: string): unknown {
+  return JSON.parse(value) as unknown;
 }

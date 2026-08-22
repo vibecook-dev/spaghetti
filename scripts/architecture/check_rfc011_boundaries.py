@@ -109,6 +109,16 @@ RUNTIME_MODULE_RE = re.compile(
 )
 PORTABLE_CLIENT_ENTRY = REPO_ROOT / "packages/sdk/src/client/portable.ts"
 OBSERVATION_HOST_ENTRY = REPO_ROOT / "packages/sdk/src/observation-host.ts"
+PORTABLE_CLIENT_CONTRACT_MODULES = frozenset(
+    (REPO_ROOT / relative).resolve()
+    for relative in (
+        "packages/sdk/src/contracts/rfc012-semantic-json.ts",
+        "packages/sdk/src/contracts/rfc012a.ts",
+        "packages/sdk/src/contracts/rfc012b.ts",
+        "packages/sdk/src/contracts/rfc012b-pages.ts",
+        "packages/sdk/src/contracts/rfc012b-client.ts",
+    )
+)
 SDK_PRODUCTION_ENTRIES = (
     REPO_ROOT / "packages/sdk/src/index.ts",
     REPO_ROOT / "packages/sdk/src/observation.ts",
@@ -1243,6 +1253,7 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
 
     portable_relatives = (
         "packages/sdk/src/contracts/rfc012b.ts",
+        "packages/sdk/src/contracts/rfc012b-client.ts",
         "packages/sdk/src/contracts/rfc012b-hydration.ts",
         "packages/sdk/src/contracts/rfc012b-pages.ts",
     )
@@ -1312,7 +1323,13 @@ def discover_portable_client_runtime_boundary_violations() -> set[str]:
             target = (path.parent / specifier).resolve()
             if target.suffix in {".js", ".jsx"}:
                 target = target.with_suffix(".ts" if target.suffix == ".js" else ".tsx")
-            if not target.is_relative_to(client_root) or not target.exists():
+            if (
+                not target.exists()
+                or not (
+                    target.is_relative_to(client_root)
+                    or target in PORTABLE_CLIENT_CONTRACT_MODULES
+                )
+            ):
                 violations.add(edge)
                 continue
             pending.append(target)
@@ -1356,7 +1373,11 @@ def discover_observation_host_runtime_boundary_violations() -> set[str]:
             target = (path.parent / specifier).resolve()
             if target.suffix in {".js", ".jsx"}:
                 target = target.with_suffix(".ts" if target.suffix == ".js" else ".tsx")
-            allowed_target = target in {native_entry, settings_entry} or target.is_relative_to(client_root)
+            allowed_target = (
+                target in {native_entry, settings_entry}
+                or target.is_relative_to(client_root)
+                or target in PORTABLE_CLIENT_CONTRACT_MODULES
+            )
             if not target.is_relative_to(sdk_root) or not target.exists() or not allowed_target:
                 violations.add(edge)
                 continue

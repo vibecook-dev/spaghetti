@@ -22,6 +22,23 @@ import {
   normalizeTransportError,
   protocolMismatchError,
 } from './errors.js';
+import {
+  catalogQueryContextFromResponse,
+  defaultCatalogReadinessTransportRequest,
+  parseCatalogProjectPageResult,
+  parseCatalogReadinessTransportRequest,
+  parseCatalogResolutionResult,
+  parseCatalogSessionPageResult,
+  prepareCatalogPageRequest,
+  prepareCatalogResolutionRequest,
+  type CatalogEntityResolutionRequest,
+  type CatalogLibraryPageRequest,
+  type CatalogProjectPageResult,
+  type CatalogQueryContext,
+  type CatalogSessionPageResult,
+} from '../contracts/rfc012b-client.js';
+import type { CatalogQueryContractRequest } from '../contracts/rfc012b.js';
+import type { CatalogEntityResolutionResponse } from '../contracts/rfc012b-pages.js';
 
 export interface OpenSpaghettiClientOptions {
   transport: SpaghettiClientTransport;
@@ -74,6 +91,46 @@ class DefaultSpaghettiClient implements SpaghettiClient {
 
   getOverview(options?: SpaghettiQueryOptions): Promise<SpaghettiClientResponseMap['getOverview']> {
     return this.query('getOverview', undefined, options);
+  }
+
+  async getCatalogReadiness(
+    request?: CatalogQueryContractRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogQueryContext> {
+    const transportRequest = catalogInput(() =>
+      request === undefined
+        ? defaultCatalogReadinessTransportRequest()
+        : parseCatalogReadinessTransportRequest({ contractRequest: request }),
+    );
+    const response = await this.query('getCatalogReadiness', transportRequest, options);
+    return catalogOutput(() => catalogQueryContextFromResponse(transportRequest.contractRequest, response));
+  }
+
+  async listLibraryProjects(
+    request: CatalogLibraryPageRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogProjectPageResult> {
+    const prepared = catalogInput(() => prepareCatalogPageRequest(request, 'projects'));
+    const response = await this.query('listLibraryProjects', prepared.transportRequest, options);
+    return catalogOutput(() => parseCatalogProjectPageResult(response, prepared));
+  }
+
+  async listLibrarySessions(
+    request: CatalogLibraryPageRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogSessionPageResult> {
+    const prepared = catalogInput(() => prepareCatalogPageRequest(request, 'sessions'));
+    const response = await this.query('listLibrarySessions', prepared.transportRequest, options);
+    return catalogOutput(() => parseCatalogSessionPageResult(response, prepared));
+  }
+
+  async resolveCatalogEntity(
+    request: CatalogEntityResolutionRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogEntityResolutionResponse> {
+    const prepared = catalogInput(() => prepareCatalogResolutionRequest(request));
+    const response = await this.query('resolveCatalogEntity', prepared.transportRequest, options);
+    return catalogOutput(() => parseCatalogResolutionResult(response, prepared));
   }
 
   replayChanges(
@@ -615,6 +672,26 @@ function compareChangeCursors(
   right: NonNullable<SpaghettiSubscribeRequest['from']>,
 ): number {
   return left.commitSeq === right.commitSeq ? left.ordinal - right.ordinal : left.commitSeq - right.commitSeq;
+}
+
+function catalogInput<T>(parse: () => T): T {
+  try {
+    return parse();
+  } catch {
+    throw clientError({
+      code: 'invalid_request',
+      message: 'The catalog query request is invalid.',
+      reason: 'catalog_contract_validation_failed',
+    });
+  }
+}
+
+function catalogOutput<T>(parse: () => T): T {
+  try {
+    return parse();
+  } catch {
+    throw clientError(protocolMismatchError('catalog response violated the negotiated RFC 012B contract'));
+  }
 }
 
 function combineSignals(...candidates: Array<AbortSignal | undefined>): AbortSignal | undefined {

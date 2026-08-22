@@ -22,6 +22,7 @@ export * from './contracts/rfc012a.js';
 // low-level native owner exposes a strict JSON, policy-WITHHELD query boundary;
 // LOCAL disclosure remains separately authorization-gated.
 export * from './contracts/rfc012b.js';
+export * from './contracts/rfc012b-client.js';
 export * from './contracts/rfc012b-hydration.js';
 export * from './contracts/rfc012b-pages.js';
 

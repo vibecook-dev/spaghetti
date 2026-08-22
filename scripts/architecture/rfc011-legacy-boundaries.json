@@ -75,7 +75,7 @@
       "allowed": []
     },
     "portable_client_runtime_boundary_violations": {
-      "description": "The portable client entry used outside the owner process cannot runtime-import storage, watcher, embedded N-API, or unresolved non-client modules.",
+      "description": "The portable client entry used outside the owner process can import the closed store-free RFC 012B contract graph but cannot runtime-import storage, watchers, embedded N-API, or other unresolved modules.",
       "allowed": []
     },
     "playground_main_sdk_owner_bypasses": {
@@ -83,7 +83,7 @@
       "allowed": []
     },
     "observation_host_runtime_boundary_violations": {
-      "description": "The native observation host runtime graph cannot import TypeScript source readers, watchers, parsers, SQLite/schema, or projection writers.",
+      "description": "The native observation host runtime graph may consume the closed store-free RFC 012B contract graph but cannot import TypeScript source readers, watchers, native-file parsers, SQLite/schema, or projection writers.",
       "allowed": []
     },
     "react_synchronous_query_bypasses": {

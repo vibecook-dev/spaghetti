@@ -59,6 +59,11 @@ export function normalizeTransportError(error: unknown, diagnosticId: string): S
   const reset = parseResetRequired(raw);
   if (reset) return reset;
 
+  const incompatibleCatalog = raw.match(/^IncompatibleCatalogContract: ([a-z_]+)$/);
+  if (incompatibleCatalog) {
+    return protocolMismatchError(`catalog_${incompatibleCatalog[1]}`);
+  }
+
   if (name === 'AbortError' || nativeStatus === 'Cancelled' || /\babort|\bcancel/.test(lower)) {
     return cancelledProtocolError();
   }
