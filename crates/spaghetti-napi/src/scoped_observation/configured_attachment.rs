@@ -88,6 +88,11 @@ impl ScopedConfiguredRootIdentity {
         self
     }
 
+    pub(crate) fn with_optional_root_run_identity_key(mut self, value: Option<Arc<[u8]>>) -> Self {
+        self.root_run_identity_key = value;
+        self
+    }
+
     pub(crate) fn with_expected_session(
         mut self,
         key: CanonicalEntityKey,

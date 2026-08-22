@@ -38,6 +38,7 @@ mod observation_contract;
 pub mod orchestrate;
 mod runtime_semantic_reducer;
 mod scoped_observation;
+mod scoped_observation_transport;
 mod semantic_contract;
 mod semantic_contract_napi;
 pub mod source;
