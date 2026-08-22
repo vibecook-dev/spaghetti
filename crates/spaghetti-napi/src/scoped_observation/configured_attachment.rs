@@ -14,9 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapter::{
     AdapterRegistry, CanonicalEntityKey, CoverageDomain, DiscoveryContext, DriverSpec,
-    ExternalEntityRef, FactSemanticContext, NativeIdentityClaim, ScopeRelationBounds,
-    ScopeRelationPrimitive, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, StreamSpec,
+    ExternalEntityRef, FactSemanticContext, NativeIdentityClaim, ScopeJoinEvidence,
+    ScopeJoinParameterSet, ScopeRelationBounds, ScopeRelationPrimitive, SourceInstance,
+    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
 };
 use crate::observation_contract::{ObservationContractOffer, ObservationContractRequest};
 use crate::source::{
@@ -42,11 +42,11 @@ use super::{
     ScopedObservationNativeWatcherRecoveryPolicy, ScopedObservationOpenDrainError,
     ScopedObservationOwnedIdentityInput, ScopedObservationProjectionLimits,
     ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-    ScopedObservationSourceOwnerRetryPolicy, ScopedObservationStartupError,
-    ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
-    ScopedObservationUnknownWireNegotiation, ScopedObserverFailureReason,
-    ScopedProjectionDeliveryError, ScopedRootIdentityRequest, ScopedSourceObjectErrorRuntime,
-    ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
+    ScopedObservationScopeJoinSnapshot, ScopedObservationSourceOwnerRetryPolicy,
+    ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
+    ScopedObservationTrustedAccessRequest, ScopedObservationUnknownWireNegotiation,
+    ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedRootIdentityRequest,
+    ScopedSourceObjectErrorRuntime, ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
 };
 
 const MAX_CONFIGURED_ROOTS: usize = 16;
@@ -476,6 +476,104 @@ impl std::fmt::Debug for PreparedScopedRelatedRelationBinding {
     }
 }
 
+/// One exact evidence-derived identity set matched to its promoted relation
+/// declaration. It is still pre-I/O: the common access pass must independently
+/// render, reserve, and bind the runtime stream before any source is opened.
+#[derive(Clone)]
+pub(crate) struct PreparedScopedRelatedSourceBinding {
+    relation_id: String,
+    primitive: ScopeRelationPrimitive,
+    parameter: ScopeJoinParameterSet,
+    evidence_groups: Vec<Vec<ScopeJoinEvidence>>,
+    bounds: ScopeRelationBounds,
+}
+
+impl PreparedScopedRelatedSourceBinding {
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub(crate) fn primitive(&self) -> ScopeRelationPrimitive {
+        self.primitive
+    }
+
+    pub(crate) fn identity_input_names(&self) -> impl Iterator<Item = &str> {
+        self.parameter
+            .identity_inputs()
+            .iter()
+            .map(|input| input.name())
+    }
+
+    pub(crate) fn evidence_group_count(&self) -> usize {
+        self.evidence_groups.len()
+    }
+
+    pub(crate) fn bounds(&self) -> ScopeRelationBounds {
+        self.bounds
+    }
+
+    pub(crate) fn borrowed_identity_inputs(&self) -> Vec<ScopeIdentityInput<'_>> {
+        self.parameter
+            .identity_inputs()
+            .iter()
+            .map(|input| ScopeIdentityInput {
+                name: input.name(),
+                value: input.value(),
+            })
+            .collect()
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedSourceBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedRelatedSourceBinding")
+            .field("relation_id", &self.relation_id)
+            .field("primitive", &self.primitive)
+            .field(
+                "identity_input_names",
+                &self.identity_input_names().collect::<Vec<_>>(),
+            )
+            .field("evidence_group_count", &self.evidence_groups.len())
+            .field("bounds", &self.bounds)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Deterministic pre-I/O reconciliation plan for the current retained join
+/// snapshot. Equal native coordinates from independent evidence owners are
+/// read once while preserving every owner group for later lifecycle proof.
+pub(crate) struct PreparedScopedRelatedReconciliationPlan {
+    declared_relation_ids: BTreeSet<String>,
+    sources: Vec<PreparedScopedRelatedSourceBinding>,
+    snapshot_retained_bytes: usize,
+}
+
+impl PreparedScopedRelatedReconciliationPlan {
+    pub(crate) fn sources(&self) -> &[PreparedScopedRelatedSourceBinding] {
+        &self.sources
+    }
+
+    pub(crate) fn declared_relation_ids(&self) -> impl Iterator<Item = &str> {
+        self.declared_relation_ids.iter().map(String::as_str)
+    }
+
+    pub(crate) fn snapshot_retained_bytes(&self) -> usize {
+        self.snapshot_retained_bytes
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedReconciliationPlan {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedRelatedReconciliationPlan")
+            .field("declared_relation_ids", &self.declared_relation_ids)
+            .field("source_count", &self.sources.len())
+            .field("snapshot_retained_bytes", &self.snapshot_retained_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Fixed internal resource policy for the first configured observer owner.
 /// These are correctness bounds rather than performance claims; a public
 /// request contract may narrow them later, but cannot widen native authority.
@@ -691,6 +789,137 @@ impl PreparedConfiguredAppendRuntime {
 
     pub(crate) fn related_relation_bindings(&self) -> &[PreparedScopedRelatedRelationBinding] {
         &self.related_relation_bindings
+    }
+
+    /// Match a committed reducer snapshot to the exact related relations in
+    /// this attachment. This performs no locator rendering and creates no
+    /// access reservation. Unknown relation IDs, wrong input order, and the
+    /// first owner/source beyond declaration bounds fail closed.
+    pub(crate) fn plan_related_sources(
+        &self,
+        snapshot: &ScopedObservationScopeJoinSnapshot,
+    ) -> Result<PreparedScopedRelatedReconciliationPlan, ConfiguredScopedObservationRuntimeError>
+    {
+        struct Candidate<'snapshot> {
+            definition: &'snapshot PreparedScopedRelatedRelationBinding,
+            parameter: &'snapshot ScopeJoinParameterSet,
+            evidence: &'snapshot [ScopeJoinEvidence],
+        }
+
+        let definitions = self
+            .related_relation_bindings
+            .iter()
+            .map(|binding| (binding.relation_id.as_str(), binding))
+            .collect::<BTreeMap<_, _>>();
+        let declared_relation_ids = definitions
+            .keys()
+            .map(|relation_id| (*relation_id).to_string())
+            .collect::<BTreeSet<_>>();
+        let directory_definitions = self
+            .directory_bindings
+            .iter()
+            .map(|binding| (binding.relation_id.as_str(), binding))
+            .collect::<BTreeMap<_, _>>();
+        let mut candidates = Vec::new();
+        for entry in snapshot.entries() {
+            let Some(definition) = definitions.get(entry.relation_id()).copied() else {
+                // A configured directory can carry corroborating adapter join
+                // evidence, but it cannot replace the already-bound root
+                // coordinate. Anything else is undeclared or the wrong
+                // primitive for this join channel.
+                let Some(directory) = directory_definitions.get(entry.relation_id()).copied()
+                else {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                };
+                if entry.parameters().iter().any(|parameter| {
+                    parameter.identity_inputs().len() != directory.identity_inputs.len()
+                        || parameter
+                            .identity_inputs()
+                            .iter()
+                            .zip(&directory.identity_inputs)
+                            .any(|(actual, expected)| {
+                                actual.name() != expected.name || actual.value() != expected.value
+                            })
+                }) {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+                continue;
+            };
+            let max_fan_out = usize::try_from(definition.bounds.max_fan_out)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            if entry.parameters().len() > max_fan_out {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            for parameter in entry.parameters() {
+                if parameter.identity_inputs().len() != definition.identity_input_names.len()
+                    || parameter
+                        .identity_inputs()
+                        .iter()
+                        .zip(&definition.identity_input_names)
+                        .any(|(actual, expected)| actual.name() != expected)
+                {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+                candidates.push(Candidate {
+                    definition,
+                    parameter,
+                    evidence: entry.evidence(),
+                });
+            }
+        }
+        candidates.sort_by(|left, right| {
+            left.definition
+                .relation_id
+                .cmp(&right.definition.relation_id)
+                .then_with(|| {
+                    left.parameter
+                        .identity_inputs()
+                        .iter()
+                        .map(|input| (input.name(), input.value()))
+                        .cmp(
+                            right
+                                .parameter
+                                .identity_inputs()
+                                .iter()
+                                .map(|input| (input.name(), input.value())),
+                        )
+                })
+        });
+
+        let mut relation_source_counts = BTreeMap::<&str, usize>::new();
+        let mut sources = Vec::<PreparedScopedRelatedSourceBinding>::new();
+        for candidate in candidates {
+            if let Some(existing) = sources.last_mut().filter(|source| {
+                source.relation_id == candidate.definition.relation_id
+                    && source.parameter == *candidate.parameter
+            }) {
+                existing.evidence_groups.push(candidate.evidence.to_vec());
+                continue;
+            }
+            let source_count = relation_source_counts
+                .entry(candidate.definition.relation_id.as_str())
+                .or_default();
+            *source_count = source_count
+                .checked_add(1)
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            let max_objects = usize::try_from(candidate.definition.bounds.max_objects)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            if *source_count > max_objects {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            sources.push(PreparedScopedRelatedSourceBinding {
+                relation_id: candidate.definition.relation_id.clone(),
+                primitive: candidate.definition.primitive,
+                parameter: candidate.parameter.clone(),
+                evidence_groups: vec![candidate.evidence.to_vec()],
+                bounds: candidate.definition.bounds,
+            });
+        }
+        Ok(PreparedScopedRelatedReconciliationPlan {
+            declared_relation_ids,
+            sources,
+            snapshot_retained_bytes: snapshot.retained_bytes(),
+        })
     }
 
     pub(crate) fn required_coverage_objects(&self) -> usize {

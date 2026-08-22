@@ -11942,6 +11942,162 @@ struct ScopedJoinProjectionState {
     parameters: Vec<ScopeJoinParameterSet>,
 }
 
+/// Immutable, non-serializable view of the join candidates retained by one
+/// reducer boundary. Debug stays path-free, and entries remain grouped by
+/// their stable fact-owner set so a later source planner can distinguish one
+/// conjunctive evidence group from several independent groups that happen to
+/// resolve to the same native coordinate.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ScopedObservationScopeJoinSnapshot {
+    entries: Vec<ScopedObservationScopeJoinSnapshotEntry>,
+    retained_bytes: usize,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ScopedObservationScopeJoinSnapshotEntry {
+    relation_id: String,
+    evidence: Vec<ScopeJoinEvidence>,
+    parameters: Vec<ScopeJoinParameterSet>,
+}
+
+impl ScopedObservationScopeJoinSnapshot {
+    pub(crate) fn entries(&self) -> &[ScopedObservationScopeJoinSnapshotEntry] {
+        &self.entries
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_updates_for_test(
+        updates: Vec<ScopeJoinUpdate>,
+    ) -> Result<Self, ScopedProjectionError> {
+        let mut owner_keys = BTreeSet::new();
+        let entries = updates
+            .into_iter()
+            .map(|update| {
+                let owner = (
+                    update.relation_id().to_string(),
+                    update
+                        .evidence()
+                        .iter()
+                        .map(ScopeJoinEvidence::fact_id)
+                        .collect::<Vec<_>>(),
+                );
+                if update.parameters().is_empty() || !owner_keys.insert(owner) {
+                    return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+                }
+                Ok(ScopedObservationScopeJoinSnapshotEntry {
+                    relation_id: update.relation_id().to_string(),
+                    evidence: update.evidence().to_vec(),
+                    parameters: update.parameters().to_vec(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        scoped_scope_join_snapshot(entries)
+    }
+}
+
+impl ScopedObservationScopeJoinSnapshotEntry {
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub(crate) fn evidence(&self) -> &[ScopeJoinEvidence] {
+        &self.evidence
+    }
+
+    pub(crate) fn parameters(&self) -> &[ScopeJoinParameterSet] {
+        &self.parameters
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationScopeJoinSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationScopeJoinSnapshot")
+            .field("entry_count", &self.entries.len())
+            .field("retained_bytes", &self.retained_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationScopeJoinSnapshotEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationScopeJoinSnapshotEntry")
+            .field("relation_id", &self.relation_id)
+            .field("evidence_count", &self.evidence.len())
+            .field("parameter_count", &self.parameters.len())
+            .finish_non_exhaustive()
+    }
+}
+
+fn scoped_scope_join_snapshot(
+    mut entries: Vec<ScopedObservationScopeJoinSnapshotEntry>,
+) -> Result<ScopedObservationScopeJoinSnapshot, ScopedProjectionError> {
+    entries.sort_by(|left, right| {
+        left.relation_id.cmp(&right.relation_id).then_with(|| {
+            left.evidence
+                .iter()
+                .map(ScopeJoinEvidence::fact_id)
+                .cmp(right.evidence.iter().map(ScopeJoinEvidence::fact_id))
+        })
+    });
+    let mut retained_bytes = 0_usize;
+    for entry in &mut entries {
+        if entry.evidence.is_empty() || entry.parameters.is_empty() {
+            return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+        }
+        entry.parameters.sort_by(scope_join_parameter_set_cmp);
+        if entry.parameters.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+        }
+        retained_bytes = retained_bytes
+            .checked_add(entry.relation_id.len())
+            .and_then(|total| {
+                total.checked_add(
+                    entry
+                        .evidence
+                        .len()
+                        .checked_mul(std::mem::size_of::<ScopeJoinEvidence>())?,
+                )
+            })
+            .ok_or(ScopedProjectionError::ScopeJoinCapacityFull)?;
+        for parameter in &entry.parameters {
+            for input in parameter.identity_inputs() {
+                retained_bytes = retained_bytes
+                    .checked_add(input.name().len())
+                    .and_then(|total| total.checked_add(input.value().len()))
+                    .ok_or(ScopedProjectionError::ScopeJoinCapacityFull)?;
+            }
+        }
+    }
+    if retained_bytes > MAX_SCOPED_JOIN_RETAINED_BYTES {
+        return Err(ScopedProjectionError::ScopeJoinCapacityFull);
+    }
+    Ok(ScopedObservationScopeJoinSnapshot {
+        entries,
+        retained_bytes,
+    })
+}
+
+fn scope_join_parameter_set_cmp(
+    left: &ScopeJoinParameterSet,
+    right: &ScopeJoinParameterSet,
+) -> std::cmp::Ordering {
+    left.identity_inputs()
+        .iter()
+        .map(|input| (input.name(), input.value()))
+        .cmp(
+            right
+                .identity_inputs()
+                .iter()
+                .map(|input| (input.name(), input.value())),
+        )
+}
+
 impl ScopedJoinProjectionState {
     fn retained_bytes(&self) -> Option<usize> {
         let mut retained = self.owner.relation_id.len().checked_add(
@@ -12478,6 +12634,35 @@ impl ScopedObservationProjectionSink {
     #[cfg(test)]
     fn scope_join_states(&self) -> impl Iterator<Item = &ScopedJoinProjectionState> {
         self.scope_joins.values()
+    }
+
+    /// Freeze the current adapter-derived relation candidates at an already
+    /// committed projection boundary. Native values stay crate-private and
+    /// bounded; no source declaration, locator, root, or access pass is
+    /// created by taking this snapshot.
+    pub(crate) fn scope_join_snapshot(
+        &self,
+    ) -> Result<ScopedObservationScopeJoinSnapshot, ScopedProjectionError> {
+        let entries = self
+            .scope_joins
+            .values()
+            .map(|state| {
+                if state
+                    .evidence
+                    .iter()
+                    .map(ScopeJoinEvidence::fact_id)
+                    .ne(state.owner.fact_ids.iter().copied())
+                {
+                    return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+                }
+                Ok(ScopedObservationScopeJoinSnapshotEntry {
+                    relation_id: state.owner.relation_id.clone(),
+                    evidence: state.evidence.clone(),
+                    parameters: state.parameters.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        scoped_scope_join_snapshot(entries)
     }
 
     fn artifact_evidence_snapshot(
@@ -25697,6 +25882,16 @@ mod projection_tests {
         assert!(!private_debug.contains("/Users/"));
         assert!(!private_debug.contains("alice"));
         assert!(!private_debug.contains("session.jsonl"));
+        let snapshot = projection.scope_join_snapshot().unwrap();
+        assert_eq!(snapshot.entries().len(), 1);
+        assert_eq!(snapshot.entries()[0].relation_id(), "related-object");
+        assert_eq!(snapshot.entries()[0].evidence().len(), 1);
+        assert_eq!(snapshot.entries()[0].parameters().len(), 1);
+        assert!(snapshot.retained_bytes() >= expected_private_bytes as usize);
+        let snapshot_debug = format!("{snapshot:?} {:?}", snapshot.entries()[0]);
+        assert!(!snapshot_debug.contains("/Users/"));
+        assert!(!snapshot_debug.contains("alice"));
+        assert!(!snapshot_debug.contains("session.jsonl"));
 
         let repeat_batch = usage_batch(&initial_record, "response-join", 1, None);
         let repeat_update = scope_join_update(
@@ -25757,6 +25952,12 @@ mod projection_tests {
         let corrected = projection.scope_join_states().next().unwrap();
         assert_eq!(
             corrected.parameters[0].identity_inputs()[0].value(),
+            b"private-corrected-id"
+        );
+        assert_eq!(
+            projection.scope_join_snapshot().unwrap().entries()[0].parameters()[0]
+                .identity_inputs()[0]
+                .value(),
             b"private-corrected-id"
         );
 

@@ -399,12 +399,14 @@ pub(crate) mod tests {
     use crate::adapter::{
         verify_support_release_bundle, AdapterErrorClass, AdapterManifest, AdapterObjectContext,
         AdapterSupportBinding, AuthorizedObservationSourceDriver, CanonicalEntityKey,
-        CanonicalSourceInstanceKey, CompatibilityClass, ConsistencyPolicy, CoverageAbsenceKind,
-        CoverageDomain, CoverageObjectKey, CoveragePositionKind, CoverageSetCompleteness,
-        CoverageStatus, CoverageStreamKey, DecodeContext, DecodeDisposition, DecoderId,
-        DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope, ExternalEntityRef, Fact,
-        FactBatch, FactSemanticContext, NativeArtifactProbe, ObjectSelector, RawRetentionPolicy,
-        ScopeRelationPrimitive, Sha256Digest, SourceAccess, SourceInstance, SourceInstanceKey,
+        CanonicalFactId, CanonicalSourceInstanceKey, CompatibilityClass, ConsistencyPolicy,
+        CoverageAbsenceKind, CoverageDomain, CoverageObjectKey, CoveragePositionKind,
+        CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeContext,
+        DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope,
+        ExternalEntityRef, Fact, FactBatch, FactRevisionId, FactSemanticContext,
+        NativeArtifactProbe, ObjectSelector, RawRetentionPolicy, ScopeJoinEvidence,
+        ScopeJoinIdentityInput, ScopeJoinParameterSet, ScopeJoinUpdate, ScopeRelationPrimitive,
+        SemanticRevisionRef, Sha256Digest, SourceAccess, SourceInstance, SourceInstanceKey,
         SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId,
         StreamSpec, SupportBundleDocument,
     };
@@ -453,13 +455,14 @@ pub(crate) mod tests {
         ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
-        ScopedObservationResyncResolution, ScopedObservationSourceOwnerBindingError,
-        ScopedObservationSourceOwnerRetryPolicy, ScopedObservationSourceOwnerRunError,
-        ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
-        ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
-        ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
-        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
-        ScopedQueuedObservationFrame, ScopedRelationMembershipObservation, ScopedReplacementMode,
+        ScopedObservationResyncResolution, ScopedObservationScopeJoinSnapshot,
+        ScopedObservationSourceOwnerBindingError, ScopedObservationSourceOwnerRetryPolicy,
+        ScopedObservationSourceOwnerRunError, ScopedObservationSourceOwnerRunExit,
+        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
+        ScopedObservationTrustedAccessRequest, ScopedObservationUnknownWireNegotiation,
+        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
+        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedRelationMembershipObservation, ScopedReplacementMode,
         ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
         ScopedRootIdentityRequest, ScopedScopeRelationState, ScopedSourceFailureClass,
         ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
@@ -2630,6 +2633,146 @@ pub(crate) mod tests {
         assert!(prepared.directory_bindings().is_empty());
         assert_eq!(prepared.related_relation_bindings().len(), 1);
         assert_eq!(prepared.required_coverage_objects(), 5);
+
+        let source_key = CanonicalSourceInstanceKey::derive(1, b"related-planner").unwrap();
+        let join_update =
+            |native_fact_key: &[u8], relation_id: &str, input_name: &str, input_value: &[u8]| {
+                let fact_id = CanonicalFactId::native(
+                    "fixture",
+                    &source_key,
+                    "runtime.actor-affiliation",
+                    native_fact_key,
+                )
+                .unwrap();
+                let semantic_revision_ref = SemanticRevisionRef::new(
+                    FactRevisionId::derive(&fact_id, 1, b"related-planner-revision").unwrap(),
+                );
+                ScopeJoinUpdate::new(
+                    relation_id,
+                    vec![ScopeJoinEvidence::new(fact_id, semantic_revision_ref)],
+                    vec![ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
+                        input_name,
+                        input_value.to_vec(),
+                    )
+                    .unwrap()])
+                    .unwrap()],
+                )
+                .unwrap()
+            };
+        let snapshot = ScopedObservationScopeJoinSnapshot::from_updates_for_test(vec![
+            join_update(
+                b"first-owner",
+                "team-config-from-evidence",
+                "team-name",
+                b"private-team-coordinate",
+            ),
+            join_update(
+                b"second-owner",
+                "team-config-from-evidence",
+                "team-name",
+                b"private-team-coordinate",
+            ),
+        ])
+        .unwrap();
+        let plan = prepared.plan_related_sources(&snapshot).unwrap();
+        assert_eq!(
+            plan.declared_relation_ids().collect::<Vec<_>>(),
+            vec!["team-config-from-evidence"]
+        );
+        assert_eq!(plan.sources().len(), 1);
+        assert_eq!(plan.sources()[0].relation_id(), "team-config-from-evidence");
+        assert_eq!(
+            plan.sources()[0].primitive(),
+            ScopeRelationPrimitive::ReferencedObjectFromField
+        );
+        assert_eq!(
+            plan.sources()[0].identity_input_names().collect::<Vec<_>>(),
+            vec!["team-name"]
+        );
+        assert_eq!(plan.sources()[0].evidence_group_count(), 2);
+        assert_eq!(plan.sources()[0].bounds().max_bytes, 4_096);
+        assert_eq!(
+            plan.sources()[0].borrowed_identity_inputs()[0].value,
+            b"private-team-coordinate"
+        );
+        assert_eq!(plan.snapshot_retained_bytes(), snapshot.retained_bytes());
+        let plan_debug = format!("{plan:?} {:?}", plan.sources()[0]);
+        assert!(!plan_debug.contains("private-team-coordinate"));
+
+        let wrong_input =
+            ScopedObservationScopeJoinSnapshot::from_updates_for_test(vec![join_update(
+                b"wrong-input-owner",
+                "team-config-from-evidence",
+                "wrong-name",
+                b"private-team-coordinate",
+            )])
+            .unwrap();
+        assert!(matches!(
+            prepared.plan_related_sources(&wrong_input),
+            Err(crate::scoped_observation::configured_attachment::ConfiguredScopedObservationRuntimeError::SourceBinding)
+        ));
+        let undeclared =
+            ScopedObservationScopeJoinSnapshot::from_updates_for_test(vec![join_update(
+                b"undeclared-owner",
+                "undeclared-relation",
+                "team-name",
+                b"private-team-coordinate",
+            )])
+            .unwrap();
+        assert!(matches!(
+            prepared.plan_related_sources(&undeclared),
+            Err(crate::scoped_observation::configured_attachment::ConfiguredScopedObservationRuntimeError::SourceBinding)
+        ));
+
+        let fan_out_fact = CanonicalFactId::native(
+            "fixture",
+            &source_key,
+            "runtime.actor-affiliation",
+            b"fan-out-owner",
+        )
+        .unwrap();
+        let fan_out_revision = SemanticRevisionRef::new(
+            FactRevisionId::derive(&fan_out_fact, 1, b"fan-out-revision").unwrap(),
+        );
+        let fan_out = ScopeJoinUpdate::new(
+            "team-config-from-evidence",
+            vec![ScopeJoinEvidence::new(fan_out_fact, fan_out_revision)],
+            (0_u8..5)
+                .map(|index| {
+                    ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
+                        "team-name",
+                        vec![b't', index],
+                    )
+                    .unwrap()])
+                    .unwrap()
+                })
+                .collect(),
+        )
+        .unwrap();
+        let fan_out =
+            ScopedObservationScopeJoinSnapshot::from_updates_for_test(vec![fan_out]).unwrap();
+        assert!(matches!(
+            prepared.plan_related_sources(&fan_out),
+            Err(crate::scoped_observation::configured_attachment::ConfiguredScopedObservationRuntimeError::SourceBinding)
+        ));
+
+        let too_many_objects = ScopedObservationScopeJoinSnapshot::from_updates_for_test(
+            (0_u8..5)
+                .map(|index| {
+                    join_update(
+                        &[b'o', index],
+                        "team-config-from-evidence",
+                        "team-name",
+                        &[b't', index],
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        assert!(matches!(
+            prepared.plan_related_sources(&too_many_objects),
+            Err(crate::scoped_observation::configured_attachment::ConfiguredScopedObservationRuntimeError::SourceBinding)
+        ));
 
         let factory_called = Arc::new(AtomicBool::new(false));
         let error = prepared
