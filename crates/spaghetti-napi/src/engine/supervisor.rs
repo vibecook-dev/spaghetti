@@ -14,15 +14,21 @@ use crossbeam_channel::{after, bounded, select, Receiver, Sender};
 use notify::{event::ModifyKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::adapter::{
-    AgentAdapter, DiscoveryContext, DriverSpec, SourceInstance, SourceInstanceSpec, StreamAuthority,
+    AgentAdapter, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
+    DiscoveryContext, DriverSpec, SourceInstance, SourceInstanceSpec, StreamAuthority,
 };
+use crate::catalog_contract::evidence::{
+    CatalogAttachTarget, CatalogDisclosureClass, CatalogLocatorKind,
+};
+use crate::catalog_contract::hydration::CatalogHydrationExecutionAuthorization;
+use crate::source::catalog_projection::decode_catalog_confined_locator;
 use crate::source::{confined_relative_path_key, DirtyReason, PollingPolicy};
 
-use super::coordinator::SelectorPatterns;
+use super::coordinator::{SelectedCatalogHydrationObject, SelectorPatterns};
 use super::observation::PendingObservationWork;
 use super::{
-    EngineError, ObservationCoordinator, QueryCancellationToken, ReconcileRequest,
-    ReconcileRetryTarget, SpaghettiEngineCore,
+    EngineError, ObservationCoordinator, QueryCancellationToken, ReconcileOutcome,
+    ReconcileRequest, ReconcileRetryTarget, SpaghettiEngineCore,
 };
 
 const WATCH_EVENT_CAPACITY: usize = 1_024;
@@ -55,6 +61,11 @@ enum SupervisorCommand {
     Refresh {
         cancellation: QueryCancellationToken,
         response: Sender<Result<(), EngineError>>,
+    },
+    HydrateSelectedCatalogObject {
+        authorization: Box<CatalogHydrationExecutionAuthorization>,
+        cancellation: QueryCancellationToken,
+        response: Sender<Result<ReconcileOutcome, EngineError>>,
     },
     PauseForBootstrap {
         paused: Sender<Result<(), EngineError>>,
@@ -95,6 +106,7 @@ struct WatchedInstance {
 #[derive(Debug)]
 struct WatchRoute {
     roots: Vec<PathBuf>,
+    root_name: String,
     stream_key: String,
     directory_snapshot: bool,
     patterns: SelectorPatterns,
@@ -493,6 +505,36 @@ impl ObservationSupervisorClient {
             })?
     }
 
+    pub(crate) fn hydrate_selected_catalog_object(
+        &self,
+        authorization: CatalogHydrationExecutionAuthorization,
+        cancellation: QueryCancellationToken,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        if cancellation.is_cancelled() {
+            return Err(EngineError::QueryCancelled);
+        }
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(SupervisorCommand::HydrateSelectedCatalogObject {
+                authorization: Box::new(authorization),
+                cancellation,
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            })?
+    }
+
     pub(crate) fn pause_for_bootstrap(&self) -> Result<PausedObservationSupervisor, EngineError> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(EngineError::WorkerUnavailable {
@@ -766,6 +808,22 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                     });
                     let _ = response.send(result);
                 }
+                Ok(SupervisorCommand::HydrateSelectedCatalogObject {
+                    authorization,
+                    cancellation: hydration_cancellation,
+                    response,
+                }) => {
+                    let result = engine.upgrade().ok_or(EngineError::ShuttingDown).and_then(|engine| {
+                        execute_selected_catalog_hydration(
+                            &engine,
+                            &adapter,
+                            &topology,
+                            authorization.attach_target(),
+                            &[cancellation.clone(), hydration_cancellation],
+                        )
+                    });
+                    let _ = response.send(result);
+                }
                 Ok(SupervisorCommand::PauseForBootstrap { paused, resume, completed }) => {
                     let Some(engine) = engine.upgrade() else {
                         let _ = paused.send(Err(EngineError::ShuttingDown));
@@ -977,6 +1035,7 @@ fn discover_topology<A: AgentAdapter>(
                 .to_path_buf();
             routes.push(WatchRoute {
                 roots: event_path_aliases(&root, configured_roots),
+                root_name: stream.selector.root_name.clone(),
                 stream_key: stream.id.as_str().to_string(),
                 directory_snapshot: matches!(stream.driver, DriverSpec::DirectorySnapshot(_)),
                 patterns: SelectorPatterns::new(&stream)?,
@@ -1012,6 +1071,123 @@ fn discover_topology<A: AgentAdapter>(
         instances,
         physical_roots,
     })
+}
+
+fn execute_selected_catalog_hydration<A: AgentAdapter>(
+    engine: &Arc<SpaghettiEngineCore>,
+    adapter: &A,
+    topology: &WatchTopology,
+    target: &CatalogAttachTarget,
+    cancellations: &[QueryCancellationToken],
+) -> Result<ReconcileOutcome, EngineError> {
+    check_supervisor_cancellations(cancellations)?;
+    let adapter_id = adapter.manifest().id.as_str();
+    if target.locator_owner.adapter_id != adapter_id
+        || target.locator_kind != CatalogLocatorKind::Filesystem
+        || target.locator_disclosure == CatalogDisclosureClass::Public
+    {
+        return Err(selected_hydration_error(
+            "catalog locator does not authorize this observation supervisor",
+        ));
+    }
+    let locator = target.locator.value.as_ref().ok_or_else(|| {
+        selected_hydration_error("catalog locator is not available to the engine policy view")
+    })?;
+    let (root_name, relative_path) = decode_catalog_confined_locator(locator)
+        .map_err(|_| selected_hydration_error("catalog locator encoding is unsupported"))?;
+    let object_key = confined_relative_path_key(&relative_path)
+        .map_err(|_| selected_hydration_error("catalog locator path is invalid"))?;
+
+    let mut matched_instance = None;
+    for instance in &topology.instances {
+        let source_instance_key = CanonicalSourceInstanceKey::derive(
+            instance.spec.identity_contract_version,
+            instance.spec.stable_key.as_bytes(),
+        )
+        .map_err(|_| selected_hydration_error("configured source identity is invalid"))?;
+        if source_instance_key == target.locator_owner.source_instance_key
+            && matched_instance.replace(instance).is_some()
+        {
+            return Err(selected_hydration_error(
+                "catalog locator source identity is ambiguous",
+            ));
+        }
+    }
+    let instance = matched_instance.ok_or_else(|| {
+        selected_hydration_error("catalog locator source is not configured for observation")
+    })?;
+
+    let mut matched_route = None;
+    for route in &instance.routes {
+        let stream_key = CoverageStreamKey::derive(adapter_id, route.stream_key.as_bytes())
+            .map_err(|_| {
+                selected_hydration_error("configured source stream identity is invalid")
+            })?;
+        if stream_key != target.locator_owner.stream_key
+            || route.root_name != root_name
+            || route.directory_snapshot
+            || !route.patterns.matches(&relative_path)
+        {
+            continue;
+        }
+        let coverage_object_key = CoverageObjectKey::derive(&route.stream_key, &object_key)
+            .map_err(|_| {
+                selected_hydration_error("configured source object identity is invalid")
+            })?;
+        if coverage_object_key != target.locator_owner.object_key {
+            continue;
+        }
+        if matched_route.replace(route).is_some() {
+            return Err(selected_hydration_error(
+                "catalog locator matches more than one declared source stream",
+            ));
+        }
+    }
+    let route = matched_route.ok_or_else(|| {
+        selected_hydration_error("catalog locator no longer matches a declared source stream")
+    })?;
+
+    let selected = SelectedCatalogHydrationObject {
+        target: ReconcileRetryTarget {
+            stable_key: instance.stable_key.clone(),
+            stream_key: route.stream_key.clone(),
+            object_key,
+        },
+        root_name,
+        relative_path,
+        expected_generation: target.locator_owner.generation,
+    };
+    let outcome =
+        ObservationCoordinator::with_cancellations(Arc::clone(engine), cancellations.to_vec())
+            .reconcile_selected_catalog_hydration(adapter, instance.spec.clone(), &selected)?;
+    if outcome.objects_registered > 0
+        || outcome.objects_changed > 0
+        || outcome.objects_removed > 0
+        || outcome.commits > 0
+    {
+        engine.request_configured_catalog_refresh()?;
+    }
+    Ok(outcome)
+}
+
+fn check_supervisor_cancellations(
+    cancellations: &[QueryCancellationToken],
+) -> Result<(), EngineError> {
+    if cancellations
+        .iter()
+        .any(QueryCancellationToken::is_cancelled)
+    {
+        Err(EngineError::QueryCancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn selected_hydration_error(detail: &'static str) -> EngineError {
+    EngineError::Observation {
+        operation: "hydrate selected catalog object",
+        detail: detail.to_string(),
+    }
 }
 
 fn create_watcher(
@@ -1547,13 +1723,20 @@ mod tests {
 
     use crate::adapter::{
         AdapterError, AdapterErrorClass, AdapterId, AdapterManifest, AdapterObjectContext,
-        ConsistencyPolicy, DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy,
-        DiscoveryContext, DriverSpec, EntityScope, FactBatch, ObjectSelector, RawRetentionPolicy,
-        SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-        StreamAuthority, StreamId, StreamSpec,
+        CanonicalEntityKey, CanonicalFactId, ConsistencyPolicy, ContractCompleteness,
+        DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
+        EntityScope, FactBatch, FactRevisionId, ObjectSelector, QualifiedValue,
+        QualifiedValueQuality, RawRetentionPolicy, SemanticRevisionRef, SourceInstance,
+        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
+        StreamId, StreamSpec,
+    };
+    use crate::catalog_contract::evidence::{
+        CatalogEntityRef, CatalogEvidenceOwner, CatalogFieldAuthority, CatalogLocatorValue,
+        CatalogPolicyView, CatalogQualifiedField, NativeLocatorClaim, ProjectAssociationBasis,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::engine::EngineOptions;
+    use crate::source::catalog_projection::encode_catalog_confined_locator;
     use crate::source::{
         platform_path_key, AppendDelimitedConfig, IngestPriority, SourceCursor, SourceRecord,
     };
@@ -1912,6 +2095,69 @@ mod tests {
             }
             other => panic!("expected one object-scoped watcher route, got {other:?}"),
         }
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn selected_catalog_hydration_opens_only_the_reducer_owned_confined_object() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        let database = temp.path().join("selected-hydration.db");
+        let engine = open_engine(database);
+        let adapter = IgnoredAppendAdapter::new();
+        let instances = ObservationCoordinator::new(Arc::clone(&engine))
+            .discover_and_register_sources(&adapter, vec![root.clone()])
+            .unwrap();
+        assert_eq!(instances.len(), 1);
+        let topology = discover_topology(&adapter, std::slice::from_ref(&root)).unwrap();
+
+        let relative_path = Path::new("selected.jsonl");
+        std::fs::write(root.join(relative_path), b"{}\n").unwrap();
+        let target =
+            selected_catalog_target(&instances[0].spec, "records", "root", relative_path, 1);
+        let outcome = execute_selected_catalog_hydration(
+            &engine,
+            &adapter,
+            &topology,
+            &target,
+            &[QueryCancellationToken::default()],
+        )
+        .unwrap();
+        assert_eq!(outcome.objects_registered, 1);
+        assert_eq!(outcome.objects_changed, 1);
+        let catalog = engine
+            .source_catalog("ignored-append", instances[0].spec.stable_key.as_bytes())
+            .unwrap();
+        let object = catalog
+            .objects
+            .iter()
+            .find(|object| object.stream_key == "records")
+            .unwrap();
+        assert_eq!(
+            object.object_key,
+            confined_relative_path_key(relative_path).unwrap()
+        );
+
+        let mut foreign = selected_catalog_target(
+            &instances[0].spec,
+            "records",
+            "root",
+            Path::new("foreign.jsonl"),
+            1,
+        );
+        foreign.locator_owner.object_key = target.locator_owner.object_key;
+        let error = execute_selected_catalog_hydration(
+            &engine,
+            &adapter,
+            &topology,
+            &foreign,
+            &[QueryCancellationToken::default()],
+        )
+        .unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains("foreign.jsonl"));
+        assert!(!rendered.contains(root.to_string_lossy().as_ref()));
         engine.shutdown().unwrap();
     }
 
@@ -2443,6 +2689,84 @@ mod tests {
         ) -> Result<DecodeDisposition, AdapterError> {
             self.gate.enter();
             self.inner.decode(context, record, output)
+        }
+    }
+
+    fn selected_catalog_target(
+        spec: &SourceInstanceSpec,
+        stream_id: &str,
+        root_name: &str,
+        relative_path: &Path,
+        generation: u64,
+    ) -> CatalogAttachTarget {
+        let adapter_id = "ignored-append";
+        let source_instance_key = CanonicalSourceInstanceKey::derive(
+            spec.identity_contract_version,
+            spec.stable_key.as_bytes(),
+        )
+        .unwrap();
+        let path_key = confined_relative_path_key(relative_path).unwrap();
+        let owner = CatalogEvidenceOwner::new(
+            adapter_id,
+            source_instance_key,
+            CoverageStreamKey::derive(adapter_id, stream_id.as_bytes()).unwrap(),
+            CoverageObjectKey::derive(stream_id, &path_key).unwrap(),
+            generation,
+        )
+        .unwrap();
+        let entity_key = CanonicalEntityKey::derive(
+            adapter_id,
+            &source_instance_key,
+            "session",
+            b"selected-session",
+        )
+        .unwrap();
+        let session_ref = CatalogEntityRef::session(entity_key);
+        let fact_id = CanonicalFactId::native(
+            adapter_id,
+            &source_instance_key,
+            "catalog.locator",
+            b"selected-session",
+        )
+        .unwrap();
+        let revision = SemanticRevisionRef::new(
+            FactRevisionId::derive(&fact_id, 1, b"selected-session-locator").unwrap(),
+        );
+        let locator: CatalogLocatorValue =
+            encode_catalog_confined_locator(root_name, &path_key).unwrap();
+        let field = CatalogQualifiedField::new(
+            QualifiedValue::from_parts(
+                Some(locator),
+                QualifiedValueQuality::Exact,
+                CatalogFieldAuthority::new("selected-hydration-test", 1, true).unwrap(),
+                ContractCompleteness::Complete,
+                None,
+                None,
+                vec![revision],
+            )
+            .unwrap(),
+            CatalogDisclosureClass::LocalSensitive,
+        )
+        .unwrap();
+        let claim = NativeLocatorClaim::new(
+            owner.clone(),
+            b"selected-session-locator",
+            session_ref,
+            CatalogLocatorKind::Filesystem,
+            field,
+            ProjectAssociationBasis::SessionDirectory,
+            vec![revision],
+        )
+        .unwrap();
+        CatalogAttachTarget {
+            session_ref,
+            locator_claim_key: claim.locator_claim_key,
+            locator_owner: owner,
+            locator_kind: claim.kind,
+            locator_basis: claim.basis,
+            locator_disclosure: claim.locator.disclosure,
+            locator: claim.for_view(CatalogPolicyView::LOCAL),
+            provenance: claim.provenance,
         }
     }
 

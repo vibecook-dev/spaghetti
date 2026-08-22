@@ -409,6 +409,19 @@ fn assert_distinct_work(label: &str, base: &Fixture, changed: &Fixture) {
 #[test]
 fn commands_are_idempotent_exactly_coalesced_and_secret_free() {
     let base = build_fixture(FixtureConfig::default());
+    let execution = CatalogHydrationExecutionAuthorization::authorize(
+        &base.reducer,
+        base.handoff.clone(),
+        CatalogPolicyView::LOCAL,
+        &base.source,
+    )
+    .unwrap();
+    assert_eq!(execution.portable(), &base.authorization);
+    assert_eq!(
+        execution.attach_target().locator_claim_key,
+        base.handoff.locator_claim_key
+    );
+    assert!(!format!("{execution:?}").contains(SECRET_LOCATOR));
     let same = build_fixture(FixtureConfig::default());
     assert_eq!(base.command, same.command);
 

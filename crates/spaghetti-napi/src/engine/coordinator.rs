@@ -82,6 +82,7 @@ const MAX_UNACKED_COMMITS: usize = 256;
 const USAGE_V2_REPLAY_PENDING_DETAIL: &str =
     "runtime.usage-v2 explicit replay in progress; replacement coverage not established";
 const USAGE_V2_REPLAY_COMMIT_REASON: &str = "projection.runtime.usage-v2.explicit_replay";
+const SELECTED_CATALOG_HYDRATION_COMMIT_REASON: &str = "catalog.selected_session_hydration";
 const PROMOTED_DURABLE_AUTHORIZATION_UNAVAILABLE: &str =
     "promoted durable support authorization unavailable";
 
@@ -251,6 +252,17 @@ pub struct ReconcileRetryTarget {
     pub stable_key: Vec<u8>,
     pub stream_key: String,
     pub object_key: Vec<u8>,
+}
+
+/// Engine-private, reducer-authorized object coordinates for one selected
+/// catalog session. The native relative path is never accepted from a public
+/// request; the observation supervisor constructs this value only after an
+/// exact catalog locator has matched its configured topology.
+pub(super) struct SelectedCatalogHydrationObject {
+    pub(super) target: ReconcileRetryTarget,
+    pub(super) root_name: String,
+    pub(super) relative_path: PathBuf,
+    pub(super) expected_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1331,6 +1343,32 @@ impl ObservationCoordinator {
         target: &ReconcileRetryTarget,
         reason: impl Into<String>,
     ) -> Result<ReconcileOutcome, EngineError> {
+        self.reconcile_declared_object_inner(adapter, spec, target, None, reason.into())
+    }
+
+    pub(super) fn reconcile_selected_catalog_hydration<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        spec: AdapterSourceInstanceSpec,
+        selected: &SelectedCatalogHydrationObject,
+    ) -> Result<ReconcileOutcome, EngineError> {
+        self.reconcile_declared_object_inner(
+            adapter,
+            spec,
+            &selected.target,
+            Some(selected),
+            SELECTED_CATALOG_HYDRATION_COMMIT_REASON.to_string(),
+        )
+    }
+
+    fn reconcile_declared_object_inner<A: AgentAdapter + ?Sized>(
+        &self,
+        adapter: &A,
+        spec: AdapterSourceInstanceSpec,
+        target: &ReconcileRetryTarget,
+        selected: Option<&SelectedCatalogHydrationObject>,
+        reason: String,
+    ) -> Result<ReconcileOutcome, EngineError> {
         self.check_cancelled()?;
         let manifest = adapter.manifest();
         manifest
@@ -1345,7 +1383,6 @@ impl ObservationCoordinator {
         let durable_authorization = self
             .engine
             .durable_authorization_for_roots(manifest.id.as_str(), &probe_roots)?;
-        let reason = reason.into();
         if !valid_reconcile_reason(&reason) {
             return Err(EngineError::InvalidConfig(
                 "object reconcile requires a bounded reason".to_string(),
@@ -1408,33 +1445,76 @@ impl ObservationCoordinator {
             let previous = catalog.objects.iter().find(|object| {
                 object.stream_key == target.stream_key && object.object_key == target.object_key
             });
-            let Some(previous) = previous else {
-                // A native backend can report a newly created file as a
-                // content modification. The object route has no durable
-                // display path yet, so escalate once to membership discovery
-                // instead of turning that normal race into a recovery loop.
-                self.engine.mark_observation_instance_dirty(
-                    manifest.id.as_str(),
-                    instance.spec.stable_key.as_bytes(),
-                    crate::source::DirtyReason::IdentityChanged,
-                )?;
-                return Ok(ReconcileOutcome {
-                    instances_discovered: 1,
-                    ..ReconcileOutcome::default()
-                });
-            };
-            let root = instance
-                .root(&stream.selector.root_name)
-                .map_err(|error| adapter_error("resolve retry source root", error))?;
-            let relative_path = previous_display_path(previous)?;
-            let object = DeclaredObject {
-                path: root.join(&relative_path),
-                descriptor: SourceObjectDescriptor {
-                    stream_id: stream.id.clone(),
-                    object_key: target.object_key.clone(),
-                    relative_path,
-                },
-                metadata: confined_metadata(root, previous.display_path.as_deref()),
+            let object = if let Some(selected) = selected {
+                if selected.expected_generation == 0
+                    || stream.selector.root_name != selected.root_name
+                    || confined_relative_path_key(&selected.relative_path).map_err(source_error)?
+                        != target.object_key
+                    || !SelectorPatterns::new(&stream)?.matches(&selected.relative_path)
+                {
+                    return Err(observation_error(
+                        "hydrate selected catalog object",
+                        "catalog locator no longer matches the declared source stream",
+                    ));
+                }
+                match previous {
+                    Some(previous) if previous.generation != selected.expected_generation => {
+                        return Err(observation_error(
+                            "hydrate selected catalog object",
+                            "catalog locator generation no longer matches the durable source object",
+                        ));
+                    }
+                    None if selected.expected_generation != 1 => {
+                        return Err(observation_error(
+                            "hydrate selected catalog object",
+                            "catalog locator generation cannot register a new durable source object",
+                        ));
+                    }
+                    _ => {}
+                }
+                let root = instance.root(&selected.root_name).map_err(|error| {
+                    adapter_error("resolve selected catalog source root", error)
+                })?;
+                DeclaredObject {
+                    path: root.join(&selected.relative_path),
+                    descriptor: SourceObjectDescriptor {
+                        stream_id: stream.id.clone(),
+                        object_key: target.object_key.clone(),
+                        relative_path: selected.relative_path.clone(),
+                    },
+                    // Confined drivers re-open this exact descriptor relative
+                    // to the declared root. Avoid a lossy display-path stat.
+                    metadata: None,
+                }
+            } else {
+                let Some(previous) = previous else {
+                    // A native backend can report a newly created file as a
+                    // content modification. The object route has no durable
+                    // display path yet, so escalate once to membership discovery
+                    // instead of turning that normal race into a recovery loop.
+                    self.engine.mark_observation_instance_dirty(
+                        manifest.id.as_str(),
+                        instance.spec.stable_key.as_bytes(),
+                        crate::source::DirtyReason::IdentityChanged,
+                    )?;
+                    return Ok(ReconcileOutcome {
+                        instances_discovered: 1,
+                        ..ReconcileOutcome::default()
+                    });
+                };
+                let root = instance
+                    .root(&stream.selector.root_name)
+                    .map_err(|error| adapter_error("resolve retry source root", error))?;
+                let relative_path = previous_display_path(previous)?;
+                DeclaredObject {
+                    path: root.join(&relative_path),
+                    descriptor: SourceObjectDescriptor {
+                        stream_id: stream.id.clone(),
+                        object_key: target.object_key.clone(),
+                        relative_path,
+                    },
+                    metadata: confined_metadata(root, previous.display_path.as_deref()),
+                }
             };
             let mut outcome = ReconcileOutcome {
                 instances_discovered: 1,
@@ -1455,7 +1535,7 @@ impl ObservationCoordinator {
                 &instance,
                 &stream,
                 &object,
-                Some(previous),
+                previous,
                 false,
                 &reason,
                 started_at,
@@ -1464,7 +1544,7 @@ impl ObservationCoordinator {
             )?;
             lane.flush()?;
             lane.apply_to(&mut outcome);
-            if usage_v2_stream {
+            if usage_v2_stream && selected.is_none() {
                 usage_v2_coverage.note_outcome(
                     stream.id.as_str(),
                     ProjectionBlockers::default(),
@@ -4808,20 +4888,22 @@ fn pending_projection_updates(
     instance: &SourceInstance,
     reason: &str,
 ) -> Vec<ProjectionVersionUpdate> {
-    (declares_usage_v2_projection(manifest) && stream_declares_usage_v2_projection(stream))
-        .then(|| {
-            usage_v2_projection_update(
-                instance,
-                ProjectionReadiness::Pending,
-                Some(if reason == USAGE_V2_REPLAY_COMMIT_REASON {
-                    USAGE_V2_REPLAY_PENDING_DETAIL
-                } else {
-                    "source reconciliation in progress"
-                }),
-            )
-        })
-        .into_iter()
-        .collect()
+    (reason != SELECTED_CATALOG_HYDRATION_COMMIT_REASON
+        && declares_usage_v2_projection(manifest)
+        && stream_declares_usage_v2_projection(stream))
+    .then(|| {
+        usage_v2_projection_update(
+            instance,
+            ProjectionReadiness::Pending,
+            Some(if reason == USAGE_V2_REPLAY_COMMIT_REASON {
+                USAGE_V2_REPLAY_PENDING_DETAIL
+            } else {
+                "source reconciliation in progress"
+            }),
+        )
+    })
+    .into_iter()
+    .collect()
 }
 
 fn coverage_position_kind(driver: &DriverSpec) -> CoveragePositionKind {

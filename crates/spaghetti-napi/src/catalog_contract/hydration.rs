@@ -310,8 +310,13 @@ impl CatalogHydrationLocatorAuthorization {
         policy_view: CatalogPolicyView,
         source: &CatalogCoveragePlanSource,
     ) -> Result<Self, CatalogContractError> {
-        let target = reducer.resolve_attach_target(&handoff, policy_view)?;
-        Self::from_attach_target(handoff, target, source)
+        Ok(CatalogHydrationExecutionAuthorization::authorize(
+            reducer,
+            handoff,
+            policy_view,
+            source,
+        )?
+        .portable)
     }
 
     fn from_attach_target(
@@ -440,6 +445,49 @@ impl CatalogHydrationLocatorAuthorization {
             && self.support_release_id == source.support_release_id
             && self.catalog_declaration_digest == source.catalog_declaration_digest
             && self.access_policy_digest == source.access_policy_digest
+    }
+}
+
+/// Non-serializable source-access authority retained beside the portable
+/// hydration authorization. The portable contract deliberately omits the
+/// native locator; only this reducer-produced value can cross into the native
+/// observation supervisor.
+pub(crate) struct CatalogHydrationExecutionAuthorization {
+    portable: CatalogHydrationLocatorAuthorization,
+    target: CatalogAttachTarget,
+}
+
+impl CatalogHydrationExecutionAuthorization {
+    pub(crate) fn authorize(
+        reducer: &CatalogReducer,
+        handoff: CatalogSessionAttachHandoff,
+        policy_view: CatalogPolicyView,
+        source: &CatalogCoveragePlanSource,
+    ) -> Result<Self, CatalogContractError> {
+        let target = reducer.resolve_attach_target(&handoff, policy_view)?;
+        let portable = CatalogHydrationLocatorAuthorization::from_attach_target(
+            handoff,
+            target.clone(),
+            source,
+        )?;
+        Ok(Self { portable, target })
+    }
+
+    pub(crate) fn portable(&self) -> &CatalogHydrationLocatorAuthorization {
+        &self.portable
+    }
+
+    pub(crate) fn attach_target(&self) -> &CatalogAttachTarget {
+        &self.target
+    }
+}
+
+impl fmt::Debug for CatalogHydrationExecutionAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogHydrationExecutionAuthorization")
+            .field("portable", &self.portable)
+            .finish_non_exhaustive()
     }
 }
 

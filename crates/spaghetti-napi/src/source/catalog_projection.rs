@@ -95,16 +95,6 @@ impl CatalogSourceMemberProjection {
         quality: QualifiedValueQuality,
     ) -> Result<Self, CatalogCompositionError> {
         if self.locator.is_some()
-            || root_name.is_empty()
-            || root_name.len() > MAX_LOCATOR_ROOT_NAME_BYTES
-            || !root_name
-                .bytes()
-                .next()
-                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-            || !root_name
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-            || confined_path_key.len() > MAX_CONFINED_LOCATOR_PATH_KEY_BYTES
             || !matches!(
                 quality,
                 QualifiedValueQuality::Exact
@@ -116,28 +106,11 @@ impl CatalogSourceMemberProjection {
                 "catalog source locator coordinates are invalid",
             ));
         }
-        confined_relative_path_from_key(confined_path_key).map_err(|_| {
-            CatalogCompositionError::invalid("catalog source locator path key is invalid")
-        })?;
-        let root_len = u16::try_from(root_name.len()).map_err(|_| {
-            CatalogCompositionError::invalid("catalog source locator root is too long")
-        })?;
-        let payload_capacity = 3_usize
-            .checked_add(root_name.len())
-            .and_then(|length| length.checked_add(confined_path_key.len()))
-            .ok_or_else(|| {
-                CatalogCompositionError::invalid("catalog source locator length overflowed")
-            })?;
-        let mut payload = Vec::with_capacity(payload_capacity);
-        payload.push(1);
-        payload.extend_from_slice(&root_len.to_be_bytes());
-        payload.extend_from_slice(root_name.as_bytes());
-        payload.extend_from_slice(confined_path_key);
+        let locator = encode_catalog_confined_locator(root_name, confined_path_key)?;
         self.locator = Some(CatalogSourceLocatorProjection {
-            encoded_value: format!(
-                "{CONFINED_LOCATOR_PREFIX}{}",
-                URL_SAFE_NO_PAD.encode(payload)
-            ),
+            encoded_value: locator
+                .native_value
+                .expect("confined locator encoding always returns one native value"),
             quality,
         });
         Ok(self)
@@ -576,6 +549,50 @@ impl fmt::Debug for CatalogSourceProjection {
 /// Decode a reducer-authorized native locator back to its exact configured
 /// root relation and descriptor-confined relative path. This never accepts a
 /// display path or an unversioned string.
+pub(crate) fn encode_catalog_confined_locator(
+    root_name: &str,
+    confined_path_key: &[u8],
+) -> Result<CatalogLocatorValue, CatalogCompositionError> {
+    if root_name.is_empty()
+        || root_name.len() > MAX_LOCATOR_ROOT_NAME_BYTES
+        || !root_name
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !root_name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || confined_path_key.len() > MAX_CONFINED_LOCATOR_PATH_KEY_BYTES
+    {
+        return Err(CatalogCompositionError::invalid(
+            "catalog source locator coordinates are invalid",
+        ));
+    }
+    confined_relative_path_from_key(confined_path_key).map_err(|_| {
+        CatalogCompositionError::invalid("catalog source locator path key is invalid")
+    })?;
+    let root_len = u16::try_from(root_name.len())
+        .map_err(|_| CatalogCompositionError::invalid("catalog source locator root is too long"))?;
+    let payload_capacity = 3_usize
+        .checked_add(root_name.len())
+        .and_then(|length| length.checked_add(confined_path_key.len()))
+        .ok_or_else(|| {
+            CatalogCompositionError::invalid("catalog source locator length overflowed")
+        })?;
+    let mut payload = Vec::with_capacity(payload_capacity);
+    payload.push(1);
+    payload.extend_from_slice(&root_len.to_be_bytes());
+    payload.extend_from_slice(root_name.as_bytes());
+    payload.extend_from_slice(confined_path_key);
+    Ok(CatalogLocatorValue {
+        native_value: Some(format!(
+            "{CONFINED_LOCATOR_PREFIX}{}",
+            URL_SAFE_NO_PAD.encode(payload)
+        )),
+        canonical_local_path: None,
+    })
+}
+
 pub(crate) fn decode_catalog_confined_locator(
     locator: &CatalogLocatorValue,
 ) -> Result<(String, PathBuf), CatalogCompositionError> {
