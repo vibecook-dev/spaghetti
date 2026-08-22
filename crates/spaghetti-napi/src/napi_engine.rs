@@ -127,7 +127,8 @@ fn public_catalog_input_error() -> Error {
     Error::new(Status::InvalidArg, "invalid catalog query request")
 }
 
-fn verified_builtin_support_catalog() -> std::result::Result<SupportCatalog, SupportContractError> {
+pub(crate) fn verified_builtin_support_catalog(
+) -> std::result::Result<SupportCatalog, SupportContractError> {
     SupportCatalog::new([
         crate::claude::verified_support_release()?,
         crate::codex::verified_support_release()?,
@@ -135,7 +136,7 @@ fn verified_builtin_support_catalog() -> std::result::Result<SupportCatalog, Sup
     ])
 }
 
-fn verified_builtin_registry(
+pub(crate) fn verified_builtin_registry(
     support_catalog: Arc<SupportCatalog>,
 ) -> std::result::Result<AdapterRegistry, AdapterError> {
     AdapterRegistry::builder()

@@ -222,6 +222,46 @@ export declare class SpaghettiEngine {
   dispose(): Promise<EngineStatus>
 }
 
+/**
+ * Native owner for one store-free RFC 012D session attachment. Construct it
+ * through `openScopedObservationJson`; direct construction is forbidden.
+ */
+export declare class SpaghettiSessionObserver {
+  constructor(_notConstructible: never)
+  /**
+   * Return the attachment's immutable capability snapshot plus the exact
+   * portable parsing context. Neither value carries source-access authority.
+   */
+  capabilitiesJson(): string
+  /**
+   * Yield one strict outer-union envelope. The matching process-local
+   * receipt remains pending until `acknowledgeApplied()` succeeds.
+   */
+  nextEventJson(): Promise<string | null>
+  /**
+   * Advance the consumer-owned applied boundary for the last yielded
+   * envelope. No receipt bytes cross N-API or enter portable JSON.
+   */
+  acknowledgeApplied(): Promise<void>
+  /** Run one exact-scope pass and return its contextual strict watermark. */
+  pollJson(): Promise<string>
+  /**
+   * Await engine-level bootstrap admission. The completion envelope still
+   * belongs to `nextEventJson()` and must be applied independently.
+   */
+  readyOffered(): Promise<void>
+  /**
+   * Request a full-snapshot replacement and await its engine-offered
+   * barrier. Ordered delivery and application remain on the event drain.
+   */
+  resyncOffered(): Promise<void>
+  /**
+   * Idempotently cancel the attachment, await all owned work, and join the
+   * retained producer supervisor before resolving.
+   */
+  close(): Promise<void>
+}
+
 export interface EngineAdapterObservationOptions {
   /** Open adapter identifier registered by the native composition root. */
   adapterId: string
@@ -2091,6 +2131,13 @@ export interface EngineWriterPerformanceStats {
 
 /** Returns the semver of the native addon. */
 export declare function nativeVersion(): string
+
+/**
+ * Open one configured, exact-known-object RFC 012D observer. Current built-in
+ * Candidate releases fail closed here; this function does not create a test
+ * authorization or bypass promotion state.
+ */
+export declare function openScopedObservationJson(requestJson: string): Promise<SpaghettiSessionObserver>
 
 /** Open the persistent engine on a libuv worker thread. */
 export declare function openSpaghettiEngine(options: EngineOpenOptions): Promise<SpaghettiEngine>

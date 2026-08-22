@@ -38,6 +38,7 @@ mod observation_contract;
 pub mod orchestrate;
 mod runtime_semantic_reducer;
 mod scoped_observation;
+mod scoped_observation_napi;
 mod scoped_observation_transport;
 mod semantic_contract;
 mod semantic_contract_napi;
@@ -56,6 +57,7 @@ pub use orchestrate::ingest::{
 };
 #[cfg(feature = "legacy-oracle")]
 pub use orchestrate::live_ingest::{live_ingest_batch, LiveBatchResult, LiveRow, LiveRowId};
+pub use scoped_observation_napi::{open_scoped_observation_json, SpaghettiSessionObserver};
 
 /// Returns the semver of the native addon.
 #[napi]

@@ -5001,6 +5001,26 @@ impl ScopedObservationAsyncHandle {
         &self.shared.host
     }
 
+    /// Serialize the immutable capability snapshot together with the exact
+    /// caller-held context required by the portable SDK parser. The context
+    /// contains no native source authority and cannot be used to reopen this
+    /// attachment.
+    pub(crate) fn capability_snapshot_wire_value(&self) -> Result<serde_json::Value, ()> {
+        let context = serde_json::to_value(self.shared.host.completion_capability_context.wire())
+            .map_err(|_| ())?;
+        let snapshot = serde_json::to_value(
+            capability_snapshot_wire::ScopedCapabilitySnapshotWire::from_context(
+                &self.shared.host.completion_capability_context,
+            )
+            .map_err(|_| ())?,
+        )
+        .map_err(|_| ())?;
+        Ok(serde_json::json!({
+            "context": context,
+            "snapshot": snapshot,
+        }))
+    }
+
     pub fn with_attachment<T>(
         &self,
         operation: impl FnOnce(&ScopedObservationAccessHost, &mut ScopedObservationConsumerDrain) -> T,
