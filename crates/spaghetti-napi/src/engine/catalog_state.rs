@@ -895,6 +895,20 @@ fn unavailable_source_coverage(
     Ok(unavailable)
 }
 
+fn retrying_source_coverage(
+    coverage: &[SourceCoverageSet],
+) -> Result<Vec<SourceCoverageSet>, EngineError> {
+    let mut retrying = coverage.to_vec();
+    for set in &mut retrying {
+        if set.completeness == CoverageSetCompleteness::Complete {
+            set.completeness = CoverageSetCompleteness::Partial;
+        }
+        set.validate()
+            .map_err(|error| EngineError::InvalidCommit(error.to_string()))?;
+    }
+    Ok(retrying)
+}
+
 fn active_refresh_matches_expectation(
     current: &DurableCatalogBuildState,
     expected: &CatalogReadyRefreshExpectation,
@@ -1164,7 +1178,7 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
             machine
                 .source_retrying(
                     reason_code.clone(),
-                    current.readiness.source_coverage.clone(),
+                    retrying_source_coverage(&current.readiness.source_coverage)?,
                 )
                 .map_err(catalog_contract_error)?;
             (
@@ -1886,11 +1900,12 @@ fn decode_stored_state(
                 stored_reason_code.map(|code| CatalogReadinessReason::SourceRetrying {
                     code: code.to_string(),
                 });
-            (
-                CatalogReadinessPhase::Ready,
-                publication_coverage.clone(),
-                ready_reason,
-            )
+            let current_coverage = if ready_reason.is_some() {
+                retrying_source_coverage(&publication_coverage)?
+            } else {
+                publication_coverage.clone()
+            };
+            (CatalogReadinessPhase::Ready, current_coverage, ready_reason)
         };
         let reconstructed = CatalogReadinessSnapshot {
             readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,

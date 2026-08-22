@@ -2416,6 +2416,23 @@ fn transient_source_retrying_can_publish_and_restart_active_and_recovery_lineage
         active.state.readiness.reason,
         Some(CatalogReadinessReason::SourceRetrying { .. })
     ));
+    assert!(active
+        .state
+        .readiness
+        .source_coverage
+        .iter()
+        .all(|coverage| coverage.completeness == CoverageSetCompleteness::Partial));
+    let retrying_query = execute_catalog_readiness_query(
+        &active.connection,
+        &CatalogReadinessQueryRequest::new(public_query_request()),
+    )
+    .unwrap();
+    assert!(retrying_query
+        .readiness
+        .readiness
+        .source_coverage
+        .iter()
+        .all(|coverage| coverage.completeness == CoverageSetCompleteness::Partial));
     let active_publication = prepare_refresh_catalog(&mut active, 2, 2);
     let active_receipt =
         apply_refresh_catalog_publication(&mut active.connection, &active_publication)
