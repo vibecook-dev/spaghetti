@@ -1073,12 +1073,17 @@ v1 fixtures now have strict Rust, JSON-string N-API, and portable TypeScript
 consumers. Effective-state now freezes qualified Model, Effort, SessionMode, and
 PermissionMode values, keeps configured intent distinct from response or
 native-transition evidence, and binds each qualification into semantic
-identity. Interaction covers Pending | Resolved | Failed | Cancelled plus
-complete retract and partial non-retraction. The fixture breadth is
-substantial, but it does not close C1: content/progress and capability
-families, complete family-by-family replacement/retraction cases, full
-semantic reduction, tier/view compositionality, and durable/scoped reducer
-digest equality remain open.
+identity. One topology-neutral `RevisionedEntityCurrent` reducer law now covers
+all four dimensions: exact semantic replay is occurrence-independent, partial
+retract cannot erase known state, complete retract is dimension-local, and a
+durable `FactBatch` view and selected scoped projection produce the same
+canonical reduced-state digest. Interaction covers Pending | Resolved | Failed
+| Cancelled plus complete retract and partial non-retraction. The fixture
+breadth is substantial, but it does not close C1: content/progress and
+capability families, complete remaining family-by-family
+replacement/retraction cases, full semantic reduction, tier/view
+compositionality, and remaining-family durable/scoped reducer digest equality
+remain open.
 
 ### C2. Usage-v2 shadow projection
 

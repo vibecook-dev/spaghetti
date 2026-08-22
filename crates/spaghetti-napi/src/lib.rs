@@ -36,6 +36,7 @@ mod napi_engine;
 mod observation_contract;
 #[cfg(feature = "legacy-oracle")]
 pub mod orchestrate;
+mod runtime_semantic_reducer;
 mod scoped_observation;
 mod semantic_contract;
 mod semantic_contract_napi;

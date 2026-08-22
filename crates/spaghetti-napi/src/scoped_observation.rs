@@ -21,18 +21,16 @@ use crate::adapter::{
     CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
     CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
     CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId,
-    EffectiveStateDimension, EffectiveStateEvidenceKind, EffectiveStateRevisionFact,
-    EffectiveStateValueAuthority, ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance,
+    EffectiveStateRevisionFact, ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance,
     FactRevisionId, FactSemanticContext, FactSemanticRevision, MessageRevisionFact,
     MessageRevisionRole, NativeArtifactProbe, NativeIdentityClaim, PlanRevisionFact,
-    QualifiedTimestamp, QualifiedUnknownReason, QualifiedValueQuality, RawRetentionPolicy,
-    ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint,
-    SourceCoverageSet, SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery,
-    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TaskLifecycleState,
-    TaskRevisionFact, TimestampQuality, ToolRevisionFact, ToolRevisionKind,
-    TypedAccessAuthorization, UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState,
-    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
-    EXTERNAL_ENTITY_REFERENCE_VERSION,
+    QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive,
+    SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
+    SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
+    SourceRows, SourceSnapshot, SupportOperation, TaskLifecycleState, TaskRevisionFact,
+    TimestampQuality, ToolRevisionFact, ToolRevisionKind, TypedAccessAuthorization,
+    UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState, UserInputOperation,
+    UserInputQuestion, UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -50,6 +48,11 @@ use crate::observation_contract::{
     negotiate_observation_contract, ObservationCapabilities, ObservationCapabilityContractError,
     ObservationContractOffer, ObservationContractRequest, ObservationContractSelection,
     ObservationNegotiationError,
+};
+use crate::runtime_semantic_reducer::{
+    effective_state_reduced_state_digest, reduce_effective_state_revision,
+    EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticReductionError,
+    RuntimeSemanticSourceRef, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -1982,7 +1985,8 @@ fn queued_control_observation(control: QueuedControlFrame) -> ScopedQueuedObserv
 /// over N-API until the complete RFC 012D envelope and negotiation surface are
 /// frozen, but event identity is already derived with the normative inputs.
 pub const SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION: u32 = 1;
-pub const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION: u32 = 1;
+pub const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION: u32 =
+    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION;
 pub const SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION: u32 = 3;
 pub const SCOPED_RESYNC_BARRIER_CONTRACT_VERSION: u32 = 3;
 const SCOPED_COMPLETION_SNAPSHOT_DIGEST_CONTRACT_VERSION: u32 = 3;
@@ -13490,41 +13494,38 @@ impl ScopedObservationProjectionSink {
                                 &state.revision,
                             ),
                         )?;
-                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
-                            continue;
-                        }
-                        if state.revision.operation == UserInputOperation::Retract
-                            && state.revision.completeness != ContractCompleteness::Complete
-                        {
-                            continue;
-                        }
-                    } else if state.revision.operation == UserInputOperation::Retract
-                        && state.revision.completeness != ContractCompleteness::Complete
+                    }
+                    match reduce_effective_state_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
                     {
-                        continue;
-                    }
-                    if state.revision.operation == UserInputOperation::Retract {
-                        queue_projection_retraction(
-                            &self.effective_states,
-                            &mut mutation.effective_state_upserts,
-                            &mut mutation.effective_state_retractions,
-                            key,
-                        );
-                        if self.families.effective_state {
-                            effective_state_events.push(
-                                ScopedProjectedObservation::EffectiveState {
-                                    lane_ordinal,
-                                    event: Box::new(effective_state_event(
-                                        &state,
-                                        ScopedRevisionedEntityOperation::Retract,
-                                        phase,
-                                    )),
-                                },
+                        RevisionedEntityReduction::Unchanged => continue,
+                        RevisionedEntityReduction::Retract => {
+                            queue_projection_retraction(
+                                &self.effective_states,
+                                &mut mutation.effective_state_upserts,
+                                &mut mutation.effective_state_retractions,
+                                key,
                             );
+                            if self.families.effective_state {
+                                effective_state_events.push(
+                                    ScopedProjectedObservation::EffectiveState {
+                                        lane_ordinal,
+                                        event: Box::new(effective_state_event(
+                                            &state,
+                                            ScopedRevisionedEntityOperation::Retract,
+                                            phase,
+                                        )),
+                                    },
+                                );
+                            }
                         }
-                        continue;
+                        RevisionedEntityReduction::Upsert => {
+                            mutation.effective_state_upserts.insert(key, state);
+                        }
                     }
-                    mutation.effective_state_upserts.insert(key, state);
                 }
                 Fact::ArtifactMetadataSnapshot(fact) => {
                     self.artifact_evidence.prepare_metadata(
@@ -15939,102 +15940,37 @@ fn tool_replacement_snapshot_is_valid(
 fn effective_state_replacement_digest(
     entities: &[ScopedEffectiveStateReplacementEntity],
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
-    let entity_count = u64::try_from(entities.len())
-        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = replacement_family_digest(
-        b"runtime.effective-state",
-        RUNTIME_EFFECTIVE_STATE_FACT_FAMILY_CONTRACT_VERSION,
-        entity_count,
-    );
-    for entity in entities {
-        validate_and_hash_replacement_source(
-            &mut hasher,
-            &entity.semantic,
-            entity.generation,
-            &entity.source,
-        )?;
-        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
-        hasher.update(&[match entity.revision.dimension {
-            EffectiveStateDimension::Model => 1,
-            EffectiveStateDimension::Effort => 2,
-            EffectiveStateDimension::SessionMode => 3,
-            EffectiveStateDimension::PermissionMode => 4,
-        }]);
-        match entity.revision.value.value.as_ref() {
-            Some(value) => {
-                hasher.update(&[1]);
-                hash_event_component(&mut hasher, value.as_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
+    let digest = effective_state_reduced_state_digest(entities.iter().map(|entity| {
+        EffectiveStateReducedDigestEntity {
+            semantic: &entity.semantic,
+            source: RuntimeSemanticSourceRef {
+                adapter_id: &entity.source.object.adapter_id,
+                source_instance_key: &entity.source.object.source_instance_key,
+                stream_key: &entity.source.object.stream_key,
+                object_key: &entity.source.object.object_key,
+                source_record_id: entity.source.source_record_id,
+                provenance: &entity.source.provenance,
+                generation: entity.generation,
+                cursor_start: entity.source.cursor_start.as_bytes(),
+                cursor_end: entity.source.cursor_end.as_bytes(),
+                payload_hash: entity.source.payload_hash.as_bytes(),
+                media_type: entity.source.media_type.as_str(),
+                state: entity.source.state,
+            },
+            revision: &entity.revision,
         }
-        hasher.update(&[match entity.revision.value.quality {
-            QualifiedValueQuality::Exact => 1,
-            QualifiedValueQuality::NativeClaimed => 2,
-            QualifiedValueQuality::Derived => 3,
-            QualifiedValueQuality::Estimated => 4,
-            QualifiedValueQuality::Unknown => 5,
-        }]);
-        hasher.update(&[match entity.revision.value.authority {
-            EffectiveStateValueAuthority::NativeConfiguration => 1,
-            EffectiveStateValueAuthority::NativeResponse => 2,
-            EffectiveStateValueAuthority::NativeTransition => 3,
-        }]);
-        hasher.update(&[match entity.revision.value.completeness {
-            ContractCompleteness::Complete => 1,
-            ContractCompleteness::Partial => 2,
-            ContractCompleteness::Unknown => 3,
-        }]);
-        hasher.update(&[match entity.revision.value.unknown_reason {
-            None => 0,
-            Some(QualifiedUnknownReason::Missing) => 1,
-            Some(QualifiedUnknownReason::Unsupported) => 2,
-            Some(QualifiedUnknownReason::Withheld) => 3,
-            Some(QualifiedUnknownReason::NotYetObserved) => 4,
-            Some(QualifiedUnknownReason::Ambiguous) => 5,
-            Some(QualifiedUnknownReason::Malformed) => 6,
-        }]);
-        match entity.revision.value.effective_at {
-            Some(effective_at) => {
-                hasher.update(&[1]);
-                hasher.update(&effective_at.to_be_bytes());
-            }
-            None => {
-                hasher.update(&[0]);
-            }
+    }))
+    .map_err(|error| match error {
+        RuntimeSemanticReductionError::InvalidSource => ScopedProjectionError::ProvenanceMismatch,
+        RuntimeSemanticReductionError::CapacityExhausted => {
+            ScopedProjectionError::ReplacementCapacityExhausted
         }
-        hash_event_component(
-            &mut hasher,
-            entity.revision.value.provenance.native_field.as_bytes(),
-        );
-        hasher.update(
-            &entity
-                .revision
-                .value
-                .provenance
-                .normalization_contract_version
-                .to_be_bytes(),
-        );
-        hasher.update(&[match entity.revision.evidence_kind {
-            EffectiveStateEvidenceKind::ConfiguredIntent => 1,
-            EffectiveStateEvidenceKind::ResponseObserved => 2,
-            EffectiveStateEvidenceKind::NativeTransition => 3,
-        }]);
-        hasher.update(&[match entity.revision.operation {
-            UserInputOperation::Upsert => 1,
-            UserInputOperation::Retract => 2,
-        }]);
-        hasher.update(&[match entity.revision.completeness {
-            ContractCompleteness::Complete => 1,
-            ContractCompleteness::Partial => 2,
-            ContractCompleteness::Unknown => 3,
-        }]);
-    }
-    Ok(ScopedReplacementSemanticDigest(
-        *hasher.finalize().as_bytes(),
-    ))
+        RuntimeSemanticReductionError::InvalidRevision
+        | RuntimeSemanticReductionError::DuplicateFact => {
+            ScopedProjectionError::InvalidSemanticRevision
+        }
+    })?;
+    Ok(ScopedReplacementSemanticDigest(digest))
 }
 
 fn effective_state_replacement_snapshot_is_valid(
@@ -16300,7 +16236,9 @@ fn validate_actor_revision_progress<T: PartialEq>(
         return Err(ScopedProjectionError::ConflictingOwnership);
     }
     if current_semantic.fact_revision_id == next_semantic.fact_revision_id {
-        return if current_semantic == next_semantic && current_revision == next_revision {
+        return if current_semantic.semantic_revision_ref == next_semantic.semantic_revision_ref
+            && current_revision == next_revision
+        {
             Ok(())
         } else {
             Err(ScopedProjectionError::InvalidSemanticRevision)
@@ -23468,11 +23406,19 @@ mod projection_tests {
 
     use crate::adapter::{
         AdapterManifest, AdapterSupportBinding, ContractCompleteness, ContractVersionOffer,
-        ContractVersionRequest, CoverageMembershipRevision, NativeIdentity, QualifiedTimestamp,
-        QualifiedValue, QualifiedValueQuality, TimestampQuality, UsageBucketsV2,
-        UsageQualifiedValue, UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
+        ContractVersionRequest, CoverageMembershipRevision, EffectiveStateDimension,
+        EffectiveStateEvidenceKind, NativeIdentity, QualifiedTimestamp, QualifiedValue,
+        QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
+        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
     };
-    use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
+    use crate::runtime_semantic_reducer::{
+        effective_state_reduced_state_digest, reduce_effective_state_revision,
+        EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticSourceRef,
+    };
+    use crate::semantic_contract::{
+        effective_state_revision, parse_rfc012c_runtime_v1_json, EffectiveStateFixtureWire,
+        EffectiveStateSlotWire, RuntimeContractFixtureWire,
+    };
     use crate::source::{DirectoryCheckpoint, FileIdentity, RecordOrigin};
 
     use super::actor_wire::ScopedActorEnvelopeWire;
@@ -26326,6 +26272,180 @@ mod projection_tests {
         }
     }
 
+    #[derive(Clone)]
+    struct DurableEffectiveStateEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
+    fn effective_state_batch(
+        record: &SourceRecord,
+        fixture: &EffectiveStateFixtureWire,
+        slot: &EffectiveStateSlotWire,
+    ) -> (FactBatch, FactEnvelope) {
+        let revision = effective_state_revision(fixture, slot);
+        let native_dimension = match revision.dimension {
+            EffectiveStateDimension::Model => b"model".as_slice(),
+            EffectiveStateDimension::Effort => b"effort".as_slice(),
+            EffectiveStateDimension::SessionMode => b"session_mode".as_slice(),
+            EffectiveStateDimension::PermissionMode => b"permission_mode".as_slice(),
+        };
+        let mut batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        batch
+            .push_native(
+                record,
+                native_dimension,
+                Fact::EffectiveStateRevision(revision),
+            )
+            .unwrap();
+        let envelope = batch.facts()[0].clone();
+        assert_eq!(
+            envelope.semantic_revision.unwrap().fact_id,
+            fixture.fact_id,
+            "fixture and durable fact identity must match"
+        );
+        (batch, envelope)
+    }
+
+    fn reduce_durable_effective_state(
+        current: &mut BTreeMap<CanonicalFactId, DurableEffectiveStateEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        envelope: FactEnvelope,
+    ) -> RevisionedEntityReduction {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("effective-state durable fact has semantic identity");
+        let Fact::EffectiveStateRevision(revision) = &envelope.value else {
+            panic!("durable effective-state reducer received another family");
+        };
+        let decision = reduce_effective_state_revision(
+            current.get(&semantic.fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::EffectiveStateRevision(current_revision) = &entity.envelope.value else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )
+        .unwrap();
+        match decision {
+            RevisionedEntityReduction::Unchanged => {}
+            RevisionedEntityReduction::Upsert => {
+                current.insert(
+                    semantic.fact_id,
+                    DurableEffectiveStateEntity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+            }
+            RevisionedEntityReduction::Retract => {
+                current.remove(&semantic.fact_id);
+            }
+        }
+        decision
+    }
+
+    fn durable_effective_state_digest(
+        current: &BTreeMap<CanonicalFactId, DurableEffectiveStateEntity>,
+    ) -> [u8; 32] {
+        // Reverse input order on purpose: the common digest must canonicalize
+        // by fact identity rather than inheriting a durable query order.
+        effective_state_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::EffectiveStateRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            EffectiveStateReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_effective_state_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurableEffectiveStateEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        let snapshot = scoped
+            .effective_state_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(snapshot.entity_count as usize, durable.len());
+        assert_eq!(
+            snapshot.semantic_digest.as_bytes(),
+            &durable_effective_state_digest(durable),
+            "durable and scoped effective-state reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.effective_states.get(fact_id).unwrap();
+            let Fact::EffectiveStateRevision(durable_revision) = &durable_entity.envelope.value
+            else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn apply_effective_state_to_topologies(
+        durable: &mut BTreeMap<CanonicalFactId, DurableEffectiveStateEntity>,
+        scoped: &mut ScopedObservationProjectionSink,
+        fixture: &EffectiveStateFixtureWire,
+        slot: &EffectiveStateSlotWire,
+        record: SourceRecord,
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+    ) -> RevisionedEntityReduction {
+        let (batch, envelope) = effective_state_batch(&record, fixture, slot);
+        let decision = reduce_durable_effective_state(
+            durable,
+            rfc012c_source_identity(),
+            record.clone(),
+            envelope,
+        );
+        let projected = scoped
+            .project(&rfc012c_decoded_frame(lane_ordinal, phase, &record, batch))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "scoped effective-state reduction failed for {:?} at lane {lane_ordinal}: {error:?}",
+                    fixture.dimension
+                )
+            });
+        assert_eq!(
+            projected.len(),
+            usize::from(decision != RevisionedEntityReduction::Unchanged),
+            "durable and scoped reducers made different delivery decisions"
+        );
+        assert_effective_state_topology_parity(durable, scoped);
+        decision
+    }
+
     fn rfc012c_initial_batch(
         fixture: &RuntimeContractFixtureWire,
         record: &SourceRecord,
@@ -27914,6 +28034,172 @@ mod projection_tests {
             .unwrap()
             .is_empty());
         assert_eq!(projection.effective_states.len(), 1);
+    }
+
+    #[test]
+    fn rfc012c_effective_state_durable_scoped_reduced_digests_match_all_dimensions() {
+        let fixtures = [
+            crate::semantic_contract::decode_rfc012c_effective_state_v1(include_str!(
+                "../fixtures/contracts/rfc012c-effective-state-v1.json"
+            ))
+            .unwrap(),
+            crate::semantic_contract::decode_rfc012c_effective_state_v1(include_str!(
+                "../fixtures/contracts/rfc012c-effective-state-effort-v1.json"
+            ))
+            .unwrap(),
+            crate::semantic_contract::decode_rfc012c_effective_state_v1(include_str!(
+                "../fixtures/contracts/rfc012c-effective-state-session-mode-v1.json"
+            ))
+            .unwrap(),
+            crate::semantic_contract::decode_rfc012c_effective_state_v1(include_str!(
+                "../fixtures/contracts/rfc012c-effective-state-permission-mode-v1.json"
+            ))
+            .unwrap(),
+        ];
+        let selection = observation_contract_selection_for("runtime.effective-state");
+        let mut scoped = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 16,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let mut durable = BTreeMap::new();
+        let mut cursor = 0_u64;
+        let mut lane = 1_u64;
+
+        for fixture in &fixtures {
+            let record = rfc012c_record(cursor, cursor + 1, 100 + lane as i64);
+            assert_eq!(
+                apply_effective_state_to_topologies(
+                    &mut durable,
+                    &mut scoped,
+                    fixture,
+                    &fixture.configured,
+                    record,
+                    lane,
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                ),
+                RevisionedEntityReduction::Upsert
+            );
+            cursor += 1;
+            lane += 1;
+        }
+        assert_eq!(durable.len(), 4);
+        assert_eq!(
+            durable.keys().copied().collect::<BTreeSet<_>>(),
+            fixtures
+                .iter()
+                .map(|fixture| fixture.fact_id)
+                .collect::<BTreeSet<_>>()
+        );
+        let configured_digest = durable_effective_state_digest(&durable);
+
+        for fixture in &fixtures {
+            let record = rfc012c_record(cursor, cursor + 1, 100 + lane as i64);
+            assert_eq!(
+                apply_effective_state_to_topologies(
+                    &mut durable,
+                    &mut scoped,
+                    fixture,
+                    &fixture.observed,
+                    record,
+                    lane,
+                    ScopedAppendDeliveryPhase::Live,
+                ),
+                RevisionedEntityReduction::Upsert
+            );
+            cursor += 1;
+            lane += 1;
+        }
+        assert_eq!(durable.len(), 4);
+        assert_ne!(configured_digest, durable_effective_state_digest(&durable));
+        assert_eq!(
+            scoped
+                .effective_states
+                .values()
+                .filter(|state| {
+                    state.revision.evidence_kind == EffectiveStateEvidenceKind::NativeTransition
+                })
+                .count(),
+            2
+        );
+        assert_eq!(
+            scoped
+                .effective_states
+                .values()
+                .filter(|state| {
+                    state.revision.evidence_kind == EffectiveStateEvidenceKind::ResponseObserved
+                })
+                .count(),
+            2
+        );
+
+        // A replay with a newer source occurrence but the same normalized
+        // revision is a semantic no-op in both topologies and leaves the
+        // retained occurrence/digest unchanged.
+        let before_repeat = durable_effective_state_digest(&durable);
+        let record = rfc012c_record(cursor, cursor + 1, 100 + lane as i64);
+        assert_eq!(
+            apply_effective_state_to_topologies(
+                &mut durable,
+                &mut scoped,
+                &fixtures[0],
+                &fixtures[0].observed,
+                record,
+                lane,
+                ScopedAppendDeliveryPhase::Live,
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert_eq!(before_repeat, durable_effective_state_digest(&durable));
+        cursor += 1;
+        lane += 1;
+
+        // An incomplete retraction cannot erase known state.
+        let mut partial_retract = fixtures[1].retract.clone();
+        partial_retract.completeness = ContractCompleteness::Partial;
+        partial_retract.value.completeness = ContractCompleteness::Partial;
+        let record = rfc012c_record(cursor, cursor + 1, 100 + lane as i64);
+        assert_eq!(
+            apply_effective_state_to_topologies(
+                &mut durable,
+                &mut scoped,
+                &fixtures[1],
+                &partial_retract,
+                record,
+                lane,
+                ScopedAppendDeliveryPhase::Live,
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert_eq!(durable.len(), 4);
+        cursor += 1;
+        lane += 1;
+
+        // Complete retraction is dimension-local, then every remaining
+        // dimension independently converges to the canonical empty digest.
+        for (index, fixture) in fixtures.iter().enumerate() {
+            let record = rfc012c_record(cursor, cursor + 1, 100 + lane as i64);
+            assert_eq!(
+                apply_effective_state_to_topologies(
+                    &mut durable,
+                    &mut scoped,
+                    fixture,
+                    &fixture.retract,
+                    record,
+                    lane,
+                    ScopedAppendDeliveryPhase::Correction,
+                ),
+                RevisionedEntityReduction::Retract
+            );
+            assert_eq!(durable.len(), 3 - index);
+            cursor += 1;
+            lane += 1;
+        }
+        assert!(durable.is_empty());
+        assert!(scoped.effective_states.is_empty());
+        assert_effective_state_topology_parity(&durable, &scoped);
     }
 
     #[test]

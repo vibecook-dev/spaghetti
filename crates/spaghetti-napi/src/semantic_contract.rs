@@ -1177,7 +1177,7 @@ fn verify_fact_revision_identity(
     )
 }
 
-fn effective_state_revision(
+pub(crate) fn effective_state_revision(
     fixture: &EffectiveStateFixtureWire,
     slot: &EffectiveStateSlotWire,
 ) -> EffectiveStateRevisionFact {
