@@ -440,6 +440,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::UserInputRequestRevision(_)
                 | Fact::MessageRevision(_)
                 | Fact::ContentBlockRevision(_)
+                | Fact::NativeRuntimeMarkerRevision(_)
                 | Fact::TaskRevision(_)
                 | Fact::PlanRevision(_)
                 | Fact::ToolRevision(_)

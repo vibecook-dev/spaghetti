@@ -50,10 +50,6 @@ use crate::observation_contract::{
     ObservationContractOffer, ObservationContractRequest, ObservationContractSelection,
     ObservationNegotiationError,
 };
-#[cfg(test)]
-use crate::runtime_semantic_reducer::{
-    content_block_reduced_state_digest, ContentBlockReducedDigestEntity,
-};
 use crate::runtime_semantic_reducer::{
     effective_state_reduced_state_digest, reduce_content_block_revision,
     reduce_effective_state_revision, EffectiveStateReducedDigestEntity, RevisionedEntityReduction,
@@ -11983,13 +11979,15 @@ impl ScopedObservationProjectionSink {
     /// event/replacement contract is exposed.
     #[cfg(test)]
     fn content_block_reduced_digest(&self) -> Result<[u8; 32], ScopedProjectionError> {
-        content_block_reduced_state_digest(self.content_blocks.values().map(|entity| {
-            ContentBlockReducedDigestEntity {
-                semantic: &entity.semantic,
-                source: runtime_semantic_source_ref(entity.generation, &entity.source),
-                revision: &entity.revision,
-            }
-        }))
+        crate::runtime_semantic_reducer::content_block_reduced_state_digest(
+            self.content_blocks.values().map(|entity| {
+                crate::runtime_semantic_reducer::ContentBlockReducedDigestEntity {
+                    semantic: &entity.semantic,
+                    source: runtime_semantic_source_ref(entity.generation, &entity.source),
+                    revision: &entity.revision,
+                }
+            }),
+        )
         .map_err(runtime_semantic_projection_error)
     }
 
@@ -13358,6 +13356,10 @@ impl ScopedObservationProjectionSink {
                         }
                     }
                 }
+                // Contract-only until the native-marker CurrentGenerationLog
+                // reducer is frozen; it must not enter a selected replacement
+                // claim through the generic catch-all.
+                Fact::NativeRuntimeMarkerRevision(_) => {}
                 Fact::PlanRevision(revision) => {
                     let mut state =
                         scoped_plan_state(object_token, source, evidence, envelope, revision)?;

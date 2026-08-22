@@ -1260,6 +1260,305 @@ fn push_content_block_revision_value(output: &mut Vec<u8>, value: &ContentBlockR
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeCompactionPhase {
+    Started,
+    Boundary,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeProgressState {
+    Pending,
+    Active,
+    Waiting,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeQueueOperation {
+    Enqueue,
+    Dequeue,
+    Drain,
+    Remove,
+}
+
+/// Closed, typed native marker values. Host assessments deliberately have no
+/// representation here; they belong to a distinct future assessment family.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeRuntimeMarkerValue {
+    Compaction {
+        phase: NativeCompactionPhase,
+        trigger: Option<String>,
+        pre_tokens: Option<u64>,
+    },
+    Progress {
+        state: NativeProgressState,
+        completed: Option<u64>,
+        total: Option<u64>,
+        detail_digest: Option<[u8; 32]>,
+    },
+    Queue {
+        operation: NativeQueueOperation,
+        depth: Option<u64>,
+        item_digest: Option<[u8; 32]>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRuntimeMarkerProvenance {
+    pub native_field: String,
+    pub normalization_contract_version: u32,
+}
+
+/// One native compaction/progress/queue marker in the current source
+/// generation. Corrections retain `native_marker_id`; complete retraction or
+/// source-generation loss removes the entity. Quality is intentionally
+/// restricted to exact/native-claimed evidence so a host heuristic cannot be
+/// serialized as a native marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRuntimeMarkerRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub native_marker_id: String,
+    pub correlated_native_id: Option<String>,
+    pub value: NativeRuntimeMarkerValue,
+    pub quality: QualifiedValueQuality,
+    pub effective_at: Option<i64>,
+    pub provenance: NativeRuntimeMarkerProvenance,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+}
+
+impl NativeRuntimeMarkerRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        validate_runtime_semantic_text("native_marker_id", Some(&self.native_marker_id))?;
+        validate_runtime_semantic_text(
+            "correlated_native_id",
+            self.correlated_native_id.as_deref(),
+        )?;
+        if !matches!(
+            self.quality,
+            QualifiedValueQuality::Exact | QualifiedValueQuality::NativeClaimed
+        ) {
+            return Err(AdapterError::invalid_contract(
+                "native runtime marker quality must be exact or native_claimed",
+            ));
+        }
+        if self.effective_at.is_some_and(|effective_at| {
+            !(-JS_SAFE_INTEGER_MAX_I64..=JS_SAFE_INTEGER_MAX_I64).contains(&effective_at)
+        }) {
+            return Err(AdapterError::invalid_contract(
+                "native runtime marker effective_at exceeds the portable safe-integer range",
+            ));
+        }
+        if !is_bounded_native_field(
+            &self.provenance.native_field,
+            MAX_EFFECTIVE_STATE_PROVENANCE_FIELD_BYTES,
+        ) || self.provenance.normalization_contract_version == 0
+        {
+            return Err(AdapterError::invalid_contract(
+                "native runtime marker provenance is empty, oversized, uncanonical, or unversioned",
+            ));
+        }
+        match &self.value {
+            NativeRuntimeMarkerValue::Compaction {
+                trigger,
+                pre_tokens,
+                ..
+            } => {
+                if let Some(trigger) = trigger {
+                    if !is_bounded_native_field(trigger, MAX_EFFECTIVE_STATE_PROVENANCE_FIELD_BYTES)
+                    {
+                        return Err(AdapterError::invalid_contract(
+                            "native compaction trigger must be a bounded machine identifier",
+                        ));
+                    }
+                }
+                validate_native_marker_counter("compaction pre_tokens", *pre_tokens)?;
+            }
+            NativeRuntimeMarkerValue::Progress {
+                completed,
+                total,
+                detail_digest,
+                ..
+            } => {
+                validate_native_marker_counter("progress completed", *completed)?;
+                validate_native_marker_counter("progress total", *total)?;
+                if (*completed)
+                    .zip(*total)
+                    .is_some_and(|(completed, total)| completed > total)
+                {
+                    return Err(AdapterError::invalid_contract(
+                        "native progress completed cannot exceed total",
+                    ));
+                }
+                validate_optional_native_marker_digest("progress detail", detail_digest.as_ref())?;
+            }
+            NativeRuntimeMarkerValue::Queue {
+                depth, item_digest, ..
+            } => {
+                validate_native_marker_counter("queue depth", *depth)?;
+                validate_optional_native_marker_digest("queue item", item_digest.as_ref())?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stable_native_fact_key(&self) -> Result<Vec<u8>, AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.native-marker/stable-native-key\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        encoded.push(native_runtime_marker_kind_tag(&self.value));
+        push_component(&mut encoded, self.native_marker_id.as_bytes());
+        Ok(encoded)
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.native-marker/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.native_marker_id.as_bytes());
+        push_optional_component(
+            &mut encoded,
+            self.correlated_native_id.as_deref().map(str::as_bytes),
+        );
+        push_native_runtime_marker_value(&mut encoded, &self.value);
+        encoded.push(match self.quality {
+            QualifiedValueQuality::Exact => 1,
+            QualifiedValueQuality::NativeClaimed => 2,
+            QualifiedValueQuality::Derived
+            | QualifiedValueQuality::Estimated
+            | QualifiedValueQuality::Unknown => unreachable!("validate rejects non-native quality"),
+        });
+        match self.effective_at {
+            Some(effective_at) => {
+                encoded.push(1);
+                encoded.extend_from_slice(&effective_at.to_be_bytes());
+            }
+            None => encoded.push(0),
+        }
+        push_component(&mut encoded, self.provenance.native_field.as_bytes());
+        encoded.extend_from_slice(&self.provenance.normalization_contract_version.to_be_bytes());
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
+fn validate_native_marker_counter(field: &str, value: Option<u64>) -> Result<(), AdapterError> {
+    if value.is_some_and(|value| value > JS_SAFE_INTEGER_MAX_U64) {
+        return Err(AdapterError::invalid_contract(format!(
+            "native runtime marker {field} exceeds the portable safe-integer range"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_optional_native_marker_digest(
+    field: &str,
+    digest: Option<&[u8; 32]>,
+) -> Result<(), AdapterError> {
+    if digest.is_some_and(|digest| digest.iter().all(|byte| *byte == 0)) {
+        return Err(AdapterError::invalid_contract(format!(
+            "native runtime marker {field} digest must be nonzero"
+        )));
+    }
+    Ok(())
+}
+
+fn native_runtime_marker_kind_tag(value: &NativeRuntimeMarkerValue) -> u8 {
+    match value {
+        NativeRuntimeMarkerValue::Compaction { .. } => 1,
+        NativeRuntimeMarkerValue::Progress { .. } => 2,
+        NativeRuntimeMarkerValue::Queue { .. } => 3,
+    }
+}
+
+fn push_native_runtime_marker_value(output: &mut Vec<u8>, value: &NativeRuntimeMarkerValue) {
+    output.push(native_runtime_marker_kind_tag(value));
+    match value {
+        NativeRuntimeMarkerValue::Compaction {
+            phase,
+            trigger,
+            pre_tokens,
+        } => {
+            output.push(match phase {
+                NativeCompactionPhase::Started => 1,
+                NativeCompactionPhase::Boundary => 2,
+                NativeCompactionPhase::Completed => 3,
+                NativeCompactionPhase::Failed => 4,
+            });
+            push_optional_component(output, trigger.as_deref().map(str::as_bytes));
+            push_optional_u64(output, *pre_tokens);
+        }
+        NativeRuntimeMarkerValue::Progress {
+            state,
+            completed,
+            total,
+            detail_digest,
+        } => {
+            output.push(match state {
+                NativeProgressState::Pending => 1,
+                NativeProgressState::Active => 2,
+                NativeProgressState::Waiting => 3,
+                NativeProgressState::Completed => 4,
+                NativeProgressState::Failed => 5,
+                NativeProgressState::Cancelled => 6,
+            });
+            push_optional_u64(output, *completed);
+            push_optional_u64(output, *total);
+            push_optional_component(output, detail_digest.as_ref().map(|value| value.as_slice()));
+        }
+        NativeRuntimeMarkerValue::Queue {
+            operation,
+            depth,
+            item_digest,
+        } => {
+            output.push(match operation {
+                NativeQueueOperation::Enqueue => 1,
+                NativeQueueOperation::Dequeue => 2,
+                NativeQueueOperation::Drain => 3,
+                NativeQueueOperation::Remove => 4,
+            });
+            push_optional_u64(output, *depth);
+            push_optional_component(output, item_digest.as_ref().map(|value| value.as_slice()));
+        }
+    }
+}
+
+fn push_optional_u64(output: &mut Vec<u8>, value: Option<u64>) {
+    match value {
+        Some(value) => {
+            output.push(1);
+            output.extend_from_slice(&value.to_be_bytes());
+        }
+        None => output.push(0),
+    }
+}
+
 /// RFC 012C task revision. Individual upserts are revisioned entities; a
 /// complete owned-set snapshot may retract members absent from that set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2617,6 +2916,7 @@ pub enum Fact {
     UserInputRequestRevision(UserInputRequestRevisionFact),
     MessageRevision(MessageRevisionFact),
     ContentBlockRevision(ContentBlockRevisionFact),
+    NativeRuntimeMarkerRevision(NativeRuntimeMarkerRevisionFact),
     TaskRevision(TaskRevisionFact),
     PlanRevision(PlanRevisionFact),
     ToolRevision(ToolRevisionFact),
@@ -2658,6 +2958,7 @@ impl Fact {
             Self::UserInputRequestRevision(_) => "runtime.user-input-request",
             Self::MessageRevision(_) => "runtime.message",
             Self::ContentBlockRevision(_) => "runtime.content-block",
+            Self::NativeRuntimeMarkerRevision(_) => "runtime.native-marker",
             Self::TaskRevision(_) => "runtime.task",
             Self::PlanRevision(_) => "runtime.plan",
             Self::ToolRevision(_) => "runtime.tool",
@@ -2695,6 +2996,7 @@ impl Fact {
             | Self::UserInputRequestRevision(_)
             | Self::MessageRevision(_)
             | Self::ContentBlockRevision(_)
+            | Self::NativeRuntimeMarkerRevision(_)
             | Self::TaskRevision(_)
             | Self::PlanRevision(_)
             | Self::ToolRevision(_)
@@ -2727,6 +3029,9 @@ impl Fact {
             Self::UserInputRequestRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::MessageRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ContentBlockRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::NativeRuntimeMarkerRevision(revision) => {
+                revision.semantic_revision_key().map(Some)
+            }
             Self::TaskRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::PlanRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ToolRevision(revision) => revision.semantic_revision_key().map(Some),
@@ -3291,6 +3596,10 @@ impl FactBatch {
                             )
                             | (Fact::MessageRevision(_), Fact::MessageRevision(_))
                             | (Fact::ContentBlockRevision(_), Fact::ContentBlockRevision(_))
+                            | (
+                                Fact::NativeRuntimeMarkerRevision(_),
+                                Fact::NativeRuntimeMarkerRevision(_)
+                            )
                             | (Fact::TaskRevision(_), Fact::TaskRevision(_))
                             | (Fact::PlanRevision(_), Fact::PlanRevision(_))
                             | (Fact::ToolRevision(_), Fact::ToolRevision(_))
@@ -4126,6 +4435,115 @@ mod tests {
             value_digest: [9; 32],
         };
         assert!(extension.semantic_revision_key().is_err());
+    }
+
+    #[test]
+    fn native_runtime_marker_is_native_only_bounded_and_value_derived() {
+        let context = semantic_context();
+        let session = context
+            .canonical_entity_key("session", b"native-session")
+            .unwrap();
+        let actor_run = context
+            .canonical_entity_key("actor-run", b"native-run")
+            .unwrap();
+        let original = NativeRuntimeMarkerRevisionFact {
+            session,
+            actor_run,
+            native_marker_id: "progress-1".to_string(),
+            correlated_native_id: Some("tool-1".to_string()),
+            value: NativeRuntimeMarkerValue::Progress {
+                state: NativeProgressState::Active,
+                completed: Some(1),
+                total: Some(2),
+                detail_digest: Some([7; 32]),
+            },
+            quality: QualifiedValueQuality::NativeClaimed,
+            effective_at: Some(42),
+            provenance: NativeRuntimeMarkerProvenance {
+                native_field: "progress.data".to_string(),
+                normalization_contract_version: 1,
+            },
+            completeness: ContractCompleteness::Complete,
+            operation: UserInputOperation::Upsert,
+        };
+        let original_identity = original.stable_native_fact_key().unwrap();
+        let original_revision = original.semantic_revision_key().unwrap();
+
+        let mut correction = original.clone();
+        correction.value = NativeRuntimeMarkerValue::Progress {
+            state: NativeProgressState::Completed,
+            completed: Some(2),
+            total: Some(2),
+            detail_digest: Some([8; 32]),
+        };
+        assert_eq!(
+            correction.stable_native_fact_key().unwrap(),
+            original_identity
+        );
+        assert_ne!(
+            correction.semantic_revision_key().unwrap(),
+            original_revision
+        );
+
+        let mut different_kind = original.clone();
+        different_kind.value = NativeRuntimeMarkerValue::Compaction {
+            phase: NativeCompactionPhase::Boundary,
+            trigger: Some("auto".to_string()),
+            pre_tokens: Some(2),
+        };
+        assert_ne!(
+            different_kind.stable_native_fact_key().unwrap(),
+            original_identity
+        );
+        assert!(different_kind.semantic_revision_key().is_ok());
+
+        let mut queue = original.clone();
+        queue.value = NativeRuntimeMarkerValue::Queue {
+            operation: NativeQueueOperation::Enqueue,
+            depth: Some(1),
+            item_digest: Some([9; 32]),
+        };
+        assert!(queue.semantic_revision_key().is_ok());
+
+        let mut host_assessment = original.clone();
+        host_assessment.quality = QualifiedValueQuality::Derived;
+        assert!(host_assessment.semantic_revision_key().is_err());
+        host_assessment.quality = QualifiedValueQuality::Estimated;
+        assert!(host_assessment.semantic_revision_key().is_err());
+
+        let mut invalid_progress = original.clone();
+        invalid_progress.value = NativeRuntimeMarkerValue::Progress {
+            state: NativeProgressState::Active,
+            completed: Some(3),
+            total: Some(2),
+            detail_digest: Some([7; 32]),
+        };
+        assert!(invalid_progress.semantic_revision_key().is_err());
+        invalid_progress.value = NativeRuntimeMarkerValue::Progress {
+            state: NativeProgressState::Active,
+            completed: Some(JS_SAFE_INTEGER_MAX_U64 + 1),
+            total: None,
+            detail_digest: Some([7; 32]),
+        };
+        assert!(invalid_progress.semantic_revision_key().is_err());
+        invalid_progress.value = NativeRuntimeMarkerValue::Progress {
+            state: NativeProgressState::Active,
+            completed: None,
+            total: None,
+            detail_digest: Some([0; 32]),
+        };
+        assert!(invalid_progress.semantic_revision_key().is_err());
+
+        let mut invalid_text = original.clone();
+        invalid_text.provenance.native_field = "/Users/alice/progress".to_string();
+        assert!(invalid_text.semantic_revision_key().is_err());
+        invalid_text = original.clone();
+        invalid_text.native_marker_id = " marker ".to_string();
+        assert!(invalid_text.semantic_revision_key().is_err());
+
+        let mut invalid_time = original;
+        invalid_time.effective_at = Some(JS_SAFE_INTEGER_MAX_I64 + 1);
+        assert!(invalid_time.semantic_revision_key().is_err());
     }
 
     #[test]

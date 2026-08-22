@@ -1090,12 +1090,18 @@ A durable `FactBatch` view and the private scoped reducer produce the same
 canonical content-block digest after every transition and in either fact
 order. The observer family, event union, and replacement-manifest entry remain
 unexposed until their portable contracts are frozen.
+Native compaction/progress/queue evidence now has a closed common
+`runtime.native-marker` fact shape: only exact or native-claimed quality is
+accepted, counters are portable safe integers, free-form detail is digest-only,
+and correction identity is separated from the value-derived revision. Host
+derived or estimated assessments cannot inhabit this native fact type. Its
+portable fixture/parsers and `CurrentGenerationLog` reducer are still open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: progress and capability families, complete remaining
-family-by-family replacement/retraction cases, full semantic reduction,
-tier/view compositionality, and remaining-family durable/scoped reducer digest
-equality remain open.
+does not close C1: native-marker portable/reducer coverage, capability families,
+complete remaining family-by-family replacement/retraction cases, full semantic
+reduction, tier/view compositionality, and remaining-family durable/scoped
+reducer digest equality remain open.
 
 ### C2. Usage-v2 shadow projection
 
