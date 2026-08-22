@@ -1258,6 +1258,55 @@ impl ScopedObservationAdmissionLane {
         })
     }
 
+    /// Retain the exact authorized known-object membership needed to report a
+    /// first-access bootstrap error. This records no coverage by itself and
+    /// therefore cannot make an unattempted relation appear complete.
+    fn bind_known_object_error_membership(
+        &mut self,
+        object: &ScopedKnownAppendObject,
+    ) -> Result<(), ScopedAdmissionError> {
+        let membership = object.coverage_membership_identity();
+        if self
+            .known_coverage_objects
+            .get(&object.source)
+            .is_some_and(|known| known == &membership)
+        {
+            return Ok(());
+        }
+        if self.known_coverage_objects.contains_key(&object.source)
+            || self
+                .relation_membership_objects
+                .contains_key(&object.source)
+            || self
+                .dynamic_relation_members
+                .values()
+                .any(|members| members.contains(&object.source))
+            || self
+                .known_coverage_objects
+                .values()
+                .chain(self.relation_membership_objects.values())
+                .any(|known| known.relation_id == membership.relation_id)
+        {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        let retained = self
+            .known_coverage_objects
+            .len()
+            .checked_add(self.relation_membership_objects.len())
+            .and_then(|value| {
+                self.dynamic_relation_members
+                    .values()
+                    .try_fold(value, |total, members| total.checked_add(members.len()))
+            })
+            .ok_or(ScopedAdmissionError::CoverageObjectCapacityFull)?;
+        if retained >= self.limits.max_coverage_objects {
+            return Err(ScopedAdmissionError::CoverageObjectCapacityFull);
+        }
+        self.known_coverage_objects
+            .insert(object.source.clone(), membership);
+        Ok(())
+    }
+
     /// Atomically admit the reset control and decoded data, then commit the
     /// matching object's cursor/decoder state. Capacity failure returns the
     /// still-owned decoded batch and leaves the object unchanged.
@@ -20834,6 +20883,23 @@ impl ScopedObservationAccessHost {
         projection: ScopedObservationProjectionSink,
         delivery: &ScopedObservationDeliveryLane,
     ) -> Result<ScopedObservationEpochState, ScopedReplacementStageError> {
+        self.bind_bootstrap_epoch_state_with_errors(
+            append_objects,
+            admission,
+            projection,
+            BTreeMap::new(),
+            delivery,
+        )
+    }
+
+    fn bind_bootstrap_epoch_state_with_errors(
+        &self,
+        append_objects: Vec<ScopedKnownAppendObject>,
+        admission: ScopedObservationAdmissionLane,
+        projection: ScopedObservationProjectionSink,
+        object_errors: BTreeMap<String, ScopedSourceObjectErrorRuntime>,
+        delivery: &ScopedObservationDeliveryLane,
+    ) -> Result<ScopedObservationEpochState, ScopedReplacementStageError> {
         let barrier = delivery
             .bootstrap_barrier()
             .ok_or(ScopedReplacementStageError::InvalidSourceState)?;
@@ -20924,6 +20990,20 @@ impl ScopedObservationAccessHost {
             &admission,
             append_objects,
         )?;
+        if !scoped_object_error_states_match_epoch(
+            SCOPED_INITIAL_SCOPE_EPOCH,
+            &append_objects,
+            &object_errors,
+        ) || object_errors.iter().any(|(relation_id, state)| {
+            append_objects
+                .get(relation_id)
+                .and_then(|object| object.prepare_object_error_coverage(&state.error).ok())
+                .is_none_or(|expected| {
+                    admission.offered_decode_coverage.get(&state.error.source) != Some(&expected)
+                })
+        }) {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
         if append_objects
             .get(self.root_relation_id.as_ref())
             .is_none_or(|object| object.is_present() != barrier.root_present)
@@ -20937,7 +21017,7 @@ impl ScopedObservationAccessHost {
             append_objects,
             admission,
             projection,
-            object_errors: BTreeMap::new(),
+            object_errors,
         })
     }
 
@@ -20959,6 +21039,29 @@ impl ScopedObservationAccessHost {
             append_objects,
             admission,
             projection,
+            drain.delivery_lane(),
+        )
+    }
+
+    fn bind_consumer_bootstrap_epoch_state_with_errors(
+        &self,
+        append_objects: Vec<ScopedKnownAppendObject>,
+        admission: ScopedObservationAdmissionLane,
+        projection: ScopedObservationProjectionSink,
+        object_errors: BTreeMap<String, ScopedSourceObjectErrorRuntime>,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<ScopedObservationEpochState, ScopedReplacementStageError> {
+        if !self.owns_consumer_drain(drain) {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        if drain.is_closed() || self.lifecycle.is_closing() {
+            return Err(ScopedReplacementStageError::InvalidSourceState);
+        }
+        self.bind_bootstrap_epoch_state_with_errors(
+            append_objects,
+            admission,
+            projection,
+            object_errors,
             drain.delivery_lane(),
         )
     }
@@ -22066,11 +22169,14 @@ impl ScopedAppendPresenceState {
         self,
         previous_generation: Option<u64>,
     ) -> (Self, Option<ScopedAppendPresenceChange>, bool) {
-        let became_missing = self == Self::Present;
-        let change = became_missing.then(|| ScopedAppendPresenceChange::Deleted {
-            generation: previous_generation
-                .expect("a present scoped append object owns a checkpoint generation"),
-        });
+        // A bootstrap or replacement object may be explicitly unavailable
+        // before it has ever established a source checkpoint. We retain that
+        // state as present/unavailable for coverage, but a later stable
+        // missing read must not fabricate a deletion generation.
+        let became_missing = self == Self::Present && previous_generation.is_some();
+        let change = previous_generation
+            .filter(|_| self == Self::Present)
+            .map(|generation| ScopedAppendPresenceChange::Deleted { generation });
         (Self::Missing, change, became_missing)
     }
 
@@ -22720,6 +22826,24 @@ impl ScopedKnownAppendObject {
         // state; the retained typed error is the authority for the degraded
         // state and prevents the rebound owner from reading it as healthy.
         self.presence_state = ScopedAppendPresenceState::Present;
+        self.bootstrap_blocked = false;
+        Ok(())
+    }
+
+    /// Finish a bootstrap object with explicit unavailable coverage after a
+    /// classifiable source/decode failure. Any already-admitted prefix remains
+    /// authoritative; a first-access failure establishes no cursor and cannot
+    /// later manufacture a deletion transition.
+    fn commit_bootstrap_unavailable(&mut self) -> Result<(), ScopedObservationAccessError> {
+        if self.lifecycle != ScopedAppendObjectLifecycle::Active
+            || !self.bootstrap_active
+            || self.pending.is_some()
+        {
+            return Err(ScopedObservationAccessError::InvalidObjectLifecycle);
+        }
+        if self.checkpoint.is_none() {
+            self.presence_state = ScopedAppendPresenceState::Present;
+        }
         self.bootstrap_blocked = false;
         Ok(())
     }
@@ -24794,6 +24918,16 @@ mod projection_tests {
             change,
             Some(ScopedAppendPresenceChange::Created { generation: 1 })
         );
+
+        // Explicit unavailable coverage may conservatively retain a
+        // present relation without a successful source generation. A later
+        // stable absence resolves that uncertainty without inventing a
+        // deletion control or panicking on a nonexistent checkpoint.
+        let (missing, deletion, became_missing) =
+            ScopedAppendPresenceState::Present.observe_missing(None);
+        assert_eq!(missing, ScopedAppendPresenceState::Missing);
+        assert_eq!(deletion, None);
+        assert!(!became_missing);
     }
 
     fn root_identity() -> ScopedObservationRootIdentity {

@@ -20,7 +20,7 @@ use crate::adapter::{
 use crate::observation_contract::{ObservationContractOffer, ObservationContractRequest};
 use crate::source::{
     confined_relative_path_key, platform_path_key, validate_relation_id, AccessPhase,
-    AppendDelimitedFile, AuthorizedScopeAccessPlan, RecordOrigin, ScopeIdentityInput,
+    AppendDelimitedFile, AppendRead, AuthorizedScopeAccessPlan, RecordOrigin, ScopeIdentityInput,
     SourceMediaType, MAX_IDENTITY_VALUE_BYTES,
 };
 
@@ -29,8 +29,8 @@ use super::{
     ScopedAccessRootGrant, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
     ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy, ScopedArtifactRelationGrant,
     ScopedBootstrapBarrierError, ScopedDeliveryError, ScopedKnownAppendObject,
-    ScopedKnownObjectGrant, ScopedObservationAccessError, ScopedObservationAccessHost,
-    ScopedObservationAccessPass, ScopedObservationAdmissionLane,
+    ScopedKnownObjectGrant, ScopedObjectFailureClassification, ScopedObservationAccessError,
+    ScopedObservationAccessHost, ScopedObservationAccessPass, ScopedObservationAdmissionLane,
     ScopedObservationAppendPassBinding, ScopedObservationAppendPassRequest,
     ScopedObservationAsyncHandle, ScopedObservationAsyncOwnerRunResult,
     ScopedObservationAsyncResyncFailure, ScopedObservationAsyncRuntime,
@@ -43,7 +43,8 @@ use super::{
     ScopedObservationSourceOwnerRetryPolicy, ScopedObservationStartupError,
     ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
     ScopedObservationUnknownWireNegotiation, ScopedObserverFailureReason,
-    ScopedProjectionDeliveryError, ScopedRootIdentityRequest,
+    ScopedProjectionDeliveryError, ScopedRootIdentityRequest, ScopedSourceObjectErrorRuntime,
+    ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
 };
 
 const MAX_CONFIGURED_ROOTS: usize = 16;
@@ -502,6 +503,7 @@ pub(crate) struct ConfiguredScopedObservationSupervisor {
     bindings: Vec<ScopedObservationAppendPassBinding>,
     admission: ScopedObservationAdmissionLane,
     projection: ScopedObservationProjectionSink,
+    bootstrap_object_errors: BTreeMap<String, ScopedSourceObjectErrorRuntime>,
     options: ConfiguredScopedObservationRuntimeOptions,
 }
 
@@ -618,6 +620,7 @@ impl PreparedConfiguredAppendRuntime {
             bindings: self.bindings,
             admission,
             projection,
+            bootstrap_object_errors: BTreeMap::new(),
             options,
         };
         Ok(OpenedConfiguredAppendRuntime {
@@ -696,10 +699,17 @@ impl ConfiguredScopedObservationSupervisor {
             bindings,
             admission,
             projection,
+            bootstrap_object_errors,
             options,
         } = self;
         let active = match handle.with_attachment(move |host, drain| {
-            host.bind_consumer_bootstrap_epoch_state(objects, admission, projection, drain)
+            host.bind_consumer_bootstrap_epoch_state_with_errors(
+                objects,
+                admission,
+                projection,
+                bootstrap_object_errors,
+                drain,
+            )
         }) {
             Ok(active) => active,
             Err(_error) => {
@@ -767,6 +777,8 @@ impl ConfiguredScopedObservationSupervisor {
             &self.bindings,
             &mut self.admission,
             &mut self.projection,
+            &mut self.bootstrap_object_errors,
+            self.options.source_retry,
             AccessPhase::Initial,
             configured_observed_at(),
         )
@@ -816,6 +828,8 @@ impl ConfiguredScopedObservationSupervisor {
                             &self.bindings,
                             &mut self.admission,
                             &mut self.projection,
+                            &mut self.bootstrap_object_errors,
+                            self.options.source_retry,
                             AccessPhase::Revalidation,
                             configured_observed_at(),
                         )
@@ -884,6 +898,8 @@ async fn configured_execute_append_pass(
     bindings: &[ScopedObservationAppendPassBinding],
     admission: &mut ScopedObservationAdmissionLane,
     projection: &mut ScopedObservationProjectionSink,
+    object_errors: &mut BTreeMap<String, ScopedSourceObjectErrorRuntime>,
+    retry_policy: ScopedObservationSourceOwnerRetryPolicy,
     phase: AccessPhase,
     observed_at: i64,
 ) -> Result<(), ConfiguredScopedObservationRuntimeError> {
@@ -930,21 +946,57 @@ async fn configured_execute_append_pass(
 
     for index in 0..objects.len() {
         let request = &requests[index];
-        let observation = objects[index]
-            .reconcile(
-                pass,
-                ScopedAppendReconcileRequest {
-                    relation_id: request.relation_id,
-                    identity_inputs: request.identity_inputs,
-                    access_phase: phase,
-                    parent_token: request.parent_token,
-                    depth: request.depth,
-                    max_bytes: request.max_bytes,
-                    origin: request.origin,
-                    force_contract_replay: request.force_contract_replay,
-                },
-            )
-            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+        let observation = match objects[index].reconcile(
+            pass,
+            ScopedAppendReconcileRequest {
+                relation_id: request.relation_id,
+                identity_inputs: request.identity_inputs,
+                access_phase: phase,
+                parent_token: request.parent_token,
+                depth: request.depth,
+                max_bytes: request.max_bytes,
+                origin: request.origin,
+                force_contract_replay: request.force_contract_replay,
+            },
+        ) {
+            Ok(observation) => observation,
+            Err(error) => {
+                let error = super::ScopedObservationPassExecutionError::Access(error);
+                let Some(classification) = super::scoped_object_failure_classification(&error)
+                else {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
+                };
+                configured_record_bootstrap_object_error(
+                    &mut objects[index],
+                    request.relation_id,
+                    pass.pass_id(),
+                    admission,
+                    object_errors,
+                    retry_policy,
+                    classification,
+                    observed_at,
+                )?;
+                continue;
+            }
+        };
+        if matches!(observation.read, AppendRead::RetryTransient) {
+            objects[index]
+                .discard(&observation)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+            configured_record_bootstrap_object_error(
+                &mut objects[index],
+                request.relation_id,
+                pass.pass_id(),
+                admission,
+                object_errors,
+                retry_policy,
+                ScopedObjectFailureClassification::Retryable(
+                    ScopedSourceObjectFailureCode::SourceRetryTransient,
+                ),
+                observed_at,
+            )?;
+            continue;
+        }
         let decoded = match handle.host().decode_append_with_dependencies(
             &mut objects[index],
             &observation,
@@ -953,11 +1005,44 @@ async fn configured_execute_append_pass(
             phase,
         ) {
             Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
-            Ok(ScopedAppendDecodeOutcome::RetryTransient) | Err(_) => {
+            Ok(ScopedAppendDecodeOutcome::RetryTransient) => {
                 objects[index]
                     .discard(&observation)
                     .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
-                return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
+                configured_record_bootstrap_object_error(
+                    &mut objects[index],
+                    request.relation_id,
+                    pass.pass_id(),
+                    admission,
+                    object_errors,
+                    retry_policy,
+                    ScopedObjectFailureClassification::Retryable(
+                        ScopedSourceObjectFailureCode::DecodeRetryTransient,
+                    ),
+                    observed_at,
+                )?;
+                continue;
+            }
+            Err(error) => {
+                objects[index]
+                    .discard(&observation)
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+                let error = super::ScopedObservationPassExecutionError::Access(error);
+                let Some(classification) = super::scoped_object_failure_classification(&error)
+                else {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
+                };
+                configured_record_bootstrap_object_error(
+                    &mut objects[index],
+                    request.relation_id,
+                    pass.pass_id(),
+                    admission,
+                    object_errors,
+                    retry_policy,
+                    classification,
+                    observed_at,
+                )?;
+                continue;
             }
         };
         if let Err(failure) = admission.admit(&mut objects[index], &observation, decoded) {
@@ -969,7 +1054,51 @@ async fn configured_execute_append_pass(
             return Err(ConfiguredScopedObservationRuntimeError::Admission);
         }
         configured_offer_pending(handle, admission, projection).await?;
+        object_errors.remove(request.relation_id);
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn configured_record_bootstrap_object_error(
+    object: &mut ScopedKnownAppendObject,
+    relation_id: &str,
+    access_pass_id: u64,
+    admission: &mut ScopedObservationAdmissionLane,
+    object_errors: &mut BTreeMap<String, ScopedSourceObjectErrorRuntime>,
+    retry_policy: ScopedObservationSourceOwnerRetryPolicy,
+    classification: ScopedObjectFailureClassification,
+    observed_at: i64,
+) -> Result<(), ConfiguredScopedObservationRuntimeError> {
+    let prior_attempts = object_errors
+        .get(relation_id)
+        .map_or(0, |state| state.error.retry.failed_attempts());
+    let (error, _retry_delay) = super::scoped_prepare_object_error(
+        object,
+        relation_id,
+        SCOPED_INITIAL_SCOPE_EPOCH,
+        prior_attempts,
+        classification,
+        retry_policy,
+    )
+    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+    object
+        .commit_bootstrap_unavailable()
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+    admission
+        .bind_known_object_error_membership(object)
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+    admission
+        .record_object_error_coverage(object, access_pass_id, &error, true)
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+    object_errors.insert(
+        relation_id.to_string(),
+        ScopedSourceObjectErrorRuntime {
+            error,
+            observed_at,
+            control_offered: false,
+        },
+    );
     Ok(())
 }
 

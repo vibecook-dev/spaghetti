@@ -635,6 +635,8 @@ pub(crate) mod tests {
 
     const COMPOSED_ROOT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
+    const COMPOSED_TWO_APPEND_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"sibling-stream","source_pattern":"siblings/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
     fn promoted_fixture_catalog_with_scope(
         scope_document: &[u8],
     ) -> (
@@ -644,6 +646,8 @@ pub(crate) mod tests {
     ) {
         let source_document = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"decoder_id":"fixture-descendant","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
+        } else if scope_document == COMPOSED_TWO_APPEND_SCOPE_DOCUMENT {
+            br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"},{"stream_id":"sibling-stream","root_id":"root","relative_patterns":["siblings/*.jsonl"],"decoder_id":"fixture-sibling","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"}]}"#.as_slice()
         } else if scope_document == COMPOSED_ROOT_SCOPE_DOCUMENT {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"}]}"#.as_slice()
         } else {
@@ -801,6 +805,26 @@ pub(crate) mod tests {
         }
     }
 
+    fn fixture_sibling_runtime_stream() -> StreamSpec {
+        StreamSpec {
+            id: StreamId::new("sibling-stream").unwrap(),
+            driver: DriverSpec::AppendDelimited(AppendDelimitedConfig::json_lines()),
+            selector: ObjectSelector {
+                root_name: "root".to_string(),
+                include: vec!["siblings/*.jsonl".to_string()],
+                exclude: Vec::new(),
+            },
+            decoder: DecoderId::new("fixture-sibling").unwrap(),
+            authority: StreamAuthority::Canonical,
+            entity_scope: EntityScope::Session,
+            priority: IngestPriority::Interactive,
+            consistency: ConsistencyPolicy::IncrementalCursor,
+            deletion: DeletionPolicy::MirrorSource,
+            retention: RawRetentionPolicy::HashOnly,
+            capabilities: Vec::new(),
+        }
+    }
+
     fn configured_attachment_registry(
         probe_calls: Arc<AtomicUsize>,
         discover_calls: Arc<AtomicUsize>,
@@ -873,6 +897,37 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    fn configured_two_append_registry(
+        probe_calls: Arc<AtomicUsize>,
+        discover_calls: Arc<AtomicUsize>,
+    ) -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(COMPOSED_TWO_APPEND_SCOPE_DOCUMENT);
+        AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![
+                        fixture_root_runtime_stream(),
+                        fixture_sibling_runtime_stream(),
+                    ])
+                    .with_configured_root_discovery(discover_calls)
+                    .with_stateful_decode(),
+            )
+            .register_native_support_probe("fixture", move |_| {
+                probe_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap()
+    }
+
     fn configured_attachment_request(
         configured_roots: Vec<PathBuf>,
         relative_path: PathBuf,
@@ -900,6 +955,39 @@ pub(crate) mod tests {
             configured_roots,
             "observe-session",
             BTreeMap::from([("root-object".to_string(), relative_path)]),
+            identity,
+            template.observation_contract_request,
+            template.observation_contract_offer,
+        )
+        .unwrap()
+        .with_unknown_wire_contract(template.unknown_wire_contract.unwrap())
+    }
+
+    fn configured_two_append_request(root: PathBuf) -> ScopedConfiguredAttachmentRequest {
+        let identity = ScopedConfiguredRootIdentity::new(
+            b"fixture-session".as_slice(),
+            BTreeMap::from([(
+                "native-session-id".to_string(),
+                Arc::<[u8]>::from(b"fixture-session".as_slice()),
+            )]),
+        )
+        .unwrap()
+        .with_root_run_identity_key(Arc::from(b"fixture-root-run".as_slice()));
+        let template = scoped_access_request(root.clone());
+        ScopedConfiguredAttachmentRequest::new(
+            "fixture",
+            vec![root],
+            "observe-session",
+            BTreeMap::from([
+                (
+                    "root-object".to_string(),
+                    PathBuf::from("sessions/session.jsonl"),
+                ),
+                (
+                    "sibling-object".to_string(),
+                    PathBuf::from("siblings/sibling.jsonl"),
+                ),
+            ]),
             identity,
             template.observation_contract_request,
             template.observation_contract_offer,
@@ -2546,6 +2634,117 @@ pub(crate) mod tests {
         assert!(runtime.next_event().await.unwrap().is_none());
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(callback_slot.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configured_bootstrap_isolates_terminal_object_error_from_healthy_sibling() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry =
+            configured_two_append_registry(Arc::clone(&probe_calls), Arc::clone(&discover_calls));
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-isolation-private-root");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::create_dir_all(root.join("siblings")).unwrap();
+        std::fs::write(root.join("sessions/session.jsonl"), b"healthy\n").unwrap();
+        std::fs::write(root.join("siblings/sibling.jsonl"), b"stream-fatal\n").unwrap();
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_two_append_request(root),
+        )
+        .unwrap()
+        .unwrap();
+        let prepared = attachment.prepare_append_runtime(16, 16).unwrap();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opened = prepared
+            .open_with_watcher_factory(ConfiguredScopedObservationRuntimeOptions::default(), {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let (mut runtime, handle, supervisor) = opened.into_parts();
+        let mut supervisor_task = tokio::spawn(supervisor.run_until_stopped());
+
+        let mut bootstrap_barrier = None;
+        for _ in 0..8 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("configured supervisor stopped during isolated bootstrap: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            if let ScopedObservationEvent::ObserverBootstrapComplete { barrier } =
+                &yielded.envelope.event
+            {
+                bootstrap_barrier = Some(Arc::clone(barrier));
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if bootstrap_barrier.is_some() {
+                break;
+            }
+        }
+        let barrier = bootstrap_barrier
+            .expect("the isolated bootstrap should finish with one degraded relation");
+        assert!(barrier.root_present);
+        assert!(barrier
+            .explicit_object_errors
+            .iter()
+            .any(|error| error.code == "decode_stream_fatal"));
+        let poll_task = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.poll().await }
+        });
+        let object_error = tokio::time::timeout(Duration::from_secs(2), runtime.next_event())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &object_error.envelope.event,
+            ScopedObservationEvent::SourceObjectError { error }
+                if error.relation_id.as_ref() == "sibling-object"
+                    && matches!(
+                        error.retry,
+                        ScopedSourceObjectRetryState::NotRetryable { .. }
+                    )
+        ));
+        runtime
+            .acknowledge_applied(object_error.application_receipt())
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), poll_task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+
+        let close = handle.request_close();
+        let stopped = tokio::time::timeout(Duration::from_secs(2), supervisor_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ConfiguredScopedObservationSupervisorRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
     }
 
     #[test]
