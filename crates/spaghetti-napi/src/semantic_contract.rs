@@ -12,7 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::adapter::{
     compare_coverage, ActorAffiliationDimension, ActorAffiliationRevisionFact,
     ActorAffiliationState, ActorRunRevisionFact, ActorRunRole, AdapterError, CanonicalEntityKey,
-    CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness, CoverageComparison,
+    CanonicalFactId, CanonicalSourceInstanceKey, ContentBlockRevisionFact,
+    ContentBlockRevisionValue, ContractCompleteness, CoverageComparison,
     EffectiveStateQualifiedValue, EffectiveStateRevisionFact, ExternalEntityRef, FactRevisionId,
     MessageRevisionFact, NativeIdentityClaim, PlanRevisionFact, QualifiedTimestamp, QualifiedValue,
     SemanticRevisionRef, SourceCoverageSet, SourceRecordId, TaskRevisionFact, TimestampQuality,
@@ -33,6 +34,7 @@ const USAGE_V2_FAMILY: &str = "runtime.usage-v2";
 const EFFECTIVE_STATE_FAMILY: &str = "runtime.effective-state";
 const USER_INPUT_FAMILY: &str = "runtime.user-input-request";
 const MESSAGE_FAMILY: &str = "runtime.message";
+const CONTENT_BLOCK_FAMILY: &str = "runtime.content-block";
 const PLAN_FAMILY: &str = "runtime.plan";
 const TASK_FAMILY: &str = "runtime.task";
 const TOOL_FAMILY: &str = "runtime.tool";
@@ -302,6 +304,40 @@ pub(crate) struct MessageRevisionSlotWire {
     pub semantic_revision_ref: SemanticRevisionRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContentBlockRevisionSlotWire {
+    pub ordinal: u32,
+    pub content: ContentBlockRevisionValue,
+    pub native_tool_call_or_result_id: Option<String>,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContentBlockFixtureWire {
+    pub family: String,
+    pub family_version: u32,
+    pub native_content_block_id: String,
+    pub fact_id: CanonicalFactId,
+    pub current: ContentBlockRevisionSlotWire,
+    pub correction: ContentBlockRevisionSlotWire,
+    pub retract: ContentBlockRevisionSlotWire,
+    pub partial_retract: ContentBlockRevisionSlotWire,
+}
+
+fn deserialize_optional_content_block<'de, D>(
+    deserializer: D,
+) -> Result<Option<ContentBlockFixtureWire>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    ContentBlockFixtureWire::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct MessageFixtureWire {
@@ -314,6 +350,12 @@ pub(crate) struct MessageFixtureWire {
     pub fact_id: CanonicalFactId,
     pub source_record_id: SourceRecordId,
     pub role: MessageRevisionRole,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_content_block",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub content_block: Option<ContentBlockFixtureWire>,
     pub current: MessageRevisionSlotWire,
     pub correction: MessageRevisionSlotWire,
     pub complete_blocks: MessageRevisionSlotWire,
@@ -1250,6 +1292,24 @@ fn message_revision(
     }
 }
 
+pub(crate) fn content_block_revision(
+    fixture: &MessageFixtureWire,
+    content_block: &ContentBlockFixtureWire,
+    slot: &ContentBlockRevisionSlotWire,
+) -> ContentBlockRevisionFact {
+    ContentBlockRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        message: fixture.fact_id,
+        native_content_block_id: Some(content_block.native_content_block_id.clone()),
+        ordinal: slot.ordinal,
+        content: slot.content.clone(),
+        native_tool_call_or_result_id: slot.native_tool_call_or_result_id.clone(),
+        completeness: slot.completeness,
+        operation: slot.operation,
+    }
+}
+
 fn task_revision(
     fixture: &TaskFixtureWire,
     native_task_id: &str,
@@ -1642,6 +1702,150 @@ fn validate_message_slot(
     )
 }
 
+fn validate_content_block_slot(
+    fixture: &MessageFixtureWire,
+    content_block: &ContentBlockFixtureWire,
+    slot_name: &str,
+    slot: &ContentBlockRevisionSlotWire,
+    expected_operation: UserInputOperation,
+    expected_completeness: ContractCompleteness,
+) -> Result<(), SemanticFixtureError> {
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "content-block {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != expected_completeness {
+        return Err(SemanticFixtureError::invalid(format!(
+            "content-block {slot_name} completeness does not match its fixture slot"
+        )));
+    }
+    verify_fact_revision_identity(
+        CONTENT_BLOCK_FAMILY,
+        &content_block.fact_id,
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+        content_block_revision(fixture, content_block, slot).semantic_revision_key(),
+    )
+}
+
+fn validate_content_block_fixture(
+    fixture: &MessageFixtureWire,
+    content_block: &ContentBlockFixtureWire,
+) -> Result<(), SemanticFixtureError> {
+    if content_block.family != CONTENT_BLOCK_FAMILY
+        || content_block.family_version != FAMILY_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "content-block fixture family must be runtime.content-block@1",
+        ));
+    }
+    validate_canonical_runtime_text(
+        "native_content_block_id",
+        &content_block.native_content_block_id,
+    )?;
+    let stable_native_key = content_block_revision(fixture, content_block, &content_block.current)
+        .stable_native_fact_key()
+        .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        CONTENT_BLOCK_FAMILY,
+        &stable_native_key,
+        &content_block.fact_id,
+    )?;
+    if content_block.fact_id == fixture.fact_id {
+        return Err(SemanticFixtureError::invalid(
+            "content block and parent message must have distinct fact identities",
+        ));
+    }
+    validate_content_block_slot(
+        fixture,
+        content_block,
+        "current",
+        &content_block.current,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+    )?;
+    validate_content_block_slot(
+        fixture,
+        content_block,
+        "correction",
+        &content_block.correction,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+    )?;
+    validate_content_block_slot(
+        fixture,
+        content_block,
+        "retract",
+        &content_block.retract,
+        UserInputOperation::Retract,
+        ContractCompleteness::Complete,
+    )?;
+    validate_content_block_slot(
+        fixture,
+        content_block,
+        "partial_retract",
+        &content_block.partial_retract,
+        UserInputOperation::Retract,
+        ContractCompleteness::Partial,
+    )?;
+    if content_block.current.content == content_block.correction.content {
+        return Err(SemanticFixtureError::invalid(
+            "content-block correction must change the normalized content",
+        ));
+    }
+    if content_block.retract.content != content_block.correction.content
+        || content_block.partial_retract.content != content_block.correction.content
+        || content_block.retract.native_tool_call_or_result_id
+            != content_block.correction.native_tool_call_or_result_id
+        || content_block.partial_retract.native_tool_call_or_result_id
+            != content_block.correction.native_tool_call_or_result_id
+        || content_block.current.ordinal != content_block.correction.ordinal
+        || content_block.current.ordinal != content_block.retract.ordinal
+        || content_block.current.ordinal != content_block.partial_retract.ordinal
+    {
+        return Err(SemanticFixtureError::invalid(
+            "content-block replacement slots must retain the corrected entity value and ordinal",
+        ));
+    }
+    for slot in [
+        &fixture.current,
+        &fixture.correction,
+        &fixture.complete_blocks,
+        &fixture.partial_blocks,
+        &fixture.retract,
+        &fixture.partial,
+    ] {
+        if !slot
+            .ordered_content_block_keys
+            .iter()
+            .any(|key| key == &content_block.native_content_block_id)
+        {
+            return Err(SemanticFixtureError::invalid(
+                "content-block fixture must belong to every declared parent message snapshot",
+            ));
+        }
+    }
+    let refs = [
+        &content_block.current.semantic_revision_ref,
+        &content_block.correction.semantic_revision_ref,
+        &content_block.retract.semantic_revision_ref,
+        &content_block.partial_retract.semantic_revision_ref,
+    ];
+    for (index, left) in refs.iter().enumerate() {
+        for right in refs.iter().skip(index + 1) {
+            if left == right {
+                return Err(SemanticFixtureError::invalid(
+                    "content-block revision slots must have distinct semantic identity",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_rfc012c_message_fixture(
     fixture: &MessageFixtureWire,
 ) -> Result<(), SemanticFixtureError> {
@@ -1666,6 +1870,9 @@ fn validate_rfc012c_message_fixture(
         fixture.native_message_id.as_bytes(),
         &fixture.fact_id,
     )?;
+    if let Some(content_block) = fixture.content_block.as_ref() {
+        validate_content_block_fixture(fixture, content_block)?;
+    }
     validate_message_slot(
         fixture,
         "current",
@@ -2334,7 +2541,8 @@ mod tests {
     fn assert_privacy_safe(json: &str) {
         assert!(!json.contains("/Users/"));
         assert!(!json.contains("~/"));
-        assert!(!json.contains('\\'));
+        assert!(!json.contains("\\\\Users\\\\"));
+        assert!(!json.contains("C:\\\\"));
         assert!(!json.contains(".db"));
         assert!(!json.contains("sqlite"));
     }
@@ -2880,6 +3088,30 @@ mod tests {
             ContractCompleteness::Partial
         );
         assert_eq!(fixture.retract.operation, UserInputOperation::Retract);
+        let content_block = fixture.content_block.as_ref().unwrap();
+        assert_eq!(content_block.family, CONTENT_BLOCK_FAMILY);
+        assert_eq!(content_block.current.ordinal, 0);
+        assert_eq!(
+            content_block.current.content,
+            ContentBlockRevisionValue::Text {
+                text: " draft \n".to_owned()
+            }
+        );
+        assert_eq!(
+            content_block.correction.content,
+            ContentBlockRevisionValue::Text {
+                text: " final answer \n".to_owned()
+            }
+        );
+        assert_eq!(
+            content_block.partial_retract.completeness,
+            ContractCompleteness::Partial
+        );
+        assert_eq!(
+            content_block.partial_retract.operation,
+            UserInputOperation::Retract
+        );
+        assert_ne!(fixture.fact_id, content_block.fact_id);
         assert_ne!(
             fixture.current.semantic_revision_ref,
             fixture.correction.semantic_revision_ref
@@ -2888,6 +3120,18 @@ mod tests {
             fixture.complete_blocks.semantic_revision_ref,
             fixture.partial_blocks.semantic_revision_ref
         );
+
+        let mut prior_v1: serde_json::Value =
+            serde_json::from_str(RFC012C_MESSAGE_FIXTURE).unwrap();
+        prior_v1.as_object_mut().unwrap().remove("content_block");
+        let prior_round_trip = parse_rfc012c_message_v1_json(&prior_v1.to_string()).unwrap();
+        let prior_round_trip: serde_json::Value = serde_json::from_str(&prior_round_trip).unwrap();
+        assert_eq!(prior_round_trip, prior_v1);
+
+        let mut explicit_null: serde_json::Value =
+            serde_json::from_str(RFC012C_MESSAGE_FIXTURE).unwrap();
+        explicit_null["content_block"] = serde_json::Value::Null;
+        assert!(parse_rfc012c_message_v1_json(&explicit_null.to_string()).is_err());
     }
 
     #[test]
@@ -2988,6 +3232,12 @@ mod tests {
         let mut message: serde_json::Value = serde_json::from_str(RFC012C_MESSAGE_FIXTURE).unwrap();
         message["role"] = serde_json::json!("user");
         assert!(parse_rfc012c_message_v1_json(&message.to_string()).is_err());
+
+        let mut content_block: serde_json::Value =
+            serde_json::from_str(RFC012C_MESSAGE_FIXTURE).unwrap();
+        content_block["content_block"]["correction"]["content"]["text"] =
+            serde_json::json!("stale identity");
+        assert!(parse_rfc012c_message_v1_json(&content_block.to_string()).is_err());
 
         let mut task: serde_json::Value = serde_json::from_str(RFC012C_TASK_FIXTURE).unwrap();
         task["subject"] = serde_json::json!("Different task subject");

@@ -32,12 +32,14 @@ export const USAGE_V2_FAMILY = 'runtime.usage-v2' as const;
 export const EFFECTIVE_STATE_FAMILY = 'runtime.effective-state' as const;
 export const USER_INPUT_FAMILY = 'runtime.user-input-request' as const;
 export const MESSAGE_FAMILY = 'runtime.message' as const;
+export const CONTENT_BLOCK_FAMILY = 'runtime.content-block' as const;
 export const PLAN_FAMILY = 'runtime.plan' as const;
 export const TASK_FAMILY = 'runtime.task' as const;
 export const TOOL_FAMILY = 'runtime.tool' as const;
 export const EFFECTIVE_STATE_FAMILY_VERSION = 1 as const;
 export const USER_INPUT_FAMILY_VERSION = 1 as const;
 export const MESSAGE_FAMILY_VERSION = 1 as const;
+export const CONTENT_BLOCK_FAMILY_VERSION = 1 as const;
 export const PLAN_FAMILY_VERSION = 1 as const;
 export const TASK_FAMILY_VERSION = 1 as const;
 export const TOOL_FAMILY_VERSION = 1 as const;
@@ -186,6 +188,7 @@ const MAX_RUNTIME_SEMANTIC_TEXT_BYTES = 8 * 1024;
 const MAX_ADAPTER_ID_BYTES = 128;
 const MAX_INTERACTION_QUESTIONS = 32;
 const MAX_INTERACTION_OPTIONS = 32;
+const MAX_MESSAGE_CONTENT_BLOCKS = 32;
 const MAX_USAGE_RESPONSE_KEY_BYTES = 8 * 1024;
 const MAX_USAGE_PROVENANCE_FIELD_BYTES = 256;
 const MAX_U32 = 0xffff_ffff;
@@ -234,6 +237,20 @@ function boundedText(value: unknown, label: string, maxBytes: number): string {
   return parsed;
 }
 
+function boundedContentText(value: unknown, label: string): string {
+  if (typeof value !== 'string') {
+    throw new ContractValidationError(`${label} must be a string`);
+  }
+  if (value.length > MAX_RUNTIME_SEMANTIC_TEXT_BYTES) {
+    throw new ContractValidationError(`${label} exceeds ${MAX_RUNTIME_SEMANTIC_TEXT_BYTES} UTF-8 bytes`);
+  }
+  assertNoUnpairedUtf16Surrogates(value, label);
+  if (textEncoder.encode(value).byteLength > MAX_RUNTIME_SEMANTIC_TEXT_BYTES) {
+    throw new ContractValidationError(`${label} exceeds ${MAX_RUNTIME_SEMANTIC_TEXT_BYTES} UTF-8 bytes`);
+  }
+  return value;
+}
+
 function optionalRuntimeSemanticText(value: unknown, label: string): string | null {
   if (value === undefined || value === null) return null;
   return boundedText(value, label, MAX_RUNTIME_SEMANTIC_TEXT_BYTES);
@@ -255,6 +272,34 @@ function positiveU32(value: unknown, label: string): number {
   const result = positiveInteger(value, label);
   if (result > MAX_U32) {
     throw new ContractValidationError(`${label} exceeds u32`);
+  }
+  return result;
+}
+
+function nonNegativeU32(value: unknown, label: string): number {
+  if (!Number.isInteger(value) || (value as number) < 0 || (value as number) > MAX_U32 || Object.is(value, -0)) {
+    throw new ContractValidationError(`${label} must be a non-negative u32`);
+  }
+  return value as number;
+}
+
+function digest32(value: unknown, label: string): number[] {
+  if (!Array.isArray(value) || value.length !== 32) {
+    throw new ContractValidationError(`${label} must contain exactly 32 bytes`);
+  }
+  const result: number[] = [];
+  for (let index = 0; index < 32; index += 1) {
+    if (!Object.hasOwn(value, index)) {
+      throw new ContractValidationError(`${label} must be a dense 32-byte array`);
+    }
+    const byte = value[index];
+    if (!Number.isInteger(byte) || (byte as number) < 0 || (byte as number) > 255) {
+      throw new ContractValidationError(`${label} must contain only bytes`);
+    }
+    result.push(byte as number);
+  }
+  if (result.every((byte) => byte === 0)) {
+    throw new ContractValidationError(`${label} must be nonzero`);
   }
   return result;
 }
@@ -1456,6 +1501,36 @@ export interface MessageRevisionSlot {
   semantic_revision_ref: SemanticRevisionRef;
 }
 
+export type ContentBlockRevisionValue =
+  | { kind: 'text'; text: string }
+  | { kind: 'thinking'; text: string; redacted: boolean }
+  | { kind: 'tool_call'; tool_name: string; input_digest: number[] }
+  | { kind: 'tool_result'; content_digest: number[]; is_error: boolean }
+  | { kind: 'image'; media_type: string; data_hash: number[] }
+  | { kind: 'document'; media_type: string; data_hash: number[] }
+  | { kind: 'native_extension'; native_kind: string; value_digest: number[] };
+
+export interface ContentBlockRevisionSlot {
+  ordinal: number;
+  content: ContentBlockRevisionValue;
+  native_tool_call_or_result_id: string | null;
+  completeness: ContractCompleteness;
+  operation: UserInputOperation;
+  semantic_revision_key_hex: string;
+  semantic_revision_ref: SemanticRevisionRef;
+}
+
+export interface ContentBlockFixture {
+  family: typeof CONTENT_BLOCK_FAMILY;
+  family_version: typeof CONTENT_BLOCK_FAMILY_VERSION;
+  native_content_block_id: string;
+  fact_id: OpaqueContractReference;
+  current: ContentBlockRevisionSlot;
+  correction: ContentBlockRevisionSlot;
+  retract: ContentBlockRevisionSlot;
+  partial_retract: ContentBlockRevisionSlot;
+}
+
 export interface MessageFixture {
   adapter_id: string;
   actor_run: OpaqueContractReference;
@@ -1466,6 +1541,7 @@ export interface MessageFixture {
   fact_id: OpaqueContractReference;
   source_record_id: OpaqueContractReference;
   role: MessageRevisionRole;
+  content_block?: ContentBlockFixture;
   current: MessageRevisionSlot;
   correction: MessageRevisionSlot;
   complete_blocks: MessageRevisionSlot;
@@ -1517,6 +1593,179 @@ const MESSAGE_SLOT_FIELDS = [
   'semantic_revision_ref',
 ] as const;
 
+function parseContentMediaType(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^[a-z0-9!#$&^_.+-]{1,127}\/[a-z0-9!#$&^_.+-]{1,127}$/.test(value)) {
+    throw new ContractValidationError(`${label} must be a canonical MIME type`);
+  }
+  return value;
+}
+
+function parseContentBlockValue(value: unknown): ContentBlockRevisionValue {
+  const input = record(value, 'content-block content');
+  switch (input.kind) {
+    case 'text':
+      assertKnownFields(input, ['kind', 'text'], 'content-block text');
+      return { kind: 'text', text: boundedContentText(input.text, 'content-block text') };
+    case 'thinking':
+      assertKnownFields(input, ['kind', 'text', 'redacted'], 'content-block thinking');
+      if (typeof input.redacted !== 'boolean') {
+        throw new ContractValidationError('content-block thinking redacted must be boolean');
+      }
+      return {
+        kind: 'thinking',
+        text: boundedContentText(input.text, 'content-block thinking text'),
+        redacted: input.redacted,
+      };
+    case 'tool_call':
+      assertKnownFields(input, ['kind', 'tool_name', 'input_digest'], 'content-block tool call');
+      return {
+        kind: 'tool_call',
+        tool_name: boundedText(input.tool_name, 'content-block tool name', MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+        input_digest: digest32(input.input_digest, 'content-block tool-call input digest'),
+      };
+    case 'tool_result':
+      assertKnownFields(input, ['kind', 'content_digest', 'is_error'], 'content-block tool result');
+      if (typeof input.is_error !== 'boolean') {
+        throw new ContractValidationError('content-block tool result is_error must be boolean');
+      }
+      return {
+        kind: 'tool_result',
+        content_digest: digest32(input.content_digest, 'content-block tool-result content digest'),
+        is_error: input.is_error,
+      };
+    case 'image':
+    case 'document': {
+      assertKnownFields(input, ['kind', 'media_type', 'data_hash'], `content-block ${input.kind}`);
+      return {
+        kind: input.kind,
+        media_type: parseContentMediaType(input.media_type, `content-block ${input.kind} media_type`),
+        data_hash: digest32(input.data_hash, `content-block ${input.kind} data hash`),
+      };
+    }
+    case 'native_extension':
+      assertKnownFields(input, ['kind', 'native_kind', 'value_digest'], 'content-block native extension');
+      return {
+        kind: 'native_extension',
+        native_kind: parseNativeField(input.native_kind, 'content-block native kind'),
+        value_digest: digest32(input.value_digest, 'content-block native extension digest'),
+      };
+    default:
+      throw new ContractValidationError('content-block content kind is unsupported');
+  }
+}
+
+function parseContentBlockSlot(
+  value: unknown,
+  label: string,
+  operation: UserInputOperation,
+  completeness: ContractCompleteness,
+): ContentBlockRevisionSlot {
+  const input = record(value, label);
+  assertKnownFields(
+    input,
+    [
+      'ordinal',
+      'content',
+      'native_tool_call_or_result_id',
+      'completeness',
+      'operation',
+      'semantic_revision_key_hex',
+      'semantic_revision_ref',
+    ],
+    label,
+  );
+  if (input.operation !== operation || input.completeness !== completeness) {
+    throw new ContractValidationError(`${label} operation/completeness does not match its fixture slot`);
+  }
+  if (!Object.hasOwn(input, 'native_tool_call_or_result_id')) {
+    throw new ContractValidationError(`${label} must declare native_tool_call_or_result_id`);
+  }
+  const content = parseContentBlockValue(input.content);
+  const nativeToolId = optionalRuntimeSemanticText(
+    input.native_tool_call_or_result_id,
+    `${label} native_tool_call_or_result_id`,
+  );
+  const isToolContent = content.kind === 'tool_call' || content.kind === 'tool_result';
+  if (nativeToolId !== null && !isToolContent) {
+    throw new ContractValidationError(`${label} tool identity may be present only for tool call/result content`);
+  }
+  return {
+    ordinal: nonNegativeU32(input.ordinal, `${label} ordinal`),
+    content,
+    native_tool_call_or_result_id: nativeToolId,
+    completeness,
+    operation,
+    semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
+    semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
+  };
+}
+
+function parseContentBlockFixture(value: unknown): ContentBlockFixture {
+  const input = record(value, 'content-block fixture');
+  assertKnownFields(
+    input,
+    [
+      'family',
+      'family_version',
+      'native_content_block_id',
+      'fact_id',
+      'current',
+      'correction',
+      'retract',
+      'partial_retract',
+    ],
+    'content-block fixture',
+  );
+  if (input.family !== CONTENT_BLOCK_FAMILY || input.family_version !== CONTENT_BLOCK_FAMILY_VERSION) {
+    throw new ContractValidationError('content-block fixture family must be runtime.content-block@1');
+  }
+  const current = parseContentBlockSlot(input.current, 'content-block current', 'upsert', 'complete');
+  const correction = parseContentBlockSlot(input.correction, 'content-block correction', 'upsert', 'complete');
+  const retract = parseContentBlockSlot(input.retract, 'content-block retract', 'retract', 'complete');
+  const partialRetract = parseContentBlockSlot(
+    input.partial_retract,
+    'content-block partial_retract',
+    'retract',
+    'partial',
+  );
+  if (JSON.stringify(current.content) === JSON.stringify(correction.content)) {
+    throw new ContractValidationError('content-block correction must change the normalized content');
+  }
+  if (
+    JSON.stringify(retract.content) !== JSON.stringify(correction.content) ||
+    JSON.stringify(partialRetract.content) !== JSON.stringify(correction.content) ||
+    current.ordinal !== correction.ordinal ||
+    current.ordinal !== retract.ordinal ||
+    current.ordinal !== partialRetract.ordinal ||
+    retract.native_tool_call_or_result_id !== correction.native_tool_call_or_result_id ||
+    partialRetract.native_tool_call_or_result_id !== correction.native_tool_call_or_result_id
+  ) {
+    throw new ContractValidationError(
+      'content-block replacement slots must retain the corrected entity value and ordinal',
+    );
+  }
+  const revisionIds = [current, correction, retract, partialRetract].map(
+    (slot) => slot.semantic_revision_ref.fact_revision_id,
+  );
+  if (new Set(revisionIds).size !== revisionIds.length) {
+    throw new ContractValidationError('content-block revision slots must have distinct semantic identity');
+  }
+  return {
+    family: CONTENT_BLOCK_FAMILY,
+    family_version: CONTENT_BLOCK_FAMILY_VERSION,
+    native_content_block_id: boundedText(
+      input.native_content_block_id,
+      'native_content_block_id',
+      MAX_RUNTIME_SEMANTIC_TEXT_BYTES,
+    ),
+    fact_id: parseOpaqueContractReference(input.fact_id, 'content-block fact id'),
+    current,
+    correction,
+    retract,
+    partial_retract: partialRetract,
+  };
+}
+
 function parseMessageSlot(
   value: unknown,
   label: string,
@@ -1529,8 +1778,18 @@ function parseMessageSlot(
   if (input.operation !== operation) {
     throw new ContractValidationError(`${label} operation does not match its fixture slot`);
   }
-  if (!Array.isArray(input.ordered_content_block_keys) || input.ordered_content_block_keys.length === 0) {
-    throw new ContractValidationError(`${label} ordered_content_block_keys must be a non-empty array`);
+  const parsedCompleteness = parseContractCompleteness(input.completeness, `${label} completeness`);
+  if (parsedCompleteness !== completeness) {
+    throw new ContractValidationError(`${label} completeness does not match its fixture slot`);
+  }
+  if (
+    !Array.isArray(input.ordered_content_block_keys) ||
+    input.ordered_content_block_keys.length === 0 ||
+    input.ordered_content_block_keys.length > MAX_MESSAGE_CONTENT_BLOCKS
+  ) {
+    throw new ContractValidationError(
+      `${label} ordered_content_block_keys must contain 1..=${MAX_MESSAGE_CONTENT_BLOCKS} keys`,
+    );
   }
   const keys = input.ordered_content_block_keys.map((key, index) =>
     boundedText(key, `${label} block ${index}`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
@@ -1539,7 +1798,7 @@ function parseMessageSlot(
     throw new ContractValidationError(`${label} ordered_content_block_keys do not match the declared snapshot`);
   }
   return {
-    completeness: parseContractCompleteness(input.completeness, `${label} completeness`),
+    completeness: parsedCompleteness,
     operation,
     ordered_content_block_keys: keys,
     semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
@@ -1561,6 +1820,7 @@ function parseMessageFixtureShape(value: unknown): MessageFixture {
       'fact_id',
       'source_record_id',
       'role',
+      'content_block',
       'current',
       'correction',
       'complete_blocks',
@@ -1581,6 +1841,9 @@ function parseMessageFixtureShape(value: unknown): MessageFixture {
     throw new ContractValidationError('unsupported message role');
   }
   const current = parseMessageSlot(input.current, 'current', 'upsert', 'complete', ['block-a', 'block-b']);
+  const contentBlock = Object.hasOwn(input, 'content_block')
+    ? parseContentBlockFixture(input.content_block)
+    : undefined;
   const correction = parseMessageSlot(input.correction, 'correction', 'upsert', 'complete', ['block-a', 'block-c']);
   const completeBlocks = parseMessageSlot(input.complete_blocks, 'complete_blocks', 'upsert', 'complete', ['block-a']);
   const partialBlocks = parseMessageSlot(input.partial_blocks, 'partial_blocks', 'upsert', 'partial', ['block-a']);
@@ -1596,6 +1859,13 @@ function parseMessageFixtureShape(value: unknown): MessageFixture {
   if (partialBlocks.completeness !== 'partial' || partial.completeness !== 'partial') {
     throw new ContractValidationError('partial message snapshots must declare partial coverage');
   }
+  const messageSnapshots = [current, correction, completeBlocks, partialBlocks, retract, partial];
+  if (
+    contentBlock !== undefined &&
+    !messageSnapshots.every((slot) => slot.ordered_content_block_keys.includes(contentBlock.native_content_block_id))
+  ) {
+    throw new ContractValidationError('content-block fixture must belong to every declared parent message snapshot');
+  }
   return {
     adapter_id: boundedText(input.adapter_id, 'adapter_id', MAX_ADAPTER_ID_BYTES),
     actor_run: parseOpaqueContractReference(input.actor_run, 'actor run'),
@@ -1606,6 +1876,7 @@ function parseMessageFixtureShape(value: unknown): MessageFixture {
     fact_id: parseOpaqueContractReference(input.fact_id, 'message fact id'),
     source_record_id: parseOpaqueContractReference(input.source_record_id, 'message source record id'),
     role,
+    ...(contentBlock === undefined ? {} : { content_block: contentBlock }),
     current,
     correction,
     complete_blocks: completeBlocks,
@@ -1630,6 +1901,22 @@ export function parseMessageFixture(value: unknown, expectedContextInput: unknow
   bindSlotIdentity('partial_blocks', parsed.partial_blocks, expected.partial_blocks);
   bindSlotIdentity('retract', parsed.retract, expected.retract);
   bindSlotIdentity('partial', parsed.partial, expected.partial);
+  if ((parsed.content_block === undefined) !== (expected.content_block === undefined)) {
+    throw new ContractValidationError('content-block identity does not match the caller-held revision identity');
+  }
+  if (parsed.content_block !== undefined && expected.content_block !== undefined) {
+    if (parsed.content_block.fact_id !== expected.content_block.fact_id) {
+      throw new ContractValidationError('content-block identity does not match the caller-held revision identity');
+    }
+    bindSlotIdentity('content-block current', parsed.content_block.current, expected.content_block.current);
+    bindSlotIdentity('content-block correction', parsed.content_block.correction, expected.content_block.correction);
+    bindSlotIdentity('content-block retract', parsed.content_block.retract, expected.content_block.retract);
+    bindSlotIdentity(
+      'content-block partial_retract',
+      parsed.content_block.partial_retract,
+      expected.content_block.partial_retract,
+    );
+  }
   bindFixtureSemanticContext('message fixture', parsed, expected);
   return parsed;
 }

@@ -13162,6 +13162,10 @@ impl ScopedObservationProjectionSink {
                     }
                     mutation.message_upserts.insert(key, state);
                 }
+                // Contract-only until the content-block CurrentGenerationLog
+                // reducer is selected below; portable values must not silently
+                // enter a scoped complete-replacement claim.
+                Fact::ContentBlockRevision(_) => {}
                 Fact::PlanRevision(revision) => {
                     let mut state =
                         scoped_plan_state(object_token, source, evidence, envelope, revision)?;

@@ -45,11 +45,65 @@ test('RFC 012C message fixture validates correction and complete/partial block r
   assert.equal(fixture.complete_blocks.completeness, 'complete');
   assert.equal(fixture.partial_blocks.completeness, 'partial');
   assert.equal(fixture.retract.operation, 'retract');
+  const contentBlock = fixture.content_block;
+  assert.ok(contentBlock);
+  assert.equal(contentBlock.family, 'runtime.content-block');
+  assert.equal(contentBlock.current.ordinal, 0);
+  assert.deepEqual(contentBlock.current.content, { kind: 'text', text: ' draft \n' });
+  assert.deepEqual(contentBlock.correction.content, { kind: 'text', text: ' final answer \n' });
+  assert.equal(contentBlock.partial_retract.completeness, 'partial');
+  assert.equal(contentBlock.partial_retract.operation, 'retract');
+  assert.notEqual(contentBlock.fact_id, fixture.fact_id);
   assert.notEqual(
     fixture.current.semantic_revision_ref.fact_revision_id,
     fixture.correction.semantic_revision_ref.fact_revision_id,
   );
   assert.doesNotMatch(JSON.stringify(fixture), /\/Users\/|~\/|\.db\b|claude-code|codex|grok/);
+});
+
+test('RFC 012C message-v1 keeps the prior field-absent shape compatible but rejects explicit null', () => {
+  const prior = clone(messageContext) as Record<string, unknown>;
+  delete prior.content_block;
+  const parsed = parseRfc012cMessageV1Json(JSON.stringify(prior), prior);
+  assert.equal(Object.hasOwn(parsed, 'content_block'), false);
+
+  const explicitNull = clone(messageContext) as Record<string, unknown>;
+  explicitNull.content_block = null;
+  assert.throws(() => parseRfc012cMessageV1Json(JSON.stringify(explicitNull), explicitNull), ContractValidationError);
+});
+
+test('RFC 012C content blocks reject unbounded, open, and malformed typed payloads', () => {
+  const mutations: Array<(value: Record<string, unknown>) => void> = [
+    (value) => {
+      const block = value.content_block as { current: { content: { text: string } } };
+      block.current.content.text = 'x'.repeat(8 * 1024 + 1);
+    },
+    (value) => {
+      const block = value.content_block as { current: { native_tool_call_or_result_id?: unknown } };
+      delete block.current.native_tool_call_or_result_id;
+    },
+    (value) => {
+      const block = value.content_block as { current: { content: Record<string, unknown> } };
+      block.current.content.future = true;
+    },
+    (value) => {
+      const block = value.content_block as { current: { content: unknown } };
+      block.current.content = {
+        kind: 'native_extension',
+        native_kind: '/Users/alice/raw',
+        value_digest: Array.from({ length: 32 }, () => 1),
+      };
+    },
+    (value) => {
+      const block = value.content_block as { retract: { completeness: string } };
+      block.retract.completeness = 'partial';
+    },
+  ];
+  for (const mutate of mutations) {
+    const candidate = clone(messageContext) as Record<string, unknown>;
+    mutate(candidate);
+    assert.throws(() => parseRfc012cMessageV1Json(JSON.stringify(candidate), messageContext), ContractValidationError);
+  }
 });
 
 test('RFC 012C task fixture validates lifecycle and complete owned-set omission', () => {
@@ -98,6 +152,12 @@ test('message and task fixtures reject identity and snapshot drift', () => {
     () => parseRfc012cMessageV1Json(JSON.stringify(semanticMessageDrift), messageContext),
     ContractValidationError,
   );
+
+  const contentDrift = clone(messageContext) as {
+    content_block: { correction: { content: { text: string } } };
+  };
+  contentDrift.content_block.correction.content.text = 'stale identity';
+  assert.throws(() => parseRfc012cMessageV1Json(JSON.stringify(contentDrift), messageContext), ContractValidationError);
 
   const semanticTaskDrift = clone(taskContext) as { subject: string };
   semanticTaskDrift.subject = 'Different task subject';

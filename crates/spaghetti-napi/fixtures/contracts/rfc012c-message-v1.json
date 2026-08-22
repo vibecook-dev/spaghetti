@@ -8,6 +8,72 @@
   "fact_id": "v1:aFw8HzmdOlzrkxuD3a6-gv2syszlHd1BY_AsW_J-bOU",
   "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
   "role": "assistant",
+  "content_block": {
+    "family": "runtime.content-block",
+    "family_version": 1,
+    "native_content_block_id": "block-a",
+    "fact_id": "v1:SjmkQAa6TOd6GUR1HPs2t6uLrql9VHXsYDaj14r85Nc",
+    "current": {
+      "ordinal": 0,
+      "content": {
+        "kind": "text",
+        "text": " draft \n"
+      },
+      "native_tool_call_or_result_id": null,
+      "completeness": "complete",
+      "operation": "upsert",
+      "semantic_revision_key_hex": "82f4ebc1b349a7e412a7152665a5b8c7338640b2b1f6ec2cd3f436682ac2d0df",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:o6_kQyjlGwRfB1DELeCGqX1GozcQ31J0o0ydZFCSoRw"
+      }
+    },
+    "correction": {
+      "ordinal": 0,
+      "content": {
+        "kind": "text",
+        "text": " final answer \n"
+      },
+      "native_tool_call_or_result_id": null,
+      "completeness": "complete",
+      "operation": "upsert",
+      "semantic_revision_key_hex": "e84d02025b23776c00bb78d71b2b5762f280ee89e92b5424ee1f1b489f86c425",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:CG_21s6DAg4bFA81d6LTylo3Az1LSoiAVrKJ6iQNJoI"
+      }
+    },
+    "retract": {
+      "ordinal": 0,
+      "content": {
+        "kind": "text",
+        "text": " final answer \n"
+      },
+      "native_tool_call_or_result_id": null,
+      "completeness": "complete",
+      "operation": "retract",
+      "semantic_revision_key_hex": "8a30a833ee6717b8436568c51890d1196346a171246c7e679de160999a79386b",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:DhHrE2b7NnXsP3WhIKetq9MsNmR3kdXStshU1CGX3Ps"
+      }
+    },
+    "partial_retract": {
+      "ordinal": 0,
+      "content": {
+        "kind": "text",
+        "text": " final answer \n"
+      },
+      "native_tool_call_or_result_id": null,
+      "completeness": "partial",
+      "operation": "retract",
+      "semantic_revision_key_hex": "e8f3be48235d07e154288b4a47872da9d0e8797a4d437907f3e929e021246424",
+      "semantic_revision_ref": {
+        "semantic_reference_contract_version": 1,
+        "fact_revision_id": "v1:XFkEKCGUbF4UCOXe2H-JEdD4WZ4vk5AiNZTHdQZbaZ8"
+      }
+    }
+  },
   "current": {
     "completeness": "complete",
     "operation": "upsert",

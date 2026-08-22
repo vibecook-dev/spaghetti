@@ -142,6 +142,17 @@ test('native RFC 012C message, task, plan, and tool helpers preserve value-bound
   }
 });
 
+test('native RFC 012C message-v1 preserves the prior field-absent shape', () => {
+  const prior = JSON.parse(messageJson) as Record<string, unknown>;
+  delete prior.content_block;
+  const roundTrip = JSON.parse(native.parseRfc012cMessageV1Json(JSON.stringify(prior))) as Record<string, unknown>;
+  assert.equal(Object.hasOwn(roundTrip, 'content_block'), false);
+
+  const explicitNull = JSON.parse(messageJson) as Record<string, unknown>;
+  explicitNull.content_block = null;
+  assert.throws(() => native.parseRfc012cMessageV1Json(JSON.stringify(explicitNull)), /invalid semantic fixture/);
+});
+
 test('native and portable RFC 012C C1 helpers reject semantic mutation with stale identity', () => {
   const cases: Array<{
     json: string;
@@ -172,7 +183,9 @@ test('native and portable RFC 012C C1 helpers reject semantic mutation with stal
       nativeParse: native.parseRfc012cMessageV1Json,
       portableParse: parseMessageFixture,
       mutate: (value) => {
-        value.role = 'user';
+        const contentBlock = value.content_block as Record<string, unknown>;
+        const correction = contentBlock.correction as Record<string, unknown>;
+        (correction.content as Record<string, unknown>).text = 'stale identity';
       },
     },
     {

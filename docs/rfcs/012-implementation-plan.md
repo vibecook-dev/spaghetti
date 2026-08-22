@@ -1068,18 +1068,22 @@ entity/revision identity, explicit retraction, partial non-retraction, and its
 complete replacement representation.
 
 Current C1 landing status (2026-08-21): actor-run, actor-affiliation, usage-v2,
-effective-state, user-input-request, interaction, message, task, plan, and tool
-v1 fixtures now have strict Rust, JSON-string N-API, and portable TypeScript
-consumers. Effective-state now freezes qualified Model, Effort, SessionMode, and
-PermissionMode values, keeps configured intent distinct from response or
-native-transition evidence, and binds each qualification into semantic
-identity. One topology-neutral `RevisionedEntityCurrent` reducer law now covers
-all four dimensions: exact semantic replay is occurrence-independent, partial
-retract cannot erase known state, complete retract is dimension-local, and a
-durable `FactBatch` view and selected scoped projection produce the same
-canonical reduced-state digest. Interaction covers Pending | Resolved | Failed
-| Cancelled plus complete retract and partial non-retraction. The fixture
-breadth is substantial, but it does not close C1: content/progress and
+effective-state, user-input-request, interaction, message/content-block, task,
+plan, and tool v1 fixtures now have strict Rust, JSON-string N-API, and portable
+TypeScript consumers. Content blocks use a closed typed-content union, a
+message-scoped native/fallback identity, value-derived correction/retraction
+revisions, and explicit complete-retract versus partial-non-retraction slots;
+arbitrary native JSON does not enter semantic reducer state. Effective-state
+freezes qualified Model, Effort, SessionMode, and PermissionMode values, keeps
+configured intent distinct from response or native-transition evidence, and
+binds each qualification into semantic identity. One topology-neutral
+`RevisionedEntityCurrent` reducer law now covers all four dimensions: exact
+semantic replay is occurrence-independent, partial retract cannot erase known
+state, complete retract is dimension-local, and a durable `FactBatch` view and
+selected scoped projection produce the same canonical reduced-state digest.
+Interaction covers Pending | Resolved | Failed | Cancelled plus complete
+retract and partial non-retraction. The fixture breadth is substantial, but it
+does not close C1: content-block CurrentGenerationLog reduction, progress and
 capability families, complete remaining family-by-family
 replacement/retraction cases, full semantic reduction, tier/view
 compositionality, and remaining-family durable/scoped reducer digest equality

@@ -982,6 +982,284 @@ impl MessageRevisionFact {
     }
 }
 
+/// Closed, bounded RFC 012C content-block payload. Structured native values
+/// cross the common boundary only as typed fields or a digest-bound extension;
+/// arbitrary native JSON remains retention-policy evidence, not semantic
+/// reducer state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ContentBlockRevisionValue {
+    Text {
+        text: String,
+    },
+    Thinking {
+        text: String,
+        redacted: bool,
+    },
+    ToolCall {
+        tool_name: String,
+        input_digest: [u8; 32],
+    },
+    ToolResult {
+        content_digest: [u8; 32],
+        is_error: bool,
+    },
+    Image {
+        media_type: String,
+        data_hash: [u8; 32],
+    },
+    Document {
+        media_type: String,
+        data_hash: [u8; 32],
+    },
+    NativeExtension {
+        native_kind: String,
+        value_digest: [u8; 32],
+    },
+}
+
+/// One independently replaceable content block in a current-generation
+/// message log. `message` is the topology-neutral canonical message fact key;
+/// block identity itself is supplied to `FactBatch` by a declared native key
+/// or a deterministic message/ordinal fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContentBlockRevisionFact {
+    pub session: CanonicalEntityKey,
+    pub actor_run: CanonicalEntityKey,
+    pub message: CanonicalFactId,
+    pub native_content_block_id: Option<String>,
+    pub ordinal: u32,
+    pub content: ContentBlockRevisionValue,
+    pub native_tool_call_or_result_id: Option<String>,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+}
+
+impl ContentBlockRevisionFact {
+    pub(crate) fn validate(&self) -> Result<(), AdapterError> {
+        validate_runtime_semantic_text(
+            "native_content_block_id",
+            self.native_content_block_id.as_deref(),
+        )?;
+        validate_runtime_semantic_text(
+            "native_tool_call_or_result_id",
+            self.native_tool_call_or_result_id.as_deref(),
+        )?;
+        let is_tool_content = match &self.content {
+            ContentBlockRevisionValue::Text { text }
+            | ContentBlockRevisionValue::Thinking { text, .. } => {
+                validate_bounded_content_text(text)?;
+                false
+            }
+            ContentBlockRevisionValue::ToolCall {
+                tool_name,
+                input_digest,
+            } => {
+                validate_runtime_semantic_text("content block tool_name", Some(tool_name))?;
+                validate_content_digest("tool-call input", input_digest)?;
+                true
+            }
+            ContentBlockRevisionValue::ToolResult { content_digest, .. } => {
+                validate_content_digest("tool-result content", content_digest)?;
+                true
+            }
+            ContentBlockRevisionValue::Image {
+                media_type,
+                data_hash,
+            }
+            | ContentBlockRevisionValue::Document {
+                media_type,
+                data_hash,
+            } => {
+                validate_content_media_type(media_type)?;
+                validate_content_digest("binary content", data_hash)?;
+                false
+            }
+            ContentBlockRevisionValue::NativeExtension {
+                native_kind,
+                value_digest,
+            } => {
+                if !is_bounded_native_field(native_kind, MAX_EFFECTIVE_STATE_PROVENANCE_FIELD_BYTES)
+                {
+                    return Err(AdapterError::invalid_contract(
+                        "content block native extension kind must be a bounded machine identifier",
+                    ));
+                }
+                validate_content_digest("native extension", value_digest)?;
+                false
+            }
+        };
+        if self.native_tool_call_or_result_id.is_some() && !is_tool_content {
+            return Err(AdapterError::invalid_contract(
+                "content block tool identity may be present only for tool call/result content",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stable identity input for a block inside one canonical message. Native
+    /// block IDs are commonly only message-local; the message fact identity is
+    /// therefore always part of the key. Blocks without a stable native ID use
+    /// their declared ordinal as the deterministic fallback.
+    pub(crate) fn stable_native_fact_key(&self) -> Result<Vec<u8>, AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.content-block/stable-native-key\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.message.as_bytes());
+        match self.native_content_block_id.as_deref() {
+            Some(native_id) => {
+                encoded.push(1);
+                push_component(&mut encoded, native_id.as_bytes());
+            }
+            None => {
+                encoded.push(2);
+                encoded.extend_from_slice(&self.ordinal.to_be_bytes());
+            }
+        }
+        Ok(encoded)
+    }
+
+    pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
+        self.validate()?;
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"spaghetti/runtime.content-block/semantic-revision\0");
+        encoded.extend_from_slice(&1_u32.to_be_bytes());
+        push_component(&mut encoded, self.session.as_bytes());
+        push_component(&mut encoded, self.actor_run.as_bytes());
+        push_component(&mut encoded, self.message.as_bytes());
+        push_optional_component(
+            &mut encoded,
+            self.native_content_block_id.as_deref().map(str::as_bytes),
+        );
+        encoded.extend_from_slice(&self.ordinal.to_be_bytes());
+        push_content_block_revision_value(&mut encoded, &self.content);
+        push_optional_component(
+            &mut encoded,
+            self.native_tool_call_or_result_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        encoded.push(match self.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        });
+        encoded.push(match self.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        });
+        Ok(*blake3::hash(&encoded).as_bytes())
+    }
+}
+
+fn validate_content_digest(field: &str, digest: &[u8; 32]) -> Result<(), AdapterError> {
+    if digest.iter().all(|byte| *byte == 0) {
+        return Err(AdapterError::invalid_contract(format!(
+            "content block {field} digest must be nonzero"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bounded_content_text(value: &str) -> Result<(), AdapterError> {
+    if value.len() > MAX_RUNTIME_SEMANTIC_TEXT_BYTES {
+        return Err(AdapterError::invalid_contract(format!(
+            "content block text exceeds {MAX_RUNTIME_SEMANTIC_TEXT_BYTES} UTF-8 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_content_media_type(value: &str) -> Result<(), AdapterError> {
+    let Some((kind, subtype)) = value.split_once('/') else {
+        return Err(AdapterError::invalid_contract(
+            "content block media_type must be a canonical MIME type",
+        ));
+    };
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 127
+            && part.bytes().all(|byte| {
+                matches!(
+                    byte,
+                    b'a'..=b'z'
+                        | b'0'..=b'9'
+                        | b'!'
+                        | b'#'
+                        | b'$'
+                        | b'&'
+                        | b'^'
+                        | b'_'
+                        | b'.'
+                        | b'+'
+                        | b'-'
+                )
+            })
+    };
+    if !valid_part(kind) || !valid_part(subtype) || subtype.contains('/') {
+        return Err(AdapterError::invalid_contract(
+            "content block media_type must be a canonical MIME type",
+        ));
+    }
+    Ok(())
+}
+
+fn push_content_block_revision_value(output: &mut Vec<u8>, value: &ContentBlockRevisionValue) {
+    match value {
+        ContentBlockRevisionValue::Text { text } => {
+            output.push(1);
+            push_component(output, text.as_bytes());
+        }
+        ContentBlockRevisionValue::Thinking { text, redacted } => {
+            output.push(2);
+            push_component(output, text.as_bytes());
+            output.push(u8::from(*redacted));
+        }
+        ContentBlockRevisionValue::ToolCall {
+            tool_name,
+            input_digest,
+        } => {
+            output.push(3);
+            push_component(output, tool_name.as_bytes());
+            output.extend_from_slice(input_digest);
+        }
+        ContentBlockRevisionValue::ToolResult {
+            content_digest,
+            is_error,
+        } => {
+            output.push(4);
+            output.extend_from_slice(content_digest);
+            output.push(u8::from(*is_error));
+        }
+        ContentBlockRevisionValue::Image {
+            media_type,
+            data_hash,
+        } => {
+            output.push(5);
+            push_component(output, media_type.as_bytes());
+            output.extend_from_slice(data_hash);
+        }
+        ContentBlockRevisionValue::Document {
+            media_type,
+            data_hash,
+        } => {
+            output.push(6);
+            push_component(output, media_type.as_bytes());
+            output.extend_from_slice(data_hash);
+        }
+        ContentBlockRevisionValue::NativeExtension {
+            native_kind,
+            value_digest,
+        } => {
+            output.push(7);
+            push_component(output, native_kind.as_bytes());
+            output.extend_from_slice(value_digest);
+        }
+    }
+}
+
 /// RFC 012C task revision. Individual upserts are revisioned entities; a
 /// complete owned-set snapshot may retract members absent from that set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2338,6 +2616,7 @@ pub enum Fact {
     ActorAffiliationRevision(ActorAffiliationRevisionFact),
     UserInputRequestRevision(UserInputRequestRevisionFact),
     MessageRevision(MessageRevisionFact),
+    ContentBlockRevision(ContentBlockRevisionFact),
     TaskRevision(TaskRevisionFact),
     PlanRevision(PlanRevisionFact),
     ToolRevision(ToolRevisionFact),
@@ -2378,6 +2657,7 @@ impl Fact {
             Self::ActorAffiliationRevision(_) => "runtime.actor-affiliation",
             Self::UserInputRequestRevision(_) => "runtime.user-input-request",
             Self::MessageRevision(_) => "runtime.message",
+            Self::ContentBlockRevision(_) => "runtime.content-block",
             Self::TaskRevision(_) => "runtime.task",
             Self::PlanRevision(_) => "runtime.plan",
             Self::ToolRevision(_) => "runtime.tool",
@@ -2414,6 +2694,7 @@ impl Fact {
             | Self::ActorAffiliationRevision(_)
             | Self::UserInputRequestRevision(_)
             | Self::MessageRevision(_)
+            | Self::ContentBlockRevision(_)
             | Self::TaskRevision(_)
             | Self::PlanRevision(_)
             | Self::ToolRevision(_)
@@ -2445,6 +2726,7 @@ impl Fact {
             Self::ActorAffiliationRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::UserInputRequestRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::MessageRevision(revision) => revision.semantic_revision_key().map(Some),
+            Self::ContentBlockRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::TaskRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::PlanRevision(revision) => revision.semantic_revision_key().map(Some),
             Self::ToolRevision(revision) => revision.semantic_revision_key().map(Some),
@@ -3008,6 +3290,7 @@ impl FactBatch {
                                 Fact::UserInputRequestRevision(_)
                             )
                             | (Fact::MessageRevision(_), Fact::MessageRevision(_))
+                            | (Fact::ContentBlockRevision(_), Fact::ContentBlockRevision(_))
                             | (Fact::TaskRevision(_), Fact::TaskRevision(_))
                             | (Fact::PlanRevision(_), Fact::PlanRevision(_))
                             | (Fact::ToolRevision(_), Fact::ToolRevision(_))
@@ -3731,6 +4014,118 @@ mod tests {
         explicit_unknown.value.quality = QualifiedValueQuality::Unknown;
         explicit_unknown.value.unknown_reason = Some(QualifiedUnknownReason::NotYetObserved);
         assert!(explicit_unknown.semantic_revision_key().is_ok());
+    }
+
+    #[test]
+    fn content_block_revision_is_typed_bounded_and_value_derived() {
+        let context = semantic_context();
+        let session = context
+            .canonical_entity_key("session", b"native-session")
+            .unwrap();
+        let actor_run = context
+            .canonical_entity_key("actor-run", b"native-run")
+            .unwrap();
+        let message = CanonicalFactId::native(
+            context.adapter_id().as_str(),
+            &context.source_instance_key(),
+            "runtime.message",
+            b"native-message",
+        )
+        .unwrap();
+        let original = ContentBlockRevisionFact {
+            session,
+            actor_run,
+            message,
+            native_content_block_id: Some("block-0".to_string()),
+            ordinal: 0,
+            content: ContentBlockRevisionValue::Text {
+                text: " draft\n".to_string(),
+            },
+            native_tool_call_or_result_id: None,
+            completeness: ContractCompleteness::Complete,
+            operation: UserInputOperation::Upsert,
+        };
+        let original_revision = original.semantic_revision_key().unwrap();
+
+        let mut correction = original.clone();
+        correction.content = ContentBlockRevisionValue::Text {
+            text: "final".to_string(),
+        };
+        assert_eq!(
+            correction.stable_native_fact_key().unwrap(),
+            original.stable_native_fact_key().unwrap()
+        );
+        assert_ne!(
+            correction.semantic_revision_key().unwrap(),
+            original_revision
+        );
+
+        let mut another_message = original.clone();
+        another_message.message = CanonicalFactId::native(
+            context.adapter_id().as_str(),
+            &context.source_instance_key(),
+            "runtime.message",
+            b"another-message",
+        )
+        .unwrap();
+        assert_ne!(
+            another_message.stable_native_fact_key().unwrap(),
+            original.stable_native_fact_key().unwrap()
+        );
+
+        let mut moved = original.clone();
+        moved.ordinal = 1;
+        assert_ne!(moved.semantic_revision_key().unwrap(), original_revision);
+
+        let mut partial = original.clone();
+        partial.completeness = ContractCompleteness::Partial;
+        assert_ne!(partial.semantic_revision_key().unwrap(), original_revision);
+
+        let mut ordinal_fallback = original.clone();
+        ordinal_fallback.native_content_block_id = None;
+        let ordinal_zero = ordinal_fallback.stable_native_fact_key().unwrap();
+        ordinal_fallback.ordinal = 1;
+        assert_ne!(
+            ordinal_fallback.stable_native_fact_key().unwrap(),
+            ordinal_zero
+        );
+
+        let mut tool_call = original.clone();
+        tool_call.content = ContentBlockRevisionValue::ToolCall {
+            tool_name: "read".to_string(),
+            input_digest: [7; 32],
+        };
+        assert!(tool_call.semantic_revision_key().is_ok());
+
+        let mut image = original.clone();
+        image.content = ContentBlockRevisionValue::Image {
+            media_type: "image/png".to_string(),
+            data_hash: [8; 32],
+        };
+        assert!(image.semantic_revision_key().is_ok());
+        image.content = ContentBlockRevisionValue::Image {
+            media_type: "/Users/alice/image.png".to_string(),
+            data_hash: [8; 32],
+        };
+        assert!(image.semantic_revision_key().is_err());
+        tool_call.native_tool_call_or_result_id = Some("tool-1".to_string());
+        assert!(tool_call.semantic_revision_key().is_ok());
+        tool_call.content = ContentBlockRevisionValue::ToolCall {
+            tool_name: "read".to_string(),
+            input_digest: [0; 32],
+        };
+        assert!(tool_call.semantic_revision_key().is_err());
+
+        let mut text_with_tool_identity = original.clone();
+        text_with_tool_identity.native_tool_call_or_result_id = Some("tool-1".to_string());
+        assert!(text_with_tool_identity.semantic_revision_key().is_err());
+
+        let mut extension = original;
+        extension.content = ContentBlockRevisionValue::NativeExtension {
+            native_kind: "/Users/alice/raw".to_string(),
+            value_digest: [9; 32],
+        };
+        assert!(extension.semantic_revision_key().is_err());
     }
 
     #[test]

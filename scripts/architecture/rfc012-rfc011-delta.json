@@ -229,6 +229,11 @@
           "state": "implemented",
           "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-permission-mode-v1.json",
           "claim": "Permission mode remains independent and requires native-transition evidence before becoming effective."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-message-v1.json",
+          "claim": "The message fixture binds a typed content-block correction, complete retraction, and partial non-retraction to one message-scoped canonical block identity."
         }
       ]
     },
