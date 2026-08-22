@@ -1323,13 +1323,25 @@ impl CatalogReadinessMachine {
         self.replace_snapshot(candidate)
     }
 
-    pub(crate) fn retry(&mut self) -> Result<(), CatalogContractError> {
+    pub(crate) fn retry(
+        &mut self,
+        source_coverage: Vec<SourceCoverageSet>,
+    ) -> Result<(), CatalogContractError> {
         if !matches!(
             self.snapshot.state,
             CatalogReadinessPhase::Degraded | CatalogReadinessPhase::Error
         ) {
             return Err(CatalogContractError::invalid(
                 "only a degraded or error catalog build can start a retry attempt",
+            ));
+        }
+        if !self.plan.required_coverage_present(&source_coverage)
+            || source_coverage
+                .iter()
+                .any(|coverage| coverage.completeness == CoverageSetCompleteness::Complete)
+        {
+            return Err(CatalogContractError::invalid(
+                "catalog retry coverage must conservatively represent every required source",
             ));
         }
         let mut candidate = self.snapshot.clone();
@@ -1340,6 +1352,7 @@ impl CatalogReadinessMachine {
         candidate.state = CatalogReadinessPhase::Building;
         candidate.complete_through_commit = None;
         candidate.refreshing_from_snapshot = None;
+        candidate.source_coverage = source_coverage;
         candidate.reason = None;
         self.replace_snapshot(candidate)
     }
@@ -1850,7 +1863,12 @@ mod tests {
             Some(first_snapshot)
         );
 
-        machine.retry().unwrap();
+        machine
+            .retry(unavailable_coverage(
+                machine.plan(),
+                machine.snapshot().desired_contract_version,
+            ))
+            .unwrap();
         assert_eq!(machine.snapshot().state, CatalogReadinessPhase::Building);
         assert_eq!(
             (machine.snapshot().epoch, machine.snapshot().attempt),
@@ -1949,7 +1967,15 @@ mod tests {
             machine.snapshot().last_complete_snapshot,
             Some(initial_snapshot)
         );
-        machine.retry().unwrap();
+        assert!(machine
+            .retry(machine.snapshot().source_coverage.clone())
+            .is_err());
+        machine
+            .retry(unavailable_coverage(
+                machine.plan(),
+                machine.snapshot().desired_contract_version,
+            ))
+            .unwrap();
         assert_eq!(
             (machine.snapshot().epoch, machine.snapshot().attempt),
             (4, 2)

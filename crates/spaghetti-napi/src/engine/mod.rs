@@ -1732,9 +1732,12 @@ impl SpaghettiEngineCore {
                 "catalog refresh cannot change its frozen coverage plan".to_string(),
             ));
         }
-        if state.readiness.state == CatalogReadinessPhase::Degraded {
+        if matches!(
+            state.readiness.state,
+            CatalogReadinessPhase::Degraded | CatalogReadinessPhase::Error
+        ) {
             let now = engine_now_unix_ms()?;
-            self.commit_catalog_build_state(CatalogBuildStateCommand::retry_degraded_refresh(
+            self.commit_catalog_build_state(CatalogBuildStateCommand::retry_terminal_refresh(
                 state.expectation()?,
                 now,
                 now,

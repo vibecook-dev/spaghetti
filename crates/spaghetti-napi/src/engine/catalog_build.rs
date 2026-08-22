@@ -307,6 +307,9 @@ impl SpaghettiEngineCore {
             {
                 Ok(CatalogBuildOutcome::LastCompleteRetained)
             }
+            Some(CatalogReadinessPhase::Error) => {
+                publish_refresh(self, plan, selection, &sources, &cancellation)
+            }
             Some(CatalogReadinessPhase::Degraded) if intent == CatalogBuildIntent::Startup => {
                 Ok(CatalogBuildOutcome::LastCompleteRetained)
             }
