@@ -77,6 +77,21 @@ pub(crate) struct UnknownEvidenceAggregateSnapshot {
     pub samples: Vec<UnknownEvidenceOccurrence>,
 }
 
+impl UnknownEvidenceAggregateSnapshot {
+    /// The fixed-policy empty current-generation snapshot used by tests and
+    /// by carriers that have not observed an unknown native record. Derive it
+    /// through the reducer so the empty digest cannot drift from the shared
+    /// aggregation law.
+    pub(crate) fn empty_policy() -> Self {
+        UnknownEvidenceReducer::new(
+            MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
+            MAX_UNKNOWN_EVIDENCE_SAMPLES,
+        )
+        .and_then(|reducer| reducer.snapshot())
+        .expect("the fixed unknown-evidence reducer policy is valid")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct UnknownEvidenceReducer {
     max_occurrences: usize,

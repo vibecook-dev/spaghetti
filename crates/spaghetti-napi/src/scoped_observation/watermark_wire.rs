@@ -26,6 +26,10 @@ use super::capability_snapshot_wire::{
 use super::scope_coverage_wire::{
     ScopedScopeCoverageConsumerContext, ScopedScopeCoverageContextWire, ScopedScopeCoverageWire,
 };
+use super::unknown_evidence_wire::{
+    UnknownEvidenceSnapshotConsumerContext, UnknownEvidenceSnapshotContextWire,
+    UnknownEvidenceSnapshotWire,
+};
 use super::{
     ScopedObservationAttachmentAuthority, ScopedObservationContinuity,
     ScopedObservationDeliveryState, ScopedObservationRootIdentity, ScopedObservationWatermarkCore,
@@ -188,6 +192,7 @@ pub(crate) struct ScopedObservationWatermarkConsumerContext {
     capability_context: Arc<ScopedCapabilitySnapshotConsumerContext>,
     scope_coverage_context: ScopedScopeCoverageConsumerContext,
     artifact_availability_context: ScopedArtifactAvailabilityConsumerContext,
+    unknown_evidence_context: UnknownEvidenceSnapshotConsumerContext,
 }
 
 impl std::fmt::Debug for ScopedObservationWatermarkConsumerContext {
@@ -237,6 +242,9 @@ impl ScopedObservationWatermarkConsumerContext {
                 &watermark.artifact_availability,
             )
             .map_err(ScopedObservationWatermarkContractError::nested)?;
+        let unknown_evidence_context =
+            UnknownEvidenceSnapshotConsumerContext::from_expected(&watermark.unknown_evidence)
+                .map_err(ScopedObservationWatermarkContractError::nested)?;
         let expected_queue_state = WatermarkQueueStateWire::from_internal(watermark.queue_state)?;
         let context = Self {
             attachment_authority: Arc::clone(expected_attachment_authority),
@@ -250,6 +258,7 @@ impl ScopedObservationWatermarkConsumerContext {
             capability_context,
             scope_coverage_context,
             artifact_availability_context,
+            unknown_evidence_context,
         };
         ScopedObservationWatermarkWire::from_scoped_for_context(watermark, &context)?;
         Ok(context)
@@ -268,6 +277,7 @@ impl ScopedObservationWatermarkConsumerContext {
             capability_context: self.capability_context.wire(),
             scope_coverage_context: self.scope_coverage_context.wire(),
             artifact_availability_context: self.artifact_availability_context.wire(),
+            unknown_evidence_context: self.unknown_evidence_context.wire(),
         }
     }
 }
@@ -285,6 +295,7 @@ pub(crate) struct ScopedObservationWatermarkContextWire {
     capability_context: ScopedCapabilitySnapshotContextWire,
     scope_coverage_context: ScopedScopeCoverageContextWire,
     artifact_availability_context: ScopedArtifactAvailabilityContextWire,
+    unknown_evidence_context: UnknownEvidenceSnapshotContextWire,
 }
 
 /// Serialize-only poll watermark. Received JSON must be consumed with the
@@ -301,6 +312,7 @@ pub(crate) struct ScopedObservationWatermarkWire {
     scope_coverage: ScopedScopeCoverageWire,
     explicit_object_errors: Vec<CoverageError>,
     artifact_availability: ScopedArtifactAvailabilitySnapshotWire,
+    unknown_evidence: UnknownEvidenceSnapshotWire,
     queue_state: WatermarkQueueStateWire,
 }
 
@@ -373,6 +385,7 @@ struct ScopedObservationWatermarkInput {
     scope_coverage: JsonValue,
     explicit_object_errors: JsonValue,
     artifact_availability: JsonValue,
+    unknown_evidence: JsonValue,
     queue_state: WatermarkQueueStateWire,
 }
 
@@ -412,6 +425,15 @@ impl ScopedObservationWatermarkWire {
             &context.artifact_availability_context,
         )
         .map_err(ScopedObservationWatermarkContractError::nested)?;
+        let actual_unknown_evidence_context =
+            UnknownEvidenceSnapshotConsumerContext::from_expected(&watermark.unknown_evidence)
+                .map_err(ScopedObservationWatermarkContractError::nested)?;
+        if actual_unknown_evidence_context != context.unknown_evidence_context {
+            return Err(ScopedObservationWatermarkContractError::ContextMismatch);
+        }
+        let unknown_evidence =
+            UnknownEvidenceSnapshotWire::from_context(&context.unknown_evidence_context)
+                .map_err(ScopedObservationWatermarkContractError::nested)?;
         Ok(Self {
             scoped_observation_watermark_contract_version:
                 SCOPED_OBSERVATION_WATERMARK_CONTRACT_VERSION,
@@ -424,6 +446,7 @@ impl ScopedObservationWatermarkWire {
             scope_coverage,
             explicit_object_errors: context.expected_explicit_object_errors.clone(),
             artifact_availability,
+            unknown_evidence,
             queue_state: context.expected_queue_state,
         })
     }
@@ -460,6 +483,11 @@ impl ScopedObservationWatermarkWire {
                 &context.artifact_availability_context,
             )
             .map_err(ScopedObservationWatermarkContractError::nested)?;
+        let unknown_evidence = UnknownEvidenceSnapshotWire::from_wire_value_for_context(
+            input.unknown_evidence,
+            &context.unknown_evidence_context,
+        )
+        .map_err(ScopedObservationWatermarkContractError::nested)?;
         input.queue_state.validate()?;
         if input.scoped_observation_watermark_contract_version
             != SCOPED_OBSERVATION_WATERMARK_CONTRACT_VERSION
@@ -483,6 +511,7 @@ impl ScopedObservationWatermarkWire {
             scope_coverage,
             explicit_object_errors,
             artifact_availability,
+            unknown_evidence,
             queue_state: input.queue_state,
         })
     }
@@ -687,6 +716,7 @@ fn preflight_arrays(
         "scope_coverage",
         "explicit_object_errors",
         "artifact_availability",
+        "unknown_evidence",
         "queue_state",
     ];
     if object.len() != fields.len()

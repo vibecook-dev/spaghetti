@@ -14,6 +14,7 @@ interface WatermarkFixture {
     capability_and_support_context_bound: boolean;
     source_and_scope_coverage_exact: boolean;
     artifact_availability_state_bound: boolean;
+    unknown_evidence_state_bound: boolean;
     queue_continuity: string[];
     source_access_authority: boolean;
     public_observer_transport: boolean;
@@ -64,6 +65,9 @@ test('selection root support and nested semantic state are exact', () => {
     },
     (value: any) => {
       value.artifact_availability.semantic_digest = fixture.context.root.session_key;
+    },
+    (value: any) => {
+      value.unknown_evidence.aggregate_digest = fixture.context.root.session_key;
     },
   ]) {
     const changed = clone(fixture.watermark);
@@ -139,6 +143,7 @@ test('strict shape bounds and privacy claims remain closed', () => {
   assert.equal(fixture.expected.capability_and_support_context_bound, true);
   assert.equal(fixture.expected.source_and_scope_coverage_exact, true);
   assert.equal(fixture.expected.artifact_availability_state_bound, true);
+  assert.equal(fixture.expected.unknown_evidence_state_bound, true);
   assert.equal(fixture.expected.source_access_authority, false);
   assert.equal(fixture.expected.public_observer_transport, false);
   assert.equal(fixture.expected.native_locator_or_payload, false);

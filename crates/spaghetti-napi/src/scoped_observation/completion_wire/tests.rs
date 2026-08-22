@@ -285,6 +285,7 @@ fn fixture_pair() -> FixturePair {
         scope_coverage: scope_coverage.clone(),
         explicit_object_errors: explicit_object_errors.clone(),
         artifact_availability: artifact_availability.clone(),
+        unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
         queue_state: drain.delivery.state(),
     };
     let bootstrap = drain
@@ -330,6 +331,7 @@ fn fixture_pair() -> FixturePair {
         scope_coverage: scope_coverage.clone(),
         explicit_object_errors,
         artifact_availability: artifact_availability.clone(),
+        unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
         queue_state: drain.delivery.state(),
     };
     let components = ScopedCompletionSnapshotComponents {

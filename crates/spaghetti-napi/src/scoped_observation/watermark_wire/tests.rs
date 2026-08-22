@@ -3,12 +3,13 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use crate::adapter::{
-    AdapterId, CanonicalEntityKey, CanonicalSourceInstanceKey, CompatibilityClass,
-    ContractVersionOffer, ContractVersionRequest, CoverageDeclarationDigest, CoverageDomain,
-    CoverageError, CoverageMembershipRevision, CoveragePosition, CoveragePositionKind,
-    CoverageProvenance, CoverageScope, CoverageSetCompleteness, CoverageStatus, ExternalEntityRef,
-    SourceCoveragePoint, SourceCoverageSet,
+    AdapterId, BoundedNativeEvidence, CanonicalEntityKey, CanonicalSourceInstanceKey,
+    CompatibilityClass, ContractVersionOffer, ContractVersionRequest, CoverageDeclarationDigest,
+    CoverageDomain, CoverageError, CoverageMembershipRevision, CoveragePosition,
+    CoveragePositionKind, CoverageProvenance, CoverageScope, CoverageSetCompleteness,
+    CoverageStatus, ExternalEntityRef, SourceCoveragePoint, SourceCoverageSet, SourceRecordId,
 };
+use crate::decode_runtime::diagnostic_excerpt;
 use crate::observation_contract::{
     negotiate_observation_contract, ObservationCapabilities, ObservationContractOffer,
     ObservationContractRequest, ObservationContractSelection,
@@ -113,6 +114,40 @@ fn root() -> ScopedObservationRootIdentity {
         .unwrap(),
         native_session_claim: None,
     }
+}
+
+fn unknown_evidence() -> UnknownEvidenceAggregateSnapshot {
+    let payload = br#"{"future_private_field":"secret"}"#;
+    let mut reducer = UnknownEvidenceReducer::new(
+        MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
+        MAX_UNKNOWN_EVIDENCE_SAMPLES,
+    )
+    .unwrap();
+    reducer
+        .apply(
+            UnknownEvidenceOccurrence::new(
+                Some("future.object".to_owned()),
+                BoundedNativeEvidence {
+                    source_record_id: SourceRecordId::derive(
+                        "watermark-fixture",
+                        &CanonicalSourceInstanceKey::derive(1, b"watermark-unknown-source")
+                            .unwrap(),
+                        b"events",
+                        b"session.jsonl",
+                        1,
+                        b"unknown-1",
+                        1,
+                    )
+                    .unwrap(),
+                    observed_bytes: payload.len() as u64,
+                    payload_digest: *blake3::hash(payload).as_bytes(),
+                    sanitized_excerpt: diagnostic_excerpt(payload),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    reducer.snapshot().unwrap()
 }
 
 fn coverage_and_scope(
@@ -250,6 +285,7 @@ fn fixture_watermark(continuity: ScopedObservationContinuity) -> FixtureWatermar
         scope_coverage,
         explicit_object_errors,
         artifact_availability: ScopedArtifactAvailabilitySnapshot::empty_fixture(root.session_key),
+        unknown_evidence: unknown_evidence(),
         queue_state: ScopedObservationDeliveryState {
             scope_epoch,
             offered_through_sequence,
@@ -282,6 +318,7 @@ fn fixture_value() -> Value {
             "capability_and_support_context_bound": true,
             "source_and_scope_coverage_exact": true,
             "artifact_availability_state_bound": true,
+            "unknown_evidence_state_bound": true,
             "queue_continuity": ["bootstrap", "valid"],
             "source_access_authority": false,
             "public_observer_transport": false,
@@ -335,6 +372,7 @@ fn exact_attachment_root_selection_and_support_are_context_bound() {
         &["source_coverage", "0", "membership_revision"][..],
         &["scope_coverage", "scope_revision"][..],
         &["artifact_availability", "semantic_digest"][..],
+        &["unknown_evidence", "aggregate_digest"][..],
     ] {
         let mut changed = value.clone();
         let mut cursor = &mut changed;

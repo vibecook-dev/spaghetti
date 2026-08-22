@@ -10116,6 +10116,10 @@ pub struct ScopedObservationWatermarkCore {
     pub scope_coverage: ScopedScopeCoverage,
     pub explicit_object_errors: Vec<CoverageError>,
     pub artifact_availability: ScopedArtifactAvailabilitySnapshot,
+    /// Complete current-generation unknown-native-evidence aggregate at this
+    /// poll boundary. Samples are fixed-policy bounded and value-free; this
+    /// field is not source access or one event per unknown native record.
+    pub unknown_evidence: UnknownEvidenceAggregateSnapshot,
     pub queue_state: ScopedObservationDeliveryState,
 }
 
@@ -20757,6 +20761,9 @@ impl ScopedObservationAccessHost {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .snapshot(self.root_identity.session_key, projection)
             .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)?;
+        let unknown_evidence = projection
+            .unknown_evidence_snapshot()
+            .map_err(|_| ScopedCoverageAssemblyError::InvalidContract)?;
         Ok(ScopedObservationWatermarkCore {
             attachment_authority: Arc::clone(&self.attachment_authority),
             root: self.root_identity.clone(),
@@ -20767,6 +20774,7 @@ impl ScopedObservationAccessHost {
             scope_coverage,
             explicit_object_errors,
             artifact_availability,
+            unknown_evidence,
             queue_state,
         })
     }
@@ -30832,6 +30840,7 @@ mod projection_tests {
             scope_coverage,
             explicit_object_errors: Vec::new(),
             artifact_availability,
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: before,
         };
         assert_eq!(
@@ -30852,6 +30861,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: before,
         };
         let barrier = delivery
@@ -31576,6 +31586,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         let barrier = delivery
@@ -31659,6 +31670,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: drain.delivery_lane().state(),
         };
         let engine_barrier = drain
@@ -31947,6 +31959,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: drain.delivery_lane().state(),
         };
         let bootstrap = drain
@@ -32115,6 +32128,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: drain.delivery_lane().state(),
         };
         let replacement_digest = replacement_snapshot_digest(fixture_completion_components(
@@ -32258,6 +32272,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: live_drain.delivery_lane().state(),
         };
         let bootstrap = live_drain
@@ -32333,6 +32348,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         let barrier = delivery
@@ -32567,6 +32583,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         delivery
@@ -32701,6 +32718,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: replay.state(),
         };
         replay
@@ -33090,6 +33108,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, false),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         delivery
@@ -33145,6 +33164,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         delivery
@@ -33304,6 +33324,7 @@ mod projection_tests {
             scope_coverage,
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         assert_eq!(
@@ -33393,6 +33414,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         delivery
@@ -33595,6 +33617,7 @@ mod projection_tests {
             scope_coverage: fixture_scope_coverage(&root, true),
             explicit_object_errors: Vec::new(),
             artifact_availability: empty_artifact_availability(&root),
+            unknown_evidence: UnknownEvidenceAggregateSnapshot::empty_policy(),
             queue_state: delivery.state(),
         };
         let bootstrap = delivery

@@ -14,6 +14,12 @@ import {
   type SourceCoverageSet,
 } from './rfc012a.js';
 import {
+  parseUnknownEvidenceSnapshot,
+  parseUnknownEvidenceSnapshotContext,
+  type UnknownEvidenceSnapshot,
+  type UnknownEvidenceSnapshotContext,
+} from './rfc012c-unknown-evidence.js';
+import {
   parseScopedArtifactAvailabilityContext,
   parseScopedArtifactAvailabilitySnapshot,
   type ScopedArtifactAvailabilityContext,
@@ -63,6 +69,7 @@ export interface ScopedObservationWatermarkContext {
   capability_context: ScopedCapabilitySnapshotContext;
   scope_coverage_context: ScopedScopeCoverageContext;
   artifact_availability_context: ScopedArtifactAvailabilityContext;
+  unknown_evidence_context: UnknownEvidenceSnapshotContext;
 }
 
 export interface ScopedObservationWatermark {
@@ -76,6 +83,7 @@ export interface ScopedObservationWatermark {
   scope_coverage: ScopedScopeCoverage;
   explicit_object_errors: CoverageError[];
   artifact_availability: ScopedArtifactAvailabilitySnapshot;
+  unknown_evidence: UnknownEvidenceSnapshot;
   queue_state: ScopedObservationWatermarkQueueState;
 }
 
@@ -345,6 +353,7 @@ export function parseScopedObservationWatermarkContext(value: unknown): ScopedOb
       'capability_context',
       'scope_coverage_context',
       'artifact_availability_context',
+      'unknown_evidence_context',
     ],
     'scoped observation watermark context',
   );
@@ -356,6 +365,7 @@ export function parseScopedObservationWatermarkContext(value: unknown): ScopedOb
   const capabilityContext = parseScopedCapabilitySnapshotContext(input.capability_context);
   const scopeCoverageContext = parseScopedScopeCoverageContext(input.scope_coverage_context);
   const artifactContext = parseScopedArtifactAvailabilityContext(input.artifact_availability_context);
+  const unknownEvidenceContext = parseUnknownEvidenceSnapshotContext(input.unknown_evidence_context);
   const sourceCoverage = parseSourceCoverage(input.expected_source_coverage, 'expected watermark source coverage');
   const explicitErrors = parseExplicitErrors(input.expected_explicit_object_errors, sourceCoverage);
   const queueState = parseQueueState(input.expected_queue_state);
@@ -388,6 +398,7 @@ export function parseScopedObservationWatermarkContext(value: unknown): ScopedOb
     capability_context: capabilityContext,
     scope_coverage_context: scopeCoverageContext,
     artifact_availability_context: artifactContext,
+    unknown_evidence_context: unknownEvidenceContext,
   };
   validateCoverageAuthority(sourceCoverage, result);
   return result;
@@ -411,6 +422,7 @@ export function parseScopedObservationWatermark(
       'scope_coverage',
       'explicit_object_errors',
       'artifact_availability',
+      'unknown_evidence',
       'queue_state',
     ],
     'scoped observation watermark',
@@ -452,6 +464,7 @@ export function parseScopedObservationWatermark(
       input.artifact_availability,
       context.artifact_availability_context,
     ),
+    unknown_evidence: parseUnknownEvidenceSnapshot(input.unknown_evidence, context.unknown_evidence_context),
     queue_state: queueState,
   };
 }

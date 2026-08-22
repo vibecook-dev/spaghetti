@@ -1141,8 +1141,12 @@ TypeScript. Every sample carries only a bounded machine family hint, opaque
 source/payload digests, and a closed value-free JSON shape whose byte/hash
 coordinates must match the retained evidence; raw values, native keys, and
 locators cannot enter it. The contract grants no source access, query,
-observer ordering, or replacement authority. The public durable query and the
-RFC 012D event/replacement carrier remain open.
+observer ordering, or replacement authority. The same bounded aggregate is
+now captured from the scoped reducer at each completed-poll boundary and
+carried by the attachment-bound RFC 012D watermark with exact Rust-issued
+context. This is one coalesced state snapshot, not one public event per unknown
+record. The public durable query plus bootstrap/resync completion and
+replacement-digest integration remain open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
 does not close C1: complete capability coverage and bounded unknown-evidence
@@ -2248,15 +2252,20 @@ Current landing status (2026-08-20):
   Serde consumer context. That context binds the negotiated selection and
   support release, full resolved root, exactly one Decode set plus exactly one
   set for every selected fact family, declared scope coverage, canonical
-  explicit errors, artifact-availability revision, epoch, offered sequence,
-  and queue state. Only `Bootstrap` and `Valid` continuity can cross the wire;
+  explicit errors, artifact-availability revision, the complete bounded
+  unknown-native-evidence aggregate and deterministic value-free samples,
+  epoch, offered sequence, and queue state. Unknown evidence is captured from
+  the same scoped projection at the completed-poll boundary and remains a
+  coalesced snapshot rather than an event per native record. Only `Bootstrap`
+  and `Valid` continuity can cross the wire;
   resync-required, resyncing, and failed states remain on the control lane.
   The portable queue law requires the offered/delivered difference to equal
   the retained semantic plus source-control item counts, while retained native
   bytes remain accounting rather than sequence. Serialize-only Rust and strict
   TypeScript parsers reject cross-attachment context, selection/root/support,
-  coverage, nested semantic-state, queue, bound, or unknown-field drift against
-  one privacy-reduced fixture. This adds no source-access authority, request-
+  coverage, nested semantic-state, unknown-evidence totals/digest/samples,
+  queue, bound, or unknown-field drift against one privacy-reduced fixture.
+  This adds no source-access authority, request-
   generation field, unified event union, N-API method, iterator owner, native
   payload/locator disclosure, or public observer transport; and
 - the contextual poll-completion slice (`5854c5f`) now carries that frozen
