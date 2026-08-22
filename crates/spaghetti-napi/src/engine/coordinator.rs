@@ -5531,7 +5531,28 @@ fn validate_durable_stream_contract(
         StreamAuthority::Diagnostic => AuthorizedObservationSourceAuthority::Diagnostic,
         StreamAuthority::IgnoredDerived => AuthorizedObservationSourceAuthority::IgnoredDerived,
     };
+    let discovery_matches = match contract.driver() {
+        AuthorizedObservationSourceDriver::DirectoryMembership {
+            max_entries,
+            max_depth,
+        } => contract.max_entries() == Some(max_entries) && contract.max_depth() == Some(max_depth),
+        _ => {
+            contract.max_entries() == Some(DISCOVERY_MAX_ENTRIES as u64)
+                && contract.max_depth() == Some(DISCOVERY_MAX_DEPTH as u64)
+        }
+    };
     let driver_matches = match (&stream.driver, contract.driver()) {
+        (
+            DriverSpec::DirectorySnapshot(runtime),
+            AuthorizedObservationSourceDriver::DirectoryMembership {
+                max_entries,
+                max_depth,
+            },
+        ) => {
+            runtime.max_entries as u64 == max_entries
+                && runtime.max_entries_per_directory as u64 == max_entries
+                && runtime.max_depth as u64 == max_depth
+        }
         (
             DriverSpec::AppendDelimited(runtime),
             AuthorizedObservationSourceDriver::AppendDelimited {
@@ -5562,8 +5583,7 @@ fn validate_durable_stream_contract(
         || !stream.selector.exclude.is_empty()
         || contract.decoder_id() != stream.decoder.as_str()
         || contract.authority() != authority
-        || contract.max_entries() != Some(DISCOVERY_MAX_ENTRIES as u64)
-        || contract.max_depth() != Some(DISCOVERY_MAX_DEPTH as u64)
+        || !discovery_matches
         || !driver_matches
         || stream.retention == RawRetentionPolicy::Full
     {
@@ -5965,6 +5985,36 @@ mod tests {
             .matches(&path("project/session/subagents/agent-child.jsonl")));
         assert!(!glob("*/*/subagents/**/agent-*.jsonl")
             .matches(&path("project/session/subagents/agent-child.meta.json")));
+    }
+
+    #[test]
+    fn grok_directory_membership_runtime_matches_the_verified_source_contract() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("sessions")).unwrap();
+        let adapter = crate::grok::GrokAdapter::new();
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![root.path().to_path_buf()],
+                observed_at: 1,
+            })
+            .unwrap()
+            .remove(0);
+        let instance = SourceInstance { id: 1, spec };
+        let mut stream = adapter
+            .streams(&instance)
+            .unwrap()
+            .into_iter()
+            .find(|stream| stream.id.as_str() == "session-membership")
+            .unwrap();
+        let release = crate::grok::verified_support_release().unwrap();
+        let contract = release.source_contract("session-membership").unwrap();
+        validate_durable_stream_contract(contract, &stream).unwrap();
+
+        let DriverSpec::DirectorySnapshot(config) = &mut stream.driver else {
+            panic!("Grok membership must use the common directory driver");
+        };
+        config.max_depth += 1;
+        assert!(validate_durable_stream_contract(contract, &stream).is_err());
     }
 
     #[test]

@@ -1619,6 +1619,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn verified_candidate_retains_the_bounded_membership_driver_contract() {
+        let release = verified_support_release().unwrap();
+        let contract = release.source_contract(MEMBERSHIP_STREAM).unwrap();
+        assert_eq!(contract.root_id(), "sessions");
+        assert_eq!(
+            contract.driver(),
+            crate::adapter::AuthorizedObservationSourceDriver::DirectoryMembership {
+                max_entries: 100_000,
+                max_depth: 8,
+            }
+        );
+    }
+
+    #[test]
     fn declares_transcript_sidecars_membership_and_ignored_projection() {
         let root = TempDir::new().unwrap();
         fs::create_dir_all(root.path().join("sessions")).unwrap();

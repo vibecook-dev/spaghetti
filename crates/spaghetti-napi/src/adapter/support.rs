@@ -599,6 +599,10 @@ struct SupportSourceBoundsWire {
 /// verification and typed access authorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthorizedObservationSourceDriver {
+    DirectoryMembership {
+        max_entries: u64,
+        max_depth: u64,
+    },
     AppendDelimited {
         max_record_bytes: u64,
         max_batch_bytes: u64,
@@ -698,6 +702,15 @@ impl VerifiedSupportRelease {
 
     pub fn scope_programs(&self) -> &ScopeProgramManifest {
         &self.scope_programs
+    }
+
+    /// Return one digest-verified source declaration entry. This describes
+    /// contract content only; a Candidate release still cannot authorize I/O.
+    pub(crate) fn source_contract(
+        &self,
+        stream_id: &str,
+    ) -> Option<&AuthorizedObservationSourceContract> {
+        self.observation_source_contracts.get(stream_id)
     }
 
     pub fn verify_adapter_binding(
@@ -1006,16 +1019,19 @@ fn validate_scope_source_bindings(
             && stream.implementation_state == "existing"
         {
             match authorized_observation_source_contract(stream) {
-                Some(contract) => {
+                Some(contract)
+                    if !require_complete_durable_contracts
+                        || observation_stream_has_complete_lifecycle(stream, u64::MAX) =>
+                {
                     observation_source_contracts.insert(stream.stream_id.clone(), contract);
                 }
-                None if require_complete_durable_contracts => {
+                Some(_) | None if require_complete_durable_contracts => {
                     return Err(SupportContractError::invalid(format!(
                         "supported durable source stream {:?} has no closed common-driver contract",
                         stream.stream_id
                     )));
                 }
-                None => {}
+                Some(_) | None => {}
             }
         }
     }
@@ -1112,6 +1128,10 @@ fn authorized_observation_source_contract(
         _ => return None,
     };
     let driver = match stream.primitive.as_str() {
+        "DirectoryMembership" => AuthorizedObservationSourceDriver::DirectoryMembership {
+            max_entries: stream.bounds.max_entries?,
+            max_depth: stream.bounds.max_depth?,
+        },
         "AppendDelimited" => AuthorizedObservationSourceDriver::AppendDelimited {
             max_record_bytes: stream.bounds.max_record_bytes?,
             max_batch_bytes: stream.bounds.max_batch_bytes?,
@@ -1147,6 +1167,14 @@ fn observation_stream_has_complete_lifecycle(
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     match stream.primitive.as_str() {
+        "DirectoryMembership" => {
+            stream.safe_decoder_state_boundary == "full_snapshot"
+                && stream.bounds.max_entries.is_some_and(|bound| bound > 0)
+                && stream.bounds.max_depth.is_some_and(|bound| bound > 0)
+                && ["membership_change", "identity_change", "delete", "recreate"]
+                    .into_iter()
+                    .all(|required| lifecycle.contains(required))
+        }
         "ReplaceDocument" | "PresenceObject" => {
             stream.safe_decoder_state_boundary == "object_generation_revision"
                 && stream
@@ -4342,6 +4370,43 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("does not match"));
+    }
+
+    #[test]
+    fn promoted_directory_membership_retains_exact_bounds_and_lifecycle() {
+        let scope = fixture_scope_manifest("fixture", SupportReleaseStatus::Promoted);
+        let mut source: SupportSourceDeclarationWire = serde_json::from_value(serde_json::json!({
+            "streams": [{
+                "stream_id": "session-membership",
+                "root_id": "sessions",
+                "relative_patterns": ["**/summary.json"],
+                "decoder_id": "fixture-membership",
+                "authority": "supplemental",
+                "primitive": "DirectoryMembership",
+                "topologies": ["durable"],
+                "implementation_state": "existing",
+                "bounds": {"max_entries": 100_000, "max_depth": 8},
+                "lifecycle": ["membership_change", "identity_change", "delete", "recreate"],
+                "safe_decoder_state_boundary": "full_snapshot"
+            }]
+        }))
+        .unwrap();
+        let contracts = validate_scope_source_bindings(&scope, &source, true).unwrap();
+        assert_eq!(
+            contracts.get("session-membership").unwrap().driver(),
+            AuthorizedObservationSourceDriver::DirectoryMembership {
+                max_entries: 100_000,
+                max_depth: 8,
+            }
+        );
+
+        source.streams[0]
+            .lifecycle
+            .retain(|value| value != "identity_change");
+        assert!(validate_scope_source_bindings(&scope, &source, true)
+            .unwrap_err()
+            .to_string()
+            .contains("no closed common-driver contract"));
     }
 
     #[test]

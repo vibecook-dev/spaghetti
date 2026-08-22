@@ -1213,6 +1213,18 @@ impl AuthorizedObservationSourceReservation {
         };
         let driver_matches = match (&stream.driver, self.source_contract.driver()) {
             (
+                DriverSpec::DirectorySnapshot(runtime),
+                AuthorizedObservationSourceDriver::DirectoryMembership {
+                    max_entries,
+                    max_depth,
+                },
+            ) => {
+                u64::try_from(runtime.max_entries).ok() == Some(max_entries)
+                    && u64::try_from(runtime.max_entries_per_directory).ok() == Some(max_entries)
+                    && u64::try_from(runtime.max_depth).ok() == Some(max_depth)
+                    && stream.consistency == ConsistencyPolicy::SnapshotReplace
+            }
+            (
                 DriverSpec::AppendDelimited(runtime),
                 AuthorizedObservationSourceDriver::AppendDelimited {
                     max_record_bytes,

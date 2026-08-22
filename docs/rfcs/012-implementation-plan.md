@@ -868,6 +868,17 @@ promoted support/declarations, an authorized production access plan, durable
 publication, and public catalog transport rather than on missing vendor
 producer semantics.
 
+The strict source-contract correction that follows closes a promotion-time
+hole exposed by the Grok producer review. Digest-verified support packages now
+retain `DirectoryMembership` as a closed common-driver contract with exact
+entry/depth bounds, and a promoted durable declaration must carry the complete
+membership-change, identity-change, deletion, and recreation lifecycle before
+it can authorize access. Runtime validation compares the common directory
+driver to those retained bounds rather than assuming the Claude-sized global
+ceiling. Candidate status and catalog authority are unchanged; this only makes
+future Grok promotion fail closed on real declaration/runtime drift instead of
+being structurally impossible.
+
 The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
 `ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,
 Codex, and Grok candidate catalog paths and freezes regression guards against
