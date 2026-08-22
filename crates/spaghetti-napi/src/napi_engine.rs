@@ -18,6 +18,7 @@ use crate::adapter::{
     AdapterError, AdapterRegistry, ExternalEntityRef, SupportCatalog, SupportContractError,
 };
 use crate::catalog_contract::query::CatalogQueryContractRequest;
+use crate::catalog_contract::CatalogSnapshotId;
 use crate::catalog_contract::{CatalogCoveragePlanId, CatalogQueryKind};
 use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
@@ -78,6 +79,7 @@ const MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES: usize = 256 * 1024;
 struct CatalogPageJsonRequestWire {
     contract_request: CatalogQueryContractRequest,
     coverage_plan_id: CatalogCoveragePlanId,
+    snapshot_id: CatalogSnapshotId,
     page_size: u32,
     #[serde(default)]
     continuation: Option<JsonValue>,
@@ -88,6 +90,7 @@ struct CatalogPageJsonRequestWire {
 struct CatalogResolutionJsonRequestWire {
     contract_request: CatalogQueryContractRequest,
     coverage_plan_id: CatalogCoveragePlanId,
+    snapshot_id: CatalogSnapshotId,
     external_ref: ExternalEntityRef,
 }
 
@@ -5665,6 +5668,7 @@ impl Task for CatalogJsonTask {
                 let request = CatalogPageQueryRequest::from_wire(
                     wire.contract_request,
                     wire.coverage_plan_id,
+                    wire.snapshot_id,
                     query_kind,
                     wire.page_size,
                     wire.continuation,
@@ -5686,6 +5690,7 @@ impl Task for CatalogJsonTask {
                         CatalogResolutionQueryRequest::new(
                             wire.contract_request,
                             wire.coverage_plan_id,
+                            wire.snapshot_id,
                             wire.external_ref,
                         ),
                         self.cancellation.clone(),

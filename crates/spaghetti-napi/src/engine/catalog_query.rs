@@ -36,7 +36,7 @@ use crate::catalog_contract::query::{
 };
 use crate::catalog_contract::{
     CatalogContractError, CatalogCoveragePlanId, CatalogCoverageScope, CatalogCursor,
-    CatalogQueryFingerprint, CatalogQueryKind, CatalogSortKey,
+    CatalogQueryFingerprint, CatalogQueryKind, CatalogSnapshotId, CatalogSortKey,
 };
 
 use super::catalog_publication::{
@@ -96,6 +96,7 @@ const EXACT_RESOLUTION_ROW_SQL: &str = r#"
 pub(crate) struct CatalogPageQueryRequest {
     contract_request: CatalogQueryContractRequest,
     expected_coverage_plan_id: CatalogCoveragePlanId,
+    expected_snapshot_id: CatalogSnapshotId,
     query_kind: CatalogQueryKind,
     page_size: u32,
     continuation: Option<JsonValue>,
@@ -105,6 +106,7 @@ impl CatalogPageQueryRequest {
     pub(crate) fn new(
         contract_request: CatalogQueryContractRequest,
         expected_coverage_plan_id: CatalogCoveragePlanId,
+        expected_snapshot_id: CatalogSnapshotId,
         query_kind: CatalogQueryKind,
         page_size: u32,
         continuation: Option<CatalogContinuationRequest>,
@@ -118,6 +120,7 @@ impl CatalogPageQueryRequest {
         Self::from_wire(
             contract_request,
             expected_coverage_plan_id,
+            expected_snapshot_id,
             query_kind,
             page_size,
             continuation,
@@ -127,6 +130,7 @@ impl CatalogPageQueryRequest {
     pub(crate) fn from_wire(
         contract_request: CatalogQueryContractRequest,
         expected_coverage_plan_id: CatalogCoveragePlanId,
+        expected_snapshot_id: CatalogSnapshotId,
         query_kind: CatalogQueryKind,
         page_size: u32,
         continuation: Option<JsonValue>,
@@ -139,6 +143,7 @@ impl CatalogPageQueryRequest {
         Ok(Self {
             contract_request,
             expected_coverage_plan_id,
+            expected_snapshot_id,
             query_kind,
             page_size,
             continuation,
@@ -150,6 +155,7 @@ impl CatalogPageQueryRequest {
 pub(crate) struct CatalogResolutionQueryRequest {
     contract_request: CatalogQueryContractRequest,
     expected_coverage_plan_id: CatalogCoveragePlanId,
+    expected_snapshot_id: CatalogSnapshotId,
     external_ref: ExternalEntityRef,
 }
 
@@ -157,11 +163,13 @@ impl CatalogResolutionQueryRequest {
     pub(crate) fn new(
         contract_request: CatalogQueryContractRequest,
         expected_coverage_plan_id: CatalogCoveragePlanId,
+        expected_snapshot_id: CatalogSnapshotId,
         external_ref: ExternalEntityRef,
     ) -> Self {
         Self {
             contract_request,
             expected_coverage_plan_id,
+            expected_snapshot_id,
             external_ref,
         }
     }
@@ -273,6 +281,11 @@ pub(crate) fn execute_catalog_page_query(
         || current_authority.snapshot_id(),
         |value| value.snapshot_id,
     );
+    if snapshot_id != request.expected_snapshot_id {
+        return Err(invalid_catalog_query_input(
+            "snapshot differs from the caller-held catalog authority",
+        ));
+    }
     let retained_request = match request.query_kind {
         CatalogQueryKind::Projects => CatalogRetainedPageRequest::projects_all(
             selection,
@@ -299,6 +312,11 @@ pub(crate) fn execute_catalog_resolution_query(
     })?;
     require_expected_plan(&state, request.expected_coverage_plan_id)?;
     let authority = state.ready_read_authority()?;
+    if authority.snapshot_id() != request.expected_snapshot_id {
+        return Err(invalid_catalog_query_input(
+            "snapshot differs from the caller-held catalog authority",
+        ));
+    }
     let selection = negotiate_durable_query(&request.contract_request, &authority)?;
     let binding = CatalogResolutionRequestBinding::new(
         selection,

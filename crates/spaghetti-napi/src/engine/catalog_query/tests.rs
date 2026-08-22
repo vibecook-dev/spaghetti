@@ -1001,6 +1001,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
     schema::initialize_schema(&connection).unwrap();
     let published = publish_catalog_in(connection, 2, 2);
     let coverage_plan_id = published.state.plan.coverage_plan_id;
+    let snapshot_id = published.state.readiness.last_complete_snapshot.unwrap();
     drop(published.connection);
 
     let mut pool = QueryPool::start(database_path, 1, None).unwrap();
@@ -1021,6 +1022,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
             CatalogPageQueryRequest::new(
                 public_query_request(),
                 coverage_plan_id,
+                snapshot_id,
                 CatalogQueryKind::Projects,
                 10,
                 None,
@@ -1048,6 +1050,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
         CatalogPageQueryRequest::new(
             public_query_request(),
             foreign_plan_id,
+            snapshot_id,
             CatalogQueryKind::Projects,
             10,
             None,
@@ -1062,6 +1065,34 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
         error,
         EngineError::InvalidQuery(ref detail)
             if detail == "invalid catalog query request: coverage plan differs from the current durable authority"
+    ));
+
+    let foreign_snapshot = crate::catalog_contract::CatalogSnapshotId::new(
+        snapshot_id.pack_contract_version,
+        snapshot_id.coverage_plan_id,
+        snapshot_id.readiness_epoch,
+        snapshot_id.complete_commit + 1,
+    )
+    .unwrap();
+    let error = match client.catalog_page(
+        CatalogPageQueryRequest::new(
+            public_query_request(),
+            coverage_plan_id,
+            foreign_snapshot,
+            CatalogQueryKind::Projects,
+            10,
+            None,
+        )
+        .unwrap(),
+        crate::engine::QueryCancellationToken::default(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("foreign snapshot must not drift to the current snapshot"),
+    };
+    assert!(matches!(
+        error,
+        EngineError::InvalidQuery(ref detail)
+            if detail == "invalid catalog query request: snapshot differs from the caller-held catalog authority"
     ));
 
     let source_instance_key =
@@ -1079,6 +1110,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
             CatalogResolutionQueryRequest::new(
                 public_query_request(),
                 coverage_plan_id,
+                snapshot_id,
                 external_ref,
             ),
             crate::engine::QueryCancellationToken::default(),
@@ -1098,6 +1130,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
         CatalogPageQueryRequest::new(
             incompatible,
             coverage_plan_id,
+            snapshot_id,
             CatalogQueryKind::Sessions,
             10,
             None,
@@ -1115,7 +1148,12 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
     let cancelled = crate::engine::QueryCancellationToken::default();
     cancelled.cancel();
     let error = match client.catalog_resolution(
-        CatalogResolutionQueryRequest::new(public_query_request(), coverage_plan_id, external_ref),
+        CatalogResolutionQueryRequest::new(
+            public_query_request(),
+            coverage_plan_id,
+            snapshot_id,
+            external_ref,
+        ),
         cancelled,
     ) {
         Err(error) => error,
