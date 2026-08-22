@@ -1216,12 +1216,13 @@ aggregate, and the v4 completion-snapshot law binds its canonical portable
 shape into both bootstrap and replacement digests. The public durable query
 and any record-level unknown-evidence event exposure remain open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
-retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: complete capability coverage and public bounded
-unknown-evidence query/event exposure, complete remaining family-by-family
-replacement/retraction cases, full semantic reduction, tier/view
-compositionality, and remaining-family durable/scoped reducer digest equality
-remain open.
+retract and partial non-retraction. The common reduction boundary now covers
+every compiled RFC 012C fact family, including replacement, retraction,
+generation reset, stable-identity rejection, and equal durable/scoped reduced-
+state digests. C1 remains `In progress`: selected portable event specialists
+are not yet frozen and exposed for every family, and the public durable bounded
+unknown-evidence query/event surface remains open. RFC 012A tier/view
+compositionality remains an A1/C4 gate rather than a reducer-family gap.
 
 ### C2. Usage-v2 shadow projection
 
