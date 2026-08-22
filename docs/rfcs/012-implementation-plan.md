@@ -1153,10 +1153,10 @@ lost-ack replay, stale-command and success/failure CAS races, all precommit
 rollback seams, source-evidence corruption, transient success from both retry
 lineages, historical reads across attempts, and retry-wake pressure are
 executable. This closes the required-source retry/degraded/recovery path for
-the configured Library refresh scheduler. `Partial` publication, retry from an
-integrity `Error`, initial/no-snapshot integrity publication, changed-plan/epoch
-replacement, physical compaction, caller-authorized local policy, richer
-queries, and promotion evidence remain open.
+the configured Library refresh scheduler. `Partial` publication,
+initial/no-snapshot integrity publication, changed-plan/epoch replacement,
+physical compaction, caller-authorized local policy, richer queries, and
+promotion evidence remain open.
 
 The eleventh bounded B3 slice (`b1cdf88`) closes automatic failure
 classification for that configured same-plan refresh path. Catalog composition
@@ -1170,7 +1170,22 @@ refreshes both append the immutable integrity-failure evidence and preserve
 only the restart-authenticated independently-safe snapshot. Recovery restart,
 lost-ack replay, exact CAS ownership, retry suppression after classification,
 and privacy-safe error projection are executable. This does not add discarded
-initial-build errors or authorize retry from `Error`.
+initial-build errors.
+
+The twelfth bounded B3 slice (`8910505`) adds the persisted
+`Error -> Building` retry required by the transition law. A retry increments
+the attempt without changing the plan or epoch, reports every required source
+as conservatively unavailable, retains the authenticated independently-safe
+snapshot for reads, and can publish a new complete successor or terminate
+again as either `Error` or `Degraded`. Integrity evidence is now immutable
+validated history rather than a single active row: repeated failures bind
+distinct attempts, exact refresh owners, retained publication/content digests,
+and source-neutral machine reasons. Restart rejects duplicate attempts,
+malformed historical rows, rollback behind a newer failure, ambiguous source
+versus integrity recovery, and forged lost-ack origin. Every recovery
+precommit seam rolls back, post-commit replay is idempotent, historical reads
+remain authenticated, and successful recovery does not erase either failure
+ledger. Initial/no-snapshot `Discarded` error publication remains open.
 
 ### B4. Progressive host and UX
 
