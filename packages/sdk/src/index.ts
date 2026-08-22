@@ -38,13 +38,9 @@ export {
   type ScopedUsageObserverEvent,
 } from './runtime/usage-v2-live-merge.js';
 
-// RFC 012D exact-version negotiation plus deliberately incomplete contextual
-// actor, usage, source-control, continuity, exact-known-object scope coverage,
-// contextual replacement-family, capability, artifact-availability, and
-// bootstrap/resync-completion and completed-poll watermark snapshots,
-// attachment-close, and bounded-artifact wire slices. The complete event union,
-// native artifact-access mediator, and native observer transport remain gated
-// on the full scoped contract.
+// RFC 012D exact-version negotiation, contextual envelopes, and the first
+// store-free exact-known-object native observer owner. Artifact reads and
+// dynamic descendant composition remain gated on their full scoped contracts.
 export * from './contracts/rfc012d.js';
 export * from './contracts/rfc012d-actor-envelope.js';
 export * from './contracts/rfc012d-artifact.js';
@@ -62,6 +58,16 @@ export * from './contracts/rfc012d-source-envelope.js';
 export * from './contracts/rfc012d-unknown-wire.js';
 export * from './contracts/rfc012d-usage-envelope.js';
 export * from './contracts/rfc012d-watermark.js';
+export {
+  SCOPED_OBSERVATION_REQUEST_CONTRACT_VERSION,
+  ScopedObservationRequestError,
+  ScopedObservationTransportError,
+  observeSession,
+  type SessionObservationApply,
+  type SessionObservationRequest,
+  type SessionObservationRootIdentity,
+  type SessionObserver,
+} from './scoped-observation.js';
 
 // Transport-neutral async client and the sole-owner production service.
 export * from './client/index.js';
