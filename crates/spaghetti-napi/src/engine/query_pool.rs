@@ -610,14 +610,20 @@ struct QueuedQuery {
     command: QueryCommand,
     queued_at: Instant,
     measured: bool,
+    _source_pass: Option<crate::source::SharedSourcePassPermit>,
 }
 
 impl QueuedQuery {
-    fn measured(command: QueryCommand) -> Self {
+    fn measured(
+        command: QueryCommand,
+        queued_at: Instant,
+        source_pass: Option<crate::source::SharedSourcePassPermit>,
+    ) -> Self {
         Self {
             command,
-            queued_at: Instant::now(),
+            queued_at,
             measured: true,
+            _source_pass: source_pass,
         }
     }
 
@@ -626,6 +632,7 @@ impl QueuedQuery {
             command,
             queued_at: Instant::now(),
             measured: false,
+            _source_pass: None,
         }
     }
 }
@@ -903,6 +910,7 @@ pub struct QueryClient {
     commands: Sender<QueuedQuery>,
     control: Arc<QueryControl>,
     configured_workers: usize,
+    source_pass_pool: Option<SharedSourcePassPool>,
 }
 
 impl QueryClient {
@@ -1746,15 +1754,23 @@ impl QueryClient {
 
         let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
         let (response_tx, response_rx) = bounded(1);
-        self.enqueue(QueryCommand::SourceCoverageReplayBaseline {
-            cancellation_epoch,
-            source_instance_id,
-            owner_id: owner_id.to_string(),
-            owner_scope_key: owner_scope_key.to_vec(),
-            family: family.to_string(),
-            version,
-            response: response_tx,
-        })?;
+        // This is an engine-internal dependency of an already-admitted source
+        // pass. Requiring a second permit could deadlock a capacity-one pool,
+        // while placing permits on query workers could strand every worker
+        // behind admitted source passes. The caller-held source permit remains
+        // the enclosing resource authority for this bounded baseline read.
+        self.enqueue_with_source_admission(
+            false,
+            QueryCommand::SourceCoverageReplayBaseline {
+                cancellation_epoch,
+                source_instance_id,
+                owner_id: owner_id.to_string(),
+                owner_scope_key: owner_scope_key.to_vec(),
+                family: family.to_string(),
+                version,
+                response: response_tx,
+            },
+        )?;
         response_rx
             .recv()
             .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
@@ -1798,7 +1814,31 @@ impl QueryClient {
     }
 
     fn enqueue(&self, command: QueryCommand) -> Result<(), EngineError> {
-        let queued = QueuedQuery::measured(command);
+        self.enqueue_with_source_admission(true, command)
+    }
+
+    fn enqueue_with_source_admission(
+        &self,
+        admit_source_pass: bool,
+        command: QueryCommand,
+    ) -> Result<(), EngineError> {
+        if self.control.stopping.load(Ordering::Acquire) {
+            return Err(EngineError::ShuttingDown);
+        }
+        let queued_at = Instant::now();
+        // Acquire before enqueueing so query workers never occupy every reader
+        // thread while waiting behind source passes that need an internal read.
+        let source_pass = admit_source_pass
+            .then(|| {
+                self.source_pass_pool
+                    .as_ref()
+                    .map(SharedSourcePassPool::blocking_acquire)
+            })
+            .flatten();
+        if self.control.stopping.load(Ordering::Acquire) {
+            return Err(EngineError::ShuttingDown);
+        }
+        let queued = QueuedQuery::measured(command, queued_at, source_pass);
         let depth = self.commands.len().saturating_add(1);
         match self.commands.try_send(queued) {
             Ok(()) => {
@@ -1873,7 +1913,6 @@ impl QueryPool {
             let thread_commands = command_rx.clone();
             let thread_ready = ready_tx.clone();
             let thread_control = Arc::clone(&control);
-            let thread_pool = source_pass_pool.clone();
             let join = thread::Builder::new()
                 .name(format!("spaghetti-query-{worker_id}"))
                 .spawn(move || {
@@ -1883,7 +1922,6 @@ impl QueryPool {
                         thread_commands,
                         thread_ready,
                         thread_control,
-                        thread_pool,
                     )
                 })
                 .map_err(|error| EngineError::WorkerStart {
@@ -1926,6 +1964,7 @@ impl QueryPool {
                 commands: command_tx,
                 control,
                 configured_workers: workers,
+                source_pass_pool,
             },
             joins,
         })
@@ -1973,7 +2012,6 @@ fn query_thread(
     commands: Receiver<QueuedQuery>,
     ready: Sender<Result<(), EngineError>>,
     control: Arc<QueryControl>,
-    source_pass_pool: Option<SharedSourcePassPool>,
 ) {
     let connection = match open_reader(&database_path) {
         Ok(connection) => connection,
@@ -1994,16 +2032,19 @@ fn query_thread(
     drop(ready);
 
     while let Ok(queued) = commands.recv() {
-        if matches!(queued.command, QueryCommand::Shutdown) {
+        let QueuedQuery {
+            command,
+            queued_at,
+            measured,
+            _source_pass,
+        } = queued;
+        if matches!(command, QueryCommand::Shutdown) {
             break;
         }
-        let _pass = source_pass_pool
-            .as_ref()
-            .map(SharedSourcePassPool::blocking_acquire);
-        let _measurement = queued
-            .measured
-            .then(|| QueryMeasurementGuard::begin(&control.telemetry, worker_id, queued.queued_at));
-        let command = queued.command;
+        // The caller-acquired permit is deliberately retained for the whole
+        // command even though the worker never waits for admission itself.
+        let _measurement = measured
+            .then(|| QueryMeasurementGuard::begin(&control.telemetry, worker_id, queued_at));
         match command {
             QueryCommand::Overview {
                 cancellation_epoch,

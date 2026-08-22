@@ -19,6 +19,7 @@ use crate::source::catalog_projection::{
     CatalogInitialProjectionBatch, CatalogRefreshProjectionBatch, CatalogSourceProjection,
 };
 use crate::source::catalog_runtime_registry::CatalogSourceRuntime;
+use crate::source::IngestPriority;
 
 use super::{EngineError, ObservationCoordinator, QueryCancellationToken, SpaghettiEngineCore};
 
@@ -117,6 +118,11 @@ impl SpaghettiEngineCore {
         intent: CatalogBuildIntent,
         cancellation: QueryCancellationToken,
     ) -> Result<CatalogBuildOutcome, EngineError> {
+        let priority = match intent {
+            CatalogBuildIntent::Startup => IngestPriority::Backfill,
+            CatalogBuildIntent::Refresh => IngestPriority::ForegroundRepair,
+        };
+        let _source_pass = self.acquire_source_pass(priority)?;
         let registered =
             self.register_configured_catalog_sources(configured, cancellation.clone())?;
         match self.prepare_registered_catalog(registered, intent, cancellation.clone())? {

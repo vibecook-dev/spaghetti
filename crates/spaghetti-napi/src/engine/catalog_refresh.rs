@@ -47,10 +47,6 @@ impl CatalogRefreshScheduler {
         Self::start_with_policy(
             move |cancellation| {
                 let engine = engine.upgrade().ok_or(EngineError::ShuttingDown)?;
-                let _pass = engine
-                    .source_pass_pool
-                    .as_ref()
-                    .map(crate::source::SharedSourcePassPool::blocking_acquire);
                 match engine.reconcile_configured_catalog(
                     configured.clone(),
                     CatalogBuildIntent::Refresh,

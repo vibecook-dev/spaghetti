@@ -75,6 +75,7 @@ const CLAUDE_ADAPTER_ID: &str = "claude-code";
 const CODEX_ADAPTER_ID: &str = "codex";
 const GROK_ADAPTER_ID: &str = "grok";
 const MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES: usize = 256 * 1024;
+const DEFAULT_SHARED_SOURCE_PASSES: usize = 4;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -5337,13 +5338,22 @@ impl Task for OpenEngineTask {
             .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
         let catalog_source_runtimes = builtin_catalog_source_runtimes()
             .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
+        let source_pass_pool = crate::source::SharedSourcePassPool::new(
+            DEFAULT_SHARED_SOURCE_PASSES,
+        )
+        .map_err(|_| {
+            Error::new(
+                Status::GenericFailure,
+                "could not initialize bounded source admission".to_string(),
+            )
+        })?;
         let inner = SpaghettiEngineCore::open_with_runtime_registry(
             EngineOptions {
                 database_path: PathBuf::from(&self.options.db_path),
                 query_workers,
                 owner_label: self.options.owner_label.clone(),
                 defer_query_structures: self.options.bootstrap_query_structures.unwrap_or(false),
-                source_pass_pool: None,
+                source_pass_pool: Some(source_pass_pool),
             },
             registry,
             catalog_source_runtimes,

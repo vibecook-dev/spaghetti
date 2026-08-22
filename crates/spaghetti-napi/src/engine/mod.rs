@@ -68,6 +68,7 @@ use crate::source::catalog_projection::{
     CatalogInitialProjectionBatch, CatalogRefreshProjectionBatch,
 };
 use crate::source::catalog_runtime_registry::CatalogSourceRuntimeRegistry;
+use crate::source::{IngestPriority, SharedSourcePassPermit};
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
@@ -183,6 +184,8 @@ use writer::{WriterClient, WriterRuntime};
 
 const DEFAULT_QUERY_WORKERS: usize = 2;
 const MAX_QUERY_WORKERS: usize = 16;
+const WRITER_QUEUE_SOFT_SOURCE_PRESSURE: u64 = 32;
+const WRITER_QUEUE_HARD_SOURCE_PRESSURE: u64 = 128;
 pub const FACT_FAMILY_REPLAY_COMMAND_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_COMMIT_WAIT_TIMEOUT_MS: u32 = 30_000;
 pub const MAX_COMMIT_WAIT_TIMEOUT_MS: u32 = 300_000;
@@ -1917,6 +1920,7 @@ impl SpaghettiEngineCore {
         policy: ChangeLogRetentionPolicy,
         now_ms: i64,
     ) -> Result<ChangeLogRetentionSnapshot, EngineError> {
+        let _source_pass = self.acquire_source_pass(IngestPriority::Maintenance)?;
         let writer = self.writer_client()?;
         writer.maintain_change_log(policy, now_ms)
     }
@@ -1963,6 +1967,30 @@ impl SpaghettiEngineCore {
         self.commit_notifications.latest_commit_seq()
     }
 
+    /// Enter the engine-wide source/query admission domain. Writer queue and
+    /// checkpoint pressure lower producer concurrency without changing the
+    /// pool's fixed maximum or allowing an individual workload to resize it.
+    pub(crate) fn acquire_source_pass(
+        &self,
+        priority: IngestPriority,
+    ) -> Result<Option<SharedSourcePassPermit>, EngineError> {
+        let Some(pool) = self.source_pass_pool.as_ref() else {
+            return Ok(None);
+        };
+        let writer = self.writer_client()?.performance_snapshot();
+        let limit = source_pass_concurrency_limit(
+            pool.max_concurrent_passes(),
+            writer.queue_depth,
+            writer.checkpoint.last_remaining_frames,
+        );
+        pool.set_concurrency_limit(limit).map_err(|_| {
+            EngineError::InvalidCommit(
+                "shared source-pass pressure limit is outside its fixed capacity".to_string(),
+            )
+        })?;
+        Ok(Some(pool.blocking_acquire_priority(priority)))
+    }
+
     pub fn cancel_pending_queries(&self) -> Result<u64, EngineError> {
         let (_, queries) = self.clients()?;
         Ok(queries.cancel_pending())
@@ -1983,6 +2011,7 @@ impl SpaghettiEngineCore {
         cancellation: QueryCancellationToken,
     ) -> Result<ReconcileOutcome, EngineError> {
         let adapter = self.registered_adapter(adapter_id)?;
+        let _source_pass = self.acquire_source_pass(IngestPriority::ForegroundRepair)?;
         ObservationCoordinator::with_cancellation(Arc::clone(self), cancellation)
             .reconcile(adapter.as_ref(), request)
     }
@@ -2032,6 +2061,7 @@ impl SpaghettiEngineCore {
             ));
         }
         let adapter = self.registered_adapter(&command.adapter_id)?;
+        let _source_pass = self.acquire_source_pass(IngestPriority::ForegroundRepair)?;
         let request = FactFamilyReplayRequest::usage_v2(command.reason.clone()).authorized(
             target.adapter_id.clone(),
             target.canonical_source_instance_key,
@@ -2422,6 +2452,7 @@ impl SpaghettiEngineCore {
                 .collect::<Vec<_>>();
             (runtime.writer.client(), clients)
         };
+        let _source_pass = self.acquire_source_pass(IngestPriority::Maintenance)?;
 
         let mut paused = Vec::with_capacity(supervisor_clients.len());
         for client in supervisor_clients {
@@ -2654,6 +2685,21 @@ impl Drop for SpaghettiEngineCore {
     }
 }
 
+fn source_pass_concurrency_limit(
+    max_concurrent_passes: usize,
+    writer_queue_depth: u64,
+    checkpoint_remaining_frames: u64,
+) -> usize {
+    debug_assert!(max_concurrent_passes > 0);
+    if checkpoint_remaining_frames > 0 || writer_queue_depth >= WRITER_QUEUE_HARD_SOURCE_PRESSURE {
+        1
+    } else if writer_queue_depth >= WRITER_QUEUE_SOFT_SOURCE_PRESSURE {
+        (max_concurrent_passes / 2).max(1)
+    } else {
+        max_concurrent_passes.max(1)
+    }
+}
+
 fn normalize_database_path(path: &Path) -> Result<PathBuf, EngineError> {
     if path.as_os_str().is_empty() || path == Path::new(":memory:") {
         return Err(EngineError::InvalidConfig(
@@ -2748,6 +2794,24 @@ mod tests {
             defer_query_structures: false,
             source_pass_pool: None,
         }
+    }
+
+    #[test]
+    fn writer_pressure_reduces_shared_source_concurrency_without_disabling_it() {
+        assert_eq!(source_pass_concurrency_limit(4, 0, 0), 4);
+        assert_eq!(
+            source_pass_concurrency_limit(4, WRITER_QUEUE_SOFT_SOURCE_PRESSURE, 0),
+            2
+        );
+        assert_eq!(
+            source_pass_concurrency_limit(4, WRITER_QUEUE_HARD_SOURCE_PRESSURE, 0),
+            1
+        );
+        assert_eq!(source_pass_concurrency_limit(4, 0, 1), 1);
+        assert_eq!(
+            source_pass_concurrency_limit(1, WRITER_QUEUE_SOFT_SOURCE_PRESSURE, 0),
+            1
+        );
     }
 
     fn catalog_selection() -> ContractVersionSelection {
@@ -3015,7 +3079,7 @@ mod tests {
     }
 
     #[test]
-    fn rfc012_d3_engine_catalog_query_workers_wait_for_shared_source_pass_pool() {
+    fn rfc012_d3_engine_queries_share_admission_without_blocking_internal_source_reads() {
         let dir = tempdir().unwrap();
         let pool = SharedSourcePassPool::new(1).expect("one shared pass is valid");
         let mut bootstrap_options = options(dir.path().join("d3-pool.db"));
@@ -3044,6 +3108,27 @@ mod tests {
             .expect("overview succeeds after the shared permit is released");
         assert_eq!(overview.commit_seq, 0);
         worker.join().expect("overview worker returns");
+
+        let held = pool.blocking_acquire_priority(IngestPriority::ForegroundRepair);
+        let (tx, rx) = mpsc::channel();
+        let baseline_engine = Arc::clone(&engine);
+        let worker = thread::spawn(move || {
+            let result = baseline_engine.source_coverage_replay_baseline(
+                1,
+                "runtime.usage-v2",
+                b"scope",
+                "runtime.usage-v2",
+                1,
+            );
+            let _ = tx.send(result);
+        });
+        let baseline = rx.recv_timeout(Duration::from_secs(2));
+        drop(held);
+        assert!(baseline
+            .expect("internal source baseline does not need a nested permit")
+            .unwrap()
+            .is_none());
+        worker.join().expect("baseline worker returns");
         engine.shutdown().unwrap();
     }
 

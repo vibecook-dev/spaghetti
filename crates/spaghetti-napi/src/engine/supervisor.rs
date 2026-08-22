@@ -22,7 +22,7 @@ use crate::catalog_contract::evidence::{
 };
 use crate::catalog_contract::hydration::CatalogHydrationExecutionAuthorization;
 use crate::source::catalog_projection::decode_catalog_confined_locator;
-use crate::source::{confined_relative_path_key, DirtyReason, PollingPolicy};
+use crate::source::{confined_relative_path_key, DirtyReason, IngestPriority, PollingPolicy};
 
 use super::coordinator::{SelectedCatalogHydrationObject, SelectorPatterns};
 use super::observation::PendingObservationWork;
@@ -695,17 +695,27 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
     };
     let startup_cancellations = [cancellation.clone(), scan_cancellation.clone()];
     loop {
-        match ObservationCoordinator::with_cancellations(
-            Arc::clone(&initial_engine),
-            startup_cancellations.to_vec(),
-        )
-        .reconcile(
-            &adapter,
-            ReconcileRequest {
-                configured_roots: options.configured_roots.clone(),
-                reason: format!("{}_initial_scan", options.reason),
-            },
-        ) {
+        let result = {
+            let _source_pass = match initial_engine.acquire_source_pass(IngestPriority::Backfill) {
+                Ok(source_pass) => source_pass,
+                Err(error) => {
+                    let _ = started.send(Err(error));
+                    return;
+                }
+            };
+            ObservationCoordinator::with_cancellations(
+                Arc::clone(&initial_engine),
+                startup_cancellations.to_vec(),
+            )
+            .reconcile(
+                &adapter,
+                ReconcileRequest {
+                    configured_roots: options.configured_roots.clone(),
+                    reason: format!("{}_initial_scan", options.reason),
+                },
+            )
+        };
+        match result {
             Ok(_) => break,
             Err(EngineError::ObservationBusy) => {
                 if let Err(error) =
@@ -1172,6 +1182,7 @@ fn execute_selected_catalog_hydration<A: AgentAdapter>(
         relative_path,
         expected_generation: target.locator_owner.generation,
     };
+    let _source_pass = engine.acquire_source_pass(IngestPriority::Interactive)?;
     let outcome =
         ObservationCoordinator::with_cancellations(Arc::clone(engine), cancellations.to_vec())
             .reconcile_selected_catalog_hydration(adapter, instance.spec.clone(), &selected)?;
@@ -1466,6 +1477,12 @@ fn drain_pending_once<A: AgentAdapter>(
     let Some(work) = engine.next_observation_work(adapter_id) else {
         return Ok(None);
     };
+    let reason = match &work {
+        PendingObservationWork::Adapter { reason, .. }
+        | PendingObservationWork::Instance { reason, .. }
+        | PendingObservationWork::Object { reason, .. } => *reason,
+    };
+    let _source_pass = engine.acquire_source_pass(priority_for_dirty_reason(reason))?;
     match work {
         PendingObservationWork::Adapter {
             adapter_id: pending_adapter,
@@ -1604,6 +1621,20 @@ fn dirty_reason_name(reason: DirtyReason) -> &'static str {
         DirtyReason::RootMoved => "root_moved",
         DirtyReason::Recovery => "recovery",
         DirtyReason::ManualRepair => "manual_repair",
+    }
+}
+
+fn priority_for_dirty_reason(reason: DirtyReason) -> IngestPriority {
+    match reason {
+        DirtyReason::NativeEvent | DirtyReason::PollDetectedChange => IngestPriority::Interactive,
+        DirtyReason::Recovery => IngestPriority::Backfill,
+        DirtyReason::WatcherOverflow
+        | DirtyReason::InternalQueueOverflow
+        | DirtyReason::BackendError
+        | DirtyReason::CursorInvalid
+        | DirtyReason::IdentityChanged
+        | DirtyReason::RootMoved
+        | DirtyReason::ManualRepair => IngestPriority::ForegroundRepair,
     }
 }
 
@@ -1757,6 +1788,34 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn dirty_reasons_map_to_bounded_global_priority_classes() {
+        for reason in [DirtyReason::NativeEvent, DirtyReason::PollDetectedChange] {
+            assert_eq!(
+                priority_for_dirty_reason(reason),
+                IngestPriority::Interactive
+            );
+        }
+        assert_eq!(
+            priority_for_dirty_reason(DirtyReason::Recovery),
+            IngestPriority::Backfill
+        );
+        for reason in [
+            DirtyReason::WatcherOverflow,
+            DirtyReason::InternalQueueOverflow,
+            DirtyReason::BackendError,
+            DirtyReason::CursorInvalid,
+            DirtyReason::IdentityChanged,
+            DirtyReason::RootMoved,
+            DirtyReason::ManualRepair,
+        ] {
+            assert_eq!(
+                priority_for_dirty_reason(reason),
+                IngestPriority::ForegroundRepair
+            );
+        }
+    }
 
     fn unavailable_watcher(
         _engine: Weak<SpaghettiEngineCore>,
