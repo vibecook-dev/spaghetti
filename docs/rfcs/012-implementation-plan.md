@@ -1145,12 +1145,14 @@ observer ordering, or replacement authority. The same bounded aggregate is
 now captured from the scoped reducer at each completed-poll boundary and
 carried by the attachment-bound RFC 012D watermark v2 with exact Rust-issued
 context. This is one coalesced state snapshot, not one public event per unknown
-record. The public durable query plus bootstrap/resync completion and
-replacement-digest integration remain open.
+record. Bootstrap/resync completion barriers now carry the same exact bounded
+aggregate, and the v4 completion-snapshot law binds its canonical portable
+shape into both bootstrap and replacement digests. The public durable query
+and any record-level unknown-evidence event exposure remain open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: complete capability coverage and bounded unknown-evidence
-event/replacement integration, complete remaining family-by-family
+does not close C1: complete capability coverage and public bounded
+unknown-evidence query/event exposure, complete remaining family-by-family
 replacement/retraction cases, full semantic reduction, tier/view
 compositionality, and remaining-family durable/scoped reducer digest equality
 remain open.
@@ -2233,6 +2235,11 @@ Current landing status (2026-08-20):
   observed time, queue boundary, barrier lineage, replacement manifest,
   capability/support-release evidence, RFC 012A source and scope coverage,
   canonical explicit errors, and artifact-availability snapshot. Context
+  also binds the complete bounded unknown-native-evidence aggregate and its
+  deterministic value-free samples. The nested bootstrap/resync barrier and
+  completion-snapshot contracts advance to v4 for that required field; the
+  enclosing completion-envelope contract remains v1 and rejects mismatched
+  nested versions rather than reinterpreting them.
   construction failure leaves the offered barrier queued. Rust reconstructs
   both typed barriers and recomputes their BLAKE3 snapshot and event identities;
   portable TypeScript consumes only the Rust-issued context and independently
@@ -2243,8 +2250,8 @@ Current landing status (2026-08-20):
   one selected support release, so an invalid barrier cannot be accepted and
   later wedge the consumer. A privacy-reduced Rust fixture covers both clean
   bootstrap and resync at equal state. This adds no N-API method, portable
-  observer owner, unknown-event preservation, native source access, or task/
-  artifact discovery authority; and
+  observer owner, per-record unknown-event preservation, native source access,
+  or task/artifact discovery authority; and
 - the contextual poll-watermark v1 slice (`c28bdef`) freezes one completed
   poll's offered boundary without turning request generation or a native clock
   into semantic progress. A process-local attachment authority is retained by

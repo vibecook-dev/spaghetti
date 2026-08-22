@@ -16,6 +16,12 @@ import {
   type SourceCoverageSet,
 } from './rfc012a.js';
 import {
+  parseUnknownEvidenceSnapshot,
+  parseUnknownEvidenceSnapshotContext,
+  type UnknownEvidenceSnapshot,
+  type UnknownEvidenceSnapshotContext,
+} from './rfc012c-unknown-evidence.js';
+import {
   parseScopedArtifactAvailabilityContext,
   parseScopedArtifactAvailabilitySnapshot,
   type ScopedArtifactAvailabilityContext,
@@ -49,7 +55,7 @@ import { parseScopedUsageRoot, type ScopedUsageRoot, type ScopedUsageSourceBindi
 import { parseObservationContractSelectionForExpected, type ObservationContractSelection } from './rfc012d.js';
 
 export const SCOPED_COMPLETION_ENVELOPE_CONTRACT_VERSION = 1 as const;
-export const SCOPED_COMPLETION_BARRIER_CONTRACT_VERSION = 3 as const;
+export const SCOPED_COMPLETION_BARRIER_CONTRACT_VERSION = 4 as const;
 
 const MAX_SOURCE_COVERAGE_SETS = 64;
 const MAX_COVERAGE_ERRORS_PER_SET = 4_096;
@@ -96,6 +102,7 @@ export interface ScopedCompletionEnvelopeContext {
   replacement_manifest_context: ScopedReplacementManifestContext;
   scope_coverage_context: ScopedScopeCoverageContext;
   artifact_availability_context: ScopedArtifactAvailabilityContext;
+  unknown_evidence_context: UnknownEvidenceSnapshotContext;
 }
 
 export interface ScopedBootstrapCompletionBarrier {
@@ -110,6 +117,7 @@ export interface ScopedBootstrapCompletionBarrier {
   scope_coverage: ScopedScopeCoverage;
   explicit_object_errors: CoverageError[];
   artifact_availability: ScopedArtifactAvailabilitySnapshot;
+  unknown_evidence: UnknownEvidenceSnapshot;
   queue_state: ScopedCompletionQueueState;
   root_present: boolean;
 }
@@ -128,6 +136,7 @@ export interface ScopedResyncCompletionBarrier {
   scope_coverage: ScopedScopeCoverage;
   explicit_object_errors: CoverageError[];
   artifact_availability: ScopedArtifactAvailabilitySnapshot;
+  unknown_evidence: UnknownEvidenceSnapshot;
   queue_state: ScopedCompletionQueueState;
   root_present: boolean;
 }
@@ -361,6 +370,7 @@ export function parseScopedCompletionEnvelopeContext(value: unknown): ScopedComp
       'replacement_manifest_context',
       'scope_coverage_context',
       'artifact_availability_context',
+      'unknown_evidence_context',
     ],
     'scoped completion envelope context',
   );
@@ -379,6 +389,7 @@ export function parseScopedCompletionEnvelopeContext(value: unknown): ScopedComp
   const replacementContext = parseScopedReplacementManifestContext(input.replacement_manifest_context);
   const scopeContext = parseScopedScopeCoverageContext(input.scope_coverage_context);
   const artifactContext = parseScopedArtifactAvailabilityContext(input.artifact_availability_context);
+  const unknownEvidenceContext = parseUnknownEvidenceSnapshotContext(input.unknown_evidence_context);
   if (typeof input.adapter_id !== 'string' || input.adapter_id !== scopeContext.root.adapter_id) {
     throw new ContractValidationError('completion context adapter does not match the scoped authority');
   }
@@ -436,6 +447,7 @@ export function parseScopedCompletionEnvelopeContext(value: unknown): ScopedComp
     replacement_manifest_context: replacementContext,
     scope_coverage_context: scopeContext,
     artifact_availability_context: artifactContext,
+    unknown_evidence_context: unknownEvidenceContext,
   };
 }
 
@@ -536,6 +548,7 @@ function parseBarrierComponents(value: UnknownRecord, context: ScopedCompletionE
       value.artifact_availability,
       context.artifact_availability_context,
     ),
+    unknown_evidence: parseUnknownEvidenceSnapshot(value.unknown_evidence, context.unknown_evidence_context),
     queue_state: parseQueueState(value.queue_state),
   };
 }
@@ -557,6 +570,7 @@ function parseCompletionEvent(value: unknown, context: ScopedCompletionEnvelopeC
         'scope_coverage',
         'explicit_object_errors',
         'artifact_availability',
+        'unknown_evidence',
         'queue_state',
         'root_present',
       ],
@@ -608,6 +622,7 @@ function parseCompletionEvent(value: unknown, context: ScopedCompletionEnvelopeC
         'scope_coverage',
         'explicit_object_errors',
         'artifact_availability',
+        'unknown_evidence',
         'queue_state',
         'root_present',
       ],

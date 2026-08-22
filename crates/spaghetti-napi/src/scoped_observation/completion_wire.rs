@@ -35,6 +35,10 @@ use super::scope_coverage_wire::{
     ScopedScopeCoverageConsumerContext, ScopedScopeCoverageContextWire, ScopedScopeCoverageWire,
 };
 use super::source_wire::{ScopedSourceEnvelopeWire, SCOPED_SOURCE_ENVELOPE_CONTRACT_VERSION};
+use super::unknown_evidence_wire::{
+    UnknownEvidenceSnapshotConsumerContext, UnknownEvidenceSnapshotContextWire,
+    UnknownEvidenceSnapshotWire,
+};
 use super::{
     bootstrap_barrier_snapshot_is_valid, bootstrap_complete_event_id, observer_control_source,
     resync_barrier_snapshot_is_valid, resync_complete_event_id, source_presence_event_id,
@@ -265,6 +269,7 @@ pub(crate) struct ScopedCompletionEnvelopeConsumerContext {
     replacement_manifest_context: ScopedReplacementManifestConsumerContext,
     scope_coverage_context: ScopedScopeCoverageConsumerContext,
     artifact_availability_context: ScopedArtifactAvailabilityConsumerContext,
+    unknown_evidence_context: UnknownEvidenceSnapshotConsumerContext,
 }
 
 impl std::fmt::Debug for ScopedCompletionEnvelopeConsumerContext {
@@ -311,6 +316,7 @@ impl ScopedCompletionEnvelopeConsumerContext {
             replacement_manifest_context,
             scope_coverage_context,
             artifact_availability_context,
+            unknown_evidence_context,
         ) = match &envelope.event {
             ScopedObservationEvent::ObserverBootstrapComplete { barrier } => {
                 validate_bootstrap_barrier(barrier, expected_root, envelope)?;
@@ -326,6 +332,7 @@ impl ScopedCompletionEnvelopeConsumerContext {
                         source_coverage: &barrier.source_coverage,
                         explicit_object_errors: &barrier.explicit_object_errors,
                         artifact_availability: &barrier.artifact_availability,
+                        unknown_evidence: &barrier.unknown_evidence,
                     },
                 )?;
                 (
@@ -341,6 +348,7 @@ impl ScopedCompletionEnvelopeConsumerContext {
                     contexts.1,
                     contexts.2,
                     contexts.3,
+                    contexts.4,
                 )
             }
             ScopedObservationEvent::ObserverResyncComplete { barrier } => {
@@ -357,6 +365,7 @@ impl ScopedCompletionEnvelopeConsumerContext {
                         source_coverage: &barrier.source_coverage,
                         explicit_object_errors: &barrier.explicit_object_errors,
                         artifact_availability: &barrier.artifact_availability,
+                        unknown_evidence: &barrier.unknown_evidence,
                     },
                 )?;
                 (
@@ -373,6 +382,7 @@ impl ScopedCompletionEnvelopeConsumerContext {
                     contexts.1,
                     contexts.2,
                     contexts.3,
+                    contexts.4,
                 )
             }
             _ => return Ok(None),
@@ -410,6 +420,7 @@ impl ScopedCompletionEnvelopeConsumerContext {
             replacement_manifest_context,
             scope_coverage_context,
             artifact_availability_context,
+            unknown_evidence_context,
         };
         if capability_snapshot
             != ScopedCapabilitySnapshotWire::from_context(&context.capability_context)
@@ -457,6 +468,7 @@ impl ScopedCompletionEnvelopeConsumerContext {
             replacement_manifest_context: self.replacement_manifest_context.wire(),
             scope_coverage_context: self.scope_coverage_context.wire(),
             artifact_availability_context: self.artifact_availability_context.wire(),
+            unknown_evidence_context: self.unknown_evidence_context.wire(),
         }
     }
 }
@@ -492,6 +504,7 @@ pub(crate) struct ScopedCompletionEnvelopeContextWire {
     replacement_manifest_context: ScopedReplacementManifestContextWire,
     scope_coverage_context: ScopedScopeCoverageContextWire,
     artifact_availability_context: ScopedArtifactAvailabilityContextWire,
+    unknown_evidence_context: UnknownEvidenceSnapshotContextWire,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -508,6 +521,7 @@ struct BootstrapBarrierWire {
     scope_coverage: ScopedScopeCoverageWire,
     explicit_object_errors: Vec<CoverageError>,
     artifact_availability: ScopedArtifactAvailabilitySnapshotWire,
+    unknown_evidence: UnknownEvidenceSnapshotWire,
     queue_state: CompletionQueueStateWire,
     root_present: bool,
 }
@@ -528,6 +542,7 @@ struct ResyncBarrierWire {
     scope_coverage: ScopedScopeCoverageWire,
     explicit_object_errors: Vec<CoverageError>,
     artifact_availability: ScopedArtifactAvailabilitySnapshotWire,
+    unknown_evidence: UnknownEvidenceSnapshotWire,
     queue_state: CompletionQueueStateWire,
     root_present: bool,
 }
@@ -760,6 +775,7 @@ fn component_contexts(
         ScopedReplacementManifestConsumerContext,
         ScopedScopeCoverageConsumerContext,
         ScopedArtifactAvailabilityConsumerContext,
+        UnknownEvidenceSnapshotConsumerContext,
     ),
     ScopedCompletionEnvelopeContractError,
 > {
@@ -790,11 +806,15 @@ fn component_contexts(
         snapshot.artifact_availability,
     )
     .map_err(ScopedCompletionEnvelopeContractError::nested)?;
+    let unknown_evidence_context =
+        UnknownEvidenceSnapshotConsumerContext::from_expected(snapshot.unknown_evidence)
+            .map_err(ScopedCompletionEnvelopeContractError::nested)?;
     Ok((
         capability_snapshot,
         replacement_manifest_context,
         scope_coverage_context,
         artifact_availability_context,
+        unknown_evidence_context,
     ))
 }
 
@@ -880,6 +900,8 @@ fn event_from_scoped(
                     "explicit_object_errors": barrier.explicit_object_errors,
                     "artifact_availability": ScopedArtifactAvailabilitySnapshotWire::from_context(&artifact_context)
                         .map_err(ScopedCompletionEnvelopeContractError::nested)?,
+                    "unknown_evidence": UnknownEvidenceSnapshotWire::from_context(&context.unknown_evidence_context)
+                        .map_err(ScopedCompletionEnvelopeContractError::nested)?,
                     "queue_state": CompletionQueueStateWire::from_internal(barrier.queue_state)?,
                     "root_present": barrier.root_present,
                 }
@@ -917,6 +939,8 @@ fn event_from_scoped(
                         .map_err(ScopedCompletionEnvelopeContractError::nested)?,
                     "explicit_object_errors": barrier.explicit_object_errors,
                     "artifact_availability": ScopedArtifactAvailabilitySnapshotWire::from_context(&artifact_context)
+                        .map_err(ScopedCompletionEnvelopeContractError::nested)?,
+                    "unknown_evidence": UnknownEvidenceSnapshotWire::from_context(&context.unknown_evidence_context)
                         .map_err(ScopedCompletionEnvelopeContractError::nested)?,
                     "queue_state": CompletionQueueStateWire::from_internal(barrier.queue_state)?,
                     "root_present": barrier.root_present,
@@ -973,6 +997,7 @@ struct BootstrapBarrierInput {
     scope_coverage: JsonValue,
     explicit_object_errors: JsonValue,
     artifact_availability: JsonValue,
+    unknown_evidence: JsonValue,
     queue_state: CompletionQueueStateWire,
     root_present: bool,
 }
@@ -1007,6 +1032,11 @@ fn parse_bootstrap_barrier(
             &context.artifact_availability_context,
         )
         .map_err(ScopedCompletionEnvelopeContractError::nested)?;
+    let unknown_evidence = UnknownEvidenceSnapshotWire::from_wire_value_for_context(
+        input.unknown_evidence,
+        &context.unknown_evidence_context,
+    )
+    .map_err(ScopedCompletionEnvelopeContractError::nested)?;
     let ExpectedCompletionBarrier::Bootstrap { snapshot_digest } = context.expected_barrier else {
         return Err(ScopedCompletionEnvelopeContractError::ContextMismatch);
     };
@@ -1038,6 +1068,7 @@ fn parse_bootstrap_barrier(
         scope_coverage,
         explicit_object_errors,
         artifact_availability,
+        unknown_evidence,
         queue_state: input.queue_state,
         root_present: input.root_present,
     })
@@ -1059,6 +1090,7 @@ struct ResyncBarrierInput {
     scope_coverage: JsonValue,
     explicit_object_errors: JsonValue,
     artifact_availability: JsonValue,
+    unknown_evidence: JsonValue,
     queue_state: CompletionQueueStateWire,
     root_present: bool,
 }
@@ -1093,6 +1125,11 @@ fn parse_resync_barrier(
             &context.artifact_availability_context,
         )
         .map_err(ScopedCompletionEnvelopeContractError::nested)?;
+    let unknown_evidence = UnknownEvidenceSnapshotWire::from_wire_value_for_context(
+        input.unknown_evidence,
+        &context.unknown_evidence_context,
+    )
+    .map_err(ScopedCompletionEnvelopeContractError::nested)?;
     let ExpectedCompletionBarrier::Resync {
         started_control_sequence,
         coverage_snapshot_digest,
@@ -1140,6 +1177,7 @@ fn parse_resync_barrier(
         scope_coverage,
         explicit_object_errors,
         artifact_availability,
+        unknown_evidence,
         queue_state: input.queue_state,
         root_present: input.root_present,
     })
@@ -1324,6 +1362,7 @@ fn preflight_barrier_arrays(
             "scope_coverage",
             "explicit_object_errors",
             "artifact_availability",
+            "unknown_evidence",
             "queue_state",
             "root_present",
         ]
@@ -1340,6 +1379,7 @@ fn preflight_barrier_arrays(
             "scope_coverage",
             "explicit_object_errors",
             "artifact_availability",
+            "unknown_evidence",
             "queue_state",
             "root_present",
         ]

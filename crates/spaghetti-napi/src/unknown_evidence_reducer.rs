@@ -69,12 +69,23 @@ impl UnknownEvidenceOccurrence {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct UnknownEvidenceAggregateSnapshot {
     pub complete_count: u64,
     pub complete_observed_bytes: u64,
     pub aggregate_digest: [u8; 32],
     pub samples: Vec<UnknownEvidenceOccurrence>,
+}
+
+impl std::fmt::Debug for UnknownEvidenceAggregateSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UnknownEvidenceAggregateSnapshot")
+            .field("complete_count", &self.complete_count)
+            .field("complete_observed_bytes", &self.complete_observed_bytes)
+            .field("sample_count", &self.samples.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl UnknownEvidenceAggregateSnapshot {
@@ -466,6 +477,20 @@ mod tests {
                 .map(|value| value.evidence.source_record_id)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn aggregate_debug_reports_counts_without_sample_evidence() {
+        let mut reducer = UnknownEvidenceReducer::new(2, 1).unwrap();
+        reducer.apply(occurrence(7, b"private-payload")).unwrap();
+
+        let debug = format!("{:?}", reducer.snapshot().unwrap());
+        assert!(debug.contains("complete_count: 1"));
+        assert!(debug.contains("sample_count: 1"));
+        assert!(!debug.contains("future.kind"));
+        assert!(!debug.contains("private-payload"));
+        assert!(!debug.contains("aggregate_digest"));
+        assert!(!debug.contains("samples"));
     }
 
     #[test]

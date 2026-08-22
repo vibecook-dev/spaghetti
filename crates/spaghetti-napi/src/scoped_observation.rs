@@ -1999,9 +1999,9 @@ fn queued_control_observation(control: QueuedControlFrame) -> ScopedQueuedObserv
 pub const SCOPED_OBSERVATION_EVENT_CONTRACT_VERSION: u32 = 1;
 pub const SCOPED_REPLACEMENT_DIGEST_CONTRACT_VERSION: u32 =
     RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION;
-pub const SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION: u32 = 3;
-pub const SCOPED_RESYNC_BARRIER_CONTRACT_VERSION: u32 = 3;
-const SCOPED_COMPLETION_SNAPSHOT_DIGEST_CONTRACT_VERSION: u32 = 3;
+pub const SCOPED_BOOTSTRAP_BARRIER_CONTRACT_VERSION: u32 = 4;
+pub const SCOPED_RESYNC_BARRIER_CONTRACT_VERSION: u32 = 4;
+const SCOPED_COMPLETION_SNAPSHOT_DIGEST_CONTRACT_VERSION: u32 = 4;
 pub const SCOPED_SCOPE_COVERAGE_CONTRACT_VERSION: u32 = 1;
 pub const RUNTIME_USAGE_V2_FACT_FAMILY_CONTRACT_VERSION: u32 = 1;
 // These versions domain-separate the selected internal actor replacement
@@ -2814,6 +2814,7 @@ pub struct ScopedBootstrapBarrier {
     pub scope_coverage: ScopedScopeCoverage,
     pub explicit_object_errors: Vec<CoverageError>,
     pub artifact_availability: ScopedArtifactAvailabilitySnapshot,
+    pub unknown_evidence: UnknownEvidenceAggregateSnapshot,
     pub queue_state: ScopedObservationDeliveryState,
     pub root_present: bool,
 }
@@ -2901,6 +2902,7 @@ pub struct ScopedResyncBarrier {
     pub scope_coverage: ScopedScopeCoverage,
     pub explicit_object_errors: Vec<CoverageError>,
     pub artifact_availability: ScopedArtifactAvailabilitySnapshot,
+    pub unknown_evidence: UnknownEvidenceAggregateSnapshot,
     pub queue_state: ScopedObservationDeliveryState,
     pub root_present: bool,
 }
@@ -10481,6 +10483,7 @@ impl ScopedObservationDeliveryLane {
             source_coverage: &watermark.source_coverage,
             explicit_object_errors: &watermark.explicit_object_errors,
             artifact_availability: &watermark.artifact_availability,
+            unknown_evidence: &watermark.unknown_evidence,
         };
         let snapshot_digest = bootstrap_snapshot_digest(snapshot)?;
         let replacement_snapshot_digest = replacement_snapshot_digest(snapshot)
@@ -10498,6 +10501,7 @@ impl ScopedObservationDeliveryLane {
             scope_coverage: watermark.scope_coverage,
             explicit_object_errors: watermark.explicit_object_errors,
             artifact_availability: watermark.artifact_availability,
+            unknown_evidence: watermark.unknown_evidence,
             queue_state,
             root_present,
         });
@@ -10797,6 +10801,7 @@ impl ScopedObservationDeliveryLane {
             source_coverage: &watermark.source_coverage,
             explicit_object_errors: &watermark.explicit_object_errors,
             artifact_availability: &watermark.artifact_availability,
+            unknown_evidence: &watermark.unknown_evidence,
         };
         if replacement_snapshot_digest(snapshot)? != expected_replacement_snapshot_digest {
             return Err(ScopedReplacementStageError::InvalidManifest);
@@ -10832,6 +10837,7 @@ impl ScopedObservationDeliveryLane {
             scope_coverage: watermark.scope_coverage,
             explicit_object_errors: watermark.explicit_object_errors,
             artifact_availability: watermark.artifact_availability,
+            unknown_evidence: watermark.unknown_evidence,
             queue_state,
             root_present,
         });
@@ -17164,6 +17170,7 @@ struct ScopedCompletionSnapshotComponents<'a> {
     source_coverage: &'a [SourceCoverageSet],
     explicit_object_errors: &'a [CoverageError],
     artifact_availability: &'a ScopedArtifactAvailabilitySnapshot,
+    unknown_evidence: &'a UnknownEvidenceAggregateSnapshot,
 }
 
 fn bootstrap_snapshot_digest(
@@ -17227,6 +17234,10 @@ fn bootstrap_snapshot_digest(
         &mut hasher,
         snapshot.artifact_availability.semantic_digest().as_bytes(),
     );
+    let unknown_evidence =
+        unknown_evidence_wire::canonical_unknown_evidence_snapshot_bytes(snapshot.unknown_evidence)
+            .map_err(|_| ScopedBootstrapBarrierError::InvalidSnapshot)?;
+    hash_event_component(&mut hasher, &unknown_evidence);
     Ok(ScopedBootstrapSnapshotDigest(*hasher.finalize().as_bytes()))
 }
 
@@ -17332,6 +17343,7 @@ fn bootstrap_barrier_snapshot_is_valid(barrier: &ScopedBootstrapBarrier) -> bool
         source_coverage: &barrier.source_coverage,
         explicit_object_errors: &barrier.explicit_object_errors,
         artifact_availability: &barrier.artifact_availability,
+        unknown_evidence: &barrier.unknown_evidence,
     };
     bootstrap_snapshot_digest(snapshot).is_ok_and(|digest| digest == barrier.snapshot_digest)
         && replacement_snapshot_digest(snapshot)
@@ -17348,6 +17360,7 @@ fn resync_barrier_snapshot_is_valid(barrier: &ScopedResyncBarrier) -> bool {
         source_coverage: &barrier.source_coverage,
         explicit_object_errors: &barrier.explicit_object_errors,
         artifact_availability: &barrier.artifact_availability,
+        unknown_evidence: &barrier.unknown_evidence,
     };
     bootstrap_snapshot_digest(snapshot)
         .is_ok_and(|digest| digest == barrier.coverage_snapshot_digest)
@@ -20954,6 +20967,7 @@ impl ScopedObservationAccessHost {
             || watermark.scope_coverage != barrier.scope_coverage
             || watermark.explicit_object_errors != barrier.explicit_object_errors
             || watermark.artifact_availability != barrier.artifact_availability
+            || watermark.unknown_evidence != barrier.unknown_evidence
         {
             return Err(ScopedReplacementStageError::InvalidSourceState);
         }
@@ -21008,6 +21022,7 @@ impl ScopedObservationAccessHost {
             source_coverage: &watermark.source_coverage,
             explicit_object_errors: &watermark.explicit_object_errors,
             artifact_availability: &watermark.artifact_availability,
+            unknown_evidence: &watermark.unknown_evidence,
         })?;
         if family_manifest != barrier.family_manifest
             || replacement_digest != barrier.replacement_snapshot_digest
@@ -21238,6 +21253,7 @@ impl ScopedObservationAccessHost {
             source_coverage: &watermark.source_coverage,
             explicit_object_errors: &watermark.explicit_object_errors,
             artifact_availability: &watermark.artifact_availability,
+            unknown_evidence: &watermark.unknown_evidence,
         })?;
         let barrier = delivery.offer_resync_barrier(
             &self.root_identity,
@@ -24271,7 +24287,14 @@ mod projection_tests {
             source_coverage,
             explicit_object_errors: &[],
             artifact_availability,
+            unknown_evidence: empty_unknown_evidence(),
         }
+    }
+
+    fn empty_unknown_evidence() -> &'static UnknownEvidenceAggregateSnapshot {
+        static EMPTY: std::sync::OnceLock<UnknownEvidenceAggregateSnapshot> =
+            std::sync::OnceLock::new();
+        EMPTY.get_or_init(UnknownEvidenceAggregateSnapshot::empty_policy)
     }
 
     fn envelope_mapper(root: ScopedObservationRootIdentity) -> ScopedObservationEnvelopeMapper {
@@ -30722,6 +30745,45 @@ mod projection_tests {
         ))
         .unwrap();
         assert_ne!(empty_replacement, observed_replacement);
+    }
+
+    #[test]
+    fn unknown_evidence_snapshot_is_bound_into_both_completion_digests() {
+        let root = root_identity();
+        let scope_coverage = fixture_scope_coverage(&root, true);
+        let source_coverage = fixture_completion_coverage(&root, true);
+        let selection = observation_contract_selection();
+        let capabilities = observation_capabilities_for_selection(&selection);
+        let family_manifest = fixture_manifest_for_selection(&selection);
+        let artifact_availability = empty_artifact_availability(&root);
+        let empty_components = fixture_completion_components(
+            &root,
+            true,
+            &capabilities,
+            &family_manifest,
+            &scope_coverage,
+            &source_coverage,
+            &artifact_availability,
+        );
+
+        let mut reducer = UnknownEvidenceReducer::new(8, 8).unwrap();
+        reducer
+            .apply(unknown_occurrence(&record(1, 0, 32), "native.future"))
+            .unwrap();
+        let observed = reducer.snapshot().unwrap();
+        let observed_components = ScopedCompletionSnapshotComponents {
+            unknown_evidence: &observed,
+            ..empty_components
+        };
+
+        assert_ne!(
+            bootstrap_snapshot_digest(empty_components).unwrap(),
+            bootstrap_snapshot_digest(observed_components).unwrap()
+        );
+        assert_ne!(
+            replacement_snapshot_digest(empty_components).unwrap(),
+            replacement_snapshot_digest(observed_components).unwrap()
+        );
     }
 
     #[test]

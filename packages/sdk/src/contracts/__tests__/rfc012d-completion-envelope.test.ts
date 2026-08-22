@@ -50,7 +50,7 @@ test('portable TypeScript parses Rust-issued ordered bootstrap and resync comple
     assert.deepEqual(parseScopedCompletionEnvelope(sample.event, context), sample.event);
   }
   assert.equal(fixture.fixture_contract_version, 1);
-  assert.equal(fixture.expected.barrier_contract_version, 3);
+  assert.equal(fixture.expected.barrier_contract_version, 4);
   assert.equal(fixture.expected.ordered, true);
   assert.equal(fixture.expected.coverage_digest_equal_at_equal_state, true);
   assert.equal(fixture.expected.replacement_digest_equal_at_equal_state, true);
@@ -114,6 +114,10 @@ test('all nested completion components remain bound to Rust-issued context', () 
   const artifact = clone(fixture.bootstrap.event);
   artifact.event.barrier.artifact_availability.semantic_digest = fixture.bootstrap.context.root.session_key;
   reject(artifact);
+
+  const unknownEvidence = clone(fixture.bootstrap.event);
+  unknownEvidence.event.barrier.unknown_evidence.aggregate_digest = fixture.bootstrap.context.root.session_key;
+  reject(unknownEvidence);
 
   const error = clone(fixture.bootstrap.event);
   error.event.barrier.explicit_object_errors = [];
@@ -194,7 +198,8 @@ test('capability authority privacy and portable bounds fail closed', () => {
   reject(fixture.bootstrap.event, unsafeInteger);
 
   const encoded = JSON.stringify(fixture);
-  assert.doesNotMatch(encoded, /\/Users\/|\\\\|locator_id":"[^n]|source_record_id":"[^n]|native bytes/);
+  assert.doesNotMatch(encoded, /\/Users\/|\\\\|locator_id":"[^n]|native bytes|future_private_field|secret/);
+  assert.match(encoded, /source_record_id":"v1:/);
   assert.equal(fixture.expected.native_evidence, 'engine_control_only');
   assert.equal(fixture.expected.native_payload_disclosure, 'none');
   assert.equal(fixture.expected.source_access_authority, false);
@@ -205,6 +210,7 @@ test('capability authority privacy and portable bounds fail closed', () => {
     'replacement_manifest',
     'scope_coverage',
     'artifact_availability',
+    'unknown_evidence',
     'rfc012a_source_coverage',
   ]);
 });

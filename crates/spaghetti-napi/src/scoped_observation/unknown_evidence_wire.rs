@@ -273,6 +273,21 @@ impl UnknownEvidenceSnapshotWire {
     }
 }
 
+/// Canonical bounded bytes used when an enclosing RFC 012D completion digest
+/// binds this already-reduced snapshot. This reuses the strict portable shape
+/// so the digest and transported value cannot disagree about samples.
+pub(crate) fn canonical_unknown_evidence_snapshot_bytes(
+    snapshot: &UnknownEvidenceAggregateSnapshot,
+) -> Result<Vec<u8>, UnknownEvidenceSnapshotContractError> {
+    let context = UnknownEvidenceSnapshotConsumerContext::from_expected(snapshot)?;
+    let wire = UnknownEvidenceSnapshotWire::from_context(&context)?;
+    serde_json::to_vec(&wire).map_err(|_| {
+        UnknownEvidenceSnapshotContractError::invalid(
+            "unknown-evidence snapshot is not canonical portable JSON",
+        )
+    })
+}
+
 fn validate_snapshot(
     complete_count: u64,
     complete_observed_bytes: u64,
