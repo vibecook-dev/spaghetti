@@ -52,10 +52,10 @@ use crate::observation_contract::{
 use crate::runtime_semantic_reducer::{
     effective_state_reduced_state_digest, reduce_content_block_revision,
     reduce_effective_state_revision, reduce_message_revision, reduce_native_marker_revision,
-    reduce_user_input_revision, EffectiveStateReducedDigestEntity, MessageReducedDigestEntity,
-    RevisionedEntityReduction, RevisionedEntityValueReduction, RuntimeSemanticReductionError,
-    RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
-    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    reduce_plan_revision, reduce_user_input_revision, EffectiveStateReducedDigestEntity,
+    MessageReducedDigestEntity, PlanReducedDigestEntity, RevisionedEntityReduction,
+    RevisionedEntityValueReduction, RuntimeSemanticReductionError, RuntimeSemanticSourceRef,
+    UserInputReducedDigestEntity, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -13641,21 +13641,31 @@ impl ScopedObservationProjectionSink {
                                 &state.revision,
                             ),
                         )?;
-                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
-                            continue;
-                        }
-                        if state.revision.operation == UserInputOperation::Retract
-                            && state.revision.completeness != ContractCompleteness::Complete
-                        {
-                            continue;
-                        }
-                        if state.revision.completeness == ContractCompleteness::Partial
-                            && state.revision.operation == UserInputOperation::Upsert
-                        {
-                            state.revision.ordered_step_keys = merge_ordered_keys(
-                                &current.revision.ordered_step_keys,
-                                &state.revision.ordered_step_keys,
+                    }
+                    match reduce_plan_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(runtime_semantic_projection_error)?
+                    {
+                        RevisionedEntityValueReduction::Unchanged => continue,
+                        RevisionedEntityValueReduction::Retract => {
+                            queue_plan_retraction(
+                                &self.plans,
+                                &mut mutation,
+                                &mut plan_events,
+                                key,
+                                &state,
+                                ScopedSelectedRetractionDelivery {
+                                    selected: self.families.plan,
+                                    lane_ordinal,
+                                    phase,
+                                },
                             );
+                            continue;
+                        }
+                        RevisionedEntityValueReduction::Upsert(reduced) => {
+                            state.revision = reduced;
                             rebind_reduced_semantic_revision(
                                 &mut state.semantic,
                                 state
@@ -13663,30 +13673,7 @@ impl ScopedObservationProjectionSink {
                                     .semantic_revision_key()
                                     .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
                             )?;
-                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
-                            {
-                                continue;
-                            }
                         }
-                    } else if state.revision.operation == UserInputOperation::Retract
-                        && state.revision.completeness != ContractCompleteness::Complete
-                    {
-                        continue;
-                    }
-                    if state.revision.operation == UserInputOperation::Retract {
-                        queue_plan_retraction(
-                            &self.plans,
-                            &mut mutation,
-                            &mut plan_events,
-                            key,
-                            &state,
-                            ScopedSelectedRetractionDelivery {
-                                selected: self.families.plan,
-                                lane_ordinal,
-                                phase,
-                            },
-                        );
-                        continue;
                     }
                     if state.revision.completeness == ContractCompleteness::Complete {
                         if let Some(owned) = state.revision.owned_set.as_ref() {
@@ -13694,6 +13681,8 @@ impl ScopedObservationProjectionSink {
                                 &self.plans,
                                 &mutation.plan_upserts,
                                 state.revision.session,
+                                state.generation,
+                                &state.source.object,
                                 owned,
                             );
                             for omitted_key in omitted {
@@ -15848,16 +15837,6 @@ fn user_input_replacement_snapshot_is_valid(
         && user_input_replacement_digest(&snapshot.entities).ok() == Some(snapshot.semantic_digest)
 }
 
-fn merge_ordered_keys(current: &[String], incoming: &[String]) -> Vec<String> {
-    let mut merged = current.to_vec();
-    for key in incoming {
-        if !merged.iter().any(|known| known == key) {
-            merged.push(key.clone());
-        }
-    }
-    merged
-}
-
 fn message_event(
     state: &ScopedMessageProjectionState,
     operation: ScopedRevisionedEntityOperation,
@@ -15990,6 +15969,8 @@ fn omitted_owned_set_plan_ids(
     current: &BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     staged: &BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     session: CanonicalEntityKey,
+    generation: u64,
+    owner: &ScopedSourceObjectIdentity,
     owned: &[String],
 ) -> Vec<CanonicalFactId> {
     let mut ids = BTreeSet::new();
@@ -15998,7 +15979,11 @@ fn omitted_owned_set_plan_ids(
         .filter(|(fact_id, _)| !staged.contains_key(fact_id))
         .chain(staged.iter())
     {
-        if state.revision.session == session && !owned.contains(&state.revision.native_plan_id) {
+        if state.revision.session == session
+            && state.generation == generation
+            && &state.source.object == owner
+            && !owned.contains(&state.revision.native_plan_id)
+        {
             ids.insert(*fact_id);
         }
     }
@@ -16096,53 +16081,16 @@ fn message_replacement_snapshot_is_valid(
 fn plan_replacement_digest(
     entities: &[ScopedPlanReplacementEntity],
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
-    let entity_count = u64::try_from(entities.len())
-        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = replacement_family_digest(
-        b"runtime.plan",
-        RUNTIME_PLAN_FACT_FAMILY_CONTRACT_VERSION,
-        entity_count,
-    );
-    for entity in entities {
-        validate_and_hash_replacement_source(
-            &mut hasher,
-            &entity.semantic,
-            entity.generation,
-            &entity.source,
-        )?;
-        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.native_plan_id.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.subject.as_bytes());
-        hasher.update(&(entity.revision.ordered_step_keys.len() as u64).to_be_bytes());
-        for key in &entity.revision.ordered_step_keys {
-            hash_event_component(&mut hasher, key.as_bytes());
-        }
-        hasher.update(&[match entity.revision.operation {
-            UserInputOperation::Upsert => 1,
-            UserInputOperation::Retract => 2,
-        }]);
-        hasher.update(&[match entity.revision.completeness {
-            ContractCompleteness::Complete => 1,
-            ContractCompleteness::Partial => 2,
-            ContractCompleteness::Unknown => 3,
-        }]);
-        match &entity.revision.owned_set {
-            Some(owned_set) => {
-                hasher.update(&[1]);
-                hasher.update(&(owned_set.len() as u64).to_be_bytes());
-                for member in owned_set {
-                    hash_event_component(&mut hasher, member.as_bytes());
-                }
+    let digest =
+        crate::runtime_semantic_reducer::plan_reduced_state_digest(entities.iter().map(|entity| {
+            PlanReducedDigestEntity {
+                semantic: &entity.semantic,
+                source: runtime_semantic_source_ref(entity.generation, &entity.source),
+                revision: &entity.revision,
             }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-    }
-    Ok(ScopedReplacementSemanticDigest(
-        *hasher.finalize().as_bytes(),
-    ))
+        }))
+        .map_err(runtime_semantic_projection_error)?;
+    Ok(ScopedReplacementSemanticDigest(digest))
 }
 
 fn plan_replacement_snapshot_is_valid(
@@ -23909,11 +23857,11 @@ mod projection_tests {
     use crate::runtime_semantic_reducer::{
         content_block_reduced_state_digest, effective_state_reduced_state_digest,
         message_reduced_state_digest, native_marker_reduced_state_digest,
-        reduce_content_block_revision, reduce_effective_state_revision,
-        reduce_native_marker_revision, user_input_reduced_state_digest,
+        plan_reduced_state_digest, reduce_content_block_revision, reduce_effective_state_revision,
+        reduce_native_marker_revision, reduce_plan_revision, user_input_reduced_state_digest,
         ContentBlockReducedDigestEntity, EffectiveStateReducedDigestEntity,
-        MessageReducedDigestEntity, NativeMarkerReducedDigestEntity, RevisionedEntityReduction,
-        RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
+        MessageReducedDigestEntity, NativeMarkerReducedDigestEntity, PlanReducedDigestEntity,
+        RevisionedEntityReduction, RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
     };
     use crate::semantic_contract::{
         content_block_revision, effective_state_revision, native_marker_revision,
@@ -27071,6 +27019,13 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurablePlanEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
     fn reduce_durable_user_input(
         current: &mut BTreeMap<CanonicalFactId, DurableUserInputEntity>,
         source: ScopedSourceObjectIdentity,
@@ -27281,6 +27236,127 @@ mod projection_tests {
         for (fact_id, durable_entity) in durable {
             let scoped_entity = scoped.messages.get(fact_id).unwrap();
             let Fact::MessageRevision(durable_revision) = &durable_entity.envelope.value else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn reduce_durable_plan(
+        current: &mut BTreeMap<CanonicalFactId, DurablePlanEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        mut envelope: FactEnvelope,
+    ) -> RevisionedEntityReduction {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("plan durable fact has semantic identity");
+        let Fact::PlanRevision(revision) = &envelope.value else {
+            panic!("durable plan reducer received another family");
+        };
+        let fact_id = semantic.fact_id;
+        let decision = reduce_plan_revision(
+            current.get(&fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::PlanRevision(current_revision) = &entity.envelope.value else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )
+        .unwrap();
+        match decision {
+            RevisionedEntityValueReduction::Unchanged => RevisionedEntityReduction::Unchanged,
+            RevisionedEntityValueReduction::Retract => {
+                current.remove(&fact_id);
+                RevisionedEntityReduction::Retract
+            }
+            RevisionedEntityValueReduction::Upsert(reduced) => {
+                envelope.value = Fact::PlanRevision(reduced.clone());
+                let semantic = envelope.semantic_revision.as_mut().unwrap();
+                rebind_reduced_semantic_revision(
+                    semantic,
+                    reduced.semantic_revision_key().unwrap(),
+                )
+                .unwrap();
+                current.insert(
+                    semantic.fact_id,
+                    DurablePlanEntity {
+                        envelope,
+                        source: source.clone(),
+                        record: record.clone(),
+                    },
+                );
+                if reduced.completeness == ContractCompleteness::Complete {
+                    if let Some(owned) = reduced.owned_set.as_ref() {
+                        current.retain(|_, entity| {
+                            let Fact::PlanRevision(revision) = &entity.envelope.value else {
+                                unreachable!();
+                            };
+                            entity.source != source
+                                || entity.record.generation != record.generation
+                                || revision.session != reduced.session
+                                || owned.contains(&revision.native_plan_id)
+                        });
+                    }
+                }
+                RevisionedEntityReduction::Upsert
+            }
+        }
+    }
+
+    fn durable_plan_digest(current: &BTreeMap<CanonicalFactId, DurablePlanEntity>) -> [u8; 32] {
+        plan_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::PlanRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            PlanReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_plan_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurablePlanEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        let snapshot = scoped
+            .plan_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(snapshot.entity_count as usize, durable.len());
+        assert_eq!(
+            snapshot.semantic_digest.as_bytes(),
+            &durable_plan_digest(durable),
+            "durable and scoped plan reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.plans.get(fact_id).unwrap();
+            let Fact::PlanRevision(durable_revision) = &durable_entity.envelope.value else {
                 unreachable!();
             };
             assert_eq!(
@@ -30355,6 +30431,7 @@ mod projection_tests {
             &selection.contract_versions,
         )
         .unwrap();
+        let mut durable = BTreeMap::<CanonicalFactId, DurablePlanEntity>::new();
         let fact_for =
             |batch: &FactBatch,
              native_plan_id: &str,
@@ -30386,6 +30463,16 @@ mod projection_tests {
                 Fact::PlanRevision(current.clone()),
             )
             .unwrap();
+        let current_envelope = current_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                current_record.clone(),
+                current_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         assert_eq!(
             projection
                 .project(&rfc012c_decoded_frame(
@@ -30399,6 +30486,7 @@ mod projection_tests {
             1
         );
         assert_eq!(projection.plans.len(), 1);
+        assert_plan_topology_parity(&durable, &projection);
         assert_eq!(
             projection
                 .plans
@@ -30409,6 +30497,36 @@ mod projection_tests {
                 .ordered_step_keys,
             ["step-a", "step-b"]
         );
+
+        let mut incomplete_owned = current.clone();
+        incomplete_owned.completeness = ContractCompleteness::Partial;
+        incomplete_owned.owned_set = Some(vec![fixture.native_plan_id.clone()]);
+        assert!(incomplete_owned.validate().is_err());
+
+        let drift_record = rfc012c_record(1, 2, 11);
+        let mut drift_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let mut drift = current.clone();
+        drift.subject = "partial evidence cannot replace a plan subject".to_owned();
+        drift.completeness = ContractCompleteness::Partial;
+        drift_batch
+            .push_native(
+                &drift_record,
+                fixture.native_plan_id.as_bytes(),
+                Fact::PlanRevision(drift),
+            )
+            .unwrap();
+        assert_eq!(
+            projection.project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &drift_record,
+                drift_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_plan_topology_parity(&durable, &projection);
+
         let partial_steps_record = rfc012c_record(1, 2, 11);
         let mut partial_steps_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
@@ -30423,6 +30541,16 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let partial_steps_envelope = partial_steps_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_steps_record.clone(),
+                partial_steps_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 3,
@@ -30445,6 +30573,7 @@ mod projection_tests {
             .plan_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .unwrap();
         assert!(plan_replacement_snapshot_is_valid(&partial_snapshot, 1));
+        assert_plan_topology_parity(&durable, &projection);
 
         let complete_steps_record = rfc012c_record(3, 4, 13);
         let mut complete_steps_batch =
@@ -30460,6 +30589,16 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let complete_steps_envelope = complete_steps_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                complete_steps_record.clone(),
+                complete_steps_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 4,
@@ -30469,6 +30608,7 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(projection.plans.len(), 1);
+        assert_plan_topology_parity(&durable, &projection);
         assert_eq!(
             projection
                 .plans
@@ -30505,6 +30645,16 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let retract_envelope = retract_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                retract_record.clone(),
+                retract_envelope,
+            ),
+            RevisionedEntityReduction::Retract
+        );
         assert_eq!(
             projection
                 .project(&rfc012c_decoded_frame(
@@ -30518,6 +30668,7 @@ mod projection_tests {
             1
         );
         assert!(projection.plans.is_empty());
+        assert_plan_topology_parity(&durable, &projection);
         assert_eq!(
             projection
                 .plan_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
@@ -30536,6 +30687,16 @@ mod projection_tests {
                 Fact::PlanRevision(current),
             )
             .unwrap();
+        let restored_envelope = restored_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                restored_record.clone(),
+                restored_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 6,
@@ -30560,6 +30721,16 @@ mod projection_tests {
                 Fact::PlanRevision(partial_retract),
             )
             .unwrap();
+        let partial_envelope = partial_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_record.clone(),
+                partial_envelope,
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
         assert!(projection
             .project(&rfc012c_decoded_frame(
                 7,
@@ -30570,6 +30741,7 @@ mod projection_tests {
             .unwrap()
             .is_empty());
         assert_eq!(projection.plans.len(), 1);
+        assert_plan_topology_parity(&durable, &projection);
 
         let peer_record = rfc012c_record(7, 8, 17);
         let mut peer_batch =
@@ -30585,6 +30757,16 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let peer_envelope = peer_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                peer_record.clone(),
+                peer_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 8,
@@ -30594,6 +30776,30 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(projection.plans.len(), 2);
+        assert_plan_topology_parity(&durable, &projection);
+
+        let plan_state = projection.plans.values().next().unwrap();
+        let mut foreign_owner = plan_state.source.object.clone();
+        foreign_owner.object_key =
+            CoverageObjectKey::derive("fixture.foreign-plan-owner", b"foreign.json").unwrap();
+        assert!(omitted_owned_set_plan_ids(
+            &projection.plans,
+            &BTreeMap::new(),
+            plan_state.revision.session,
+            plan_state.generation,
+            &foreign_owner,
+            &[],
+        )
+        .is_empty());
+        assert!(omitted_owned_set_plan_ids(
+            &projection.plans,
+            &BTreeMap::new(),
+            plan_state.revision.session,
+            plan_state.generation + 1,
+            &plan_state.source.object,
+            &[],
+        )
+        .is_empty());
 
         let omit_record = rfc012c_record(8, 9, 18);
         let mut omit_batch =
@@ -30609,6 +30815,16 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let omit_envelope = omit_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_plan(
+                &mut durable,
+                rfc012c_source_identity(),
+                omit_record.clone(),
+                omit_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 9,
@@ -30618,6 +30834,7 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(projection.plans.len(), 1);
+        assert_plan_topology_parity(&durable, &projection);
         assert_eq!(
             projection
                 .plans

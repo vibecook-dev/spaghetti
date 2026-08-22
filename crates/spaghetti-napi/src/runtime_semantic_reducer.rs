@@ -11,9 +11,9 @@ use crate::adapter::{
     EffectiveStateEvidenceKind, EffectiveStateRevisionFact, EffectiveStateValueAuthority,
     FactProvenance, FactRevisionId, FactSemanticRevision, MessageRevisionFact, MessageRevisionRole,
     NativeCompactionPhase, NativeProgressState, NativeQueueOperation,
-    NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, QualifiedUnknownReason,
-    QualifiedValueQuality, SourceRecordId, UserInputKind, UserInputLifecycleState,
-    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
+    NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PlanRevisionFact,
+    QualifiedUnknownReason, QualifiedValueQuality, SourceRecordId, UserInputKind,
+    UserInputLifecycleState, UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
 };
 use crate::source::SourceRecordState;
 
@@ -136,6 +136,30 @@ fn validate_message_entity(
     revision
         .validate()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    Ok(())
+}
+
+fn validate_plan_entity(
+    semantic: &FactSemanticRevision,
+    revision: &PlanRevisionFact,
+) -> Result<(), RuntimeSemanticReductionError> {
+    revision
+        .validate()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if revision.completeness != ContractCompleteness::Complete && revision.owned_set.is_some() {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
     if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -353,6 +377,89 @@ pub(crate) fn reduce_message_revision(
     }
 }
 
+fn merge_ordered_plan_keys(current: &[String], incoming: &[String]) -> Vec<String> {
+    let mut merged = current.to_vec();
+    for key in incoming {
+        if !merged.iter().any(|known| known == key) {
+            merged.push(key.clone());
+        }
+    }
+    merged
+}
+
+/// Reduce one plan revision independently of its durable or scoped delivery
+/// topology. Incomplete evidence may extend a known ordered step set, but it
+/// cannot remove or reorder steps, change the plan subject, retract the plan,
+/// or carry complete-set absence authority.
+pub(crate) fn reduce_plan_revision(
+    current: Option<(&FactSemanticRevision, &PlanRevisionFact)>,
+    incoming: (&FactSemanticRevision, &PlanRevisionFact),
+) -> Result<RevisionedEntityValueReduction<PlanRevisionFact>, RuntimeSemanticReductionError> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    validate_plan_entity(incoming_semantic, incoming_revision)?;
+    let current = match current {
+        Some((current_semantic, current_revision)) => {
+            validate_plan_entity(current_semantic, current_revision)?;
+            if current_semantic.fact_id != incoming_semantic.fact_id
+                || current_revision.session != incoming_revision.session
+                || current_revision.actor_run != incoming_revision.actor_run
+                || current_revision.native_plan_id != incoming_revision.native_plan_id
+            {
+                return Err(RuntimeSemanticReductionError::InvalidRevision);
+            }
+            if current_semantic.fact_revision_id == incoming_semantic.fact_revision_id {
+                return Ok(RevisionedEntityValueReduction::Unchanged);
+            }
+            Some((current_semantic, current_revision))
+        }
+        None => None,
+    };
+
+    match incoming_revision.operation {
+        UserInputOperation::Retract
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
+        {
+            Ok(RevisionedEntityValueReduction::Unchanged)
+        }
+        UserInputOperation::Retract => Ok(RevisionedEntityValueReduction::Retract),
+        UserInputOperation::Upsert
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
+        {
+            let Some((current_semantic, current_revision)) = current else {
+                return Ok(RevisionedEntityValueReduction::Upsert(
+                    incoming_revision.clone(),
+                ));
+            };
+            if current_revision.subject != incoming_revision.subject {
+                return Err(RuntimeSemanticReductionError::InvalidRevision);
+            }
+            let mut merged = incoming_revision.clone();
+            merged.ordered_step_keys = merge_ordered_plan_keys(
+                &current_revision.ordered_step_keys,
+                &incoming_revision.ordered_step_keys,
+            );
+            merged.owned_set = None;
+            merged
+                .validate()
+                .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            let merged_key = merged
+                .semantic_revision_key()
+                .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            let merged_revision_id =
+                FactRevisionId::derive(&incoming_semantic.fact_id, 1, &merged_key)
+                    .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            if merged_revision_id == current_semantic.fact_revision_id {
+                Ok(RevisionedEntityValueReduction::Unchanged)
+            } else {
+                Ok(RevisionedEntityValueReduction::Upsert(merged))
+            }
+        }
+        UserInputOperation::Upsert => Ok(RevisionedEntityValueReduction::Upsert(
+            incoming_revision.clone(),
+        )),
+    }
+}
+
 /// Decide one effective-state revision using the RFC 012C
 /// `RevisionedEntityCurrent` law.
 ///
@@ -503,6 +610,13 @@ pub(crate) struct MessageReducedDigestEntity<'a> {
     pub semantic: &'a FactSemanticRevision,
     pub source: RuntimeSemanticSourceRef<'a>,
     pub revision: &'a MessageRevisionFact,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PlanReducedDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub source: RuntimeSemanticSourceRef<'a>,
+    pub revision: &'a PlanRevisionFact,
 }
 
 fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
@@ -694,6 +808,62 @@ pub(crate) fn message_reduced_state_digest<'a>(
             ContractCompleteness::Partial => 2,
             ContractCompleteness::Unknown => 3,
         }]);
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Compute the canonical current-state digest for `runtime.plan`.
+pub(crate) fn plan_reduced_state_digest<'a>(
+    entities: impl IntoIterator<Item = PlanReducedDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.semantic.fact_id);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].semantic.fact_id == pair[1].semantic.fact_id)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, b"runtime.plan");
+    hasher.update(&1_u32.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in &entities {
+        validate_plan_entity(entity.semantic, entity.revision)?;
+        validate_and_hash_semantic_source(&mut hasher, entity.semantic, entity.source)?;
+        hash_component(&mut hasher, entity.revision.session.as_bytes());
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_component(&mut hasher, entity.revision.native_plan_id.as_bytes());
+        hash_component(&mut hasher, entity.revision.subject.as_bytes());
+        hasher.update(&(entity.revision.ordered_step_keys.len() as u64).to_be_bytes());
+        for key in &entity.revision.ordered_step_keys {
+            hash_component(&mut hasher, key.as_bytes());
+        }
+        hasher.update(&[match entity.revision.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        }]);
+        hasher.update(&[match entity.revision.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        }]);
+        match &entity.revision.owned_set {
+            Some(owned_set) => {
+                hasher.update(&[1]);
+                hasher.update(&(owned_set.len() as u64).to_be_bytes());
+                for member in owned_set {
+                    hash_component(&mut hasher, member.as_bytes());
+                }
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
     }
     Ok(*hasher.finalize().as_bytes())
 }

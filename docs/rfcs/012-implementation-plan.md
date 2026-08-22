@@ -1101,6 +1101,16 @@ closed. The durable `FactBatch` view and selected scoped projection share the
 same reduced revision and path-free digest across pending, complete terminal
 correction, complete retraction, restoration, partial enrichment, and partial
 retraction. Its selected portable event specialist remains open.
+The topology-neutral revisioned-entity law now also owns `runtime.plan`.
+Incomplete evidence may extend an ordered step set, but cannot remove or
+reorder known steps, change a known subject, retract the entity, or carry
+owned-set absence authority. Complete owned-set omission is confined to the
+same source object and generation, so one task-list document cannot retract a
+different document's plans merely because they share a session. Durable
+`FactBatch` reduction and the selected scoped projection now share the exact
+reduced revision and path-free digest across partial enrichment, complete
+replacement, retraction, restoration, and owned-set omission. Its portable
+selected event specialist remains open.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,
@@ -3005,8 +3015,11 @@ projects C1 `runtime.plan` as `RevisionedEntityCurrent` plus complete owned-set
 retract law: a partial step list cannot drop a previously known key, a complete
 step snapshot replaces prior steps, complete retract removes the entity,
 partial retract does not, and a complete owned-set listing only the peer
-native id retracts the omitted current plan while keeping the peer.
-Bootstrap/correction replacement digests match at the same current set.
+native id retracts the omitted current plan while keeping the peer. Owned-set
+authority is source-object/generation-local, incomplete owned sets and partial
+subject drift fail closed, and durable/scoped reduced-state digests match after
+every transition. Bootstrap/correction replacement digests match at the same
+current set.
 `rfc012d_tool_replaces_correlated_lifecycle_without_rekeying_or_dropping_unmatched`
 projects C1 `runtime.tool` as `CorrelatedLifecycleCurrent`: call and unmatched
 result are separate entities, later correlation updates the relationship
