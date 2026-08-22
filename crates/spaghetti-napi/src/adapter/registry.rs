@@ -392,7 +392,7 @@ pub(crate) mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 
@@ -418,8 +418,9 @@ pub(crate) mod tests {
         ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
     };
     use crate::scoped_observation::configured_attachment::{
-        prepare_configured_scoped_observation_attachment, ScopedConfiguredAttachmentRequest,
-        ScopedConfiguredRootIdentity,
+        prepare_configured_scoped_observation_attachment,
+        ConfiguredScopedObservationRuntimeOptions, ConfiguredScopedObservationSupervisorRunResult,
+        ScopedConfiguredAttachmentRequest, ScopedConfiguredRootIdentity,
     };
     use crate::scoped_observation::{
         bind_observation_runtime_source_for_test,
@@ -2404,6 +2405,128 @@ pub(crate) mod tests {
         assert_eq!(objects.len(), 1);
         assert_eq!(bindings.len(), 1);
         drop(host);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configured_append_supervisor_watches_before_scan_and_closes_structurally() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_attachment_registry(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+            "1.0.0",
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-supervisor-private-root");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        let target = root.join("sessions/session.jsonl");
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(vec![root], PathBuf::from("sessions/session.jsonl")),
+        )
+        .unwrap()
+        .unwrap();
+        let prepared = attachment.prepare_append_runtime(16, 16).unwrap();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opened = prepared
+            .open_with_watcher_factory(ConfiguredScopedObservationRuntimeOptions::default(), {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        assert_eq!(registrations.lock().unwrap().len(), 1);
+        assert!(callback_slot.lock().unwrap().is_some());
+
+        // The transcript appears only after watcher installation. A cold
+        // existing object does not fabricate a creation event, but the first
+        // barrier must still bind it as present.
+        std::fs::write(&target, b"fixture\n").unwrap();
+        let (mut runtime, handle, supervisor) = opened.into_parts();
+        let supervisor_task = tokio::spawn(supervisor.run_until_stopped());
+        let mut saw_bootstrap = false;
+        for _ in 0..8 {
+            let yielded = tokio::time::timeout(Duration::from_secs(2), runtime.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            saw_bootstrap |= matches!(
+                &yielded.envelope.event,
+                ScopedObservationEvent::ObserverBootstrapComplete { barrier }
+                    if barrier.root_present
+            );
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if saw_bootstrap {
+                break;
+            }
+        }
+        assert!(saw_bootstrap);
+        assert!(matches!(
+            handle.ready_applied().await.unwrap(),
+            ScopedObservationReadyResolution::Ready(_)
+        ));
+
+        let resync_task = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.resync_applied().await }
+        });
+        let mut saw_resync_complete = false;
+        for _ in 0..32 {
+            let yielded = tokio::time::timeout(Duration::from_secs(2), runtime.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            saw_resync_complete |= matches!(
+                &yielded.envelope.event,
+                ScopedObservationEvent::ObserverResyncComplete { .. }
+            );
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if saw_resync_complete {
+                break;
+            }
+        }
+        assert!(saw_resync_complete);
+        assert!(matches!(
+            resync_task.await.unwrap().unwrap(),
+            ScopedObservationResyncResolution::Ready(_)
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), handle.poll())
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+
+        let close = handle.request_close();
+        let stopped = tokio::time::timeout(Duration::from_secs(2), supervisor_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            stopped,
+            ConfiguredScopedObservationSupervisorRunResult::Stopped(_)
+        ));
+        assert!(close.wait_async().await.complete);
+        assert!(runtime.next_event().await.unwrap().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(callback_slot.lock().unwrap().is_none());
     }
 
     #[test]
@@ -12994,9 +13117,7 @@ pub(crate) mod tests {
                 false,
                 80,
             ),
-            Err(ScopedReplacementStageError::Delivery(
-                ScopedDeliveryError::SourceControlQueueFull
-            ))
+            Err(ScopedReplacementStageError::ResyncStartNotDelivered)
         );
         assert_eq!(
             delivery.state().continuity,
@@ -13319,13 +13440,12 @@ pub(crate) mod tests {
         assert!(replacement.events.is_empty());
         assert!(stage.snapshot_fully_offered());
 
-        // observer.resync_started still owns the one control slot. Completion
-        // failure cannot activate any of the three staged state components.
+        // observer.resync_started has not crossed the delivered boundary.
+        // Completion cannot retire its strict context or activate any of the
+        // three staged state components.
         assert_eq!(
             host.offer_scope_resync_complete(&mut active, &mut stage, &mut delivery, 80,),
-            Err(ScopedReplacementStageError::Delivery(
-                ScopedDeliveryError::SourceControlQueueFull
-            ))
+            Err(ScopedReplacementStageError::ResyncStartNotDelivered)
         );
         assert_eq!(active.scope_epoch(), 1);
         assert_eq!(

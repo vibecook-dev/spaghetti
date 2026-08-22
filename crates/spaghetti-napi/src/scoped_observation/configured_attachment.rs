@@ -19,17 +19,31 @@ use crate::adapter::{
 };
 use crate::observation_contract::{ObservationContractOffer, ObservationContractRequest};
 use crate::source::{
-    confined_relative_path_key, platform_path_key, validate_relation_id, AppendDelimitedFile,
-    AuthorizedScopeAccessPlan, RecordOrigin, SourceMediaType, MAX_IDENTITY_VALUE_BYTES,
+    confined_relative_path_key, platform_path_key, validate_relation_id, AccessPhase,
+    AppendDelimitedFile, AuthorizedScopeAccessPlan, RecordOrigin, ScopeIdentityInput,
+    SourceMediaType, MAX_IDENTITY_VALUE_BYTES,
 };
 
 use super::{
     artifact_access, prepare_scoped_observation_support, PreparedScopedObservationSupport,
-    ScopedAccessRootGrant, ScopedAppendDecoderConfig, ScopedArtifactAccessPolicy,
-    ScopedArtifactRelationGrant, ScopedKnownAppendObject, ScopedKnownObjectGrant,
-    ScopedObservationAccessError, ScopedObservationAccessHost, ScopedObservationAppendPassBinding,
-    ScopedObservationOwnedIdentityInput, ScopedObservationTrustedAccessRequest,
-    ScopedObservationUnknownWireNegotiation, ScopedRootIdentityRequest,
+    ScopedAccessRootGrant, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
+    ScopedAppendReconcileRequest, ScopedArtifactAccessPolicy, ScopedArtifactRelationGrant,
+    ScopedBootstrapBarrierError, ScopedDeliveryError, ScopedKnownAppendObject,
+    ScopedKnownObjectGrant, ScopedObservationAccessError, ScopedObservationAccessHost,
+    ScopedObservationAccessPass, ScopedObservationAdmissionLane,
+    ScopedObservationAppendPassBinding, ScopedObservationAppendPassRequest,
+    ScopedObservationAsyncHandle, ScopedObservationAsyncOwnerRunResult,
+    ScopedObservationAsyncResyncFailure, ScopedObservationAsyncRuntime,
+    ScopedObservationAsyncStoppedOwners, ScopedObservationConsumerOfferError,
+    ScopedObservationDeliveryLimits, ScopedObservationNativeWatchBackend,
+    ScopedObservationNativeWatchCallback, ScopedObservationNativeWatcher,
+    ScopedObservationNativeWatcherRecoveryPolicy, ScopedObservationOpenDrainError,
+    ScopedObservationOwnedIdentityInput, ScopedObservationProjectionLimits,
+    ScopedObservationProjectionSink, ScopedObservationQueueLimits,
+    ScopedObservationSourceOwnerRetryPolicy, ScopedObservationStartupError,
+    ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
+    ScopedObservationUnknownWireNegotiation, ScopedObserverFailureReason,
+    ScopedProjectionDeliveryError, ScopedRootIdentityRequest,
 };
 
 const MAX_CONFIGURED_ROOTS: usize = 16;
@@ -346,6 +360,190 @@ pub(crate) struct PreparedConfiguredAppendRuntime {
     bindings: Vec<ScopedObservationAppendPassBinding>,
 }
 
+/// Fixed internal resource policy for the first configured observer owner.
+/// These are correctness bounds rather than performance claims; a public
+/// request contract may narrow them later, but cannot widen native authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConfiguredScopedObservationRuntimeOptions {
+    admission: ScopedObservationQueueLimits,
+    delivery: ScopedObservationDeliveryLimits,
+    projection: ScopedObservationProjectionLimits,
+    watcher_hint_capacity: usize,
+    startup_reconcile_hint_limit: usize,
+    max_startup_reconcile_passes: usize,
+    source_retry: ScopedObservationSourceOwnerRetryPolicy,
+    watcher_recovery: ScopedObservationNativeWatcherRecoveryPolicy,
+}
+
+impl Default for ConfiguredScopedObservationRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            admission: ScopedObservationQueueLimits {
+                max_data_events: 4_096,
+                max_retained_native_bytes: 4 * 1_024 * 1_024,
+                max_control_items: 512,
+                max_coverage_objects: MAX_KNOWN_OBJECTS,
+            },
+            delivery: ScopedObservationDeliveryLimits {
+                max_semantic_events: 1_024,
+                max_retained_native_bytes: 4 * 1_024 * 1_024,
+                max_source_control_items: 256,
+            },
+            projection: ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 4_096,
+            },
+            watcher_hint_capacity: 256,
+            startup_reconcile_hint_limit: 64,
+            max_startup_reconcile_passes: 256,
+            source_retry: ScopedObservationSourceOwnerRetryPolicy::default(),
+            watcher_recovery: ScopedObservationNativeWatcherRecoveryPolicy::default(),
+        }
+    }
+}
+
+impl ConfiguredScopedObservationRuntimeOptions {
+    fn validate(
+        self,
+        object_count: usize,
+    ) -> Result<Self, ConfiguredScopedObservationRuntimeError> {
+        if object_count == 0
+            || object_count > MAX_KNOWN_OBJECTS
+            || self.admission.max_coverage_objects < object_count
+            || self.watcher_hint_capacity == 0
+            || self.watcher_hint_capacity > 4_096
+            || self.startup_reconcile_hint_limit == 0
+            || self.startup_reconcile_hint_limit > 4_096
+            || self.max_startup_reconcile_passes == 0
+            || self.max_startup_reconcile_passes > 4_096
+        {
+            return Err(ConfiguredScopedObservationRuntimeError::InvalidOptions);
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ConfiguredScopedObservationRuntimeError {
+    #[error("configured scoped observer options are invalid")]
+    InvalidOptions,
+    #[error("configured scoped observer admission could not be created")]
+    AdmissionOpen,
+    #[error("configured scoped observer projection could not be created")]
+    ProjectionOpen,
+    #[error("configured scoped observer event drain could not be created")]
+    RuntimeOpen,
+    #[error("configured scoped observer watcher could not be installed")]
+    WatcherInstall,
+    #[error("configured scoped observer bootstrap ordering failed")]
+    Startup,
+    #[error("configured scoped observer source or decoder pass failed")]
+    SourcePass,
+    #[error("configured scoped observer admission failed")]
+    Admission,
+    #[error("configured scoped observer delivery failed")]
+    Delivery,
+    #[error("configured scoped observer bootstrap exceeded its bounded reconciliation ceiling")]
+    ReconcileLimit,
+    #[error("configured scoped observer epoch could not be bound")]
+    EpochBinding,
+    #[error("configured scoped observer source owner could not be bound")]
+    SourceBinding,
+    #[error("configured scoped observer watcher/source owners could not be paired")]
+    OwnerPairBinding,
+    #[error("configured scoped observer was closed")]
+    Closed,
+}
+
+/// The non-cloneable event owner and its structured producer supervisor. No
+/// task is detached here: callers must drive both futures concurrently and
+/// retain the returned runtime until close completes.
+pub(crate) struct OpenedConfiguredAppendRuntime {
+    runtime: ScopedObservationAsyncRuntime,
+    handle: ScopedObservationAsyncHandle,
+    supervisor: ConfiguredScopedObservationSupervisor,
+}
+
+impl OpenedConfiguredAppendRuntime {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ScopedObservationAsyncRuntime,
+        ScopedObservationAsyncHandle,
+        ConfiguredScopedObservationSupervisor,
+    ) {
+        (self.runtime, self.handle, self.supervisor)
+    }
+}
+
+impl std::fmt::Debug for OpenedConfiguredAppendRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenedConfiguredAppendRuntime")
+            .field("adapter_id", &self.handle.host().root_identity().adapter_id)
+            .field(
+                "session_key",
+                &self.handle.host().root_identity().session_key,
+            )
+            .field("supervisor", &self.supervisor)
+            .finish_non_exhaustive()
+    }
+}
+
+#[must_use = "the configured observer supervisor must be driven beside the event owner"]
+pub(crate) struct ConfiguredScopedObservationSupervisor {
+    handle: ScopedObservationAsyncHandle,
+    watcher: ScopedObservationNativeWatcher,
+    objects: Vec<ScopedKnownAppendObject>,
+    bindings: Vec<ScopedObservationAppendPassBinding>,
+    admission: ScopedObservationAdmissionLane,
+    projection: ScopedObservationProjectionSink,
+    options: ConfiguredScopedObservationRuntimeOptions,
+}
+
+impl std::fmt::Debug for ConfiguredScopedObservationSupervisor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ConfiguredScopedObservationSupervisor")
+            .field("adapter_id", &self.handle.host().root_identity().adapter_id)
+            .field(
+                "session_key",
+                &self.handle.host().root_identity().session_key,
+            )
+            .field("watcher", &self.watcher)
+            .field(
+                "relation_ids",
+                &self
+                    .bindings
+                    .iter()
+                    .map(ScopedObservationAppendPassBinding::relation_id)
+                    .collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[must_use = "a configured supervisor result retains terminal owner state or failure evidence"]
+pub(crate) enum ConfiguredScopedObservationSupervisorRunResult {
+    Stopped(Box<ScopedObservationAsyncStoppedOwners>),
+    BootstrapFailed(ConfiguredScopedObservationRuntimeError),
+    ResyncFailed(ScopedObservationAsyncResyncFailure),
+}
+
+impl std::fmt::Debug for ConfiguredScopedObservationSupervisorRunResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stopped(stopped) => formatter.debug_tuple("Stopped").field(stopped).finish(),
+            Self::BootstrapFailed(error) => formatter
+                .debug_tuple("BootstrapFailed")
+                .field(error)
+                .finish(),
+            Self::ResyncFailed(error) => {
+                formatter.debug_tuple("ResyncFailed").field(error).finish()
+            }
+        }
+    }
+}
+
 impl PreparedConfiguredAppendRuntime {
     pub(crate) fn host(&self) -> &ScopedObservationAccessHost {
         &self.host
@@ -368,6 +566,75 @@ impl PreparedConfiguredAppendRuntime {
     ) {
         (self.host, self.objects, self.bindings)
     }
+
+    /// Create the sole event drain and install the native watcher without
+    /// reading any source object. The returned supervisor performs the scan;
+    /// callers drive it concurrently with the non-cloneable event runtime.
+    pub(crate) fn open(
+        self,
+        options: ConfiguredScopedObservationRuntimeOptions,
+    ) -> Result<OpenedConfiguredAppendRuntime, ConfiguredScopedObservationRuntimeError> {
+        self.open_with_watcher_factory_inner(options, |callback| {
+            let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+            Ok(Box::new(watcher))
+        })
+    }
+
+    fn open_with_watcher_factory_inner<F>(
+        self,
+        options: ConfiguredScopedObservationRuntimeOptions,
+        factory: F,
+    ) -> Result<OpenedConfiguredAppendRuntime, ConfiguredScopedObservationRuntimeError>
+    where
+        F: FnOnce(
+            ScopedObservationNativeWatchCallback,
+        ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
+    {
+        let options = options.validate(self.objects.len())?;
+        let admission = ScopedObservationAdmissionLane::new(options.admission)
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::AdmissionOpen)?;
+        let projection = self
+            .host
+            .open_projection_sink(options.projection)
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::ProjectionOpen)?;
+        let runtime = ScopedObservationAsyncRuntime::open(self.host, options.delivery).map_err(
+            |_: ScopedObservationOpenDrainError| {
+                ConfiguredScopedObservationRuntimeError::RuntimeOpen
+            },
+        )?;
+        let handle = runtime.handle();
+        let watcher = handle
+            .install_native_watcher_with_factory_inner(options.watcher_hint_capacity, factory)
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::WatcherInstall)?;
+        let supervisor = ConfiguredScopedObservationSupervisor {
+            handle: handle.clone(),
+            watcher,
+            objects: self.objects,
+            bindings: self.bindings,
+            admission,
+            projection,
+            options,
+        };
+        Ok(OpenedConfiguredAppendRuntime {
+            runtime,
+            handle,
+            supervisor,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_with_watcher_factory<F>(
+        self,
+        options: ConfiguredScopedObservationRuntimeOptions,
+        factory: F,
+    ) -> Result<OpenedConfiguredAppendRuntime, ConfiguredScopedObservationRuntimeError>
+    where
+        F: FnOnce(
+            ScopedObservationNativeWatchCallback,
+        ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
+    {
+        self.open_with_watcher_factory_inner(options, factory)
+    }
 }
 
 impl std::fmt::Debug for PreparedConfiguredAppendRuntime {
@@ -387,6 +654,352 @@ impl std::fmt::Debug for PreparedConfiguredAppendRuntime {
             )
             .finish_non_exhaustive()
     }
+}
+
+impl ConfiguredScopedObservationSupervisor {
+    /// Drive bootstrap, then supervise the inseparable watcher/source pair
+    /// through any number of whole-epoch resync replacements until close or a
+    /// terminal failure. This future owns all producer-side mutable state.
+    pub(crate) async fn run_until_stopped(
+        mut self,
+    ) -> ConfiguredScopedObservationSupervisorRunResult {
+        if let Err(error) = self.bootstrap().await {
+            configured_fail_watcher(&mut self.watcher);
+            return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(error);
+        }
+
+        let Self {
+            handle,
+            mut watcher,
+            objects,
+            bindings,
+            admission,
+            projection,
+            options,
+        } = self;
+        let active = match handle.with_attachment(move |host, drain| {
+            host.bind_consumer_bootstrap_epoch_state(objects, admission, projection, drain)
+        }) {
+            Ok(active) => active,
+            Err(_error) => {
+                configured_fail_watcher(&mut watcher);
+                return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(
+                    ConfiguredScopedObservationRuntimeError::EpochBinding,
+                );
+            }
+        };
+        let source = match handle.bind_epoch_source_owner(active, bindings, options.source_retry) {
+            Ok(source) => source,
+            Err(failure) => {
+                let (_error, active, bindings) = failure.into_parts();
+                drop((active, bindings));
+                configured_fail_watcher(&mut watcher);
+                return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(
+                    ConfiguredScopedObservationRuntimeError::SourceBinding,
+                );
+            }
+        };
+        let mut pair = match handle.bind_live_owner_pair(watcher, source, options.watcher_recovery)
+        {
+            Ok(pair) => pair,
+            Err(failure) => {
+                let (_error, mut watcher, source, _policy) = failure.into_parts();
+                drop(source);
+                configured_fail_watcher(&mut watcher);
+                return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(
+                    ConfiguredScopedObservationRuntimeError::OwnerPairBinding,
+                );
+            }
+        };
+
+        loop {
+            match pair.run_until_stopped().await {
+                ScopedObservationAsyncOwnerRunResult::Stopped(stopped) => {
+                    return ConfiguredScopedObservationSupervisorRunResult::Stopped(Box::new(
+                        stopped,
+                    ));
+                }
+                ScopedObservationAsyncOwnerRunResult::Resync(handoff) => {
+                    pair = match handoff.replay_and_rebind().await {
+                        Ok(pair) => pair,
+                        Err(error) => {
+                            return ConfiguredScopedObservationSupervisorRunResult::ResyncFailed(
+                                error,
+                            );
+                        }
+                    };
+                }
+            }
+        }
+    }
+
+    async fn bootstrap(&mut self) -> Result<(), ConfiguredScopedObservationRuntimeError> {
+        let scan = self
+            .watcher
+            .coordinator()
+            .begin_initial_scan(self.handle.host())
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::Startup)?;
+        configured_execute_append_pass(
+            &self.handle,
+            scan.access_pass(),
+            &mut self.objects,
+            &self.bindings,
+            &mut self.admission,
+            &mut self.projection,
+            AccessPhase::Initial,
+            configured_observed_at(),
+        )
+        .await?;
+        self.handle
+            .with_attachment(|host, drain| {
+                self.watcher.coordinator().finish_initial_scan(
+                    host,
+                    scan,
+                    &self.admission,
+                    &self.projection,
+                    drain,
+                )
+            })
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::Startup)?;
+
+        let mut completed_reconcile_passes = 0_usize;
+        loop {
+            if self.objects.iter().any(|object| object.bootstrap_blocked) {
+                self.watcher
+                    .request_audit()
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::Startup)?;
+            }
+
+            loop {
+                match self
+                    .watcher
+                    .coordinator()
+                    .next_reconcile(
+                        self.handle.host(),
+                        self.options.startup_reconcile_hint_limit,
+                    )
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::Startup)?
+                {
+                    ScopedObservationStartupReconcileAction::CaughtUp => break,
+                    ScopedObservationStartupReconcileAction::Reconcile(reconcile) => {
+                        completed_reconcile_passes = completed_reconcile_passes
+                            .checked_add(1)
+                            .ok_or(ConfiguredScopedObservationRuntimeError::ReconcileLimit)?;
+                        if completed_reconcile_passes > self.options.max_startup_reconcile_passes {
+                            return Err(ConfiguredScopedObservationRuntimeError::ReconcileLimit);
+                        }
+                        configured_execute_append_pass(
+                            &self.handle,
+                            reconcile.access_pass(),
+                            &mut self.objects,
+                            &self.bindings,
+                            &mut self.admission,
+                            &mut self.projection,
+                            AccessPhase::Revalidation,
+                            configured_observed_at(),
+                        )
+                        .await?;
+                        self.handle
+                            .with_attachment(|host, drain| {
+                                self.watcher.coordinator().finish_reconcile(
+                                    host,
+                                    reconcile,
+                                    &self.admission,
+                                    &self.projection,
+                                    drain,
+                                )
+                            })
+                            .map_err(|_| ConfiguredScopedObservationRuntimeError::Startup)?;
+                    }
+                }
+            }
+
+            let (waiter, generation, offered) = self.handle.with_attachment(|host, drain| {
+                let waiter = drain.delivery_capacity_waiter();
+                let generation = waiter.snapshot().generation;
+                let offered = self.watcher.coordinator().complete_and_offer_bootstrap(
+                    host,
+                    &mut self.objects,
+                    &self.admission,
+                    &self.projection,
+                    drain,
+                    configured_observed_at(),
+                );
+                (waiter, generation, offered)
+            });
+            match offered {
+                Ok(_) => return Ok(()),
+                Err(ScopedObservationStartupError::ReconcilePending { .. }) => continue,
+                Err(error) if configured_startup_is_backpressure(&error) => {
+                    if waiter.wait_after_async(generation).await.closed {
+                        return Err(ConfiguredScopedObservationRuntimeError::Closed);
+                    }
+                }
+                Err(ScopedObservationStartupError::Closed) => {
+                    return Err(ConfiguredScopedObservationRuntimeError::Closed);
+                }
+                Err(_) => return Err(ConfiguredScopedObservationRuntimeError::Startup),
+            }
+        }
+    }
+}
+
+fn configured_observed_at() -> i64 {
+    super::scoped_observation_now_unix_ms()
+}
+
+fn configured_fail_watcher(watcher: &mut ScopedObservationNativeWatcher) {
+    let _ = watcher.fail_observer(
+        ScopedObserverFailureReason::InternalControlFailure,
+        configured_observed_at(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn configured_execute_append_pass(
+    handle: &ScopedObservationAsyncHandle,
+    pass: &ScopedObservationAccessPass,
+    objects: &mut [ScopedKnownAppendObject],
+    bindings: &[ScopedObservationAppendPassBinding],
+    admission: &mut ScopedObservationAdmissionLane,
+    projection: &mut ScopedObservationProjectionSink,
+    phase: AccessPhase,
+    observed_at: i64,
+) -> Result<(), ConfiguredScopedObservationRuntimeError> {
+    if objects.len() != bindings.len() || objects.is_empty() {
+        return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
+    }
+    let identity_inputs = bindings
+        .iter()
+        .map(|binding| {
+            binding
+                .identity_inputs
+                .iter()
+                .map(|input| ScopeIdentityInput {
+                    name: &input.name,
+                    value: &input.value,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let origins = bindings
+        .iter()
+        .map(|binding| {
+            let mut origin = binding.origin.clone();
+            origin.observed_at = observed_at;
+            origin
+        })
+        .collect::<Vec<_>>();
+    let requests = bindings
+        .iter()
+        .zip(&identity_inputs)
+        .zip(&origins)
+        .map(
+            |((binding, identity_inputs), origin)| ScopedObservationAppendPassRequest {
+                relation_id: &binding.relation_id,
+                identity_inputs,
+                parent_token: binding.parent_token,
+                depth: binding.depth,
+                max_bytes: binding.max_bytes,
+                origin,
+                force_contract_replay: binding.force_contract_replay,
+            },
+        )
+        .collect::<Vec<_>>();
+
+    for index in 0..objects.len() {
+        let request = &requests[index];
+        let observation = objects[index]
+            .reconcile(
+                pass,
+                ScopedAppendReconcileRequest {
+                    relation_id: request.relation_id,
+                    identity_inputs: request.identity_inputs,
+                    access_phase: phase,
+                    parent_token: request.parent_token,
+                    depth: request.depth,
+                    max_bytes: request.max_bytes,
+                    origin: request.origin,
+                    force_contract_replay: request.force_contract_replay,
+                },
+            )
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+        let decoded = match handle.host().decode_append_with_dependencies(
+            &mut objects[index],
+            &observation,
+            pass,
+            &requests,
+            phase,
+        ) {
+            Ok(ScopedAppendDecodeOutcome::Ready(decoded)) => decoded,
+            Ok(ScopedAppendDecodeOutcome::RetryTransient) | Err(_) => {
+                objects[index]
+                    .discard(&observation)
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+                return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
+            }
+        };
+        if let Err(failure) = admission.admit(&mut objects[index], &observation, decoded) {
+            objects[index]
+                .discard(&observation)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            let _error = failure.error;
+            let _decoded = failure.decoded;
+            return Err(ConfiguredScopedObservationRuntimeError::Admission);
+        }
+        configured_offer_pending(handle, admission, projection).await?;
+    }
+    Ok(())
+}
+
+async fn configured_offer_pending(
+    handle: &ScopedObservationAsyncHandle,
+    admission: &mut ScopedObservationAdmissionLane,
+    projection: &mut ScopedObservationProjectionSink,
+) -> Result<(), ConfiguredScopedObservationRuntimeError> {
+    loop {
+        let (waiter, generation, offered) = handle.with_attachment(|host, drain| {
+            let waiter = drain.delivery_capacity_waiter();
+            let generation = waiter.snapshot().generation;
+            let offered = host.offer_consumer_next(admission, projection, drain);
+            (waiter, generation, offered)
+        });
+        match offered {
+            Ok(Some(_)) => {}
+            Ok(None) => return Ok(()),
+            Err(error) if configured_offer_is_backpressure(&error) => {
+                if waiter.wait_after_async(generation).await.closed {
+                    return Err(ConfiguredScopedObservationRuntimeError::Closed);
+                }
+            }
+            Err(ScopedObservationConsumerOfferError::Closed) => {
+                return Err(ConfiguredScopedObservationRuntimeError::Closed);
+            }
+            Err(_) => return Err(ConfiguredScopedObservationRuntimeError::Delivery),
+        }
+    }
+}
+
+fn configured_offer_is_backpressure(error: &ScopedObservationConsumerOfferError) -> bool {
+    matches!(
+        error,
+        ScopedObservationConsumerOfferError::Offer(ScopedProjectionDeliveryError::Delivery(
+            ScopedDeliveryError::SemanticQueueFull
+                | ScopedDeliveryError::RetainedNativeQueueFull
+                | ScopedDeliveryError::SourceControlQueueFull
+        ))
+    )
+}
+
+fn configured_startup_is_backpressure(error: &ScopedObservationStartupError) -> bool {
+    matches!(
+        error,
+        ScopedObservationStartupError::Bootstrap(ScopedBootstrapBarrierError::Delivery(
+            ScopedDeliveryError::SemanticQueueFull
+                | ScopedDeliveryError::RetainedNativeQueueFull
+                | ScopedDeliveryError::SourceControlQueueFull
+        ))
+    )
 }
 
 /// Fully composed store-free attachment authority. It has not opened a file,

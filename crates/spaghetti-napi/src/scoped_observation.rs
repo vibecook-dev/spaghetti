@@ -8342,11 +8342,12 @@ fn scoped_automatic_resync_object_error_is_backpressure(
 fn scoped_automatic_resync_is_backpressure(error: ScopedReplacementStageError) -> bool {
     matches!(
         error,
-        ScopedReplacementStageError::Delivery(
-            ScopedDeliveryError::SemanticQueueFull
-                | ScopedDeliveryError::RetainedNativeQueueFull
-                | ScopedDeliveryError::SourceControlQueueFull
-        )
+        ScopedReplacementStageError::ResyncStartNotDelivered
+            | ScopedReplacementStageError::Delivery(
+                ScopedDeliveryError::SemanticQueueFull
+                    | ScopedDeliveryError::RetainedNativeQueueFull
+                    | ScopedDeliveryError::SourceControlQueueFull
+            )
     )
 }
 
@@ -11039,6 +11040,9 @@ impl ScopedObservationDeliveryLane {
                 .any(|queued| queued.value.phase() != ScopedAppendDeliveryPhase::Correction)
         {
             return Err(ScopedReplacementStageError::StateChanged);
+        }
+        if before.delivered_through_sequence < started.control_sequence {
+            return Err(ScopedReplacementStageError::ResyncStartNotDelivered);
         }
         let snapshot = ScopedCompletionSnapshotComponents {
             root,
@@ -14630,6 +14634,8 @@ pub enum ScopedReplacementStageError {
     SnapshotNotPrepared,
     #[error("scoped replacement snapshot has not crossed the offered boundary")]
     SnapshotNotFullyOffered,
+    #[error("scoped replacement cannot complete before its start control is delivered")]
+    ResyncStartNotDelivered,
     #[error("scoped replacement snapshot accounting is exhausted")]
     CapacityExhausted,
     #[error("scoped replacement coverage is not ready: {0}")]
