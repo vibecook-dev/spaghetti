@@ -626,19 +626,33 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         let _ = started.send(Err(EngineError::ShuttingDown));
         return;
     };
-    if let Err(error) = ObservationCoordinator::with_cancellations(
-        Arc::clone(&initial_engine),
-        vec![cancellation.clone(), startup_cancellation.clone()],
-    )
-    .reconcile(
-        &adapter,
-        ReconcileRequest {
-            configured_roots: options.configured_roots.clone(),
-            reason: format!("{}_initial_scan", options.reason),
-        },
-    ) {
-        let _ = started.send(Err(error));
-        return;
+    let startup_cancellations = [cancellation.clone(), startup_cancellation.clone()];
+    loop {
+        match ObservationCoordinator::with_cancellations(
+            Arc::clone(&initial_engine),
+            startup_cancellations.to_vec(),
+        )
+        .reconcile(
+            &adapter,
+            ReconcileRequest {
+                configured_roots: options.configured_roots.clone(),
+                reason: format!("{}_initial_scan", options.reason),
+            },
+        ) {
+            Ok(_) => break,
+            Err(EngineError::ObservationBusy) => {
+                if let Err(error) =
+                    initial_engine.wait_for_observation_idle_cancellable(&startup_cancellations)
+                {
+                    let _ = started.send(Err(error));
+                    return;
+                }
+            }
+            Err(error) => {
+                let _ = started.send(Err(error));
+                return;
+            }
+        }
     }
     let mut polling = PollingPolicy::default();
     if watcher.is_none() {
@@ -1163,7 +1177,8 @@ fn drain_pending<A: AgentAdapter>(
     cancellations: &[QueryCancellationToken],
 ) -> DrainSummary {
     let mut summary = DrainSummary::default();
-    for _ in 0..max_passes {
+    let mut completed_passes = 0;
+    while completed_passes < max_passes {
         if cancellations
             .iter()
             .any(QueryCancellationToken::is_cancelled)
@@ -1173,6 +1188,7 @@ fn drain_pending<A: AgentAdapter>(
         }
         match drain_pending_once(engine, adapter, options, topology, cancellations) {
             Ok(Some(drained)) => {
+                completed_passes += 1;
                 summary.changed |= drained.outcome.objects_changed > 0;
                 summary.watcher_failure |= matches!(
                     drained.reason,
@@ -1192,25 +1208,35 @@ fn drain_pending<A: AgentAdapter>(
                 }
             }
             Ok(None) => {
+                if engine.has_pending_observation_work(adapter.manifest().id.as_str()) {
+                    if let Err(error) = engine.wait_for_observation_idle_cancellable(cancellations)
+                    {
+                        summary.result = Err(error);
+                        return summary;
+                    }
+                    continue;
+                }
                 summary.immediate_retry = false;
                 return summary;
+            }
+            Err(EngineError::ObservationBusy) => {
+                if let Err(error) = engine.wait_for_observation_idle_cancellable(cancellations) {
+                    summary.result = Err(error);
+                    return summary;
+                }
+                continue;
             }
             Err(error) => {
                 summary.result = Err(error);
                 return summary;
             }
         }
-        if engine
-            .next_observation_work(adapter.manifest().id.as_str())
-            .is_none()
-        {
+        if !engine.has_pending_observation_work(adapter.manifest().id.as_str()) {
             summary.immediate_retry = false;
             return summary;
         }
     }
-    summary.immediate_retry = engine
-        .next_observation_work(adapter.manifest().id.as_str())
-        .is_some();
+    summary.immediate_retry = engine.has_pending_observation_work(adapter.manifest().id.as_str());
     summary
 }
 

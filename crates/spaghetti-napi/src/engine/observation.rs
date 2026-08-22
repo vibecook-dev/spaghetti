@@ -6,10 +6,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::Duration;
 
 use crate::source::DirtyReason;
 
-use super::{EngineError, ReconcileOutcome};
+use super::{EngineError, QueryCancellationToken, ReconcileOutcome};
 
 const DEFAULT_DIRTY_INSTANCE_CAPACITY: usize = 1_024;
 const MAX_ERROR_DETAIL_CHARS: usize = 512;
@@ -436,6 +437,45 @@ impl ObservationRuntime {
                 reason: pending.reason,
             }),
             (None, None) => None,
+        }
+    }
+
+    pub(crate) fn has_pending(&self, adapter_id: &str) -> bool {
+        let state = self.lock_state();
+        state.pending_adapters.contains_key(adapter_id)
+            || state
+                .pending_instances
+                .keys()
+                .any(|key| key.adapter_id == adapter_id)
+            || state
+                .pending_objects
+                .keys()
+                .any(|key| key.instance.adapter_id == adapter_id)
+    }
+
+    pub(crate) fn wait_until_idle_cancellable(
+        &self,
+        cancellations: &[QueryCancellationToken],
+    ) -> Result<(), EngineError> {
+        let mut state = self.lock_state();
+        loop {
+            if cancellations
+                .iter()
+                .any(QueryCancellationToken::is_cancelled)
+            {
+                return Err(EngineError::QueryCancelled);
+            }
+            if !state.accepting {
+                return Err(EngineError::ShuttingDown);
+            }
+            if state.active.is_none() {
+                return Ok(());
+            }
+            let (next, _) = self
+                .idle
+                .wait_timeout(state, Duration::from_millis(20))
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
         }
     }
 

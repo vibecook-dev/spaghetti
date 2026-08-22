@@ -5659,7 +5659,7 @@ fn durable_probe_roots(spec: &AdapterSourceInstanceSpec) -> Vec<PathBuf> {
     }
 }
 
-fn validate_request(request: &ReconcileRequest) -> Result<(), EngineError> {
+pub(super) fn validate_request(request: &ReconcileRequest) -> Result<(), EngineError> {
     if request.configured_roots.is_empty()
         || request.configured_roots.len() > MAX_CONFIGURED_ROOTS
         || !valid_reconcile_reason(&request.reason)

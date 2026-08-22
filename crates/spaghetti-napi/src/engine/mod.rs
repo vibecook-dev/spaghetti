@@ -23,6 +23,7 @@ mod orchestration_query;
 mod owner_lock;
 mod performance;
 mod presence_projection;
+mod progressive_startup;
 mod projection;
 mod query_identity;
 mod query_pool;
@@ -48,6 +49,7 @@ mod usage_query;
 mod workflow_projection;
 mod writer;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -2181,6 +2183,17 @@ impl SpaghettiEngineCore {
         self.observation.next_pending(adapter_id)
     }
 
+    pub(crate) fn has_pending_observation_work(&self, adapter_id: &str) -> bool {
+        self.observation.has_pending(adapter_id)
+    }
+
+    pub(crate) fn wait_for_observation_idle_cancellable(
+        &self,
+        cancellations: &[QueryCancellationToken],
+    ) -> Result<(), EngineError> {
+        self.observation.wait_until_idle_cancellable(cancellations)
+    }
+
     pub fn start_observation_supervisor<A: crate::adapter::AgentAdapter>(
         self: &Arc<Self>,
         adapter: A,
@@ -2254,31 +2267,46 @@ impl SpaghettiEngineCore {
         &self,
         supervisor: ObservationSupervisor,
     ) -> Result<(), EngineError> {
-        if !supervisor.is_alive() {
-            return Err(EngineError::WorkerUnavailable {
-                worker: "observation supervisor",
-            });
+        self.install_started_observation_supervisors(vec![supervisor])
+    }
+
+    pub(crate) fn install_started_observation_supervisors(
+        &self,
+        supervisors_to_install: Vec<ObservationSupervisor>,
+    ) -> Result<(), EngineError> {
+        if supervisors_to_install.is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "observation supervisor batch must not be empty".to_string(),
+            ));
         }
-        let adapter_id = supervisor.adapter_id().to_string();
+        let mut adapter_ids = BTreeSet::new();
+        for supervisor in &supervisors_to_install {
+            if !supervisor.is_alive() {
+                return Err(EngineError::WorkerUnavailable {
+                    worker: "observation supervisor",
+                });
+            }
+            if !adapter_ids.insert(supervisor.adapter_id().to_string()) {
+                return Err(EngineError::InvalidConfig(
+                    "observation supervisor batch contains a duplicate adapter".to_string(),
+                ));
+            }
+        }
         let lifecycle = self.lock_lifecycle();
         if lifecycle.phase != LifecyclePhase::Running {
-            drop(lifecycle);
-            drop(supervisor);
             return Err(EngineError::ShuttingDown);
         }
         let mut supervisors = self.lock_supervisors();
-        if supervisors
+        if let Some(adapter_id) = supervisors
             .iter()
-            .any(|existing| existing.adapter_id() == adapter_id)
+            .map(ObservationSupervisor::adapter_id)
+            .find(|adapter_id| adapter_ids.contains(*adapter_id))
         {
-            drop(supervisors);
-            drop(lifecycle);
-            drop(supervisor);
             return Err(EngineError::InvalidConfig(format!(
                 "observation supervisor for adapter {adapter_id} is already running"
             )));
         }
-        supervisors.push(supervisor);
+        supervisors.extend(supervisors_to_install);
         Ok(())
     }
 
