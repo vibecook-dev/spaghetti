@@ -121,32 +121,32 @@ prerequisite for early vertical slices.
 
 ## 4. Program status
 
-| Work package                             | Owner               | Status      | Exit evidence                                                                           |
-| ---------------------------------------- | ------------------- | ----------- | --------------------------------------------------------------------------------------- |
-| E0. Phase 0A/0B evidence                 | Umbrella            | Gate met    | catalog, diagnostic, topology, usage census reports/tests                               |
-| X0. RFC 011 delta/compatibility gate     | Umbrella            | Gate met    | retained/amended/superseded contract and migration fixtures                             |
-| A1. Logical dependency/model seam        | 012A                | In progress | architecture checks and partial contract-family fixtures                                |
-| A2. ADS/scope/support tooling            | 012A                | In progress | internal strict authority; remaining public catalog/scoped lifecycle                    |
-| A3. Current-agent support candidates     | 012A                | In progress | Claude 2.1.223 review-blocked candidate; Codex/Grok remain candidate                    |
-| A4. New-agent adaptation proof           | 012A/umbrella       | Gate met    | fourth adapter without common-runtime/query/observer change                             |
-| B1. Catalog identity/readiness contracts | 012B                | Gate met    | strict Rust/TypeScript fixtures plus caller-bound query and hydration transport          |
-| B2. Bounded catalog source compositions  | 012B                | In progress | three authorized runtime producers publish/refresh; promotion evidence open              |
-| B3. Durable catalog/query snapshots      | 012B                | In progress | public WITHHELD snapshot lifecycle; local policy/richer queries/compaction open          |
-| B4. Progressive host and UX              | 012B                | In progress | catalog-first host and selected hydration; weighted fairness and product UI open         |
-| B5. Catalog performance calibration      | 012B                | In progress | partial experiment; complete report and ratification open                               |
-| C1. Runtime semantic contracts           | 012C                | In progress | compiled reducer parity complete; portable specialists/durable unknown query open       |
-| C2. Usage-v2 shadow projection           | 012C                | In progress | private parity; complete coverage/topology gate open                                    |
-| C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof                          |
-| C4. Runtime semantic downstream suite    | 012C                | In progress | Rust all-family merge/digests landed; remaining integration matrices open                |
-| D1. Store-free observer kernel           | 012D                | In progress | substantial internal kernel; public/multi-object surface open                           |
-| D2. Claude scope composition             | 012D                | In progress | bounded internal directory membership; runtime promotion open                           |
-| D3. Control lane and epoch replacement   | 012D                | In progress | internal interaction replacement; six-family portable union; interaction wire open      |
-| D4. SDK and Chopsticks migration         | 012D                | In progress | injected-source shadow only; public observer transport open                             |
-| D5. Observer performance calibration     | 012D                | In progress | partial timings; memory/access/slow-consumer report open                                |
-| X1. Search/finalization separation       | 012B integration    | In progress | strategy harness landed; required report fields open                                    |
-| X2. Diagnostic disposition/aggregation   | 012A implementation | In progress | bounded machinery landed; retained reduction/parity report open                         |
-| X3. Physical extraction                  | Implementation      | In progress | coverage encoding extracted; remaining boundaries still logical                         |
-| X4. Default promotion/drift lane         | Umbrella            | In progress | Claude candidate quarantined; independent review/telemetry open                         |
+| Work package                             | Owner               | Status      | Exit evidence                                                                        |
+| ---------------------------------------- | ------------------- | ----------- | ------------------------------------------------------------------------------------ |
+| E0. Phase 0A/0B evidence                 | Umbrella            | Gate met    | catalog, diagnostic, topology, usage census reports/tests                            |
+| X0. RFC 011 delta/compatibility gate     | Umbrella            | Gate met    | retained/amended/superseded contract and migration fixtures                          |
+| A1. Logical dependency/model seam        | 012A                | In progress | architecture checks and partial contract-family fixtures                             |
+| A2. ADS/scope/support tooling            | 012A                | In progress | internal strict authority; remaining public catalog/scoped lifecycle                 |
+| A3. Current-agent support candidates     | 012A                | In progress | Claude 2.1.223 review-blocked candidate; Codex/Grok remain candidate                 |
+| A4. New-agent adaptation proof           | 012A/umbrella       | Gate met    | fourth adapter without common-runtime/query/observer change                          |
+| B1. Catalog identity/readiness contracts | 012B                | Gate met    | strict Rust/TypeScript fixtures plus caller-bound query and hydration transport      |
+| B2. Bounded catalog source compositions  | 012B                | In progress | three authorized runtime producers publish/refresh; promotion evidence open          |
+| B3. Durable catalog/query snapshots      | 012B                | In progress | public WITHHELD snapshot lifecycle; local policy/richer queries/compaction open      |
+| B4. Progressive host and UX              | 012B                | In progress | catalog-first host, hydration, and weighted engine admission; product UI/matrix open |
+| B5. Catalog performance calibration      | 012B                | In progress | partial experiment; complete report and ratification open                            |
+| C1. Runtime semantic contracts           | 012C                | In progress | compiled reducer parity complete; portable specialists/durable unknown query open    |
+| C2. Usage-v2 shadow projection           | 012C                | In progress | private parity; complete coverage/topology gate open                                 |
+| C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof                       |
+| C4. Runtime semantic downstream suite    | 012C                | In progress | Rust all-family merge/digests landed; remaining integration matrices open            |
+| D1. Store-free observer kernel           | 012D                | In progress | substantial internal kernel; public/multi-object surface open                        |
+| D2. Claude scope composition             | 012D                | In progress | bounded internal directory membership; runtime promotion open                        |
+| D3. Control lane and epoch replacement   | 012D                | In progress | internal interaction replacement; six-family portable union; interaction wire open   |
+| D4. SDK and Chopsticks migration         | 012D                | In progress | injected-source shadow only; public observer transport open                          |
+| D5. Observer performance calibration     | 012D                | In progress | partial timings; memory/access/slow-consumer report open                             |
+| X1. Search/finalization separation       | 012B integration    | In progress | strategy harness landed; required report fields open                                 |
+| X2. Diagnostic disposition/aggregation   | 012A implementation | In progress | bounded machinery landed; retained reduction/parity report open                      |
+| X3. Physical extraction                  | Implementation      | In progress | coverage encoding extracted; remaining boundaries still logical                      |
+| X4. Default promotion/drift lane         | Umbrella            | In progress | Claude candidate quarantined; independent review/telemetry open                      |
 
 ## 5. Completed evidence work (E0)
 
@@ -1159,11 +1159,19 @@ immutable authorization-bound command, and runs through an engine-owned lane
 with bounded active/retained work, idempotent request replay, exact-work
 coalescing, receipt lineage, cancellation, and privacy-safe N-API/SDK
 transport. Progressive readiness advertises hydration only when a catalog is
-queryable and an observation supervisor is running. The current hydration lane
-is deliberately bounded but is not yet the RFC's cross-lane writer-aware
-weighted scheduler. Renderer pagination/content states, product loading/error
-flow, fairness/starvation proof, and the complete cold/warm/selected-hydration
-UX and performance matrix remain open. B4 remains `In progress`.
+queryable and an observation supervisor is running. Commit `994028c` wires the
+production host to one fixed-capacity, weighted admission domain across public
+queries, catalog startup/refresh, live and polling work, selected hydration,
+repair/replay, and maintenance. The 4:2:1:1 class schedule is starvation
+bounded and FIFO within each class. Writer queue depth halves or serializes new
+producer admission, and an incomplete checkpoint serializes it; internal
+source-baseline reads inherit the enclosing pass so capacity-one pressure
+cannot deadlock every query worker. This is a semantic scheduling policy, not
+a calibrated latency or capacity claim. The scoped-observer facade is not yet
+wired into this production domain. Renderer pagination/content states, product
+loading/error flow, cross-workload flood/slow-consumer measurements, and the
+complete cold/warm/selected-hydration UX and performance matrix remain open.
+B4 remains `In progress`.
 
 ### B5. Performance calibration
 
@@ -3794,10 +3802,12 @@ test keeps one scope runnable by requesting a follow-up from every active pass
 and proves a sibling poll completes before the busy chain exhausts; the
 watcher-before-scan test separately proves duplicate pre-reservation callbacks
 share one completion while an in-flight callback is deferred to the next pass.
-This establishes the attachment-local scheduling quantum only. Cross-workload
-shared access/decode worker integration, durable/catalog workload fairness,
-numeric latency ceilings, and a calibrated multi-observer performance report
-remain open D3/D5 gates.
+This establishes the attachment-local scheduling quantum only. Durable,
+catalog, hydration, query, repair, and maintenance work now share weighted
+production admission (`994028c`), but the public scoped-observer facade is not
+yet wired into that host-owned domain. End-to-end scoped/durable workload
+fairness, numeric latency ceilings, and a calibrated multi-observer performance
+report remain open D3/D5 gates.
 
 The follow-on D3 permit slice (`9402172`) adds a real caller-owned shared
 capacity domain around bounded observer source passes. Multiple async runtimes
@@ -3812,9 +3822,12 @@ post-pass yield. A one-permit two-observer matrix keeps one scope continuously
 runnable while the sibling completes, and a separately held-permit case proves
 that close cancels the queued owner with its poll unresolved, performs no
 native pass, and leaks no permit. This closes shared capacity across current
-scoped observers only. Durable live tails and catalog work do not yet enter
-this pool, and numeric permit counts, latency/starvation ceilings, the retained
-performance report, public host wiring, and D5 ratification remain open.
+scoped observers. Durable live, catalog, hydration, query, repair, and
+maintenance work now enter a production weighted pool, but that host pool and
+the internal scoped-observer pool remain separate until the public observer
+facade owns their composition. Numeric capacity calibration,
+latency/starvation ceilings, the retained performance report, public host
+wiring, and D5 ratification remain open.
 
 ### D4. SDK and Chopsticks migration
 
