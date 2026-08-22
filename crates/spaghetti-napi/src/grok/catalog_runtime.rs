@@ -22,6 +22,9 @@ use crate::adapter::{
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceRoot};
+use crate::catalog_contract::evidence::{
+    CatalogAvailability, CatalogEvidenceOwner, ProjectAssociationBasis,
+};
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::decode_runtime::{
     decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecoderDependenciesDenied,
@@ -36,6 +39,7 @@ use crate::source::catalog_composition::{
     CatalogSourceComponent, CatalogSourceComposition, CatalogSourcePrimitive,
     MAX_CATALOG_COVERAGE_POINTS,
 };
+use crate::source::catalog_projection::{CatalogSourceMemberProjection, CatalogSourceProjection};
 use crate::source::{
     DirectoryCheckpoint, DirectoryEntryKind, DirectoryScan, DirectorySelection, DirectorySnapshot,
     DirectorySnapshotConfig, RecordOrigin, ReplaceCheckpoint, ReplaceDocument,
@@ -86,6 +90,7 @@ pub(crate) struct GrokCatalogIdentity {
 pub(crate) struct GrokCatalogProduction {
     pub(crate) identity: GrokCatalogIdentity,
     pub(crate) assembly: CatalogLibraryCoverageAssembly,
+    pub(crate) projection: CatalogSourceProjection,
 }
 
 pub(crate) fn grok_catalog_components() -> Vec<CatalogSourceComponent> {
@@ -277,12 +282,22 @@ fn produce_grok_library_coverage_after_summaries(
         let coordinates = catalog_path_coordinates(&relative_path).map_err(|_| {
             CatalogCompositionError::invalid("Grok membership path is not a catalog coordinate")
         })?;
-        if let Some(existing) = members.get(directory) {
+        let transcript_discovered =
+            relative_path.file_name().and_then(|name| name.to_str()) == Some("chat_history.jsonl");
+        let projection_owner = projection_owner(
+            source_instance_key,
+            membership_component,
+            &entry.path_key,
+            entry.generation,
+        )?;
+        if let Some(existing) = members.get_mut(directory) {
             if existing.coordinates != coordinates {
                 return Err(CatalogCompositionError::invalid(
                     "one Grok session directory produced conflicting coordinates",
                 ));
             }
+            existing.retain_projection_owner(projection_owner, transcript_discovered);
+            existing.transcript_discovered |= transcript_discovered;
             continue;
         }
         let identity = (
@@ -321,6 +336,8 @@ fn produce_grok_library_coverage_after_summaries(
             MemberState {
                 coordinates,
                 summary_metadata: false,
+                transcript_discovered,
+                projection_owner,
             },
         );
     }
@@ -510,6 +527,22 @@ fn produce_grok_library_coverage_after_summaries(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let projection_members = members
+        .values()
+        .map(|state| {
+            CatalogSourceMemberProjection::new(
+                state.projection_owner.clone(),
+                state.coordinates.native_project_key.clone(),
+                state.coordinates.session_id.clone(),
+                if state.transcript_discovered {
+                    CatalogAvailability::TranscriptDiscovered
+                } else {
+                    CatalogAvailability::MetadataOnly
+                },
+                ProjectAssociationBasis::SessionDirectory,
+            )
+        })
+        .collect();
     let membership_completion = complete_directory(
         executable,
         source_instance_key,
@@ -537,6 +570,12 @@ fn produce_grok_library_coverage_after_summaries(
         membership_entries,
         vec![membership_completion, summary_completion],
     )?;
+    let publication_source = assembly.complete_publication_source().map_err(|_| {
+        CatalogCompositionError::invalid(
+            "Grok catalog coverage could not form a complete publication source",
+        )
+    })?;
+    let projection = CatalogSourceProjection::assemble(publication_source, projection_members)?;
 
     Ok(GrokCatalogProduction {
         identity: GrokCatalogIdentity {
@@ -547,6 +586,7 @@ fn produce_grok_library_coverage_after_summaries(
             session_identity_digest: identity_digest(&sessions),
         },
         assembly,
+        projection,
     })
 }
 
@@ -554,11 +594,49 @@ fn produce_grok_library_coverage_after_summaries(
 struct MemberState {
     coordinates: GrokCatalogCoordinates,
     summary_metadata: bool,
+    transcript_discovered: bool,
+    projection_owner: CatalogEvidenceOwner,
+}
+
+impl MemberState {
+    fn retain_projection_owner(
+        &mut self,
+        candidate: CatalogEvidenceOwner,
+        candidate_is_transcript: bool,
+    ) {
+        let current_is_transcript = self.transcript_discovered;
+        if candidate_is_transcript && !current_is_transcript
+            || candidate_is_transcript == current_is_transcript && candidate < self.projection_owner
+        {
+            self.projection_owner = candidate;
+        }
+    }
 }
 
 struct SummaryRead {
     relative_path: PathBuf,
     checkpoint: ReplaceCheckpoint,
+}
+
+fn projection_owner(
+    source_instance_key: crate::adapter::CanonicalSourceInstanceKey,
+    component: &CatalogSourceComponent,
+    object_key: &[u8],
+    generation: u64,
+) -> Result<CatalogEvidenceOwner, CatalogCompositionError> {
+    CatalogEvidenceOwner::new(
+        ADAPTER_ID,
+        source_instance_key,
+        crate::adapter::CoverageStreamKey::derive(ADAPTER_ID, component.stream_id.as_bytes())
+            .map_err(|_| {
+                CatalogCompositionError::invalid("Grok catalog stream identity is invalid")
+            })?,
+        crate::adapter::CoverageObjectKey::derive(&component.stream_id, object_key).map_err(
+            |_| CatalogCompositionError::invalid("Grok catalog object identity is invalid"),
+        )?,
+        generation,
+    )
+    .map_err(|_| CatalogCompositionError::invalid("Grok catalog evidence owner is invalid"))
 }
 
 fn require_exact_runtime_composition(
