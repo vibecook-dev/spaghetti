@@ -35,11 +35,50 @@ pub(crate) struct DecodeRuntimeRequest<'a, A: AgentAdapter + ?Sized> {
 
 pub(crate) struct DecodedFactBatch {
     pub disposition: DecodeDisposition,
+    pub mapping_disposition: RecordMappingDisposition,
     pub batch: FactBatch,
     pub next_decoder_state: Option<Vec<u8>>,
     pub quarantined: bool,
     pub unscoped_permanent_diagnostic: bool,
     pub diagnostic_coverage_gaps: Vec<CapabilityId>,
+}
+
+/// RFC 012A's topology-independent outcome for one complete source record.
+///
+/// Adapters still return the smaller legacy enum while the remaining native
+/// decoders migrate.  This common boundary turns that value into the exact
+/// structured contract consumed by durable and scoped execution, so neither
+/// topology invents its own classification or exposes unbounded native data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecordMappingDisposition {
+    Mapped {
+        fact_count: u32,
+    },
+    IgnoredKnown {
+        reason_code: String,
+    },
+    RetainedUnknown {
+        family_hint: Option<String>,
+        bounded_evidence: BoundedNativeEvidence,
+    },
+    BufferedIncomplete,
+    Malformed {
+        reason_code: String,
+        bounded_diagnostic: Vec<u8>,
+    },
+    UnsupportedVersion {
+        observed_version: String,
+    },
+}
+
+/// Value-free evidence retained for an unknown source record regardless of
+/// the selected raw-retention policy.  The excerpt contains only hashed JSON
+/// keys, value kinds, sizes, and a digest; it never contains native values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedNativeEvidence {
+    pub observed_bytes: u64,
+    pub payload_digest: [u8; 32],
+    pub sanitized_excerpt: Vec<u8>,
 }
 
 /// A decode attempt always reports timing, including controlled failures.
@@ -142,6 +181,8 @@ fn finish_decode(
         _ => {}
     }
 
+    let mapping_disposition = record_mapping_disposition(record, disposition, &batch)?;
+
     match retention {
         RawRetentionPolicy::Full => {}
         RawRetentionPolicy::DiagnosticExcerpt => {
@@ -161,12 +202,92 @@ fn finish_decode(
     let next_decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
     Ok(DecodedFactBatch {
         disposition,
+        mapping_disposition,
         batch,
         next_decoder_state,
         quarantined,
         unscoped_permanent_diagnostic,
         diagnostic_coverage_gaps,
     })
+}
+
+const LEGACY_IGNORED_REASON_CODE: &str = "known_record_ignored";
+
+fn record_mapping_disposition(
+    record: &SourceRecord,
+    disposition: DecodeDisposition,
+    batch: &FactBatch,
+) -> Result<RecordMappingDisposition, AdapterError> {
+    match disposition {
+        DecodeDisposition::Applied => {
+            if batch.facts().iter().any(|envelope| {
+                matches!(&envelope.value, crate::adapter::Fact::UnknownRecord { .. })
+            }) {
+                return Err(AdapterError::invalid_contract(
+                    "mapped disposition cannot carry unknown-record evidence",
+                ));
+            }
+            let fact_count = u32::try_from(batch.facts().len()).map_err(|_| {
+                AdapterError::invalid_contract("mapped fact count exceeds the portable range")
+            })?;
+            Ok(RecordMappingDisposition::Mapped { fact_count })
+        }
+        DecodeDisposition::IgnoredKnown => Ok(RecordMappingDisposition::IgnoredKnown {
+            // Existing adapter contracts did not carry a reason. Keep one
+            // closed migration code until each decoder contract supplies a
+            // more specific machine classification.
+            reason_code: LEGACY_IGNORED_REASON_CODE.to_string(),
+        }),
+        DecodeDisposition::PreservedUnknown => {
+            let [envelope] = batch.facts() else {
+                return Err(AdapterError::invalid_contract(
+                    "retained-unknown disposition requires exactly one evidence fact",
+                ));
+            };
+            let crate::adapter::Fact::UnknownRecord {
+                native_kind,
+                raw_payload,
+                ..
+            } = &envelope.value
+            else {
+                return Err(AdapterError::invalid_contract(
+                    "retained-unknown disposition requires unknown-record evidence",
+                ));
+            };
+            if raw_payload.as_slice() != record.payload.as_slice() {
+                return Err(AdapterError::invalid_contract(
+                    "retained-unknown evidence must bind the complete source record",
+                ));
+            }
+            let observed_bytes = u64::try_from(record.payload.len()).map_err(|_| {
+                AdapterError::invalid_contract(
+                    "retained-unknown source record exceeds the portable byte range",
+                )
+            })?;
+            Ok(RecordMappingDisposition::RetainedUnknown {
+                family_hint: native_kind
+                    .as_deref()
+                    .filter(|value| is_safe_family_hint(value))
+                    .map(ToOwned::to_owned),
+                bounded_evidence: BoundedNativeEvidence {
+                    observed_bytes,
+                    payload_digest: *record.payload_hash.as_bytes(),
+                    sanitized_excerpt: diagnostic_excerpt(&record.payload),
+                },
+            })
+        }
+        DecodeDisposition::RetryTransient => Ok(RecordMappingDisposition::BufferedIncomplete),
+    }
+}
+
+fn is_safe_family_hint(value: &str) -> bool {
+    const MAX_FAMILY_HINT_BYTES: usize = 128;
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit())
+        && value.len() <= MAX_FAMILY_HINT_BYTES
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
 }
 
 pub(crate) const MAX_DIAGNOSTIC_EXCERPT_BYTES: usize = 1_024;
@@ -250,9 +371,10 @@ fn json_value_kind(value: &serde_json::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use crate::adapter::{
-        AdapterDiagnostic, AdapterId, AdapterManifest, DiscoveryContext, Fact, SourceInstance,
-        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceObjectList,
-        SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot, StreamId, StreamSpec,
+        AdapterDiagnostic, AdapterId, AdapterManifest, DiscoveryContext, EntityKey, EvidenceKind,
+        EvidenceStrength, Fact, RunEvidenceFact, SourceInstance, SourceInstanceKey,
+        SourceInstanceSpec, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest,
+        SourceQuery, SourceRows, SourceSnapshot, StreamId, StreamSpec,
     };
     use crate::source::{RecordOrigin, SourceCursor, SourceMediaType};
 
@@ -416,6 +538,18 @@ mod tests {
         )
     }
 
+    fn semantic_context() -> FactSemanticContext {
+        FactSemanticContext::new(
+            &AdapterId::new("decode-fixture").unwrap(),
+            1,
+            b"fixture-source-instance",
+            b"fixture-records",
+            b"record.jsonl",
+            1,
+        )
+        .unwrap()
+    }
+
     fn run<'a>(
         adapter: &'a FixtureAdapter,
         record: &'a SourceRecord,
@@ -424,15 +558,7 @@ mod tests {
     ) -> DecodeRuntimeAttempt {
         let decoder = DecoderId::new("fixture-v1").unwrap();
         let object_context = AdapterObjectContext::empty();
-        let semantic_context = FactSemanticContext::new(
-            &adapter.manifest().id,
-            1,
-            b"fixture-source-instance",
-            b"fixture-records",
-            b"record.jsonl",
-            1,
-        )
-        .unwrap();
+        let semantic_context = semantic_context();
         decode_record(DecodeRuntimeRequest {
             adapter,
             decoder: &decoder,
@@ -526,6 +652,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(first.disposition, DecodeDisposition::PreservedUnknown);
+        let RecordMappingDisposition::RetainedUnknown {
+            family_hint,
+            bounded_evidence,
+        } = &first.mapping_disposition
+        else {
+            panic!("expected structured retained-unknown disposition");
+        };
+        assert_eq!(family_hint.as_deref(), Some("fixture"));
+        assert_eq!(bounded_evidence.observed_bytes, 10);
+        assert_eq!(
+            bounded_evidence.payload_digest,
+            *record.payload_hash.as_bytes()
+        );
+        assert_eq!(
+            bounded_evidence.sanitized_excerpt,
+            diagnostic_excerpt(&record.payload)
+        );
+        assert!(bounded_evidence.sanitized_excerpt.len() <= MAX_DIAGNOSTIC_EXCERPT_BYTES);
         assert!(first.quarantined);
         assert_eq!(
             first.next_decoder_state.as_deref(),
@@ -541,6 +685,130 @@ mod tests {
             panic!("expected retained unknown fact");
         };
         assert!(raw_payload.is_empty());
+    }
+
+    #[test]
+    fn structured_mapping_dispositions_are_closed_bounded_and_privacy_safe() {
+        let record = record(br#"{"/Users/alice/private/session.jsonl":"secret"}"#);
+        let context = semantic_context();
+
+        let mut mapped = FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap();
+        mapped
+            .push_derived(
+                &record,
+                b"mapped",
+                Fact::RunEvidence(RunEvidenceFact {
+                    run: EntityKey::native(
+                        &AdapterId::new("decode-fixture").unwrap(),
+                        1,
+                        "run",
+                        b"run-1",
+                    )
+                    .unwrap(),
+                    kind: EvidenceKind::ActivityObserved,
+                    strength: EvidenceStrength::NativeActivity,
+                    native_state: None,
+                    source_time: None,
+                }),
+            )
+            .unwrap();
+        let mapped = finish_decode(
+            &record,
+            RawRetentionPolicy::None,
+            DecodeDisposition::Applied,
+            mapped,
+        )
+        .unwrap();
+        assert_eq!(
+            mapped.mapping_disposition,
+            RecordMappingDisposition::Mapped { fact_count: 1 }
+        );
+
+        let ignored = finish_decode(
+            &record,
+            RawRetentionPolicy::None,
+            DecodeDisposition::IgnoredKnown,
+            FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            ignored.mapping_disposition,
+            RecordMappingDisposition::IgnoredKnown {
+                reason_code: "known_record_ignored".to_string(),
+            }
+        );
+
+        let buffered = finish_decode(
+            &record,
+            RawRetentionPolicy::None,
+            DecodeDisposition::RetryTransient,
+            FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            buffered.mapping_disposition,
+            RecordMappingDisposition::BufferedIncomplete
+        );
+
+        let mut unknown = FactBatch::new_with_semantic_context(1, 1, context).unwrap();
+        unknown
+            .push_derived(
+                &record,
+                b"unknown",
+                Fact::UnknownRecord {
+                    native_kind: Some("/Users/alice/private/session.jsonl".to_string()),
+                    raw_payload: record.payload.clone(),
+                    reason: "private native shape".to_string(),
+                },
+            )
+            .unwrap();
+        let unknown = finish_decode(
+            &record,
+            RawRetentionPolicy::Full,
+            DecodeDisposition::PreservedUnknown,
+            unknown,
+        )
+        .unwrap();
+        let RecordMappingDisposition::RetainedUnknown {
+            family_hint,
+            bounded_evidence,
+        } = unknown.mapping_disposition
+        else {
+            panic!("expected retained unknown");
+        };
+        assert_eq!(family_hint, None);
+        let excerpt = String::from_utf8(bounded_evidence.sanitized_excerpt).unwrap();
+        for private in ["/Users/", "alice", "private", "session.jsonl", "secret"] {
+            assert!(!excerpt.contains(private));
+        }
+
+        for invalid_batch in [
+            FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap(),
+            {
+                let mut batch =
+                    FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+                batch
+                    .push_derived(
+                        &record,
+                        b"partial",
+                        Fact::UnknownRecord {
+                            native_kind: Some("fixture".to_string()),
+                            raw_payload: b"not-the-record".to_vec(),
+                            reason: "fixture".to_string(),
+                        },
+                    )
+                    .unwrap();
+                batch
+            },
+        ] {
+            assert!(finish_decode(
+                &record,
+                RawRetentionPolicy::None,
+                DecodeDisposition::PreservedUnknown,
+                invalid_batch,
+            )
+            .is_err());
+        }
     }
 
     #[test]

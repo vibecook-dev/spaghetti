@@ -1108,6 +1108,17 @@ private scoped reducer produce the same path-free reduced-state digest for
 compaction, progress, and queue markers in either fact order. Whole-record
 capacity failure is atomic. The observer family, event union, and replacement
 manifest entry remain unexposed until their portable contracts are frozen.
+The shared decode boundary now also derives RFC 012A's structured mapping
+outcome before raw-retention policy is applied. Mapped records carry the exact
+fact count, transient records become `BufferedIncomplete`, known ignored
+records carry one closed migration reason code, and `RetainedUnknown` requires
+exactly one complete `UnknownRecord`. Its family hint is admitted only through
+a closed machine-code grammar; its always-bounded evidence contains byte count,
+payload digest, and a value-free shape excerpt, so path-shaped native kinds and
+payload values cannot enter the common disposition. The legacy adapter return
+enum remains during migration, so decoder-specific ignore/malformed/version
+codes and deterministic cross-record unknown-evidence aggregation are still
+open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
 does not close C1: capability and bounded unknown-evidence families, complete
