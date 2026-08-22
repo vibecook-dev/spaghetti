@@ -38,6 +38,7 @@ use crate::coverage_runtime::{
 };
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
+    RecordMappingDisposition,
 };
 use crate::observation_contract::unknown_wire::{
     negotiate_observation_unknown_wire, ObservationUnknownWireContractError,
@@ -65,6 +66,10 @@ use crate::source::{
     SourceCursor, SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState, StableRead,
     StartupAction, StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
 };
+use crate::unknown_evidence_reducer::{
+    UnknownEvidenceAggregateSnapshot, UnknownEvidenceOccurrence, UnknownEvidenceReducer,
+    UnknownEvidenceReductionError, MAX_UNKNOWN_EVIDENCE_OCCURRENCES, MAX_UNKNOWN_EVIDENCE_SAMPLES,
+};
 
 mod actor_wire;
 mod artifact_access;
@@ -86,7 +91,9 @@ mod source_wire;
 mod usage_wire;
 mod watermark_wire;
 
-use observation_source_access::ScopedObservationDirectoryListing;
+use observation_source_access::{
+    ScopedObservationDirectoryListing, ScopedObservationDirectoryMemberAdmissionParts,
+};
 pub(crate) use observation_source_access::{
     ScopedObservationDirectoryMemberLifecycle, ScopedObservationDirectoryScan,
     ScopedObservationRuntimeSourceBinding,
@@ -757,6 +764,7 @@ pub enum ScopedDecodedAppendItem {
     Record {
         evidence: Box<ScopedDecodedRecordEvidence>,
         disposition: DecodeDisposition,
+        mapping_disposition: Box<RecordMappingDisposition>,
         batch: FactBatch,
         quarantined: bool,
     },
@@ -1546,19 +1554,21 @@ impl ScopedObservationAdmissionLane {
                         ));
                     }
                 };
-                let (
-                    _binding,
-                    _object_context,
-                    _checkpoint,
+                let ScopedObservationDirectoryMemberAdmissionParts {
+                    binding: _binding,
+                    object_context: _object_context,
+                    checkpoint: _checkpoint,
                     record,
                     disposition,
+                    mapping_disposition,
                     batch,
-                    _next_decoder_state,
+                    next_decoder_state: _next_decoder_state,
                     quarantined,
-                ) = (*snapshot).into_admission_parts();
+                } = (*snapshot).into_admission_parts();
                 let item = ScopedDecodedAppendItem::Record {
                     evidence: Box::new(scoped_record_evidence(&record, retention)),
                     disposition,
+                    mapping_disposition: Box::new(mapping_disposition),
                     batch,
                     quarantined,
                 };
@@ -11102,6 +11112,8 @@ pub enum ScopedProjectionError {
     ContentBlockCapacityFull,
     #[error("scoped native-marker projection entity capacity is full")]
     NativeMarkerCapacityFull,
+    #[error("scoped unknown-evidence projection entity capacity is full")]
+    UnknownEvidenceCapacityFull,
     #[error("scoped plan projection entity capacity is full")]
     PlanCapacityFull,
     #[error("scoped task projection entity capacity is full")]
@@ -11118,6 +11130,8 @@ pub enum ScopedProjectionError {
     InvalidSemanticRevision,
     #[error("scoped decoded fact provenance does not match its source record")]
     ProvenanceMismatch,
+    #[error("scoped unknown-evidence mapping is invalid")]
+    InvalidUnknownEvidence,
     #[error("scoped usage-v2 fact changed source ownership")]
     ConflictingOwnership,
     #[error("scoped usage-v2 correction did not advance its source cursor")]
@@ -11495,7 +11509,15 @@ struct ScopedProjectionMutation {
     tool_retractions: Vec<CanonicalFactId>,
     effective_state_upserts: BTreeMap<CanonicalFactId, ScopedEffectiveStateProjectionState>,
     effective_state_retractions: Vec<CanonicalFactId>,
+    unknown_evidence_upsert: Option<(UnknownEvidenceOccurrence, ScopedUnknownEvidenceOwner)>,
+    unknown_evidence_retractions: Vec<SourceRecordId>,
     artifact_evidence: artifact_evidence::ScopedArtifactEvidenceMutation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopedUnknownEvidenceOwner {
+    object_token: u64,
+    generation: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -11509,6 +11531,19 @@ struct ScopedActorContextRetractions {
     projected: Vec<ScopedProjectedObservation>,
     actors: Vec<CanonicalEntityKey>,
     affiliations: Vec<CanonicalEntityKey>,
+}
+
+fn map_unknown_evidence_error(error: UnknownEvidenceReductionError) -> ScopedProjectionError {
+    match error {
+        UnknownEvidenceReductionError::CapacityExhausted => {
+            ScopedProjectionError::UnknownEvidenceCapacityFull
+        }
+        UnknownEvidenceReductionError::InvalidEvidence
+        | UnknownEvidenceReductionError::DuplicateIdentity
+        | UnknownEvidenceReductionError::CounterOverflow => {
+            ScopedProjectionError::InvalidUnknownEvidence
+        }
+    }
 }
 
 /// Database-free common reducer for typed scoped-observation facts.
@@ -11533,6 +11568,8 @@ pub struct ScopedObservationProjectionSink {
     tasks: BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
     tools: BTreeMap<CanonicalFactId, ScopedToolProjectionState>,
     effective_states: BTreeMap<CanonicalFactId, ScopedEffectiveStateProjectionState>,
+    unknown_evidence: UnknownEvidenceReducer,
+    unknown_evidence_owners: BTreeMap<SourceRecordId, ScopedUnknownEvidenceOwner>,
     artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer,
 }
 
@@ -11587,6 +11624,12 @@ impl ScopedObservationProjectionSink {
             tasks: BTreeMap::new(),
             tools: BTreeMap::new(),
             effective_states: BTreeMap::new(),
+            unknown_evidence: UnknownEvidenceReducer::new(
+                MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
+                MAX_UNKNOWN_EVIDENCE_SAMPLES,
+            )
+            .map_err(|_| ScopedProjectionError::InvalidLimits)?,
+            unknown_evidence_owners: BTreeMap::new(),
             artifact_evidence: artifact_evidence::ScopedArtifactEvidenceReducer::new(root_session),
         })
     }
@@ -11661,6 +11704,18 @@ impl ScopedObservationProjectionSink {
     }
 
     fn commit(&mut self, mutation: ScopedProjectionMutation) {
+        for source_record_id in mutation.unknown_evidence_retractions {
+            let removed = self.unknown_evidence.retract(&source_record_id);
+            debug_assert!(removed, "prepared unknown-evidence retraction must exist");
+            self.unknown_evidence_owners.remove(&source_record_id);
+        }
+        if let Some((occurrence, owner)) = mutation.unknown_evidence_upsert {
+            let source_record_id = occurrence.evidence.source_record_id;
+            self.unknown_evidence
+                .apply(occurrence)
+                .expect("prepared unknown-evidence upsert must remain valid");
+            self.unknown_evidence_owners.insert(source_record_id, owner);
+        }
         self.artifact_evidence.commit(mutation.artifact_evidence);
         for fact_id in mutation.usage_retractions {
             let removed = self.usage_v2.remove(&fact_id);
@@ -11776,6 +11831,18 @@ impl ScopedObservationProjectionSink {
             .retain(|_, state| state.object_token != object_token);
         self.effective_states
             .retain(|_, state| state.object_token != object_token);
+        let unknown_ids = self
+            .unknown_evidence_owners
+            .iter()
+            .filter_map(|(source_record_id, owner)| {
+                (owner.object_token == object_token).then_some(*source_record_id)
+            })
+            .collect::<Vec<_>>();
+        for source_record_id in unknown_ids {
+            let removed = self.unknown_evidence.retract(&source_record_id);
+            debug_assert!(removed, "owned unknown evidence must exist in its reducer");
+            self.unknown_evidence_owners.remove(&source_record_id);
+        }
     }
 
     pub fn usage_v2_entity_count(&self) -> usize {
@@ -11786,6 +11853,14 @@ impl ScopedObservationProjectionSink {
         &self,
     ) -> Result<artifact_evidence::ScopedArtifactEvidenceSnapshot, ScopedProjectionError> {
         self.artifact_evidence.snapshot()
+    }
+
+    fn unknown_evidence_snapshot(
+        &self,
+    ) -> Result<UnknownEvidenceAggregateSnapshot, ScopedProjectionError> {
+        self.unknown_evidence
+            .snapshot()
+            .map_err(map_unknown_evidence_error)
     }
 
     fn supports_coverage_domain(&self, domain: &CoverageDomain) -> bool {
@@ -12265,6 +12340,11 @@ impl ScopedObservationProjectionSink {
                 ScopedRevisionedEntityRetractionCause::Reset(reset),
                 ScopedProjectionError::InvalidResetState,
             )?;
+        let unknown_evidence_retractions = self.prepare_unknown_evidence_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
@@ -12308,6 +12388,7 @@ impl ScopedObservationProjectionSink {
                 task_retractions,
                 tool_retractions,
                 effective_state_retractions,
+                unknown_evidence_retractions,
                 artifact_evidence,
                 ..ScopedProjectionMutation::default()
             },
@@ -12369,6 +12450,10 @@ impl ScopedObservationProjectionSink {
                         .effective_states
                         .values()
                         .any(|state| state.object_token == object_token)
+                    || self
+                        .unknown_evidence_owners
+                        .values()
+                        .any(|owner| owner.object_token == object_token)
                     || self.artifact_evidence.has_object(object_token)
                 {
                     return Err(ScopedProjectionError::InvalidPresenceState);
@@ -12524,6 +12609,15 @@ impl ScopedObservationProjectionSink {
                     ScopedProjectionError::InvalidPresenceState,
                 )?,
         };
+        let unknown_evidence_retractions = match change {
+            ScopedAppendPresenceChange::Created { .. } => Vec::new(),
+            ScopedAppendPresenceChange::Deleted { generation } => self
+                .prepare_unknown_evidence_retractions(
+                    object_token,
+                    generation,
+                    ScopedProjectionError::InvalidPresenceState,
+                )?,
+        };
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
@@ -12567,6 +12661,7 @@ impl ScopedObservationProjectionSink {
                 task_retractions,
                 tool_retractions,
                 effective_state_retractions,
+                unknown_evidence_retractions,
                 artifact_evidence,
                 ..ScopedProjectionMutation::default()
             },
@@ -12689,6 +12784,35 @@ impl ScopedObservationProjectionSink {
             actors,
             affiliations,
         })
+    }
+
+    fn prepare_unknown_evidence_retractions(
+        &self,
+        object_token: u64,
+        generation: u64,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<Vec<SourceRecordId>, ScopedProjectionError> {
+        if self
+            .unknown_evidence_owners
+            .values()
+            .any(|owner| owner.object_token == object_token && owner.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        let source_record_ids = self
+            .unknown_evidence_owners
+            .iter()
+            .filter_map(|(source_record_id, owner)| {
+                (owner.object_token == object_token && owner.generation == generation)
+                    .then_some(*source_record_id)
+            })
+            .collect::<Vec<_>>();
+        for source_record_id in &source_record_ids {
+            if !self.unknown_evidence.contains(source_record_id) {
+                return Err(ScopedProjectionError::InvalidUnknownEvidence);
+            }
+        }
+        Ok(source_record_ids)
     }
 
     fn prepare_usage_v2_retractions(
@@ -13132,7 +13256,10 @@ impl ScopedObservationProjectionSink {
         item: &ScopedDecodedAppendItem,
     ) -> Result<ScopedProjectionPlan, ScopedProjectionError> {
         let ScopedDecodedAppendItem::Record {
-            evidence, batch, ..
+            evidence,
+            mapping_disposition,
+            batch,
+            ..
         } = item
         else {
             return Ok(ScopedProjectionPlan {
@@ -13141,7 +13268,14 @@ impl ScopedObservationProjectionSink {
             });
         };
 
-        let mut mutation = ScopedProjectionMutation::default();
+        let mut mutation = ScopedProjectionMutation {
+            unknown_evidence_upsert: self.prepare_unknown_evidence_upsert(
+                object_token,
+                evidence,
+                mapping_disposition,
+            )?,
+            ..ScopedProjectionMutation::default()
+        };
         let mut user_input_events = Vec::new();
         let mut message_events = Vec::new();
         let mut plan_events = Vec::new();
@@ -14186,6 +14320,51 @@ impl ScopedObservationProjectionSink {
             projected,
             mutation,
         })
+    }
+
+    fn prepare_unknown_evidence_upsert(
+        &self,
+        object_token: u64,
+        evidence: &ScopedDecodedRecordEvidence,
+        mapping_disposition: &RecordMappingDisposition,
+    ) -> Result<
+        Option<(UnknownEvidenceOccurrence, ScopedUnknownEvidenceOwner)>,
+        ScopedProjectionError,
+    > {
+        let RecordMappingDisposition::RetainedUnknown {
+            family_hint,
+            bounded_evidence,
+        } = mapping_disposition
+        else {
+            return Ok(None);
+        };
+        if bounded_evidence.payload_digest != *evidence.payload_hash.as_bytes() {
+            return Err(ScopedProjectionError::InvalidUnknownEvidence);
+        }
+        let occurrence =
+            UnknownEvidenceOccurrence::new(family_hint.clone(), bounded_evidence.clone())
+                .map_err(map_unknown_evidence_error)?;
+        let owner = ScopedUnknownEvidenceOwner {
+            object_token,
+            generation: evidence.generation,
+        };
+        if self
+            .unknown_evidence_owners
+            .get(&bounded_evidence.source_record_id)
+            .is_some_and(|current| *current != owner)
+        {
+            return Err(ScopedProjectionError::InvalidUnknownEvidence);
+        }
+        match self
+            .unknown_evidence
+            .classify_apply(&occurrence)
+            .map_err(map_unknown_evidence_error)?
+        {
+            crate::unknown_evidence_reducer::UnknownEvidenceReduction::Unchanged => Ok(None),
+            crate::unknown_evidence_reducer::UnknownEvidenceReduction::Upsert => {
+                Ok(Some((occurrence, owner)))
+            }
+        }
     }
 }
 
@@ -22211,6 +22390,7 @@ impl ScopedKnownAppendObject {
                                 self.decoder.retention,
                             )),
                             disposition: decoded.disposition,
+                            mapping_disposition: Box::new(decoded.mapping_disposition),
                             batch: decoded.batch,
                             quarantined: decoded.quarantined,
                         });
@@ -23808,6 +23988,14 @@ pub(crate) use observation_source_access::{
 };
 
 #[cfg(test)]
+pub(crate) fn mapped_record_disposition(batch: &FactBatch) -> RecordMappingDisposition {
+    RecordMappingDisposition::Mapped {
+        fact_count: u32::try_from(batch.facts().len())
+            .expect("test fact batches remain in the portable count range"),
+    }
+}
+
+#[cfg(test)]
 fn scoped_source_owner_error_is_transient(error: &ScopedObservationPassExecutionError) -> bool {
     matches!(
         error,
@@ -24375,6 +24563,65 @@ mod projection_tests {
             item: Box::new(ScopedDecodedAppendItem::Record {
                 evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
                 disposition: DecodeDisposition::Applied,
+                mapping_disposition: Box::new(mapped_record_disposition(&batch)),
+                batch,
+                quarantined: false,
+            }),
+        }
+    }
+
+    fn unknown_mapping(record: &SourceRecord, family_hint: &str) -> RecordMappingDisposition {
+        RecordMappingDisposition::RetainedUnknown {
+            family_hint: Some(family_hint.to_string()),
+            bounded_evidence: crate::adapter::BoundedNativeEvidence {
+                source_record_id: semantic_context().source_record_id(record).unwrap(),
+                observed_bytes: record.payload.len() as u64,
+                payload_digest: *record.payload_hash.as_bytes(),
+                sanitized_excerpt: diagnostic_excerpt(&record.payload),
+            },
+        }
+    }
+
+    fn unknown_occurrence(record: &SourceRecord, family_hint: &str) -> UnknownEvidenceOccurrence {
+        let RecordMappingDisposition::RetainedUnknown {
+            family_hint,
+            bounded_evidence,
+        } = unknown_mapping(record, family_hint)
+        else {
+            unreachable!()
+        };
+        UnknownEvidenceOccurrence::new(family_hint, bounded_evidence).unwrap()
+    }
+
+    fn unknown_frame(
+        object_token: u64,
+        lane_ordinal: u64,
+        record: &SourceRecord,
+        family_hint: &str,
+    ) -> ScopedQueuedObservationFrame {
+        let mapping_disposition = unknown_mapping(record, family_hint);
+        let mut batch = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        batch
+            .push_derived(
+                record,
+                b"retained-unknown",
+                Fact::UnknownRecord {
+                    native_kind: Some(family_hint.to_string()),
+                    raw_payload: record.payload.clone(),
+                    reason: "unmapped native fixture".to_string(),
+                },
+            )
+            .unwrap();
+        batch.redact_unknown_record_payloads();
+        ScopedQueuedObservationFrame::Decoded {
+            object_token,
+            source: source_identity(),
+            lane_ordinal,
+            phase: ScopedAppendDeliveryPhase::Live,
+            item: Box::new(ScopedDecodedAppendItem::Record {
+                evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
+                disposition: DecodeDisposition::PreservedUnknown,
+                mapping_disposition: Box::new(mapping_disposition),
                 batch,
                 quarantined: false,
             }),
@@ -24396,6 +24643,137 @@ mod projection_tests {
             max_usage_v2_entities,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn scoped_unknown_evidence_matches_the_topology_neutral_complete_digest() {
+        let records = [record(1, 0, 10), record(1, 10, 20), record(1, 20, 30)];
+        let mut forward = sink(8);
+        let mut reverse = sink(8);
+        let mut reference = UnknownEvidenceReducer::new(8, 8).unwrap();
+        for (index, record) in records.iter().enumerate() {
+            assert!(forward
+                .project(&unknown_frame(
+                    OBJECT_TOKEN,
+                    index as u64 + 1,
+                    record,
+                    "future.message"
+                ))
+                .unwrap()
+                .is_empty());
+            reference
+                .apply(unknown_occurrence(record, "future.message"))
+                .unwrap();
+        }
+        for (index, record) in records.iter().rev().enumerate() {
+            reverse
+                .project(&unknown_frame(
+                    OBJECT_TOKEN,
+                    index as u64 + 1,
+                    record,
+                    "future.message",
+                ))
+                .unwrap();
+        }
+        let forward = forward.unknown_evidence_snapshot().unwrap();
+        let reverse = reverse.unknown_evidence_snapshot().unwrap();
+        let reference = reference.snapshot().unwrap();
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, reference);
+        assert_eq!(forward.complete_count, 3);
+    }
+
+    #[test]
+    fn scoped_unknown_evidence_corrects_retracts_and_rejects_invalid_atomically() {
+        let initial = record(1, 0, 10);
+        let mut corrected = record(1, 0, 10);
+        corrected.payload = b"corrected-at-the-same-source-position".to_vec();
+        corrected.payload_hash = RecordHash::digest(&corrected.payload);
+        let second = record(1, 10, 20);
+        let mut projection = sink(2);
+
+        projection
+            .project(&unknown_frame(OBJECT_TOKEN, 1, &initial, "future.message"))
+            .unwrap();
+        let initial_snapshot = projection.unknown_evidence_snapshot().unwrap();
+        projection
+            .project(&unknown_frame(OBJECT_TOKEN, 2, &initial, "future.message"))
+            .unwrap();
+        assert_eq!(
+            projection.unknown_evidence_snapshot().unwrap(),
+            initial_snapshot
+        );
+
+        projection
+            .project(&unknown_frame(
+                OBJECT_TOKEN,
+                3,
+                &corrected,
+                "future.message",
+            ))
+            .unwrap();
+        let corrected_snapshot = projection.unknown_evidence_snapshot().unwrap();
+        assert_eq!(corrected_snapshot.complete_count, 1);
+        assert_ne!(
+            corrected_snapshot.aggregate_digest,
+            initial_snapshot.aggregate_digest
+        );
+
+        projection
+            .project(&unknown_frame(OBJECT_TOKEN, 4, &second, "future.message"))
+            .unwrap();
+        let full = projection.unknown_evidence_snapshot().unwrap();
+        assert_eq!(full.complete_count, 2);
+        let mut invalid = unknown_frame(OBJECT_TOKEN, 5, &record(1, 20, 30), "future.message");
+        let ScopedQueuedObservationFrame::Decoded { item, .. } = &mut invalid else {
+            unreachable!()
+        };
+        let ScopedDecodedAppendItem::Record {
+            mapping_disposition,
+            ..
+        } = item.as_mut()
+        else {
+            unreachable!()
+        };
+        let RecordMappingDisposition::RetainedUnknown {
+            bounded_evidence, ..
+        } = mapping_disposition.as_mut()
+        else {
+            unreachable!()
+        };
+        bounded_evidence.payload_digest = [0; 32];
+        assert_eq!(
+            projection.project(&invalid),
+            Err(ScopedProjectionError::InvalidUnknownEvidence)
+        );
+        assert_eq!(projection.unknown_evidence_snapshot().unwrap(), full);
+
+        projection
+            .project(&ScopedQueuedObservationFrame::Reset {
+                object_token: OBJECT_TOKEN,
+                source: source_identity(),
+                lane_ordinal: 6,
+                observed_at: 88,
+                phase: ScopedAppendDeliveryPhase::Correction,
+                reset: ScopedAppendReset {
+                    old_generation: 1,
+                    new_generation: 2,
+                    reason: AppendTransition::Truncated,
+                },
+            })
+            .unwrap();
+        assert!(projection
+            .unknown_evidence_snapshot()
+            .unwrap()
+            .samples
+            .is_empty());
+        assert_eq!(
+            projection
+                .unknown_evidence_snapshot()
+                .unwrap()
+                .complete_count,
+            0
+        );
     }
 
     fn multi_family_sink(max_entities: usize) -> ScopedObservationProjectionSink {
@@ -26695,6 +27073,7 @@ mod projection_tests {
             item: Box::new(ScopedDecodedAppendItem::Record {
                 evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
                 disposition: DecodeDisposition::Applied,
+                mapping_disposition: Box::new(mapped_record_disposition(&batch)),
                 batch,
                 quarantined: false,
             }),
@@ -30763,6 +31142,7 @@ mod projection_tests {
             item: Box::new(ScopedDecodedAppendItem::Record {
                 evidence: Box::new(scoped_record_evidence(&record, RawRetentionPolicy::None)),
                 disposition: DecodeDisposition::Applied,
+                mapping_disposition: Box::new(mapped_record_disposition(&batch)),
                 batch,
                 quarantined: false,
             }),
@@ -33110,6 +33490,12 @@ mod projection_tests {
         )
         .unwrap();
         let first_record = record(1, 0, 7);
+        let first_batch = contextual_usage_batch(
+            &first_record,
+            Some(("failed-object", 10)),
+            true,
+            &[ActorAffiliationDimension::Team],
+        );
         let first_frame = ScopedQueuedObservationFrame::Decoded {
             object_token: 101,
             source: source_identity(),
@@ -33121,18 +33507,15 @@ mod projection_tests {
                     RawRetentionPolicy::None,
                 )),
                 disposition: DecodeDisposition::Applied,
-                batch: contextual_usage_batch(
-                    &first_record,
-                    Some(("failed-object", 10)),
-                    true,
-                    &[ActorAffiliationDimension::Team],
-                ),
+                mapping_disposition: Box::new(mapped_record_disposition(&first_batch)),
+                batch: first_batch,
                 quarantined: false,
             }),
         };
         let failed_fact = only_usage_event(stage.projection.project(&first_frame).unwrap()).fact_id;
 
         let sibling_record = record(1, 0, 8);
+        let sibling_batch = usage_batch(&sibling_record, "healthy-sibling", 20, None);
         let sibling_frame = ScopedQueuedObservationFrame::Decoded {
             object_token: 202,
             source: source_identity(),
@@ -33144,7 +33527,8 @@ mod projection_tests {
                     RawRetentionPolicy::None,
                 )),
                 disposition: DecodeDisposition::Applied,
-                batch: usage_batch(&sibling_record, "healthy-sibling", 20, None),
+                mapping_disposition: Box::new(mapped_record_disposition(&sibling_batch)),
+                batch: sibling_batch,
                 quarantined: false,
             }),
         };

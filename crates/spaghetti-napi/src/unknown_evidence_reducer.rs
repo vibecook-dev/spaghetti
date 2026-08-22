@@ -107,19 +107,34 @@ impl UnknownEvidenceReducer {
         self.current.is_empty()
     }
 
+    pub(crate) fn contains(&self, source_record_id: &SourceRecordId) -> bool {
+        self.current.contains_key(source_record_id)
+    }
+
     pub(crate) fn apply(
         &mut self,
         occurrence: UnknownEvidenceOccurrence,
     ) -> Result<UnknownEvidenceReduction, UnknownEvidenceReductionError> {
+        let reduction = self.classify_apply(&occurrence)?;
+        if reduction == UnknownEvidenceReduction::Upsert {
+            let key = occurrence.evidence.source_record_id;
+            self.current.insert(key, occurrence);
+        }
+        Ok(reduction)
+    }
+
+    pub(crate) fn classify_apply(
+        &self,
+        occurrence: &UnknownEvidenceOccurrence,
+    ) -> Result<UnknownEvidenceReduction, UnknownEvidenceReductionError> {
         occurrence.validate()?;
         let key = occurrence.evidence.source_record_id;
-        if self.current.get(&key) == Some(&occurrence) {
+        if self.current.get(&key) == Some(occurrence) {
             return Ok(UnknownEvidenceReduction::Unchanged);
         }
         if !self.current.contains_key(&key) && self.current.len() == self.max_occurrences {
             return Err(UnknownEvidenceReductionError::CapacityExhausted);
         }
-        self.current.insert(key, occurrence);
         Ok(UnknownEvidenceReduction::Upsert)
     }
 

@@ -476,6 +476,9 @@ fn projection_commit_and_source_reset_move_artifact_evidence_atomically() {
                     RawRetentionPolicy::None,
                 )),
                 disposition: DecodeDisposition::Applied,
+                mapping_disposition: Box::new(
+                    crate::scoped_observation::mapped_record_disposition(&batch),
+                ),
                 batch,
                 quarantined: false,
             }),

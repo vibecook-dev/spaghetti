@@ -245,6 +245,9 @@ fn active_with_content_evidence(
         item: Box::new(ScopedDecodedAppendItem::Record {
             evidence: Box::new(scoped_record_evidence(&record, RawRetentionPolicy::None)),
             disposition: crate::adapter::DecodeDisposition::Applied,
+            mapping_disposition: Box::new(crate::scoped_observation::mapped_record_disposition(
+                &batch,
+            )),
             batch,
             quarantined: false,
         }),

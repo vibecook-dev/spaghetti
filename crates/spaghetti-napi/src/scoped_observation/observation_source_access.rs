@@ -22,7 +22,7 @@ use crate::adapter::{
 };
 use crate::decode_runtime::{
     bootstrap_object_without_source_access, decode_record, diagnostic_excerpt, DecodeRuntimeLimits,
-    DecodeRuntimeRequest,
+    DecodeRuntimeRequest, RecordMappingDisposition,
 };
 use crate::source::{
     confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,
@@ -395,9 +395,22 @@ pub(crate) struct ScopedObservationDirectoryMemberDecodedSnapshot {
     checkpoint: ReplaceCheckpoint,
     record: SourceRecord,
     disposition: DecodeDisposition,
+    mapping_disposition: RecordMappingDisposition,
     batch: FactBatch,
     next_decoder_state: Option<Vec<u8>>,
     quarantined: bool,
+}
+
+pub(super) struct ScopedObservationDirectoryMemberAdmissionParts {
+    pub binding: ScopedObservationDirectoryMemberBinding,
+    pub object_context: AdapterObjectContext,
+    pub checkpoint: ReplaceCheckpoint,
+    pub record: SourceRecord,
+    pub disposition: DecodeDisposition,
+    pub mapping_disposition: RecordMappingDisposition,
+    pub batch: FactBatch,
+    pub next_decoder_state: Option<Vec<u8>>,
+    pub quarantined: bool,
 }
 
 pub(crate) struct ScopedObservationDirectoryMemberObserveFailure {
@@ -1609,6 +1622,7 @@ impl ScopedObservationDirectoryMemberDecodeInput {
                 checkpoint,
                 record,
                 disposition: decoded.disposition,
+                mapping_disposition: decoded.mapping_disposition,
                 batch: decoded.batch,
                 next_decoder_state: decoded.next_decoder_state,
                 quarantined: decoded.quarantined,
@@ -1751,28 +1765,18 @@ impl ScopedObservationDirectoryMemberDecodedSnapshot {
         Some((data_events, retained_native_bytes))
     }
 
-    pub(super) fn into_admission_parts(
-        self,
-    ) -> (
-        ScopedObservationDirectoryMemberBinding,
-        AdapterObjectContext,
-        ReplaceCheckpoint,
-        SourceRecord,
-        DecodeDisposition,
-        FactBatch,
-        Option<Vec<u8>>,
-        bool,
-    ) {
-        (
-            self.binding,
-            self.object_context,
-            self.checkpoint,
-            self.record,
-            self.disposition,
-            self.batch,
-            self.next_decoder_state,
-            self.quarantined,
-        )
+    pub(super) fn into_admission_parts(self) -> ScopedObservationDirectoryMemberAdmissionParts {
+        ScopedObservationDirectoryMemberAdmissionParts {
+            binding: self.binding,
+            object_context: self.object_context,
+            checkpoint: self.checkpoint,
+            record: self.record,
+            disposition: self.disposition,
+            mapping_disposition: self.mapping_disposition,
+            batch: self.batch,
+            next_decoder_state: self.next_decoder_state,
+            quarantined: self.quarantined,
+        }
     }
 
     #[cfg(test)]

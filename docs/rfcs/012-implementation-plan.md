@@ -1124,9 +1124,13 @@ computes an ordered digest and exact count/byte totals over every retained
 occurrence, and selects transport samples by a domain-separated source-identity
 rank rather than arrival order. Complete replacement, duplicate identity,
 capacity, correction, retraction, reset, and unsampled-digest behavior are
-covered atomically. Wiring
-that reducer into durable/scoped projection ownership and freezing its portable
-fact/replacement carrier remain open.
+covered atomically. The private scoped projection now carries the structured
+mapping result through append and authorized directory-member decodes, applies
+unknown corrections without whole-state cloning, and retracts object-owned
+evidence on reset, deletion, and replacement rollback. Forward/reverse scoped
+application matches the topology-neutral complete-set digest. Durable
+persistence/query ownership and the portable fact/replacement carrier remain
+open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
 does not close C1: capability and bounded unknown-evidence families, complete
