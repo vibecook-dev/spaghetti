@@ -1053,25 +1053,26 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
 
     let mut incompatible = public_query_request();
     incompatible.contract_versions.query_pack_versions = Some(vec![2]);
-    let error = client
-        .catalog_page(
-            CatalogPageQueryRequest::new(incompatible, CatalogQueryKind::Sessions, 10, None)
-                .unwrap(),
-            crate::engine::QueryCancellationToken::default(),
-        )
-        .expect_err("incompatible query pack must fail");
+    let error = match client.catalog_page(
+        CatalogPageQueryRequest::new(incompatible, CatalogQueryKind::Sessions, 10, None).unwrap(),
+        crate::engine::QueryCancellationToken::default(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("incompatible query pack must fail"),
+    };
     assert!(
         matches!(error, EngineError::InvalidQuery(ref detail) if detail == "IncompatibleCatalogContract: query_pack_version")
     );
 
     let cancelled = crate::engine::QueryCancellationToken::default();
     cancelled.cancel();
-    let error = client
-        .catalog_resolution(
-            CatalogResolutionQueryRequest::new(public_query_request(), external_ref),
-            cancelled,
-        )
-        .expect_err("cancelled catalog resolution must not enter SQLite");
+    let error = match client.catalog_resolution(
+        CatalogResolutionQueryRequest::new(public_query_request(), external_ref),
+        cancelled,
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("cancelled catalog resolution must not enter SQLite"),
+    };
     assert!(matches!(error, EngineError::QueryCancelled));
 
     pool.shutdown().unwrap();
