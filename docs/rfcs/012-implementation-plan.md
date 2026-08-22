@@ -129,10 +129,10 @@ prerequisite for early vertical slices.
 | A2. ADS/scope/support tooling            | 012A                | In progress | internal strict authority; remaining public catalog/scoped lifecycle                    |
 | A3. Current-agent support candidates     | 012A                | In progress | Claude 2.1.223 review-blocked candidate; Codex/Grok remain candidate                    |
 | A4. New-agent adaptation proof           | 012A/umbrella       | Gate met    | fourth adapter without common-runtime/query/observer change                             |
-| B1. Catalog identity/readiness contracts | 012B                | In progress | contract fixtures complete; authorized public transport open                            |
-| B2. Bounded catalog source compositions  | 012B                | In progress | three test-only producers; promotion/access-plan/runtime publication open                |
-| B3. Durable catalog/query snapshots      | 012B                | In progress | private pack/pagination; public policy/query lifecycle open                             |
-| B4. Progressive host and UX              | 012B                | In progress | partial host readiness; selected hydration and UI flow open                             |
+| B1. Catalog identity/readiness contracts | 012B                | Gate met    | strict Rust/TypeScript fixtures plus caller-bound query and hydration transport          |
+| B2. Bounded catalog source compositions  | 012B                | In progress | three authorized runtime producers publish/refresh; promotion evidence open              |
+| B3. Durable catalog/query snapshots      | 012B                | In progress | public WITHHELD snapshot lifecycle; local policy/richer queries/compaction open          |
+| B4. Progressive host and UX              | 012B                | In progress | catalog-first host and selected hydration; weighted fairness and product UI open         |
 | B5. Catalog performance calibration      | 012B                | In progress | partial experiment; complete report and ratification open                               |
 | C1. Runtime semantic contracts           | 012C                | In progress | compiled reducer parity complete; portable specialists/durable unknown query open       |
 | C2. Usage-v2 shadow projection           | 012C                | In progress | private parity; complete coverage/topology gate open                                    |
@@ -1117,6 +1117,22 @@ errors, retry/degraded/partial lineage, physical compaction, caller-authorized
 local policy, richer queries, and public N-API/SDK catalog transport remain
 open.
 
+The current B1/B2/B3 landing status (2026-08-22) closes that public-transport
+gap without widening policy disclosure. Verified Claude, Codex, and Grok
+catalog compositions execute through common bounded source drivers, publish
+complete source assemblies into the durable snapshot pack, and refresh after
+configured source changes. Strict JSON N-API methods and the transport-neutral
+SDK client negotiate against the caller's offer, retain the caller-held plan
+and snapshot across readiness, project/session pages, continuations, and exact
+external-reference resolution, and expose only the policy-`WITHHELD` view.
+Prior-plan continuations remain bound to their retained snapshot and expire
+only through authenticated retirement evidence. Malformed, oversized, stale,
+foreign, or path-shaped inputs fail closed behind privacy-safe errors. This
+makes B1's contract/transport gate complete; it does not promote any support
+candidate or complete B2/B3. Caller-authorized local disclosure, richer
+filters/sorts, retry/degraded/partial refresh lineage, automatic retention and
+physical compaction, and candidate promotion evidence remain open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
@@ -1132,13 +1148,22 @@ work. Add:
 
 Remove initial-library per-project usage and per-session task fan-out.
 
-Current landing status (2026-08-21): the sole-owner host can admit query
-workers before complete-only FTS finishes and exposes source-neutral readiness
-and search state. Deferred bootstrap is an explicit caller choice rather than
-an SDK filesystem-size heuristic. This does not yet provide the authorized
-public catalog pages, last-complete warm policy view, selected-session hydration
-command, renderer pagination/content states, or the complete cold/warm UX
-matrix. B4 remains `In progress`.
+Current landing status (2026-08-22): the sole-owner host freezes all configured
+catalog plans before reads, installs watchers before history scans, starts
+source catalogs behind one global planning barrier, publishes and refreshes
+their authorized snapshots, and releases configured history work without
+waiting for unrelated finalization. The SDK exposes typed caller-bound catalog
+pages and exact external-reference resolution. Selected-session hydration now
+resolves only a retained session's advertised confined locator, produces an
+immutable authorization-bound command, and runs through an engine-owned lane
+with bounded active/retained work, idempotent request replay, exact-work
+coalescing, receipt lineage, cancellation, and privacy-safe N-API/SDK
+transport. Progressive readiness advertises hydration only when a catalog is
+queryable and an observation supervisor is running. The current hydration lane
+is deliberately bounded but is not yet the RFC's cross-lane writer-aware
+weighted scheduler. Renderer pagination/content states, product loading/error
+flow, fairness/starvation proof, and the complete cold/warm/selected-hydration
+UX and performance matrix remain open. B4 remains `In progress`.
 
 ### B5. Performance calibration
 
