@@ -5072,7 +5072,7 @@ pub(crate) mod tests {
             ..origin.clone()
         };
         let observe_failure = present_listing
-            .observe_bootstrapped_member(decoded_input, &wrong_origin)
+            .observe_bootstrapped_member(decoded_input, &wrong_origin, None)
             .unwrap_err();
         assert_eq!(
             observe_failure.kind_for_test(),
@@ -5086,7 +5086,7 @@ pub(crate) mod tests {
         }
         let decoded_input = observe_failure.into_input_for_test();
         let nested = present_listing
-            .observe_bootstrapped_member(decoded_input, &origin)
+            .observe_bootstrapped_member(decoded_input, &origin, None)
             .unwrap();
         let nested_rendered = format!("{nested:?}");
         for private in [
@@ -5108,6 +5108,10 @@ pub(crate) mod tests {
         );
         assert_eq!(snapshot.fact_count_for_test(), 1);
         assert_eq!(snapshot.record_payload_for_test(), nested_jsonl);
+        assert_eq!(
+            snapshot.next_decoder_state_for_test(),
+            Some(nested_jsonl.as_slice())
+        );
         match &snapshot.facts_for_test()[0].value {
             Fact::UnknownRecord {
                 native_kind,
@@ -5140,9 +5144,16 @@ pub(crate) mod tests {
         admission
             .record_relation_membership(7, ScopedAppendDeliveryPhase::Bootstrap, observation)
             .unwrap();
+        assert!(admission
+            .directory_relation_listing("descendant-objects")
+            .is_some());
         let receipt = admission
             .admit_directory_member(7, ScopedAppendDeliveryPhase::Bootstrap, nested)
             .unwrap();
+        assert_eq!(
+            admission.directory_member_decoder_state(&nested_source),
+            Some(nested_jsonl.as_slice())
+        );
         assert_eq!(receipt.data_events, 1);
         assert_eq!(receipt.retained_native_bytes, 0);
         match admission.pop_next() {
@@ -5186,7 +5197,7 @@ pub(crate) mod tests {
         let retained_input = retained_content.bootstrap_for_test().unwrap();
         std::fs::remove_file(&retained_member).unwrap();
         let retained_lifecycle = retained_listing
-            .observe_bootstrapped_member(retained_input, &origin)
+            .observe_bootstrapped_member(retained_input, &origin, Some(b"retained-prior-state:"))
             .unwrap();
         assert_eq!(retained_lifecycle.absence_for_test(), None);
         assert_eq!(
@@ -5195,6 +5206,17 @@ pub(crate) mod tests {
                 .expect("the authorized stable read remains the decode snapshot")
                 .record_payload_for_test(),
             nested_jsonl
+        );
+        assert_eq!(
+            retained_lifecycle
+                .present_snapshot_for_test()
+                .unwrap()
+                .next_decoder_state_for_test(),
+            Some(
+                [b"retained-prior-state:".as_slice(), nested_jsonl.as_slice()]
+                    .concat()
+                    .as_slice()
+            )
         );
         let retained_rendered = format!("{retained_lifecycle:?}");
         for private in ["retained-child-session-id", "child.jsonl", "nested-child"] {

@@ -1084,6 +1084,7 @@ impl ScopedObservationDirectoryListing {
         &self,
         input: ScopedObservationDirectoryMemberDecodeInput,
         origin: &RecordOrigin,
+        decoder_state: Option<&[u8]>,
     ) -> Result<
         ScopedObservationDirectoryMemberLifecycle,
         ScopedObservationDirectoryMemberObserveFailure,
@@ -1106,7 +1107,7 @@ impl ScopedObservationDirectoryListing {
                 input: Box::new(input),
             });
         }
-        input.observe_retained_replace(origin)
+        input.observe_retained_replace(origin, decoder_state)
     }
 
     pub(super) fn finalize_for_membership(
@@ -1496,6 +1497,7 @@ impl ScopedObservationDirectoryMemberDecodeInput {
     pub(super) fn observe_retained_replace(
         self,
         origin: &RecordOrigin,
+        decoder_state: Option<&[u8]>,
     ) -> Result<
         ScopedObservationDirectoryMemberLifecycle,
         ScopedObservationDirectoryMemberObserveFailure,
@@ -1509,13 +1511,14 @@ impl ScopedObservationDirectoryMemberDecodeInput {
                 });
             }
         };
-        self.decode_replace_record(record, checkpoint)
+        self.decode_replace_record(record, checkpoint, decoder_state)
     }
 
     fn decode_replace_record(
         self,
         record: SourceRecord,
         checkpoint: ReplaceCheckpoint,
+        decoder_state: Option<&[u8]>,
     ) -> Result<
         ScopedObservationDirectoryMemberLifecycle,
         ScopedObservationDirectoryMemberObserveFailure,
@@ -1527,7 +1530,7 @@ impl ScopedObservationDirectoryMemberDecodeInput {
             source_access: &DirectoryMemberSourceAccessDenied,
             record: &record,
             semantic_context: self.binding.identity().semantic_context(),
-            decoder_state: None,
+            decoder_state,
             retention: self.binding.runtime_stream().retention,
             limits: DecodeRuntimeLimits {
                 max_facts: DIRECTORY_MEMBER_MAX_FACTS,
@@ -1730,6 +1733,11 @@ impl ScopedObservationDirectoryMemberDecodedSnapshot {
     #[cfg(test)]
     pub(crate) fn facts_for_test(&self) -> &[crate::adapter::FactEnvelope] {
         self.batch.facts()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_decoder_state_for_test(&self) -> Option<&[u8]> {
+        self.next_decoder_state.as_deref()
     }
 
     #[cfg(test)]

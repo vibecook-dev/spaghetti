@@ -1209,6 +1209,8 @@ pub struct ScopedObservationAdmissionLane {
     relation_membership_objects:
         BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
     dynamic_relation_members: BTreeMap<Arc<str>, BTreeSet<ScopedSourceObjectIdentity>>,
+    dynamic_relation_listings: BTreeMap<Arc<str>, ScopedObservationDirectoryListing>,
+    dynamic_member_decoder_states: BTreeMap<ScopedSourceObjectIdentity, Vec<u8>>,
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
     offered_access_pass_ids: BTreeMap<ScopedSourceObjectIdentity, u64>,
@@ -1251,6 +1253,8 @@ impl ScopedObservationAdmissionLane {
             known_coverage_objects: BTreeMap::new(),
             relation_membership_objects: BTreeMap::new(),
             dynamic_relation_members: BTreeMap::new(),
+            dynamic_relation_listings: BTreeMap::new(),
+            dynamic_member_decoder_states: BTreeMap::new(),
             pending_coverage_updates: VecDeque::new(),
             offered_decode_coverage: BTreeMap::new(),
             offered_access_pass_ids: BTreeMap::new(),
@@ -1552,6 +1556,7 @@ impl ScopedObservationAdmissionLane {
         let source = observation.coverage.source.clone();
         let membership = observation.membership;
         let member_sources = observation.member_sources;
+        let listing = observation._listing_authority;
         if source.stream_key.as_bytes() != membership.stream_key.as_ref()
             || source.object_key.as_bytes() != membership.object_key.as_ref()
             || self.known_coverage_objects.contains_key(&source)
@@ -1624,6 +1629,8 @@ impl ScopedObservationAdmissionLane {
         }
         self.dynamic_relation_members
             .insert(membership.relation_id.clone(), member_sources);
+        self.dynamic_relation_listings
+            .insert(membership.relation_id.clone(), listing);
         self.stage_coverage_update(
             self.offered_lane_ordinal,
             access_pass_id,
@@ -1713,6 +1720,7 @@ impl ScopedObservationAdmissionLane {
                 };
                 self.known_coverage_objects
                     .insert(source.clone(), membership_identity);
+                self.dynamic_member_decoder_states.remove(&source);
                 self.stage_coverage_update(
                     self.offered_lane_ordinal,
                     access_pass_id,
@@ -1807,7 +1815,7 @@ impl ScopedObservationAdmissionLane {
                     disposition,
                     mapping_disposition,
                     batch,
-                    next_decoder_state: _next_decoder_state,
+                    next_decoder_state,
                     quarantined,
                 } = (*snapshot).into_admission_parts();
                 let item = ScopedDecodedAppendItem::Record {
@@ -1832,6 +1840,15 @@ impl ScopedObservationAdmissionLane {
                 self.queued_retained_native_bytes = next_bytes;
                 self.known_coverage_objects
                     .insert(source.clone(), membership_identity);
+                match next_decoder_state {
+                    Some(state) => {
+                        self.dynamic_member_decoder_states
+                            .insert(source.clone(), state);
+                    }
+                    None => {
+                        self.dynamic_member_decoder_states.remove(&source);
+                    }
+                }
                 self.stage_coverage_update(
                     lane_ordinal,
                     access_pass_id,
@@ -2139,6 +2156,22 @@ impl ScopedObservationAdmissionLane {
 
     pub fn queued_coverage_updates(&self) -> usize {
         self.pending_coverage_updates.len()
+    }
+
+    pub(crate) fn directory_relation_listing(
+        &self,
+        relation_id: &str,
+    ) -> Option<&ScopedObservationDirectoryListing> {
+        self.dynamic_relation_listings.get(relation_id)
+    }
+
+    pub(crate) fn directory_member_decoder_state(
+        &self,
+        source: &ScopedSourceObjectIdentity,
+    ) -> Option<&[u8]> {
+        self.dynamic_member_decoder_states
+            .get(source)
+            .map(Vec::as_slice)
     }
 
     /// Latest decode coverage whose corresponding control/data frames have all
@@ -25325,6 +25358,8 @@ mod projection_tests {
         );
         assert!(too_small.relation_membership_objects.is_empty());
         assert!(too_small.dynamic_relation_members.is_empty());
+        assert!(too_small.dynamic_relation_listings.is_empty());
+        assert!(too_small.dynamic_member_decoder_states.is_empty());
         assert!(too_small.offered_decode_coverage.is_empty());
 
         let mut lane = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
@@ -25339,6 +25374,12 @@ mod projection_tests {
         assert_eq!(
             lane.dynamic_relation_members.get(relation_id),
             Some(&BTreeSet::from([member_source.clone()]))
+        );
+        assert_eq!(
+            lane.directory_relation_listing(relation_id)
+                .unwrap()
+                .checkpoint(),
+            &checkpoint
         );
         assert!(!lane
             .dynamic_relation_members
