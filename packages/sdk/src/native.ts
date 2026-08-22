@@ -2041,6 +2041,14 @@ export interface SpaghettiEngine {
   readonly status: SpaghettiEngineStatus;
   health(signal?: AbortSignal): Promise<SpaghettiEngineHealth>;
   overview(signal?: AbortSignal): Promise<SpaghettiEngineOverview>;
+  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
+  getCatalogReadinessJson(requestJson: string, signal?: AbortSignal): Promise<string>;
+  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
+  listLibraryProjectsJson(requestJson: string, signal?: AbortSignal): Promise<string>;
+  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
+  listLibrarySessionsJson(requestJson: string, signal?: AbortSignal): Promise<string>;
+  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
+  resolveCatalogEntityJson(requestJson: string, signal?: AbortSignal): Promise<string>;
   replayChanges(
     options?: SpaghettiEngineChangeReplayOptions,
     signal?: AbortSignal,

@@ -26,7 +26,8 @@ use super::capability_query::{
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
 };
 use super::catalog_query::{
-    execute_catalog_page_query, execute_catalog_resolution_query, CatalogPageQueryRequest,
+    execute_catalog_page_query, execute_catalog_readiness_query, execute_catalog_resolution_query,
+    CatalogPageQueryRequest, CatalogReadinessQueryRequest, CatalogReadinessQueryResult,
     CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
 };
 use super::coverage_query::{
@@ -555,6 +556,12 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: CatalogPageQueryRequest,
         response: Sender<Result<CatalogRetainedPageOutcome, EngineError>>,
+    },
+    CatalogReadiness {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: CatalogReadinessQueryRequest,
+        response: Sender<Result<CatalogReadinessQueryResult, EngineError>>,
     },
     CatalogResolution {
         cancellation_epoch: u64,
@@ -1629,6 +1636,22 @@ impl QueryClient {
         )
     }
 
+    pub(crate) fn catalog_readiness(
+        &self,
+        request: CatalogReadinessQueryRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CatalogReadinessQueryResult, EngineError> {
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::CatalogReadiness {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
     pub(crate) fn catalog_resolution(
         &self,
         request: CatalogResolutionQueryRequest,
@@ -2524,6 +2547,22 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || execute_catalog_page_query(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::CatalogReadiness {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || execute_catalog_readiness_query(&connection, &request),
                 );
                 let _ = response.send(result);
             }

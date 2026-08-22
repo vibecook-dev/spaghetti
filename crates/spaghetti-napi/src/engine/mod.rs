@@ -74,7 +74,8 @@ use catalog_publication::{
     CatalogRefreshPublicationCommand, CatalogRefreshPublicationReceipt,
 };
 pub(crate) use catalog_query::{
-    CatalogPageQueryRequest, CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
+    CatalogPageQueryRequest, CatalogReadinessQueryRequest, CatalogReadinessQueryResult,
+    CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
 };
 use catalog_retention::{CatalogSnapshotRetirementCommand, CatalogSnapshotRetirementReceipt};
 use catalog_state::CatalogBuildStateCommand;
@@ -929,6 +930,17 @@ impl SpaghettiEngineCore {
     ) -> Result<CatalogRetainedPageOutcome, EngineError> {
         let queries = self.query_client()?;
         queries.catalog_page(request, cancellation)
+    }
+
+    /// Return the exact portable coverage plan and negotiated current
+    /// readiness from the restart-authenticated durable catalog lineage.
+    pub(crate) fn catalog_readiness(
+        &self,
+        request: CatalogReadinessQueryRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CatalogReadinessQueryResult, EngineError> {
+        let queries = self.query_client()?;
+        queries.catalog_readiness(request, cancellation)
     }
 
     /// Resolve one persisted RFC 012B external reference against the current

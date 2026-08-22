@@ -18,6 +18,27 @@ export declare class SpaghettiEngine {
   /** Execute the first typed, read-only Rust query. */
   overview(signal?: AbortSignal | undefined | null): Promise<EngineOverviewResult>
   /**
+   * Negotiate and return the restart-authenticated RFC 012B coverage plan
+   * plus current readiness as canonical JSON. The response carries no
+   * native path or LOCAL policy-view values.
+   */
+  getCatalogReadinessJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
+  /**
+   * Read one snapshot-bound RFC 012B project page through the policy-
+   * WITHHELD public view.
+   */
+  listLibraryProjectsJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
+  /**
+   * Read one snapshot-bound RFC 012B session page through the policy-
+   * WITHHELD public view.
+   */
+  listLibrarySessionsJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
+  /**
+   * Resolve one persisted RFC 012B external reference against the current
+   * exact plan and snapshot, returning only the policy-WITHHELD view.
+   */
+  resolveCatalogEntityJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
+  /**
    * Replay one bounded, snapshot-consistent page of durable projection
    * changes. Binary keys and payloads remain lossless base64 strings.
    */

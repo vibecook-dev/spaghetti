@@ -18,8 +18,9 @@ export * from './data/timeline-query.js';
 // contracts. Rust derives references; portable consumers validate and compare.
 export * from './contracts/rfc012a.js';
 
-// RFC 012B portable catalog negotiation and continuation wire contracts. The
-// native query API remains gated until complete page DTOs and snapshot leases land.
+// RFC 012B portable catalog negotiation, pages, and snapshot lifecycle. The
+// low-level native owner exposes a strict JSON, policy-WITHHELD query boundary;
+// LOCAL disclosure remains separately authorization-gated.
 export * from './contracts/rfc012b.js';
 export * from './contracts/rfc012b-hydration.js';
 export * from './contracts/rfc012b-pages.js';

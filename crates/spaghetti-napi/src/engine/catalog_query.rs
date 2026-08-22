@@ -10,6 +10,8 @@
 use std::collections::BTreeMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::Serialize;
+use serde_json::Value as JsonValue;
 
 use crate::adapter::ExternalEntityRef;
 use crate::catalog_contract::evidence::{
@@ -19,10 +21,10 @@ use crate::catalog_contract::evidence::{
 use crate::catalog_contract::page::{
     validate_continuation_retention, CatalogContinuationDisposition, CatalogCount,
     CatalogEntityResolution, CatalogEntityResolutionResponse, CatalogPageEntry,
-    CatalogPageRequestBinding, CatalogPolicyViewBinding, CatalogPortableProjectRow,
-    CatalogPortableRow, CatalogPortableSessionRow, CatalogProjectPage,
-    CatalogResolutionRequestBinding, CatalogSessionPage, CatalogSnapshotExpired,
-    CatalogSnapshotRetention,
+    CatalogPageRequestBinding, CatalogPolicyViewBinding, CatalogPortableCoveragePlan,
+    CatalogPortableProjectRow, CatalogPortableRow, CatalogPortableSessionRow, CatalogProjectPage,
+    CatalogReadinessResponse, CatalogResolutionRequestBinding, CatalogSessionPage,
+    CatalogSnapshotExpired, CatalogSnapshotRetention,
 };
 use crate::catalog_contract::publication::{
     CatalogDurablePublicationEntryKind, MAX_DURABLE_CATALOG_ROW_BYTES,
@@ -33,8 +35,8 @@ use crate::catalog_contract::query::{
     MAX_CONTINUATION_PAGE_SIZE,
 };
 use crate::catalog_contract::{
-    CatalogContractError, CatalogCoverageScope, CatalogCursor, CatalogQueryFingerprint,
-    CatalogQueryKind, CatalogSortKey,
+    CatalogContractError, CatalogCoveragePlanId, CatalogCoverageScope, CatalogCursor,
+    CatalogQueryFingerprint, CatalogQueryKind, CatalogSortKey,
 };
 
 use super::catalog_publication::{
@@ -93,33 +95,50 @@ const EXACT_RESOLUTION_ROW_SQL: &str = r#"
 #[derive(Clone)]
 pub(crate) struct CatalogPageQueryRequest {
     contract_request: CatalogQueryContractRequest,
+    expected_coverage_plan_id: CatalogCoveragePlanId,
     query_kind: CatalogQueryKind,
     page_size: u32,
-    continuation: Option<CatalogContinuationRequest>,
+    continuation: Option<JsonValue>,
 }
 
 impl CatalogPageQueryRequest {
     pub(crate) fn new(
         contract_request: CatalogQueryContractRequest,
+        expected_coverage_plan_id: CatalogCoveragePlanId,
         query_kind: CatalogQueryKind,
         page_size: u32,
         continuation: Option<CatalogContinuationRequest>,
+    ) -> Result<Self, EngineError> {
+        let continuation = continuation
+            .map(|continuation| {
+                serde_json::to_value(continuation)
+                    .map_err(|_| invalid_catalog_query_input("continuation is not portable"))
+            })
+            .transpose()?;
+        Self::from_wire(
+            contract_request,
+            expected_coverage_plan_id,
+            query_kind,
+            page_size,
+            continuation,
+        )
+    }
+
+    pub(crate) fn from_wire(
+        contract_request: CatalogQueryContractRequest,
+        expected_coverage_plan_id: CatalogCoveragePlanId,
+        query_kind: CatalogQueryKind,
+        page_size: u32,
+        continuation: Option<JsonValue>,
     ) -> Result<Self, EngineError> {
         if page_size == 0 || page_size > MAX_CONTINUATION_PAGE_SIZE {
             return Err(invalid_catalog_query_input(
                 "page size is outside the supported bound",
             ));
         }
-        if continuation
-            .as_ref()
-            .is_some_and(|continuation| continuation.page_size != page_size)
-        {
-            return Err(invalid_catalog_query_input(
-                "page size differs from the continuation",
-            ));
-        }
         Ok(Self {
             contract_request,
+            expected_coverage_plan_id,
             query_kind,
             page_size,
             continuation,
@@ -130,19 +149,42 @@ impl CatalogPageQueryRequest {
 #[derive(Clone)]
 pub(crate) struct CatalogResolutionQueryRequest {
     contract_request: CatalogQueryContractRequest,
+    expected_coverage_plan_id: CatalogCoveragePlanId,
     external_ref: ExternalEntityRef,
 }
 
 impl CatalogResolutionQueryRequest {
     pub(crate) fn new(
         contract_request: CatalogQueryContractRequest,
+        expected_coverage_plan_id: CatalogCoveragePlanId,
         external_ref: ExternalEntityRef,
     ) -> Self {
         Self {
             contract_request,
+            expected_coverage_plan_id,
             external_ref,
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct CatalogReadinessQueryRequest {
+    contract_request: CatalogQueryContractRequest,
+}
+
+impl CatalogReadinessQueryRequest {
+    pub(crate) const fn new(contract_request: CatalogQueryContractRequest) -> Self {
+        Self { contract_request }
+    }
+}
+
+/// Transport-neutral readiness result. The plan is returned with the response
+/// so a caller can retain its opaque identity and bind every later page or
+/// resolution request to that exact durable authority.
+#[derive(Serialize)]
+pub(crate) struct CatalogReadinessQueryResult {
+    pub coverage_plan: CatalogPortableCoveragePlan,
+    pub readiness: CatalogReadinessResponse,
 }
 
 fn invalid_catalog_query_input(detail: &'static str) -> EngineError {
@@ -165,6 +207,42 @@ fn negotiate_durable_query(
     )
 }
 
+fn require_expected_plan(
+    state: &catalog_state::DurableCatalogBuildState,
+    expected: CatalogCoveragePlanId,
+) -> Result<(), EngineError> {
+    if state.plan.coverage_plan_id != expected {
+        return Err(invalid_catalog_query_input(
+            "coverage plan differs from the current durable authority",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn execute_catalog_readiness_query(
+    connection: &Connection,
+    request: &CatalogReadinessQueryRequest,
+) -> Result<CatalogReadinessQueryResult, EngineError> {
+    let state = catalog_state::load_catalog_build_state(connection)?.ok_or_else(|| {
+        EngineError::InvalidQuery("catalog readiness is not available".to_string())
+    })?;
+    let authority = state.ready_read_authority()?;
+    let selection = negotiate_durable_query(&request.contract_request, &authority)?;
+    let coverage_plan = CatalogPortableCoveragePlan::from_plan(&state.plan)
+        .map_err(catalog_state::catalog_contract_error)?;
+    let readiness = CatalogReadinessResponse::new(
+        selection,
+        state.readiness.clone(),
+        BTreeMap::new(),
+        &state.plan,
+    )
+    .map_err(catalog_state::catalog_contract_error)?;
+    Ok(CatalogReadinessQueryResult {
+        coverage_plan,
+        readiness,
+    })
+}
+
 pub(crate) fn execute_catalog_page_query(
     connection: &Connection,
     request: &CatalogPageQueryRequest,
@@ -172,18 +250,25 @@ pub(crate) fn execute_catalog_page_query(
     let state = catalog_state::load_catalog_build_state(connection)?.ok_or_else(|| {
         EngineError::InvalidQuery("catalog readiness is not available".to_string())
     })?;
+    require_expected_plan(&state, request.expected_coverage_plan_id)?;
     let current_authority = state.ready_read_authority()?;
     let selection = negotiate_durable_query(&request.contract_request, &current_authority)?;
     let continuation = request
         .continuation
         .as_ref()
         .map(|continuation| {
-            let wire = serde_json::to_value(continuation)
-                .map_err(|_| invalid_catalog_query_input("continuation is not portable"))?;
-            CatalogContinuationRequest::from_wire_value(wire, &selection)
+            CatalogContinuationRequest::from_wire_value(continuation.clone(), &selection)
                 .map_err(|_| invalid_catalog_query_input("continuation is invalid"))
         })
         .transpose()?;
+    if continuation
+        .as_ref()
+        .is_some_and(|continuation| continuation.page_size != request.page_size)
+    {
+        return Err(invalid_catalog_query_input(
+            "page size differs from the continuation",
+        ));
+    }
     let snapshot_id = continuation.as_ref().map_or_else(
         || current_authority.snapshot_id(),
         |value| value.snapshot_id,
@@ -212,6 +297,7 @@ pub(crate) fn execute_catalog_resolution_query(
     let state = catalog_state::load_catalog_build_state(connection)?.ok_or_else(|| {
         EngineError::InvalidQuery("catalog readiness is not available".to_string())
     })?;
+    require_expected_plan(&state, request.expected_coverage_plan_id)?;
     let authority = state.ready_read_authority()?;
     let selection = negotiate_durable_query(&request.contract_request, &authority)?;
     let binding = CatalogResolutionRequestBinding::new(
@@ -351,6 +437,19 @@ pub(crate) enum CatalogRetainedPage {
 pub(crate) enum CatalogRetainedPageOutcome {
     Page(Box<CatalogRetainedPage>),
     SnapshotExpired(Box<CatalogSnapshotExpired>),
+}
+
+impl CatalogRetainedPageOutcome {
+    pub(crate) fn to_wire_value(&self) -> Result<JsonValue, EngineError> {
+        match self {
+            Self::Page(page) => match page.as_ref() {
+                CatalogRetainedPage::Projects(page) => serde_json::to_value(page),
+                CatalogRetainedPage::Sessions(page) => serde_json::to_value(page),
+            },
+            Self::SnapshotExpired(expiration) => serde_json::to_value(expiration),
+        }
+        .map_err(|_| EngineError::InvalidCommit("catalog response is not portable".to_string()))
+    }
 }
 
 /// Resolve one current or historical page against the exact current Ready

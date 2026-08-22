@@ -1000,14 +1000,27 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
     let connection = Connection::open(&database_path).unwrap();
     schema::initialize_schema(&connection).unwrap();
     let published = publish_catalog_in(connection, 2, 2);
+    let coverage_plan_id = published.state.plan.coverage_plan_id;
     drop(published.connection);
 
     let mut pool = QueryPool::start(database_path, 1, None).unwrap();
     let client = pool.client();
+    let readiness = client
+        .catalog_readiness(
+            CatalogReadinessQueryRequest::new(public_query_request()),
+            crate::engine::QueryCancellationToken::default(),
+        )
+        .unwrap();
+    assert_eq!(readiness.coverage_plan.coverage_plan_id, coverage_plan_id);
+    assert_eq!(
+        readiness.readiness.readiness.state,
+        CatalogReadinessPhase::Ready
+    );
     let page = client
         .catalog_page(
             CatalogPageQueryRequest::new(
                 public_query_request(),
+                coverage_plan_id,
                 CatalogQueryKind::Projects,
                 10,
                 None,
@@ -1027,6 +1040,30 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
     assert!(portable_page.contains("withheld"));
     assert!(!portable_page.contains("private-project"));
 
+    let foreign_plan_id =
+        CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new())
+            .unwrap()
+            .coverage_plan_id;
+    let error = match client.catalog_page(
+        CatalogPageQueryRequest::new(
+            public_query_request(),
+            foreign_plan_id,
+            CatalogQueryKind::Projects,
+            10,
+            None,
+        )
+        .unwrap(),
+        crate::engine::QueryCancellationToken::default(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("foreign coverage plan must not drift to the current plan"),
+    };
+    assert!(matches!(
+        error,
+        EngineError::InvalidQuery(ref detail)
+            if detail == "invalid catalog query request: coverage plan differs from the current durable authority"
+    ));
+
     let source_instance_key =
         CanonicalSourceInstanceKey::derive(1, b"retained-page-source").unwrap();
     let session_key = CanonicalEntityKey::derive(
@@ -1039,7 +1076,11 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
     let external_ref = crate::adapter::ExternalEntityRef::new(session_key);
     let response = client
         .catalog_resolution(
-            CatalogResolutionQueryRequest::new(public_query_request(), external_ref),
+            CatalogResolutionQueryRequest::new(
+                public_query_request(),
+                coverage_plan_id,
+                external_ref,
+            ),
             crate::engine::QueryCancellationToken::default(),
         )
         .unwrap();
@@ -1054,7 +1095,14 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
     let mut incompatible = public_query_request();
     incompatible.contract_versions.query_pack_versions = Some(vec![2]);
     let error = match client.catalog_page(
-        CatalogPageQueryRequest::new(incompatible, CatalogQueryKind::Sessions, 10, None).unwrap(),
+        CatalogPageQueryRequest::new(
+            incompatible,
+            coverage_plan_id,
+            CatalogQueryKind::Sessions,
+            10,
+            None,
+        )
+        .unwrap(),
         crate::engine::QueryCancellationToken::default(),
     ) {
         Err(error) => error,
@@ -1067,7 +1115,7 @@ fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
     let cancelled = crate::engine::QueryCancellationToken::default();
     cancelled.cancel();
     let error = match client.catalog_resolution(
-        CatalogResolutionQueryRequest::new(public_query_request(), external_ref),
+        CatalogResolutionQueryRequest::new(public_query_request(), coverage_plan_id, external_ref),
         cancelled,
     ) {
         Err(error) => error,

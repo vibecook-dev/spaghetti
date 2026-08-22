@@ -7,14 +7,23 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use napi::bindgen_prelude::{
     AbortSignal, AsyncBlock, AsyncBlockBuilder, AsyncTask, Env, Error, Result, Status, Task,
+    Utf16String,
 };
 use napi_derive::napi;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
-use crate::adapter::{AdapterError, AdapterRegistry, SupportCatalog, SupportContractError};
+use crate::adapter::{
+    AdapterError, AdapterRegistry, ExternalEntityRef, SupportCatalog, SupportContractError,
+};
+use crate::catalog_contract::query::CatalogQueryContractRequest;
+use crate::catalog_contract::{CatalogCoveragePlanId, CatalogQueryKind};
 use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
-    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, CatalogPageQueryRequest,
+    CatalogReadinessQueryRequest, CatalogResolutionQueryRequest, ChangeCursor, ChangeReplay,
     ChangeReplayRequest, CheckpointPerformanceSnapshot, CommitWaitResult, DelegationPage,
     DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
     EngineOptions, EngineOverview, EngineStatusSnapshot, FactFamilyCoverageItem,
@@ -62,6 +71,44 @@ use crate::grok::GrokAdapter;
 const CLAUDE_ADAPTER_ID: &str = "claude-code";
 const CODEX_ADAPTER_ID: &str = "codex";
 const GROK_ADAPTER_ID: &str = "grok";
+const MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES: usize = 256 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogPageJsonRequestWire {
+    contract_request: CatalogQueryContractRequest,
+    coverage_plan_id: CatalogCoveragePlanId,
+    page_size: u32,
+    #[serde(default)]
+    continuation: Option<JsonValue>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogResolutionJsonRequestWire {
+    contract_request: CatalogQueryContractRequest,
+    coverage_plan_id: CatalogCoveragePlanId,
+    external_ref: ExternalEntityRef,
+}
+
+fn bounded_catalog_json(json: Utf16String) -> Result<String> {
+    if json.len() > MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES {
+        return Err(public_catalog_input_error());
+    }
+    let json = String::from_utf16(&json).map_err(|_| public_catalog_input_error())?;
+    if json.is_empty() || json.len() > MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES {
+        return Err(public_catalog_input_error());
+    }
+    Ok(json)
+}
+
+fn parse_catalog_json<T: DeserializeOwned>(json: &str) -> Result<T> {
+    serde_json::from_str(json).map_err(|_| public_catalog_input_error())
+}
+
+fn public_catalog_input_error() -> Error {
+    Error::new(Status::InvalidArg, "invalid catalog query request")
+}
 
 fn verified_builtin_support_catalog() -> std::result::Result<SupportCatalog, SupportContractError> {
     SupportCatalog::new([
@@ -4274,6 +4321,78 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Negotiate and return the restart-authenticated RFC 012B coverage plan
+    /// plus current readiness as canonical JSON. The response carries no
+    /// native path or LOCAL policy-view values.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn get_catalog_readiness_json(
+        &self,
+        request_json: Utf16String,
+        signal: Option<AbortSignal>,
+    ) -> Result<AsyncTask<CatalogJsonTask>> {
+        self.catalog_json_task(request_json, CatalogJsonOperation::Readiness, signal)
+    }
+
+    /// Read one snapshot-bound RFC 012B project page through the policy-
+    /// WITHHELD public view.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn list_library_projects_json(
+        &self,
+        request_json: Utf16String,
+        signal: Option<AbortSignal>,
+    ) -> Result<AsyncTask<CatalogJsonTask>> {
+        self.catalog_json_task(
+            request_json,
+            CatalogJsonOperation::Page(CatalogQueryKind::Projects),
+            signal,
+        )
+    }
+
+    /// Read one snapshot-bound RFC 012B session page through the policy-
+    /// WITHHELD public view.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn list_library_sessions_json(
+        &self,
+        request_json: Utf16String,
+        signal: Option<AbortSignal>,
+    ) -> Result<AsyncTask<CatalogJsonTask>> {
+        self.catalog_json_task(
+            request_json,
+            CatalogJsonOperation::Page(CatalogQueryKind::Sessions),
+            signal,
+        )
+    }
+
+    /// Resolve one persisted RFC 012B external reference against the current
+    /// exact plan and snapshot, returning only the policy-WITHHELD view.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn resolve_catalog_entity_json(
+        &self,
+        request_json: Utf16String,
+        signal: Option<AbortSignal>,
+    ) -> Result<AsyncTask<CatalogJsonTask>> {
+        self.catalog_json_task(request_json, CatalogJsonOperation::Resolution, signal)
+    }
+
+    fn catalog_json_task(
+        &self,
+        request_json: Utf16String,
+        operation: CatalogJsonOperation,
+        signal: Option<AbortSignal>,
+    ) -> Result<AsyncTask<CatalogJsonTask>> {
+        let request_json = bounded_catalog_json(request_json)?;
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        Ok(AsyncTask::with_optional_signal(
+            CatalogJsonTask {
+                engine: Arc::clone(&self.inner),
+                request_json,
+                operation,
+                cancellation,
+            },
+            signal,
+        ))
+    }
+
     /// Replay one bounded, snapshot-consistent page of durable projection
     /// changes. Binary keys and payloads remain lossless base64 strings.
     #[napi(ts_return_type = "Promise<EngineChangeReplay>")]
@@ -5192,6 +5311,20 @@ pub struct OverviewTask {
     engine: Arc<SpaghettiEngineCore>,
 }
 
+#[derive(Clone, Copy)]
+enum CatalogJsonOperation {
+    Readiness,
+    Page(CatalogQueryKind),
+    Resolution,
+}
+
+pub struct CatalogJsonTask {
+    engine: Arc<SpaghettiEngineCore>,
+    request_json: String,
+    operation: CatalogJsonOperation,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct ChangeReplayTask {
     engine: Arc<SpaghettiEngineCore>,
     options: Option<EngineChangeReplayOptions>,
@@ -5507,6 +5640,74 @@ impl Task for OverviewTask {
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(output)
     }
+}
+
+impl Task for CatalogJsonTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        match self.operation {
+            CatalogJsonOperation::Readiness => {
+                let contract_request =
+                    parse_catalog_json::<CatalogQueryContractRequest>(&self.request_json)?;
+                let result = self
+                    .engine
+                    .catalog_readiness(
+                        CatalogReadinessQueryRequest::new(contract_request),
+                        self.cancellation.clone(),
+                    )
+                    .map_err(catalog_napi_error)?;
+                serialize_catalog_json(&result)
+            }
+            CatalogJsonOperation::Page(query_kind) => {
+                let wire = parse_catalog_json::<CatalogPageJsonRequestWire>(&self.request_json)?;
+                let request = CatalogPageQueryRequest::from_wire(
+                    wire.contract_request,
+                    wire.coverage_plan_id,
+                    query_kind,
+                    wire.page_size,
+                    wire.continuation,
+                )
+                .map_err(catalog_napi_error)?;
+                let result = self
+                    .engine
+                    .catalog_page(request, self.cancellation.clone())
+                    .map_err(catalog_napi_error)?;
+                let wire = result.to_wire_value().map_err(catalog_napi_error)?;
+                serialize_catalog_json(&wire)
+            }
+            CatalogJsonOperation::Resolution => {
+                let wire =
+                    parse_catalog_json::<CatalogResolutionJsonRequestWire>(&self.request_json)?;
+                let result = self
+                    .engine
+                    .resolve_catalog_entity(
+                        CatalogResolutionQueryRequest::new(
+                            wire.contract_request,
+                            wire.coverage_plan_id,
+                            wire.external_ref,
+                        ),
+                        self.cancellation.clone(),
+                    )
+                    .map_err(catalog_napi_error)?;
+                serialize_catalog_json(&result)
+            }
+        }
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+fn serialize_catalog_json(value: &impl Serialize) -> Result<String> {
+    serde_json::to_string(value).map_err(|_| {
+        Error::new(
+            Status::GenericFailure,
+            "catalog query response serialization failed",
+        )
+    })
 }
 
 impl Task for ChangeReplayTask {
@@ -6411,6 +6612,33 @@ fn napi_error(error: EngineError) -> Error {
         _ => Status::GenericFailure,
     };
     Error::new(status, public_engine_error_message(&error))
+}
+
+fn catalog_napi_error(error: EngineError) -> Error {
+    let status = match &error {
+        EngineError::InvalidConfig(_)
+        | EngineError::InvalidQuery(_)
+        | EngineError::InvalidCommit(_) => Status::InvalidArg,
+        EngineError::QueryCancelled => Status::Cancelled,
+        EngineError::QueryQueueFull => Status::QueueFull,
+        EngineError::ShuttingDown => Status::Closing,
+        _ => Status::GenericFailure,
+    };
+    let message = match &error {
+        EngineError::InvalidQuery(message)
+            if message.starts_with("IncompatibleCatalogContract:") =>
+        {
+            message.clone()
+        }
+        EngineError::InvalidQuery(_) | EngineError::InvalidCommit(_) => {
+            "invalid catalog query request".to_string()
+        }
+        EngineError::QueryCancelled => "catalog query cancelled".to_string(),
+        EngineError::QueryQueueFull => "catalog query queue is full".to_string(),
+        EngineError::ShuttingDown => "catalog query engine is stopping".to_string(),
+        _ => "catalog query failed".to_string(),
+    };
+    Error::new(status, message)
 }
 
 fn public_engine_error_message(error: &EngineError) -> String {
