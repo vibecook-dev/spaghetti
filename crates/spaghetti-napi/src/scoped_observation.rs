@@ -259,6 +259,105 @@ pub struct ScopedObservationAccessRequest {
     pub artifact_relations: Vec<ScopedArtifactRelationGrant>,
 }
 
+/// Trusted pre-access result for one scoped attachment. The portable request
+/// never contains this value: the host negotiates the complete observation
+/// contract first, then runs its registered native probe, and only a promoted
+/// scoped release can mint the retained authorization.
+pub(crate) struct PreparedScopedObservationSupport {
+    adapter_id: AdapterId,
+    artifact_probe: NativeArtifactProbe,
+    observation_contract: ObservationContractSelection,
+    compatibility: CompatibilityDecision,
+    authorization: TypedAccessAuthorization,
+}
+
+impl PreparedScopedObservationSupport {
+    pub(crate) fn adapter_id(&self) -> &AdapterId {
+        &self.adapter_id
+    }
+
+    pub(crate) fn artifact_probe(&self) -> &NativeArtifactProbe {
+        &self.artifact_probe
+    }
+
+    pub(crate) fn observation_contract(&self) -> &ObservationContractSelection {
+        &self.observation_contract
+    }
+
+    pub(crate) fn compatibility(&self) -> &CompatibilityDecision {
+        &self.compatibility
+    }
+
+    pub(crate) fn authorization(&self) -> &TypedAccessAuthorization {
+        &self.authorization
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedObservationSupport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedObservationSupport")
+            .field("adapter_id", &self.adapter_id)
+            .field("has_artifact_probe", &true)
+            .field("observation_contract", &self.observation_contract)
+            .field(
+                "compatibility_class",
+                &self.compatibility.compatibility_class(),
+            )
+            .field(
+                "support_release_id",
+                &self.compatibility.support_release_id(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Prepare scoped support without creating source, grant, watcher, or event
+/// authority. Incompatible observation semantics fail before the registered
+/// probe can touch native evidence. Missing probe drivers and non-promoted or
+/// non-scoped releases return `None` rather than falling back to legacy I/O.
+pub(crate) fn prepare_scoped_observation_support(
+    registry: &AdapterRegistry,
+    adapter_id: &str,
+    configured_roots: &[PathBuf],
+    request: &ObservationContractRequest,
+    offer: &ObservationContractOffer,
+) -> Result<Option<PreparedScopedObservationSupport>, ScopedObservationAccessError> {
+    let observation_contract = negotiate_observation_contract(request, offer)?;
+    let adapter_id = AdapterId::new(adapter_id)
+        .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
+    let Some(artifact_probe) = registry
+        .probe_native_support(&adapter_id, configured_roots)
+        .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    let Some((compatibility, authorization)) = registry
+        .authorize_scoped_if_supported(
+            &adapter_id,
+            &artifact_probe,
+            &request.contract_versions,
+            &offer.contract_versions,
+        )
+        .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?
+    else {
+        return Ok(None);
+    };
+    if authorization.contracts() != &observation_contract.contract_versions {
+        return Err(ScopedObservationAccessError::Authorization(
+            "typed access authorization does not match the negotiated observation contract"
+                .to_string(),
+        ));
+    }
+    Ok(Some(PreparedScopedObservationSupport {
+        adapter_id,
+        artifact_probe,
+        observation_contract,
+        compatibility,
+        authorization,
+    }))
+}
+
 impl std::fmt::Debug for ScopedObservationAccessRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

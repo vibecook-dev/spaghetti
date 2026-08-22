@@ -257,6 +257,42 @@ impl AdapterRegistry {
         )
     }
 
+    /// Select a promoted scoped-observation contract for one already-probed
+    /// native artifact. Candidate, recognized-unverified, and incompatible
+    /// artifacts deliberately return `None`; they never reach the stricter
+    /// typed-access constructor and cannot acquire source authority.
+    ///
+    /// The containing trusted host must negotiate the complete RFC 012D
+    /// observation contract before it performs the native probe and calls
+    /// this method. Keeping this selector in the registry prevents a future
+    /// portable transport from treating a caller-supplied classification as
+    /// authority.
+    pub(crate) fn authorize_scoped_if_supported(
+        &self,
+        adapter_id: &AdapterId,
+        probe: &NativeArtifactProbe,
+        request: &ContractVersionRequest,
+        offer: &ContractVersionOffer,
+    ) -> Result<Option<(CompatibilityDecision, TypedAccessAuthorization)>, AdapterError> {
+        let Some(catalog) = self.support_catalog.as_ref() else {
+            return Ok(None);
+        };
+        let decision = catalog
+            .classify(probe)
+            .map_err(|error| AdapterError::invalid_contract(error.to_string()))?;
+        if !decision.permissions().scoped_observation {
+            return Ok(None);
+        }
+        self.authorize_typed_access(
+            adapter_id,
+            probe,
+            SupportOperation::ScopedTypedObservation,
+            request,
+            offer,
+        )
+        .map(Some)
+    }
+
     fn authorize_supported_operation(
         &self,
         adapter_id: &AdapterId,
@@ -383,7 +419,7 @@ pub(crate) mod tests {
     };
     use crate::scoped_observation::{
         bind_observation_runtime_source_for_test,
-        prepare_observation_directory_membership_for_test,
+        prepare_observation_directory_membership_for_test, prepare_scoped_observation_support,
         scan_observation_directory_membership_for_test,
         scan_observation_directory_membership_with_foreign_attachment_for_test,
         ScopedAccessRootGrant, ScopedActorAttribution, ScopedActorFallbackReason,
@@ -1879,8 +1915,8 @@ pub(crate) mod tests {
         scoped_request.observation_contract_versions = Some(vec![1]);
         let mut scoped_offer = offer;
         scoped_offer.observation_contract_versions = vec![1];
-        let (_, scoped_authorization) = registry
-            .authorize_typed_access(
+        let (scoped_decision, scoped_authorization) = registry
+            .authorize_scoped_if_supported(
                 &AdapterId::new("fixture").unwrap(),
                 &NativeArtifactProbe {
                     family: "fixture".to_string(),
@@ -1889,17 +1925,39 @@ pub(crate) mod tests {
                     markers: vec!["fixture.marker".to_string()],
                     contradictory_markers: false,
                 },
-                SupportOperation::ScopedTypedObservation,
                 &scoped_request,
                 &scoped_offer,
             )
+            .unwrap()
             .unwrap();
+        assert!(scoped_decision.permissions().scoped_observation);
+        assert_eq!(
+            scoped_authorization.operation().operation(),
+            SupportOperation::ScopedTypedObservation
+        );
         let program = scoped_authorization
             .select_scope_program("observe-session")
             .unwrap();
         let plan = AuthorizedScopeAccessPlan::from_authorized_program(program).unwrap();
         assert_eq!(plan.adapter_id(), "fixture");
         assert_eq!(plan.support_release_id(), "fixture-release");
+
+        let unsupported_probe = NativeArtifactProbe {
+            family: "fixture".to_string(),
+            platform: "test".to_string(),
+            version: Some("9.9.9".to_string()),
+            markers: vec!["fixture.marker".to_string()],
+            contradictory_markers: false,
+        };
+        assert!(registry
+            .authorize_scoped_if_supported(
+                &AdapterId::new("fixture").unwrap(),
+                &unsupported_probe,
+                &scoped_request,
+                &scoped_offer,
+            )
+            .unwrap()
+            .is_none());
 
         let empty_report = plan.report();
         assert!(empty_report.verify_digest());
@@ -1940,6 +1998,90 @@ pub(crate) mod tests {
         tampered["relations"][0]["bytes_read"] = serde_json::json!(65);
         let tampered: ScopeAccessReport = serde_json::from_value(tampered).unwrap();
         assert!(!tampered.verify_digest());
+    }
+
+    #[test]
+    fn scoped_support_preparation_negotiates_before_probe_and_never_falls_back() {
+        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let registry = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
+            .register_native_support_probe("fixture", {
+                let probe_calls = Arc::clone(&probe_calls);
+                move |_| {
+                    probe_calls.fetch_add(1, Ordering::AcqRel);
+                    Ok(NativeArtifactProbe {
+                        family: "fixture".to_string(),
+                        platform: "test".to_string(),
+                        version: Some("1.0.0".to_string()),
+                        markers: vec!["fixture.marker".to_string()],
+                        contradictory_markers: false,
+                    })
+                }
+            })
+            .build_supported(catalog)
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let request = scoped_access_request(temp.path().to_path_buf());
+        let mut incompatible = request.observation_contract_request.clone();
+        incompatible.event_contract_versions = vec![2];
+        assert!(matches!(
+            prepare_scoped_observation_support(
+                &registry,
+                "fixture",
+                &[temp.path().to_path_buf()],
+                &incompatible,
+                &request.observation_contract_offer,
+            ),
+            Err(ScopedObservationAccessError::ObservationContract(
+                ObservationNegotiationError::IncompatibleObservationContract {
+                    axis: ObservationCompatibilityAxis::EventContractVersion,
+                }
+            ))
+        ));
+        assert_eq!(probe_calls.load(Ordering::Acquire), 0);
+
+        let prepared = prepare_scoped_observation_support(
+            &registry,
+            "fixture",
+            &[temp.path().to_path_buf()],
+            &request.observation_contract_request,
+            &request.observation_contract_offer,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(prepared.adapter_id().as_str(), "fixture");
+        assert_eq!(prepared.artifact_probe().version.as_deref(), Some("1.0.0"));
+        assert_eq!(
+            prepared.observation_contract().contract_versions,
+            *prepared.authorization().contracts()
+        );
+        assert!(prepared.compatibility().permissions().scoped_observation);
+
+        let (catalog, binding, scope_programs) = promoted_fixture_catalog();
+        let unsupported = AdapterRegistryBuilder::new()
+            .register(EmptyAdapter::new("fixture").with_support(binding, scope_programs))
+            .register_native_support_probe("fixture", |_| {
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("9.9.9".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap();
+        assert!(prepare_scoped_observation_support(
+            &unsupported,
+            "fixture",
+            &[temp.path().to_path_buf()],
+            &request.observation_contract_request,
+            &request.observation_contract_offer,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
