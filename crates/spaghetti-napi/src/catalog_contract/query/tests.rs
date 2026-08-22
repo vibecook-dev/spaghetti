@@ -46,6 +46,45 @@ fn selection() -> CatalogQueryContractSelection {
     negotiate_catalog_query_contract(&contract_request(), &contract_offer()).unwrap()
 }
 
+#[test]
+fn durable_selection_is_the_only_server_offer_and_requires_exact_coordinates() {
+    let mut request = contract_request();
+    request
+        .contract_versions
+        .fact_family_versions
+        .insert("catalog.session".to_owned(), vec![2, 1]);
+    request.contract_versions.observation_contract_versions = Some(vec![2, 1]);
+
+    let mut exact = selection().contract_versions;
+    exact
+        .fact_family_versions
+        .insert("catalog.session".to_owned(), 1);
+    exact.observation_contract_version = Some(1);
+
+    let selected = negotiate_catalog_query_contract_for_selection(&request, &exact).unwrap();
+    assert_eq!(selected.contract_versions, exact);
+    assert_eq!(selected.typed_unknown.max_payload_bytes, 4_096);
+
+    let mut omitted_family = request.clone();
+    omitted_family
+        .contract_versions
+        .fact_family_versions
+        .clear();
+    assert_incompatible(
+        negotiate_catalog_query_contract_for_selection(&omitted_family, &exact),
+        CatalogQueryCompatibilityAxis::FactFamilyVersion,
+    );
+
+    let mut omitted_observation = request;
+    omitted_observation
+        .contract_versions
+        .observation_contract_versions = None;
+    assert_incompatible(
+        negotiate_catalog_query_contract_for_selection(&omitted_observation, &exact),
+        CatalogQueryCompatibilityAxis::ObservationContractVersion,
+    );
+}
+
 fn continuation(selection: CatalogQueryContractSelection) -> CatalogContinuationRequest {
     let coverage_plan_id = CatalogCoveragePlanId::from_digest(contract_digest(
         b"catalog-query-fixture-plan",

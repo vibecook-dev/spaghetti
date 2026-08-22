@@ -450,6 +450,58 @@ pub(crate) fn negotiate_catalog_query_contract(
     Ok(selection)
 }
 
+/// Negotiate a public catalog query against the exact contract selection
+/// authenticated from one durable publication.
+///
+/// The durable selection is authority, not a caller-supplied offer. Building
+/// the singleton offer here prevents a transport from widening the server's
+/// capabilities or selecting a nearby version. Fact-family and observation
+/// coordinates are also required to be exact: omitting either would make a
+/// response claim a weaker selection than the snapshot that produced it.
+pub(crate) fn negotiate_catalog_query_contract_for_selection(
+    request: &CatalogQueryContractRequest,
+    exact: &ContractVersionSelection,
+) -> Result<CatalogQueryContractSelection, CatalogQueryNegotiationError> {
+    let offer = CatalogQueryContractOffer::new(
+        ContractVersionOffer {
+            selection_contract_version: exact.selection_contract_version,
+            model_major: exact.model_major,
+            external_entity_reference_versions: vec![exact.external_entity_reference_version],
+            semantic_revision_reference_versions: vec![exact.semantic_revision_reference_version],
+            coverage_contract_versions: vec![exact.coverage_contract_version],
+            fact_family_versions: exact
+                .fact_family_versions
+                .iter()
+                .map(|(family, version)| (family.clone(), vec![*version]))
+                .collect(),
+            query_pack_versions: exact.query_pack_version.into_iter().collect(),
+            observation_contract_versions: exact.observation_contract_version.into_iter().collect(),
+        },
+        CatalogTypedUnknownCapability::preserving(MAX_TYPED_UNKNOWN_PAYLOAD_BYTES)
+            .map_err(CatalogQueryNegotiationError::invalid)?,
+    )
+    .map_err(CatalogQueryNegotiationError::invalid)?;
+    let selection = negotiate_catalog_query_contract(request, &offer)?;
+    if selection.contract_versions.fact_family_versions != exact.fact_family_versions {
+        return Err(CatalogQueryNegotiationError::incompatible(
+            CatalogQueryCompatibilityAxis::FactFamilyVersion,
+        ));
+    }
+    if selection.contract_versions.observation_contract_version
+        != exact.observation_contract_version
+    {
+        return Err(CatalogQueryNegotiationError::incompatible(
+            CatalogQueryCompatibilityAxis::ObservationContractVersion,
+        ));
+    }
+    if selection.contract_versions != *exact {
+        return Err(CatalogQueryNegotiationError::invalid(
+            "negotiated catalog query selection differs from durable authority",
+        ));
+    }
+    Ok(selection)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum CatalogQueryContractResponse {
     Selected {
