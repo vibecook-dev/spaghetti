@@ -5015,6 +5015,7 @@ pub struct ScopedObservationAsyncSourceOwner {
     directory_bindings: Vec<ScopedObservationDirectoryPassBinding>,
     policy: ScopedObservationSourceOwnerRetryPolicy,
     retry_deadlines: BTreeMap<String, tokio::time::Instant>,
+    replacement_poll: Option<ScopedObservationReplacementPollLease>,
     operation: ScopedObservationOperationGuard,
 }
 
@@ -5028,6 +5029,7 @@ impl std::fmt::Debug for ScopedObservationAsyncSourceOwner {
             .field("policy", &self.policy)
             .field("object_error_count", &self.active.object_errors.len())
             .field("scheduled_retry_count", &self.retry_deadlines.len())
+            .field("replacement_poll_pending", &self.replacement_poll.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -5627,6 +5629,7 @@ impl ScopedObservationAsyncHandle {
             directory_bindings,
             policy,
             retry_deadlines,
+            replacement_poll: None,
             operation,
         })
     }
@@ -5680,8 +5683,11 @@ impl ScopedObservationAsyncSourceOwner {
             directory_bindings,
             policy: _,
             retry_deadlines: _,
+            replacement_poll,
             operation,
         } = self;
+        debug_assert!(replacement_poll.is_none());
+        drop(replacement_poll);
         drop(operation);
         (active, bindings, directory_bindings)
     }
@@ -5723,6 +5729,7 @@ impl ScopedObservationAsyncSourceOwner {
             directory_bindings,
             policy,
             retry_deadlines: _,
+            replacement_poll,
             operation,
         } = self;
         // Release the close-barrier obligation before the stopped state is
@@ -5733,6 +5740,7 @@ impl ScopedObservationAsyncSourceOwner {
             bindings,
             directory_bindings,
             policy,
+            replacement_poll,
             exit,
         }
     }
@@ -5812,6 +5820,46 @@ impl ScopedObservationAsyncSourceOwner {
                     );
                 }
             };
+            if !self.directory_bindings.is_empty() {
+                if self.replacement_poll.is_some() {
+                    return ScopedObservationSourceOwnerRunExit::Failed(
+                        ScopedObservationSourceOwnerRunError::Pass(
+                            ScopedObservationPassExecutionError::InvalidEpochState,
+                        ),
+                    );
+                }
+                // Directory membership currently has no safe live-delta
+                // admission seam. An append-only pass would falsely certify
+                // exact-scope coverage, so release its unused access pass and
+                // preserve the logical poll across a complete replacement.
+                self.replacement_poll = Some(lease.defer_to_replacement());
+                drop(automatic_ticket);
+                let replacement_observed_at = observed_at();
+                let invalidation = self.handle.require_resync(
+                    ScopedResyncReason::TransportContinuityLoss,
+                    replacement_observed_at,
+                );
+                match invalidation {
+                    Ok(_) | Err(ScopedContinuityError::ResyncStartNotDelivered) => {
+                        return match self.attachment_wait_context() {
+                            Err(exit) => exit,
+                            Ok(_) => ScopedObservationSourceOwnerRunExit::Failed(
+                                ScopedObservationSourceOwnerRunError::Pass(
+                                    ScopedObservationPassExecutionError::InvalidEpochState,
+                                ),
+                            ),
+                        };
+                    }
+                    Err(ScopedContinuityError::Closed) => {
+                        return ScopedObservationSourceOwnerRunExit::Cancelled;
+                    }
+                    Err(error) => {
+                        return ScopedObservationSourceOwnerRunExit::Failed(
+                            ScopedObservationSourceOwnerRunError::Continuity(error),
+                        );
+                    }
+                }
+            }
             let pass_permit = match self.acquire_shared_pass_permit().await {
                 Ok(permit) => permit,
                 Err(exit) => return exit,
@@ -7645,8 +7693,14 @@ impl ScopedObservationAsyncResyncHandoff {
             watcher_policy,
         } = self;
         let handle = watcher.handle.clone();
-        let (mut active, mut bindings, mut directory_bindings, source_policy, exit) =
-            source.into_rebind_parts();
+        let (
+            mut active,
+            mut bindings,
+            mut directory_bindings,
+            source_policy,
+            mut replacement_poll,
+            exit,
+        ) = source.into_automatic_resync_parts();
         if !matches!(
             exit,
             ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(_)
@@ -7669,6 +7723,7 @@ impl ScopedObservationAsyncResyncHandoff {
                 active,
                 &bindings,
                 &directory_bindings,
+                &mut replacement_poll,
                 source_policy,
                 &mut replacement_observed_at,
             ));
@@ -7920,6 +7975,7 @@ async fn scoped_replay_complete_replacement<C>(
     mut active: ScopedObservationEpochState,
     bindings: &[ScopedObservationAppendPassBinding],
     directory_bindings: &[ScopedObservationDirectoryPassBinding],
+    replacement_poll: &mut Option<ScopedObservationReplacementPollLease>,
     retry_policy: ScopedObservationSourceOwnerRetryPolicy,
     observed_at: &mut C,
 ) -> Result<ScopedObservationEpochState, ScopedObservationAutomaticResyncError>
@@ -7934,6 +7990,7 @@ where
             &mut active,
             bindings,
             directory_bindings,
+            replacement_poll,
             retry_policy,
             observed_at,
         )
@@ -8005,6 +8062,7 @@ async fn scoped_replay_started_replacement<C>(
     active: &mut ScopedObservationEpochState,
     bindings: &[ScopedObservationAppendPassBinding],
     directory_bindings: &[ScopedObservationDirectoryPassBinding],
+    replacement_poll: &mut Option<ScopedObservationReplacementPollLease>,
     retry_policy: ScopedObservationSourceOwnerRetryPolicy,
     observed_at: &mut C,
 ) -> Result<(), ScopedObservationAutomaticResyncError>
@@ -8368,7 +8426,21 @@ where
             (waiter, generation)
         };
         match handle.offer_scope_resync_complete(active, &mut stage, observed_at()) {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                if let Some(lease) = replacement_poll.take() {
+                    let drain = handle.shared.lock_drain();
+                    handle
+                        .host()
+                        .complete_epoch_replacement_poll(lease, active, &drain)
+                        .map_err(|error| match error {
+                            ScopedObservationPollError::Closed => {
+                                ScopedObservationAutomaticResyncError::Closed
+                            }
+                            _ => ScopedObservationAutomaticResyncError::Continuity,
+                        })?;
+                }
+                return Ok(());
+            }
             Err(error) if scoped_automatic_resync_is_backpressure(error) => {
                 if waiter.wait_after_async(generation).await.closed {
                     return Err(ScopedObservationAutomaticResyncError::Closed);
@@ -19035,6 +19107,8 @@ enum ScopedObservationRelationPollOutcome {
 pub enum ScopedObservationSourceOwnerRunError {
     #[error("scoped source-owner pass failed: {0}")]
     Pass(#[source] ScopedObservationPassExecutionError),
+    #[error("scoped source-owner continuity transition failed: {0}")]
+    Continuity(#[source] ScopedContinuityError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19087,6 +19161,7 @@ pub struct ScopedObservationStoppedSourceOwner {
     bindings: Vec<ScopedObservationAppendPassBinding>,
     directory_bindings: Vec<ScopedObservationDirectoryPassBinding>,
     policy: ScopedObservationSourceOwnerRetryPolicy,
+    replacement_poll: Option<ScopedObservationReplacementPollLease>,
     exit: ScopedObservationSourceOwnerRunExit,
 }
 
@@ -19127,11 +19202,34 @@ impl ScopedObservationStoppedSourceOwner {
         ScopedObservationSourceOwnerRetryPolicy,
         ScopedObservationSourceOwnerRunExit,
     ) {
+        let Self {
+            active,
+            bindings,
+            directory_bindings,
+            policy,
+            replacement_poll,
+            exit,
+        } = self;
+        drop(replacement_poll);
+        (active, bindings, directory_bindings, policy, exit)
+    }
+
+    fn into_automatic_resync_parts(
+        self,
+    ) -> (
+        ScopedObservationEpochState,
+        Vec<ScopedObservationAppendPassBinding>,
+        Vec<ScopedObservationDirectoryPassBinding>,
+        ScopedObservationSourceOwnerRetryPolicy,
+        Option<ScopedObservationReplacementPollLease>,
+        ScopedObservationSourceOwnerRunExit,
+    ) {
         (
             self.active,
             self.bindings,
             self.directory_bindings,
             self.policy,
+            self.replacement_poll,
             self.exit,
         )
     }
@@ -19602,6 +19700,21 @@ impl ScopedObservationPollLease {
             .expect("an unfinished scoped poll lease retains its access pass")
     }
 
+    /// Preserve this exact coalesced poll target across a whole-epoch
+    /// replacement. Releasing the access pass is mandatory before replacement
+    /// can mint its own fresh pass; the returned token keeps the poll runtime's
+    /// active reservation so the same target cannot be serviced twice.
+    fn defer_to_replacement(mut self) -> ScopedObservationReplacementPollLease {
+        drop(self.access_pass.take());
+        self.completed = true;
+        ScopedObservationReplacementPollLease {
+            runtime: Arc::clone(&self.runtime),
+            lease_id: self.lease_id,
+            target_generation: self.target_generation,
+            completed: false,
+        }
+    }
+
     fn complete(
         mut self,
         watermark: ScopedObservationWatermarkCore,
@@ -19624,6 +19737,37 @@ impl Drop for ScopedObservationPollLease {
             // Release native-access serialization before making the abandoned
             // target runnable for another driver.
             drop(self.access_pass.take());
+            self.runtime.abandon(self.lease_id, self.target_generation);
+        }
+    }
+}
+
+/// Access-free ownership of one poll target while a complete replacement is
+/// reconstructed. Dropping it requeues the target; only a replacement
+/// watermark from the same attachment may complete it.
+struct ScopedObservationReplacementPollLease {
+    runtime: Arc<ScopedObservationPollRuntime>,
+    lease_id: u64,
+    target_generation: u64,
+    completed: bool,
+}
+
+impl ScopedObservationReplacementPollLease {
+    fn complete(
+        mut self,
+        watermark: ScopedObservationWatermarkCore,
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
+        let watermark =
+            self.runtime
+                .complete(self.lease_id, self.target_generation, Arc::new(watermark))?;
+        self.completed = true;
+        Ok(watermark)
+    }
+}
+
+impl Drop for ScopedObservationReplacementPollLease {
+    fn drop(&mut self) {
+        if !self.completed {
             self.runtime.abandon(self.lease_id, self.target_generation);
         }
     }
@@ -20993,6 +21137,23 @@ impl ScopedObservationAccessHost {
         drain: &ScopedObservationConsumerDrain,
     ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
         self.validate_poll_completion(&lease, &active.admission, drain)?;
+        let watermark = self.capture_epoch_watermark(active, drain.delivery_lane())?;
+        lease.complete(watermark)
+    }
+
+    /// Complete a poll whose native access pass was deliberately replaced by
+    /// a fully validated whole-epoch replay. The replacement pass is checked
+    /// before its completion barrier is offered; this seam therefore binds
+    /// only the exact attachment and captures the new valid epoch watermark.
+    fn complete_epoch_replacement_poll(
+        &self,
+        lease: ScopedObservationReplacementPollLease,
+        active: &ScopedObservationEpochState,
+        drain: &ScopedObservationConsumerDrain,
+    ) -> Result<Arc<ScopedObservationWatermarkCore>, ScopedObservationPollError> {
+        if !Arc::ptr_eq(&self.state.poll, &lease.runtime) {
+            return Err(ScopedObservationPollError::ForeignLease);
+        }
         let watermark = self.capture_epoch_watermark(active, drain.delivery_lane())?;
         lease.complete(watermark)
     }

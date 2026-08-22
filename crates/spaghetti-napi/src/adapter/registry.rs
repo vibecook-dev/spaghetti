@@ -418,7 +418,7 @@ pub(crate) mod tests {
         ObservationContractOffer, ObservationContractRequest, ObservationNegotiationError,
     };
     use crate::scoped_observation::configured_attachment::{
-        prepare_configured_scoped_observation_attachment, ConfiguredScopedObservationRuntimeError,
+        prepare_configured_scoped_observation_attachment,
         ConfiguredScopedObservationRuntimeOptions, ConfiguredScopedObservationSupervisorRunResult,
         ScopedConfiguredAttachmentRequest, ScopedConfiguredRootIdentity,
     };
@@ -2565,11 +2565,6 @@ pub(crate) mod tests {
         assert!(!rendered.contains("fixture-session"));
         assert_eq!(probe_calls.load(Ordering::Acquire), 1);
         assert_eq!(discover_calls.load(Ordering::Acquire), 1);
-
-        assert!(matches!(
-            prepared.open(ConfiguredScopedObservationRuntimeOptions::default()),
-            Err(ConfiguredScopedObservationRuntimeError::UnsupportedRelation)
-        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2705,6 +2700,94 @@ pub(crate) mod tests {
             ScopedObservationResyncResolution::Ready(resolved)
                 if Arc::ptr_eq(&resolved, &replacement)
         ));
+
+        std::fs::write(
+            children.join("nested/child.jsonl"),
+            b"{\"type\":\"child-polled\"}\n",
+        )
+        .unwrap();
+        let poll_task = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.poll().await }
+        });
+        let mut poll_required = None;
+        let mut later_required = None;
+        let mut later_replacement = None;
+        let mut later_poll_ticket = None;
+        for _ in 0..64 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("dynamic configured supervisor stopped during polled replacement: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            match &yielded.envelope.event {
+                ScopedObservationEvent::ObserverResyncRequired { control }
+                    if control.invalid_scope_epoch == 2 =>
+                {
+                    poll_required = Some(Arc::clone(control));
+                }
+                ScopedObservationEvent::ObserverResyncRequired { control }
+                    if control.invalid_scope_epoch == 3 =>
+                {
+                    later_required = Some(Arc::clone(control));
+                }
+                ScopedObservationEvent::ObserverResyncStarted { control }
+                    if control.new_scope_epoch == 3 && later_poll_ticket.is_none() =>
+                {
+                    later_poll_ticket = Some(handle.host().request_poll().unwrap());
+                }
+                ScopedObservationEvent::ObserverResyncComplete { barrier }
+                    if barrier.scope_epoch == 4 =>
+                {
+                    later_replacement = Some(Arc::clone(barrier));
+                }
+                _ => {}
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if later_replacement.is_some() {
+                break;
+            }
+        }
+        let poll_required = poll_required.expect("a dynamic poll must invalidate incrementality");
+        assert_eq!(
+            poll_required.reason,
+            ScopedResyncReason::TransportContinuityLoss
+        );
+        let poll_watermark = match poll_task.await.unwrap().unwrap() {
+            ScopedObservationPollResolution::Ready(watermark) => watermark,
+            other => panic!("dynamic poll must resolve from replacement: {other:?}"),
+        };
+        assert_eq!(poll_watermark.scope_epoch, 3);
+        assert_eq!(poll_watermark.scope_coverage.relations().len(), 2);
+        let poll_decode = poll_watermark
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            poll_decode.points.len() + poll_decode.explicit_absence_or_deletion.len(),
+            3
+        );
+        let later_required = later_required.expect("the later poll must own a later replacement");
+        assert_eq!(
+            later_required.reason,
+            ScopedResyncReason::TransportContinuityLoss
+        );
+        let later_replacement =
+            later_replacement.expect("the later poll must complete a distinct replacement");
+        assert_eq!(later_replacement.scope_epoch, 4);
+        let later_watermark = match later_poll_ticket
+            .expect("a request admitted after replacement start must remain independently owned")
+            .wait_async()
+            .await
+        {
+            ScopedObservationPollResolution::Ready(watermark) => watermark,
+            other => panic!("later dynamic poll must resolve from its replacement: {other:?}"),
+        };
+        assert_eq!(later_watermark.scope_epoch, 4);
 
         let close = handle.request_close();
         let stopped = tokio::time::timeout(Duration::from_secs(2), supervisor_task)

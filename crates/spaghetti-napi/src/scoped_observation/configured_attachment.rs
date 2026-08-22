@@ -511,8 +511,6 @@ pub(crate) enum ConfiguredScopedObservationRuntimeError {
     Startup,
     #[error("configured scoped observer source or decoder pass failed")]
     SourcePass,
-    #[error("configured scoped observer relation primitive is not executable")]
-    UnsupportedRelation,
     #[error("configured scoped observer admission failed")]
     Admission,
     #[error("configured scoped observer delivery failed")]
@@ -673,34 +671,22 @@ impl PreparedConfiguredAppendRuntime {
         self,
         options: ConfiguredScopedObservationRuntimeOptions,
     ) -> Result<OpenedConfiguredAppendRuntime, ConfiguredScopedObservationRuntimeError> {
-        self.open_with_watcher_factory_inner(
-            options,
-            |callback| {
-                let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
-                Ok(Box::new(watcher))
-            },
-            false,
-        )
+        self.open_with_watcher_factory_inner(options, |callback| {
+            let watcher = notify::recommended_watcher(callback).map_err(|_| ())?;
+            Ok(Box::new(watcher))
+        })
     }
 
     fn open_with_watcher_factory_inner<F>(
         self,
         options: ConfiguredScopedObservationRuntimeOptions,
         factory: F,
-        allow_bootstrap_only_directory_runtime: bool,
     ) -> Result<OpenedConfiguredAppendRuntime, ConfiguredScopedObservationRuntimeError>
     where
         F: FnOnce(
             ScopedObservationNativeWatchCallback,
         ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
     {
-        if !self.directory_bindings.is_empty() && !allow_bootstrap_only_directory_runtime {
-            // Preparation retains exact declaration-owned coordinates, but
-            // opening remains closed until bootstrap and whole-epoch replay
-            // both execute the directory snapshot. Never expose a runtime
-            // that silently omits configured relations after bootstrap.
-            return Err(ConfiguredScopedObservationRuntimeError::UnsupportedRelation);
-        }
         let options = options.validate(self.objects.len(), self.required_coverage_objects)?;
         let admission = ScopedObservationAdmissionLane::new(options.admission)
             .map_err(|_| ConfiguredScopedObservationRuntimeError::AdmissionOpen)?;
@@ -746,7 +732,7 @@ impl PreparedConfiguredAppendRuntime {
             ScopedObservationNativeWatchCallback,
         ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
     {
-        self.open_with_watcher_factory_inner(options, factory, true)
+        self.open_with_watcher_factory_inner(options, factory)
     }
 
     #[cfg(test)]
