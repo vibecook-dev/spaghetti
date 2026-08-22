@@ -2283,20 +2283,15 @@ impl CatalogMembershipAuthorityEvidence {
         Ok(())
     }
 
-    fn hash_into(&self, hasher: &mut blake3::Hasher) {
+    /// Hash only the native authority identity that determines the admitted
+    /// member set. The coverage proof is validated against the matching
+    /// completion before publication, but it is deliberately excluded here:
+    /// that proof binds the caller's access-policy view and belongs to the
+    /// component-completion/plan identity, not catalog membership identity.
+    fn hash_membership_identity_into(&self, hasher: &mut blake3::Hasher) {
         hash_string(hasher, &self.component_id);
         hasher.update(&self.generation.to_be_bytes());
         hasher.update(self.authority_revision.as_bytes());
-        hasher.update(self.coverage_proof.as_bytes());
-        hash_string(
-            hasher,
-            match self.completeness {
-                CatalogMembershipAuthorityCompleteness::Complete => "complete",
-                CatalogMembershipAuthorityCompleteness::Partial => "partial",
-                CatalogMembershipAuthorityCompleteness::Unavailable => "unavailable",
-                CatalogMembershipAuthorityCompleteness::Unbound => "unbound",
-            },
-        );
     }
 }
 
@@ -2516,7 +2511,7 @@ impl CatalogMembershipSnapshot {
         hash_string(&mut hasher, &self.member_identity_contract_id);
         hasher.update(&(self.authority_evidence.len() as u64).to_be_bytes());
         for evidence in &self.authority_evidence {
-            evidence.hash_into(&mut hasher);
+            evidence.hash_membership_identity_into(&mut hasher);
         }
         hasher.update(&(self.members.len() as u64).to_be_bytes());
         for member in &self.members {

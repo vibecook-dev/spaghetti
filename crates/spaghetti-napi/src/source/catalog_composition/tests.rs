@@ -1382,6 +1382,80 @@ fn executable_composition_assembles_canonical_complete_library_coverage() {
 }
 
 #[test]
+fn access_policy_drift_changes_completion_but_not_catalog_membership_identity() {
+    const ADAPTER_ID: &str = "fixture-agent";
+    const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";
+    const SOURCE_DECLARATION_ID: &str = "fixture-catalog-sources-v1";
+    const SOURCE_DECLARATION: &[u8] = b"fixture/catalog-source-declaration/v1";
+    const SUPPORT_RELEASE: &[u8] = b"fixture/catalog-support-release/v1";
+
+    let selection = catalog_contract_selection();
+    let composition = CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        SUPPORT_RELEASE_ID,
+        SOURCE_DECLARATION_ID,
+        CatalogPromotedBinding::fixture(SOURCE_DECLARATION, SUPPORT_RELEASE),
+        claude_components(),
+    )
+    .unwrap();
+    let executable = composition
+        .authorize_execution(catalog_access(
+            ADAPTER_ID,
+            SUPPORT_RELEASE_ID,
+            SOURCE_DECLARATION,
+            SUPPORT_RELEASE,
+            &selection,
+        ))
+        .unwrap();
+    let source_instance_key = catalog_coverage_source_key(b"fixture-device/catalog-root");
+    let first_policy = catalog_coverage_policy(b"fixture-local-catalog-policy");
+    let second_policy = catalog_coverage_policy(b"fixture-other-catalog-policy");
+    let first_completions =
+        complete_component_coverage(&executable, source_instance_key, first_policy);
+    let second_completions =
+        complete_component_coverage(&executable, source_instance_key, second_policy);
+    let first_membership =
+        coverage_bound_membership(&composition, claude_members(), &first_completions);
+    let second_membership =
+        coverage_bound_membership(&composition, claude_members(), &second_completions);
+
+    assert_eq!(
+        first_membership.membership_revision, second_membership.membership_revision,
+        "an access-policy view must not rename the admitted native member set"
+    );
+    assert_ne!(
+        first_membership.authority_evidence, second_membership.authority_evidence,
+        "the complete authority proof must still bind the selected policy view"
+    );
+
+    let first = executable
+        .assemble_library_coverage(
+            source_instance_key,
+            first_policy,
+            &first_membership,
+            first_completions,
+        )
+        .unwrap();
+    let second = executable
+        .assemble_library_coverage(
+            source_instance_key,
+            second_policy,
+            &second_membership,
+            second_completions,
+        )
+        .unwrap();
+    assert_eq!(
+        first.catalog_membership_revision(),
+        second.catalog_membership_revision()
+    );
+    assert_ne!(
+        first.component_completion_revision(),
+        second.component_completion_revision()
+    );
+    assert_ne!(first.plan_source(), second.plan_source());
+}
+
+#[test]
 fn coverage_assembly_rejects_authority_selection_and_binding_drift() {
     const ADAPTER_ID: &str = "fixture-agent";
     const SUPPORT_RELEASE_ID: &str = "fixture-catalog-support-v1";

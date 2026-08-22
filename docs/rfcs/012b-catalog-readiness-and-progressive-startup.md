@@ -379,6 +379,13 @@ catalog declaration, or applicable access policy—creates a new plan. Optional
 sources cannot silently contribute to a snapshot that still claims completeness
 for an older plan; promoting or demoting optionality also creates a new plan.
 
+The catalog membership revision identifies the admitted opaque member set and
+the native membership-authority checkpoints that proved it. It does not absorb
+the caller's access-policy digest. Policy drift still creates a new coverage
+plan and component-completion revision, and the policy-bound coverage proof
+must validate before publication, but an unchanged native member set is not
+renamed merely because it is viewed through a different authorized policy.
+
 Each complete catalog snapshot has:
 
 ```text

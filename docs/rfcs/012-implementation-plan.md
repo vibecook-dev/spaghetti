@@ -819,7 +819,11 @@ must provide an explicit complete enumeration and unordered snapshot revision,
 including an empty metadata-only component; canonical live/absence lineage and
 primitive-specific positions then produce one RFC 012A coverage set and a
 separate aggregate restart revision. Catalog membership, native coverage
-membership, and component-completion revisions remain distinct identities.
+membership, and component-completion revisions remain distinct identities. The
+catalog membership revision binds the admitted set and native authority
+checkpoints, while access-policy drift changes the plan and component
+completion without renaming an otherwise unchanged member set; the
+policy-bound coverage proof is still validated before publication.
 Forward-recognized authorization, incomplete/error evidence, replay under a
 different selection or policy, and planned/unbound compositions fail closed.
 This remains a no-I/O contract seam: real source producers, access-plan proof,

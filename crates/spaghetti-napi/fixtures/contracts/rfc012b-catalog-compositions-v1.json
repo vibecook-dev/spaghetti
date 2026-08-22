@@ -333,7 +333,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:0YEr4lKgJAl_gHPENW_Bj33Madt2aaA_i9PBZatPJZQ"
+      "membership_revision": "catalog-membership-v1:NkQnEll3J-ML6QZ2ATSSj-S6RP07RmdM3p1XWQwF_GI"
     },
     "codex": {
       "authority_evidence": [
@@ -359,7 +359,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:jkUR7gSQSrwLSMcdPF3cK2rYdGHOhHWTuoUb1NoogS0"
+      "membership_revision": "catalog-membership-v1:iNgwRUOjjq_usQG4rQS40lDQxpjQBVTq3JgEHOYemIE"
     },
     "grok": {
       "authority_evidence": [
@@ -385,7 +385,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:c8V-jg6HVS8OCkWA_OMrdTyg1z6IRyfS1WYjMLefEpM"
+      "membership_revision": "catalog-membership-v1:H3IsnWm3TbBcZMywyOv71QOc-ksD1VLs1CpQR6YDbDw"
     }
   },
   "overlap_conformance": {
