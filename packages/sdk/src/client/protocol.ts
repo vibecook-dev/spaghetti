@@ -9,12 +9,15 @@
 import type { SpaghettiEngine } from '../native.js';
 import type {
   CatalogEntityResolutionRequest,
+  CatalogHydrationSchedulingResult,
+  CatalogHydrationTransportRequest,
   CatalogLibraryPageRequest,
   CatalogPageTransportRequest,
   CatalogProjectPageResult,
   CatalogQueryContext,
   CatalogReadinessTransportRequest,
   CatalogResolutionTransportRequest,
+  CatalogSelectedHydrationRequest,
   CatalogSessionPageResult,
 } from '../contracts/rfc012b-client.js';
 import type { CatalogQueryContractRequest } from '../contracts/rfc012b.js';
@@ -55,6 +58,7 @@ export interface SpaghettiClientRequestMap {
   listLibraryProjects: CatalogPageTransportRequest;
   listLibrarySessions: CatalogPageTransportRequest;
   resolveCatalogEntity: CatalogResolutionTransportRequest;
+  requestCatalogHydration: CatalogHydrationTransportRequest;
   replayChanges: EngineRequest<'replayChanges'>;
   waitForCommit: EngineRequest<'waitForCommit'>;
   listProjects: EngineRequest<'listHistoryProjects'>;
@@ -97,6 +101,7 @@ export interface SpaghettiClientResponseMap {
   listLibraryProjects: unknown;
   listLibrarySessions: unknown;
   resolveCatalogEntity: unknown;
+  requestCatalogHydration: unknown;
   replayChanges: EngineResult<'replayChanges'>;
   waitForCommit: EngineResult<'waitForCommit'>;
   listProjects: EngineResult<'listHistoryProjects'>;
@@ -140,6 +145,7 @@ export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'listLibraryProjects',
   'listLibrarySessions',
   'resolveCatalogEntity',
+  'requestCatalogHydration',
   'replayChanges',
   'waitForCommit',
   'listProjects',
@@ -365,6 +371,10 @@ export interface SpaghettiClient {
     request: CatalogEntityResolutionRequest,
     options?: SpaghettiQueryOptions,
   ): Promise<CatalogEntityResolutionResponse>;
+  requestCatalogHydration(
+    request: CatalogSelectedHydrationRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogHydrationSchedulingResult>;
   replayChanges(
     request?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>,
     options?: SpaghettiQueryOptions,

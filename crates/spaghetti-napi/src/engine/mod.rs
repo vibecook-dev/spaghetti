@@ -81,8 +81,8 @@ use catalog_publication::{
     CatalogRefreshPublicationCommand, CatalogRefreshPublicationReceipt,
 };
 pub(crate) use catalog_query::{
-    CatalogPageQueryRequest, CatalogReadinessQueryRequest, CatalogReadinessQueryResult,
-    CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
+    CatalogHydrationPreparationRequest, CatalogPageQueryRequest, CatalogReadinessQueryRequest,
+    CatalogReadinessQueryResult, CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
 };
 use catalog_refresh::ConfiguredCatalogRefreshRuntime;
 use catalog_retention::{CatalogSnapshotRetirementCommand, CatalogSnapshotRetirementReceipt};
@@ -837,10 +837,8 @@ impl SpaghettiEngineCore {
         ProgressiveHostReadiness {
             catalog_query_ready: status.catalog_query_ready,
             search_available: status.search_available,
-            // A readable catalog is necessary but not sufficient for selected
-            // hydration. Keep this capability false until the engine owns an
-            // authorization-bound command scheduler and execution lane.
-            selected_hydration_available: false,
+            selected_hydration_available: status.catalog_query_ready
+                && status.observation.supervisors_running > 0,
             bootstrap_active,
         }
     }

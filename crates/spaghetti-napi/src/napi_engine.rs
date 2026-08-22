@@ -17,30 +17,32 @@ use serde_json::Value as JsonValue;
 use crate::adapter::{
     AdapterError, AdapterRegistry, ExternalEntityRef, SupportCatalog, SupportContractError,
 };
+use crate::catalog_contract::evidence::{CatalogEntityRef, CatalogLocatorClaimKey};
 use crate::catalog_contract::query::CatalogQueryContractRequest;
 use crate::catalog_contract::CatalogSnapshotId;
 use crate::catalog_contract::{CatalogCoveragePlanId, CatalogQueryKind};
 use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
-    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, CatalogPageQueryRequest,
-    CatalogReadinessQueryRequest, CatalogResolutionQueryRequest, ChangeCursor, ChangeReplay,
-    ChangeReplayRequest, CheckpointPerformanceSnapshot, CommitWaitResult,
-    ConfiguredObservationSource, DelegationPage, DelegationPageRequest, DelegationSummary,
-    DurableChange, EngineError, EngineHealthSnapshot, EngineOptions, EngineOverview,
-    EngineStatusSnapshot, FactFamilyCoverageItem, FactFamilyCoveragePage,
-    FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary, FactFamilyReplayCommand,
-    FactFamilyReplayResult, HistoryProjectIndexSummary, HistoryProjectPage,
-    HistoryProjectPageRequest, HistoryProjectSummary, HistorySessionIndexSummary,
-    HistorySessionPage, HistorySessionPageRequest, HistorySessionSummary, MemoryDocument,
-    MemoryDocumentPage, MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest,
-    NamedCount, NamedLatencySnapshot, ObservationStatusSnapshot, ObservationSupervisorOptions,
-    OwnerMetadata, PlanDetail, PlanPage, PlanPageRequest, QueryCancellationToken,
-    QueryPerformanceSnapshot, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
-    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
-    RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket, RuntimeUsageCompatibilityReport,
-    RuntimeUsageCompatibilityRequest, RuntimeUsageCompatibilityTelemetrySnapshot,
-    RuntimeUsageLegacyTotals, RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats,
+    CatalogHydrationPreparationRequest, CatalogPageQueryRequest, CatalogReadinessQueryRequest,
+    CatalogResolutionQueryRequest, ChangeCursor, ChangeReplay, ChangeReplayRequest,
+    CheckpointPerformanceSnapshot, CommitWaitResult, ConfiguredObservationSource, DelegationPage,
+    DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
+    EngineOptions, EngineOverview, EngineStatusSnapshot, FactFamilyCoverageItem,
+    FactFamilyCoveragePage, FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary,
+    FactFamilyReplayCommand, FactFamilyReplayResult, HistoryProjectIndexSummary,
+    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
+    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
+    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
+    MessageDetail, MessagePage, MessagePageRequest, NamedCount, NamedLatencySnapshot,
+    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
+    PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
+    ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
+    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket,
+    RuntimeUsageCompatibilityReport, RuntimeUsageCompatibilityRequest,
+    RuntimeUsageCompatibilityTelemetrySnapshot, RuntimeUsageLegacyTotals,
+    RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
     RuntimeUsageQuerySelectionResult, RuntimeUsageQuerySelectionValue, RuntimeUsageTotalsReport,
     RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, RuntimeUsageV2ActorContext,
     RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
@@ -92,6 +94,17 @@ struct CatalogResolutionJsonRequestWire {
     coverage_plan_id: CatalogCoveragePlanId,
     snapshot_id: CatalogSnapshotId,
     external_ref: ExternalEntityRef,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogHydrationJsonRequestWire {
+    contract_request: CatalogQueryContractRequest,
+    coverage_plan_id: CatalogCoveragePlanId,
+    snapshot_id: CatalogSnapshotId,
+    selected_base_session_ref: CatalogEntityRef,
+    locator_claim_key: CatalogLocatorClaimKey,
+    stable_request_token: String,
 }
 
 fn bounded_catalog_json(json: Utf16String) -> Result<String> {
@@ -4408,6 +4421,18 @@ impl SpaghettiEngine {
         self.catalog_json_task(request_json, CatalogJsonOperation::Resolution, signal)
     }
 
+    /// Request one idempotent RFC 012B selected-session hydration through the
+    /// engine-owned bounded scheduler. Cancellation applies through command
+    /// preparation; accepted native work is owned by the engine lifecycle.
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn request_catalog_hydration_json(
+        &self,
+        request_json: Utf16String,
+        signal: Option<AbortSignal>,
+    ) -> Result<AsyncTask<CatalogJsonTask>> {
+        self.catalog_json_task(request_json, CatalogJsonOperation::Hydration, signal)
+    }
+
     fn catalog_json_task(
         &self,
         request_json: Utf16String,
@@ -5372,6 +5397,7 @@ enum CatalogJsonOperation {
     Readiness,
     Page(CatalogQueryKind),
     Resolution,
+    Hydration,
 }
 
 pub struct CatalogJsonTask {
@@ -5782,6 +5808,24 @@ impl Task for CatalogJsonTask {
                         ),
                         self.cancellation.clone(),
                     )
+                    .map_err(catalog_napi_error)?;
+                serialize_catalog_json(&result)
+            }
+            CatalogJsonOperation::Hydration => {
+                let wire =
+                    parse_catalog_json::<CatalogHydrationJsonRequestWire>(&self.request_json)?;
+                let request = CatalogHydrationPreparationRequest::new(
+                    wire.contract_request,
+                    wire.coverage_plan_id,
+                    wire.snapshot_id,
+                    wire.selected_base_session_ref,
+                    wire.locator_claim_key,
+                    wire.stable_request_token.as_bytes(),
+                )
+                .map_err(catalog_napi_error)?;
+                let result = self
+                    .engine
+                    .schedule_catalog_hydration(request, self.cancellation.clone())
                     .map_err(catalog_napi_error)?;
                 serialize_catalog_json(&result)
             }

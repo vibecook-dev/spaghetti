@@ -2056,6 +2056,8 @@ export interface SpaghettiEngine {
   listLibrarySessionsJson(requestJson: string, signal?: AbortSignal): Promise<string>;
   /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
   resolveCatalogEntityJson(requestJson: string, signal?: AbortSignal): Promise<string>;
+  /** RFC 012B engine-owned selected-session hydration command transport. */
+  requestCatalogHydrationJson(requestJson: string, signal?: AbortSignal): Promise<string>;
   replayChanges(
     options?: SpaghettiEngineChangeReplayOptions,
     signal?: AbortSignal,

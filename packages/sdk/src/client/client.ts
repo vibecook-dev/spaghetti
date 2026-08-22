@@ -25,16 +25,20 @@ import {
 import {
   catalogQueryContextFromResponse,
   defaultCatalogReadinessTransportRequest,
+  parseCatalogHydrationSchedulingResult,
   parseCatalogProjectPageResult,
   parseCatalogReadinessTransportRequest,
   parseCatalogResolutionResult,
   parseCatalogSessionPageResult,
   prepareCatalogPageRequest,
+  prepareCatalogHydrationRequest,
   prepareCatalogResolutionRequest,
   type CatalogEntityResolutionRequest,
+  type CatalogHydrationSchedulingResult,
   type CatalogLibraryPageRequest,
   type CatalogProjectPageResult,
   type CatalogQueryContext,
+  type CatalogSelectedHydrationRequest,
   type CatalogSessionPageResult,
 } from '../contracts/rfc012b-client.js';
 import type { CatalogQueryContractRequest } from '../contracts/rfc012b.js';
@@ -65,6 +69,8 @@ class DefaultSpaghettiClient implements SpaghettiClient {
   private readonly supersession = new Map<string, SupersessionEntry>();
   private readonly inFlight = new Map<number, AbortController>();
   private readonly subscriptions = new Set<AbortController>();
+  private readonly catalogHydrationResults = new Map<string, CatalogHydrationSchedulingResult>();
+  private readonly catalogHydrationTurns = new Map<string, Promise<void>>();
   private readonly subscriptionMetrics: SpaghettiSubscriptionMetrics = {
     activeSubscriptions: 0,
     replayRequests: 0,
@@ -131,6 +137,34 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     const prepared = catalogInput(() => prepareCatalogResolutionRequest(request));
     const response = await this.query('resolveCatalogEntity', prepared.transportRequest, options);
     return catalogOutput(() => parseCatalogResolutionResult(response, prepared));
+  }
+
+  async requestCatalogHydration(
+    request: CatalogSelectedHydrationRequest,
+    options?: SpaghettiQueryOptions,
+  ): Promise<CatalogHydrationSchedulingResult> {
+    const prepared = catalogInput(() => prepareCatalogHydrationRequest(request));
+    const token = prepared.transportRequest.stableRequestToken;
+    const predecessor = this.catalogHydrationTurns.get(token) ?? Promise.resolve();
+    let releaseTurn!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const tail = predecessor.then(() => turn);
+    this.catalogHydrationTurns.set(token, tail);
+    await predecessor;
+    try {
+      const previous = this.catalogHydrationResults.get(token);
+      const response = await this.query('requestCatalogHydration', prepared.transportRequest, options);
+      const result = catalogOutput(() => parseCatalogHydrationSchedulingResult(response, prepared, previous));
+      this.catalogHydrationResults.set(token, result);
+      return result;
+    } finally {
+      releaseTurn();
+      if (this.catalogHydrationTurns.get(token) === tail) {
+        this.catalogHydrationTurns.delete(token);
+      }
+    }
   }
 
   replayChanges(
@@ -402,6 +436,8 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     for (const controller of this.inFlight.values()) controller.abort(cancelledProtocolError());
     this.inFlight.clear();
     this.supersession.clear();
+    this.catalogHydrationResults.clear();
+    this.catalogHydrationTurns.clear();
     this.disposePromise = Promise.resolve().then(() => this.transport.dispose());
     return this.disposePromise;
   }

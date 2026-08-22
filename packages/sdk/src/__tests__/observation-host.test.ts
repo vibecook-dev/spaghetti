@@ -14,6 +14,7 @@ import {
   type ObservationHostProgress,
   type ObservationHostSource,
   type ObservationService,
+  type SpaghettiEngineStatus,
 } from '../index.js';
 
 const native = loadNativeAddon();
@@ -58,15 +59,17 @@ describe('observation host progressive startup', () => {
       state: 'bootstrapping',
       catalogQueryReady: true,
       searchAvailable: false,
+      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
     });
     assert.equal(bootstrapping.catalogQueryReady, true);
     assert.equal(bootstrapping.searchAvailable, false);
-    assert.equal(bootstrapping.selectedHydrationAvailable, false);
+    assert.equal(bootstrapping.selectedHydrationAvailable, true);
 
     const runningWithoutCatalog = observationHostProgressiveView({
       state: 'running',
       catalogQueryReady: false,
       searchAvailable: false,
+      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
     });
     assert.equal(runningWithoutCatalog.catalogQueryReady, false);
     assert.equal(runningWithoutCatalog.searchAvailable, false);
@@ -75,9 +78,10 @@ describe('observation host progressive startup', () => {
       state: 'running',
       catalogQueryReady: true,
       searchAvailable: true,
+      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
     });
     assert.equal(runningWithCatalog.searchAvailable, true);
-    assert.equal(runningWithCatalog.selectedHydrationAvailable, false);
+    assert.equal(runningWithCatalog.selectedHydrationAvailable, true);
   });
 });
 

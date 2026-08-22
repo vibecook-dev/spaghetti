@@ -39,6 +39,12 @@ export declare class SpaghettiEngine {
    */
   resolveCatalogEntityJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
   /**
+   * Request one idempotent RFC 012B selected-session hydration through the
+   * engine-owned bounded scheduler. Cancellation applies through command
+   * preparation; accepted native work is owned by the engine lifecycle.
+   */
+  requestCatalogHydrationJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
+  /**
    * Replay one bounded, snapshot-consistent page of durable projection
    * changes. Binary keys and payloads remain lossless base64 strings.
    */

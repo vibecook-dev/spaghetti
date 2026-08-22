@@ -203,15 +203,13 @@ function emitAdapterProgress(
 }
 
 export function observationHostProgressiveView(
-  status: Pick<SpaghettiEngineStatus, 'state' | 'catalogQueryReady' | 'searchAvailable'>,
+  status: Pick<SpaghettiEngineStatus, 'state' | 'catalogQueryReady' | 'searchAvailable' | 'observation'>,
 ): ObservationHostProgressiveView {
   const catalogQueryReady = status.catalogQueryReady === true;
   return {
     catalogQueryReady,
     searchAvailable: catalogQueryReady && status.state !== 'bootstrapping',
-    // Catalog readability alone does not mint source-access authority. This
-    // remains false until the engine exposes the explicit hydration command.
-    selectedHydrationAvailable: false,
+    selectedHydrationAvailable: catalogQueryReady && status.observation.supervisorsRunning > 0,
   };
 }
 

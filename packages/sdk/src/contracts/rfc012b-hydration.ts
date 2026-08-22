@@ -217,6 +217,10 @@ function parseEntityRef(value: unknown, label: string): CatalogHydrationEntityRe
   return { kind: 'session', external_ref: parseExternalEntityRef(input.external_ref) };
 }
 
+export function parseCatalogHydrationEntityRef(value: unknown): CatalogHydrationEntityRef {
+  return parseEntityRef(value, 'catalog hydration session reference');
+}
+
 function entityRefsEqual(left: CatalogHydrationEntityRef, right: CatalogHydrationEntityRef): boolean {
   return (
     left.kind === right.kind &&
@@ -627,6 +631,23 @@ export function parseCatalogHydrationCommand(
   };
 }
 
+/**
+ * Strictly parses a native-produced command and its internal bindings. This
+ * does not replace caller-held request/snapshot/plan validation.
+ */
+export function parseCatalogHydrationCommandShape(value: unknown): CatalogHydrationCommand {
+  const input = record(value, 'catalog hydration command');
+  return parseCatalogHydrationCommand(input, {
+    identity: parseCommandIdentity(input),
+    contract_selection: input.contract_selection,
+    snapshot_id: input.snapshot_id,
+    source: input.source,
+    authorization: input.authorization,
+    requested_scope: input.requested_scope,
+    reason: 'selected_session',
+  });
+}
+
 export function catalogHydrationCommandBinding(command: CatalogHydrationCommand): CatalogHydrationCommandBinding {
   return {
     request_key: command.request_key,
@@ -727,11 +748,13 @@ function receiptMatchesCommand(receipt: CatalogSchedulingReceipt, command: Catal
   );
 }
 
-export function parseCatalogSchedulingReceipt(
+/**
+ * Strictly parses a receipt and binds it to one command without claiming
+ * prior-receipt or active-coalescing lineage.
+ */
+export function parseCatalogSchedulingReceiptShape(
   value: unknown,
   expectedCommandInput: unknown,
-  expectedPrior: CatalogSchedulingReceipt | null,
-  expectedActive: CatalogHydrationActiveSchedule | null,
 ): CatalogSchedulingReceipt {
   const input = record(value, 'catalog scheduling receipt');
   rejectUnknown(
@@ -777,6 +800,28 @@ export function parseCatalogSchedulingReceipt(
   if (!receiptMatchesCommand(receipt, command) || receipt.emitted_at_commit < receipt.snapshot_id.complete_commit) {
     throw new ContractValidationError('catalog scheduling receipt does not match its hydration command');
   }
+  return receipt;
+}
+
+export function parseCatalogHydrationActiveScheduleShape(value: unknown): CatalogHydrationActiveSchedule {
+  const input = record(value, 'active catalog hydration schedule');
+  rejectUnknown(input, new Set(['command', 'receipt']), 'active catalog hydration schedule');
+  const command = parseCatalogHydrationCommandBinding(input.command);
+  const receipt = parseCatalogSchedulingReceiptShape(input.receipt, command);
+  if (receipt.outcome.state !== 'accepted') {
+    throw new ContractValidationError('active catalog hydration schedule requires an accepted receipt');
+  }
+  return { command, receipt };
+}
+
+export function parseCatalogSchedulingReceipt(
+  value: unknown,
+  expectedCommandInput: unknown,
+  expectedPrior: CatalogSchedulingReceipt | null,
+  expectedActive: CatalogHydrationActiveSchedule | null,
+): CatalogSchedulingReceipt {
+  const command = parseCatalogHydrationCommandBinding(expectedCommandInput);
+  const receipt = parseCatalogSchedulingReceiptShape(value, command);
   if (expectedPrior === null) {
     if (receipt.prior_receipt_id !== null || receipt.attempt !== 1) {
       throw new ContractValidationError('initial catalog scheduling receipt cannot claim prior lineage');

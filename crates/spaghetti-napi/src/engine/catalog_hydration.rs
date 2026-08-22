@@ -11,10 +11,12 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
+use serde::Serialize;
 
 use crate::catalog_contract::hydration::{
-    CatalogHydrationActiveSchedule, CatalogHydrationExecutionAuthorization,
-    CatalogHydrationFailure, CatalogHydrationFailureDisposition, CatalogHydrationSchedulingOutcome,
+    CatalogHydrationActiveSchedule, CatalogHydrationActiveScheduleBinding,
+    CatalogHydrationExecutionAuthorization, CatalogHydrationFailure,
+    CatalogHydrationFailureDisposition, CatalogHydrationSchedulingOutcome,
     CatalogSchedulingReceipt,
 };
 use crate::catalog_contract::{CatalogHydrationCoalescingKey, CatalogHydrationRequestKey};
@@ -35,10 +37,11 @@ pub(super) struct CatalogHydrationRuntime {
     scheduler: Option<CatalogHydrationScheduler>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub(crate) struct CatalogHydrationSchedulingResult {
     pub(crate) command: crate::catalog_contract::hydration::CatalogHydrationCommand,
     pub(crate) receipt: CatalogSchedulingReceipt,
+    pub(crate) active_schedule: Option<CatalogHydrationActiveScheduleBinding>,
 }
 
 struct CatalogHydrationScheduler {
@@ -85,6 +88,7 @@ struct Admission {
     execute: bool,
     prior_before_acceptance: Option<CatalogSchedulingReceipt>,
     execution_cancellation: Option<QueryCancellationToken>,
+    active_schedule: Option<CatalogHydrationActiveScheduleBinding>,
 }
 
 struct SchedulerReplay {
@@ -116,6 +120,7 @@ impl CatalogHydrationSchedulerState {
                         execute: false,
                         prior_before_acceptance: None,
                         execution_cancellation: None,
+                        active_schedule: None,
                     });
                 }
                 Some(current.clone())
@@ -143,6 +148,7 @@ impl CatalogHydrationSchedulerState {
                 execute: false,
                 prior_before_acceptance: None,
                 execution_cancellation: None,
+                active_schedule: None,
             });
         }
 
@@ -162,11 +168,17 @@ impl CatalogHydrationSchedulerState {
             )?;
             active.request_keys.insert(command.request_key);
             self.receipts.insert(command.request_key, receipt.clone());
+            let active_schedule = CatalogHydrationActiveScheduleBinding::new(
+                &active.command,
+                &active.accepted_receipt,
+            )
+            .map_err(super::catalog_state::catalog_contract_error)?;
             return Ok(Admission {
                 receipt,
                 execute: false,
                 prior_before_acceptance: None,
                 execution_cancellation: None,
+                active_schedule: Some(active_schedule),
             });
         }
 
@@ -184,6 +196,7 @@ impl CatalogHydrationSchedulerState {
                 execute: false,
                 prior_before_acceptance: None,
                 execution_cancellation: None,
+                active_schedule: None,
             });
         }
 
@@ -210,6 +223,7 @@ impl CatalogHydrationSchedulerState {
             execute: true,
             prior_before_acceptance: prior,
             execution_cancellation: Some(execution_cancellation),
+            active_schedule: None,
         })
     }
 
@@ -363,7 +377,11 @@ impl CatalogHydrationScheduler {
                 "scheduler_unavailable",
             )?;
         }
-        Ok(CatalogHydrationSchedulingResult { command, receipt })
+        Ok(CatalogHydrationSchedulingResult {
+            command,
+            receipt,
+            active_schedule: admission.active_schedule,
+        })
     }
 
     fn replay(
@@ -385,10 +403,39 @@ impl CatalogHydrationScheduler {
                 worker: "catalog hydration",
             });
         }
+        let active_schedule = match &receipt.outcome {
+            CatalogHydrationSchedulingOutcome::InProgress {
+                active_command_id,
+                active_receipt_id,
+            } => {
+                let active = state.active.get(&receipt.coalescing_key).ok_or_else(|| {
+                    EngineError::InvalidCommit(
+                        "catalog hydration replay lost its active coalescing context".to_string(),
+                    )
+                })?;
+                if active.command.command_id != *active_command_id
+                    || active.accepted_receipt.receipt_id != *active_receipt_id
+                {
+                    return Err(EngineError::InvalidCommit(
+                        "catalog hydration replay active context differs from its receipt"
+                            .to_string(),
+                    ));
+                }
+                Some(
+                    CatalogHydrationActiveScheduleBinding::new(
+                        &active.command,
+                        &active.accepted_receipt,
+                    )
+                    .map_err(super::catalog_state::catalog_contract_error)?,
+                )
+            }
+            _ => None,
+        };
         Ok(Some(SchedulerReplay {
             result: CatalogHydrationSchedulingResult {
                 command: command.clone(),
                 receipt: receipt.clone(),
+                active_schedule,
             },
             retryable: is_retryable_rejection(&receipt.outcome),
         }))
@@ -686,6 +733,7 @@ mod tests {
 
         let accepted = state.admit(&first, emitted(&first)).unwrap();
         assert!(accepted.execute);
+        assert!(accepted.active_schedule.is_none());
         assert!(matches!(
             accepted.receipt.outcome,
             CatalogHydrationSchedulingOutcome::Accepted
@@ -696,6 +744,9 @@ mod tests {
 
         let follower = state.admit(&coalesced, emitted(&coalesced) + 1).unwrap();
         assert!(!follower.execute);
+        let active_schedule = follower.active_schedule.as_ref().unwrap();
+        assert_eq!(active_schedule.command, first.binding());
+        assert_eq!(active_schedule.receipt, accepted.receipt);
         assert!(matches!(
             follower.receipt.outcome,
             CatalogHydrationSchedulingOutcome::InProgress {

@@ -547,6 +547,15 @@ pub(crate) struct CatalogHydrationCommand {
     pub reason: CatalogHydrationReason,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CatalogHydrationCommandBinding {
+    pub request_key: CatalogHydrationRequestKey,
+    pub command_id: CatalogHydrationCommandId,
+    pub coalescing_key: CatalogHydrationCoalescingKey,
+    pub selected_base_session_ref: CatalogEntityRef,
+    pub snapshot_id: CatalogSnapshotId,
+}
+
 impl fmt::Debug for CatalogHydrationCommand {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -643,6 +652,16 @@ impl CatalogHydrationCommand {
             expected_authorization,
         )?;
         Ok(parsed)
+    }
+
+    pub(crate) fn binding(&self) -> CatalogHydrationCommandBinding {
+        CatalogHydrationCommandBinding {
+            request_key: self.request_key,
+            command_id: self.command_id,
+            coalescing_key: self.coalescing_key,
+            selected_base_session_ref: self.authorization.handoff.selected_base_session_ref,
+            snapshot_id: self.snapshot_id,
+        }
     }
 
     fn validate_against(
@@ -959,6 +978,25 @@ pub(crate) struct CatalogSchedulingReceipt {
     pub prior_receipt_id: Option<CatalogSchedulingReceiptId>,
     pub emitted_at_commit: u64,
     pub outcome: CatalogHydrationSchedulingOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct CatalogHydrationActiveScheduleBinding {
+    pub command: CatalogHydrationCommandBinding,
+    pub receipt: CatalogSchedulingReceipt,
+}
+
+impl CatalogHydrationActiveScheduleBinding {
+    pub(crate) fn new(
+        command: &CatalogHydrationCommand,
+        receipt: &CatalogSchedulingReceipt,
+    ) -> Result<Self, CatalogContractError> {
+        CatalogHydrationActiveSchedule::new(command, receipt)?;
+        Ok(Self {
+            command: command.binding(),
+            receipt: receipt.clone(),
+        })
+    }
 }
 
 impl fmt::Debug for CatalogSchedulingReceipt {

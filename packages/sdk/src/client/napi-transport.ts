@@ -225,6 +225,20 @@ async function executeEngineRequest(
           signal,
         ),
       );
+    case 'requestCatalogHydration':
+      return parseNativeCatalogJson(
+        await engine.requestCatalogHydrationJson(
+          JSON.stringify({
+            contract_request: request.payload.contractRequest,
+            coverage_plan_id: request.payload.coveragePlanId,
+            snapshot_id: request.payload.snapshotId,
+            selected_base_session_ref: request.payload.selectedBaseSessionRef,
+            locator_claim_key: request.payload.locatorClaimKey,
+            stable_request_token: request.payload.stableRequestToken,
+          }),
+          signal,
+        ),
+      );
     case 'replayChanges':
       return engine.replayChanges(request.payload, signal);
     case 'waitForCommit':

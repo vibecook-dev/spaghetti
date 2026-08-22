@@ -117,6 +117,7 @@ PORTABLE_CLIENT_CONTRACT_MODULES = frozenset(
         "packages/sdk/src/contracts/rfc012b.ts",
         "packages/sdk/src/contracts/rfc012b-pages.ts",
         "packages/sdk/src/contracts/rfc012b-client.ts",
+        "packages/sdk/src/contracts/rfc012b-hydration.ts",
     )
 )
 SDK_PRODUCTION_ENTRIES = (

@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { parseExternalEntityRef } from '../../contracts/rfc012a.js';
+import { parseExternalEntityRef, parseOpaqueContractReference } from '../../contracts/rfc012a.js';
 import { parseCatalogQueryContractRequest } from '../../contracts/rfc012b.js';
+import { parseCatalogHydrationEntityRef } from '../../contracts/rfc012b-hydration.js';
+import { catalogQueryContextFromResponse } from '../../contracts/rfc012b-client.js';
 import type { SpaghettiEngine } from '../../native.js';
 import {
   NapiTransport,
@@ -43,13 +45,26 @@ const queryFixture = JSON.parse(
     'utf8',
   ),
 ) as { contract_request: unknown };
+const hydrationFixture = JSON.parse(
+  readFileSync(
+    new URL(
+      '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012b-catalog-hydration-v1.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+) as { command: Record<string, unknown>; accepted_receipt: Record<string, unknown> };
+const hydrationFamilies = { 'catalog.project': 1, 'catalog.session': 1 } as const;
 
 class CatalogFixtureTransport implements SpaghettiClientTransport {
   readonly kind = 'catalog-fixture';
   readonly requests: AnySpaghettiProtocolRequest[] = [];
   private closed = false;
 
-  constructor(private readonly mutateProject?: (page: Record<string, unknown>) => void) {}
+  constructor(
+    private readonly mutateProject?: (page: Record<string, unknown>) => void,
+    private readonly beforeHydration?: () => Promise<void>,
+  ) {}
 
   async connect(request: SpaghettiTransportConnectRequest): Promise<SpaghettiTransportConnectResponse> {
     return {
@@ -87,6 +102,12 @@ class CatalogFixtureTransport implements SpaghettiClientTransport {
       case 'resolveCatalogEntity':
         result = structuredClone(pageFixture.resolutions.live);
         break;
+      case 'requestCatalogHydration': {
+        await this.beforeHydration?.();
+        const payload = request.payload as { selectedBaseSessionRef: unknown; locatorClaimKey: unknown };
+        result = hydrationSchedulingEnvelope(payload.selectedBaseSessionRef, payload.locatorClaimKey);
+        break;
+      }
       default:
         result = { contractVersion: 1 };
     }
@@ -117,6 +138,67 @@ function readinessEnvelope(): unknown {
       readiness: structuredClone(pageFixture.project_page.published_readiness),
     },
   };
+}
+
+function hydrationSchedulingEnvelope(selectedInput: unknown, locatorClaimKey: unknown): unknown {
+  const selected = parseCatalogHydrationEntityRef(selectedInput);
+  const command = structuredClone(hydrationFixture.command);
+  const snapshot = structuredClone(pageFixture.project_page.request.snapshot_id);
+  const sourceWithBinding = (pageFixture.published_plan.required_sources as Array<Record<string, unknown>>)[0]!;
+  const source = {
+    adapter_id: sourceWithBinding.adapter_id,
+    source_instance_key: sourceWithBinding.source_instance_key,
+    support_release_id: sourceWithBinding.support_release_id,
+    catalog_declaration_digest: sourceWithBinding.catalog_declaration_digest,
+    access_policy_digest: sourceWithBinding.access_policy_digest,
+  };
+  const selection = structuredClone(pageFixture.contract_selection) as {
+    contract_versions: { fact_family_versions: Record<string, number> };
+  };
+  selection.contract_versions.fact_family_versions = structuredClone(hydrationFamilies);
+  command.contract_selection = selection;
+  command.snapshot_id = snapshot;
+  command.source = source;
+  const authorization = command.authorization as Record<string, unknown>;
+  Object.assign(authorization, source);
+  authorization.handoff = {
+    presentation_ref: selected,
+    member_refs: [selected],
+    relation_keys: [],
+    selected_base_session_ref: selected,
+    locator_claim_key: locatorClaimKey,
+  };
+  command.requested_scope = {
+    hydration_scope_contract_version: 1,
+    fact_family_versions: structuredClone(selection.contract_versions.fact_family_versions),
+    max_source_objects_per_pass: 1,
+    max_records_per_pass: 4_096,
+    max_bytes_per_pass: 256 * 1024 * 1024,
+  };
+  const receipt = structuredClone(hydrationFixture.accepted_receipt);
+  receipt.request_key = command.request_key;
+  receipt.command_id = command.command_id;
+  receipt.coalescing_key = command.coalescing_key;
+  receipt.selected_base_session_ref = selected;
+  receipt.snapshot_id = snapshot;
+  receipt.emitted_at_commit = (snapshot as { complete_commit: number }).complete_commit + 1;
+  return { command, receipt, active_schedule: null };
+}
+
+function hydrationContext(): ReturnType<typeof catalogQueryContextFromResponse> {
+  const request = structuredClone(queryFixture.contract_request) as {
+    contract_versions: { fact_family_versions: Record<string, number[]> };
+  };
+  request.contract_versions.fact_family_versions = {
+    'catalog.project': [1],
+    'catalog.session': [1],
+  };
+  const response = readinessEnvelope() as {
+    readiness: { contract_selection: { contract_versions: { fact_family_versions: Record<string, number> } } };
+  };
+  response.readiness.contract_selection.contract_versions.fact_family_versions = structuredClone(hydrationFamilies);
+  const parsedRequest = parseCatalogQueryContractRequest(request);
+  return catalogQueryContextFromResponse(parsedRequest, response);
 }
 
 function clientErrorCode(error: unknown, code: SpaghettiClientError['code']): boolean {
@@ -153,6 +235,30 @@ test('typed catalog client retains readiness authority across pages, expiration,
   const externalRef = parseExternalEntityRef(pageFixture.resolutions.live.request.external_ref);
   const resolution = await client.resolveCatalogEntity({ context, externalRef });
   assert.equal(resolution.resolution.state, 'live');
+
+  const session = (pageFixture.session_page.rows as Array<{ row: { session_ref: unknown } }>)[0]!.row.session_ref;
+  const selectedBaseSessionRef = parseCatalogHydrationEntityRef(session);
+  const locatorClaimKey = parseOpaqueContractReference(
+    (hydrationFixture.command.authorization as { handoff: { locator_claim_key: string } }).handoff.locator_claim_key,
+  );
+  const hydration = await client.requestCatalogHydration({
+    context: hydrationContext(),
+    selectedBaseSessionRef,
+    locatorClaimKey,
+    stableRequestToken: 'catalog-client-hydration-1',
+  });
+  assert.equal(hydration.receipt.outcome.state, 'accepted');
+  assert.equal(
+    (
+      await client.requestCatalogHydration({
+        context: hydrationContext(),
+        selectedBaseSessionRef,
+        locatorClaimKey,
+        stableRequestToken: 'catalog-client-hydration-1',
+      })
+    ).receipt.receipt_id,
+    hydration.receipt.receipt_id,
+  );
 
   const firstPagePayload = transport.requests.find((request) => request.method === 'listLibraryProjects')?.payload as
     | Record<string, unknown>
@@ -200,6 +306,76 @@ test('typed catalog client rejects caller and transport drift with path-safe err
   await client.dispose();
 });
 
+test('typed hydration client rejects token retargeting and allocation-heavy tokens', async () => {
+  const transport = new CatalogFixtureTransport();
+  const client = await openSpaghettiClient({ transport });
+  const context = hydrationContext();
+  const selectedBaseSessionRef = parseCatalogHydrationEntityRef(
+    (pageFixture.session_page.rows as Array<{ row: { session_ref: unknown } }>)[0]!.row.session_ref,
+  );
+  const locatorClaimKey = parseOpaqueContractReference(
+    (hydrationFixture.command.authorization as { handoff: { locator_claim_key: string } }).handoff.locator_claim_key,
+  );
+  await client.requestCatalogHydration({
+    context,
+    selectedBaseSessionRef,
+    locatorClaimKey,
+    stableRequestToken: 'retarget-proof',
+  });
+  const differentLocator = parseOpaqueContractReference(
+    (hydrationFixture.command.authorization as { authorization_id: string }).authorization_id,
+  );
+  await assert.rejects(
+    client.requestCatalogHydration({
+      context,
+      selectedBaseSessionRef,
+      locatorClaimKey: differentLocator,
+      stableRequestToken: 'retarget-proof',
+    }),
+    (error) => clientErrorCode(error, 'protocol_mismatch'),
+  );
+  const before = transport.requests.length;
+  for (const stableRequestToken of ['x'.repeat(1_025), '\ud800']) {
+    await assert.rejects(
+      client.requestCatalogHydration({ context, selectedBaseSessionRef, locatorClaimKey, stableRequestToken }),
+      (error) => clientErrorCode(error, 'invalid_request'),
+    );
+  }
+  assert.equal(transport.requests.length, before);
+  await client.dispose();
+});
+
+test('typed hydration client serializes caller-held receipt lineage per stable token', async () => {
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const transport = new CatalogFixtureTransport(undefined, () => firstBlocked);
+  const client = await openSpaghettiClient({ transport });
+  const context = hydrationContext();
+  const selectedBaseSessionRef = parseCatalogHydrationEntityRef(
+    (pageFixture.session_page.rows as Array<{ row: { session_ref: unknown } }>)[0]!.row.session_ref,
+  );
+  const locatorClaimKey = parseOpaqueContractReference(
+    (hydrationFixture.command.authorization as { handoff: { locator_claim_key: string } }).handoff.locator_claim_key,
+  );
+  const request = {
+    context,
+    selectedBaseSessionRef,
+    locatorClaimKey,
+    stableRequestToken: 'serialized-hydration-lineage',
+  };
+  const first = client.requestCatalogHydration(request);
+  const second = client.requestCatalogHydration(request);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(transport.requests.filter(({ method }) => method === 'requestCatalogHydration').length, 1);
+  releaseFirst();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.equal(firstResult.receipt.receipt_id, secondResult.receipt.receipt_id);
+  assert.equal(transport.requests.filter(({ method }) => method === 'requestCatalogHydration').length, 2);
+  await client.dispose();
+});
+
 test('NapiTransport maps typed catalog DTOs to the strict snake-case JSON boundary', async () => {
   const calls: Array<{ method: string; request: Record<string, unknown> }> = [];
   const engine = {
@@ -218,6 +394,11 @@ test('NapiTransport maps typed catalog DTOs to the strict snake-case JSON bounda
       calls.push({ method: 'resolveCatalogEntityJson', request: JSON.parse(requestJson) as Record<string, unknown> });
       return JSON.stringify(pageFixture.resolutions.live);
     },
+    requestCatalogHydrationJson: async (requestJson: string) => {
+      const request = JSON.parse(requestJson) as Record<string, unknown>;
+      calls.push({ method: 'requestCatalogHydrationJson', request });
+      return JSON.stringify(hydrationSchedulingEnvelope(request.selected_base_session_ref, request.locator_claim_key));
+    },
   } as unknown as SpaghettiEngine;
   const client = await openSpaghettiClient({
     transport: new NapiTransport({ engine, ownsEngine: false }),
@@ -231,10 +412,22 @@ test('NapiTransport maps typed catalog DTOs to the strict snake-case JSON bounda
     context,
     externalRef: parseExternalEntityRef(pageFixture.resolutions.live.request.external_ref),
   });
+  const selectedBaseSessionRef = parseCatalogHydrationEntityRef(
+    (pageFixture.session_page.rows as Array<{ row: { session_ref: unknown } }>)[0]!.row.session_ref,
+  );
+  const locatorClaimKey = parseOpaqueContractReference(
+    (hydrationFixture.command.authorization as { handoff: { locator_claim_key: string } }).handoff.locator_claim_key,
+  );
+  await client.requestCatalogHydration({
+    context: hydrationContext(),
+    selectedBaseSessionRef,
+    locatorClaimKey,
+    stableRequestToken: 'napi-hydration-1',
+  });
 
   assert.deepEqual(
     calls.map(({ method }) => method),
-    ['getCatalogReadinessJson', 'listLibraryProjectsJson', 'resolveCatalogEntityJson'],
+    ['getCatalogReadinessJson', 'listLibraryProjectsJson', 'resolveCatalogEntityJson', 'requestCatalogHydrationJson'],
   );
   const pageRequest = calls[1]!.request;
   assert.deepEqual(pageRequest.contract_request, context.contractRequest);
@@ -244,6 +437,11 @@ test('NapiTransport maps typed catalog DTOs to the strict snake-case JSON bounda
   assert.equal('contractRequest' in pageRequest, false);
   assert.equal('coveragePlanId' in pageRequest, false);
   assert.equal('snapshotId' in pageRequest, false);
+  const hydrationRequest = calls[3]!.request;
+  assert.deepEqual(hydrationRequest.selected_base_session_ref, selectedBaseSessionRef);
+  assert.equal(hydrationRequest.locator_claim_key, locatorClaimKey);
+  assert.equal(hydrationRequest.stable_request_token, 'napi-hydration-1');
+  assert.equal('selectedBaseSessionRef' in hydrationRequest, false);
   await client.dispose();
 });
 
@@ -254,6 +452,7 @@ test('catalog methods remain part of the complete transport negotiation set', ()
   assert.ok(SPAGHETTI_CLIENT_METHODS.includes('listLibraryProjects'));
   assert.ok(SPAGHETTI_CLIENT_METHODS.includes('listLibrarySessions'));
   assert.ok(SPAGHETTI_CLIENT_METHODS.includes('resolveCatalogEntity'));
+  assert.ok(SPAGHETTI_CLIENT_METHODS.includes('requestCatalogHydration'));
   assert.deepEqual(normalizeTransportError(new Error('IncompatibleCatalogContract: query_pack_version'), 'test'), {
     code: 'protocol_mismatch',
     message: 'The client and transport do not share a supported protocol contract.',
