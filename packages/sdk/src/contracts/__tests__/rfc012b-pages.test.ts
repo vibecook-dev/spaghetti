@@ -138,7 +138,7 @@ test('catalog-first startup can query last-complete catalog while search stays c
   const beforeSearch = progressiveStartupView(readiness, false);
   assert.equal(beforeSearch.catalogQueryReady, readiness.state === 'ready' || readiness.state === 'degraded');
   assert.equal(beforeSearch.searchAvailable, false);
-  assert.equal(beforeSearch.selectedHydrationAvailable, beforeSearch.catalogQueryReady);
+  assert.equal(beforeSearch.selectedHydrationAvailable, false);
 
   if (beforeSearch.catalogQueryReady) {
     const afterSearch = progressiveStartupView(readiness, true);

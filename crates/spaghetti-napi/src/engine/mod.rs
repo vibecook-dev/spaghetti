@@ -833,7 +833,10 @@ impl SpaghettiEngineCore {
         ProgressiveHostReadiness {
             catalog_query_ready: status.catalog_query_ready,
             search_available: status.search_available,
-            selected_hydration_available: status.catalog_query_ready,
+            // A readable catalog is necessary but not sufficient for selected
+            // hydration. Keep this capability false until the engine owns an
+            // authorization-bound command scheduler and execution lane.
+            selected_hydration_available: false,
             bootstrap_active,
         }
     }
@@ -2954,6 +2957,7 @@ mod tests {
         assert!(readiness.bootstrap_active);
         assert!(!readiness.search_available);
         assert!(!readiness.catalog_query_ready);
+        assert!(!readiness.selected_hydration_available);
         let status = engine.status();
         assert!(!status.search_available);
         assert!(!status.catalog_query_ready);
@@ -2968,6 +2972,7 @@ mod tests {
             !ready.catalog_query_ready,
             "empty DB has no last-complete catalog snapshot"
         );
+        assert!(!ready.selected_hydration_available);
         engine.shutdown().unwrap();
     }
 

@@ -209,7 +209,9 @@ export function observationHostProgressiveView(
   return {
     catalogQueryReady,
     searchAvailable: catalogQueryReady && status.state !== 'bootstrapping',
-    selectedHydrationAvailable: catalogQueryReady,
+    // Catalog readability alone does not mint source-access authority. This
+    // remains false until the engine exposes the explicit hydration command.
+    selectedHydrationAvailable: false,
   };
 }
 

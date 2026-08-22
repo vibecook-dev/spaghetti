@@ -207,7 +207,9 @@ export function progressiveStartupViewFromFlags(
   return {
     catalogQueryReady,
     searchAvailable: catalogQueryReady && searchPackComplete,
-    selectedHydrationAvailable: catalogQueryReady,
+    // The portable readiness projection cannot infer executable source-access
+    // authority from a catalog snapshot.
+    selectedHydrationAvailable: false,
   };
 }
 

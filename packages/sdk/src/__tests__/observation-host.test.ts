@@ -61,7 +61,7 @@ describe('observation host progressive startup', () => {
     });
     assert.equal(bootstrapping.catalogQueryReady, true);
     assert.equal(bootstrapping.searchAvailable, false);
-    assert.equal(bootstrapping.selectedHydrationAvailable, true);
+    assert.equal(bootstrapping.selectedHydrationAvailable, false);
 
     const runningWithoutCatalog = observationHostProgressiveView({
       state: 'running',
@@ -77,6 +77,7 @@ describe('observation host progressive startup', () => {
       searchAvailable: true,
     });
     assert.equal(runningWithCatalog.searchAvailable, true);
+    assert.equal(runningWithCatalog.selectedHydrationAvailable, false);
   });
 });
 
