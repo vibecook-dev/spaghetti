@@ -1269,6 +1269,26 @@ scheduler triggering, coverage-plan replacement, contract-version replacement,
 compaction beyond retained bounds, caller-authorized local policy, richer
 queries, and promotion evidence remain open.
 
+The seventeenth bounded B3 slice (`61036f9`) adds schema-v61 and closes the
+durable state/publication contract for required-source loss before any safe
+snapshot exists. A temporary loss now retains the exact `Building` or
+`Partial` attempt, conservatively demotes any complete per-source progress, and
+publishes a source-neutral retry reason without granting query authority.
+Terminal exhaustion atomically appends immutable failure evidence bound to the
+failed state commit, plan, epoch, attempt, prior phase, reason, and timestamp;
+readiness becomes no-snapshot `Degraded`, with every required source represented
+as `Unavailable` and no fabricated points, absences, or errors. Recovery enters
+`Building` at `attempt + 1`, and initial publication authenticates the unique
+immediately preceding source or discarded-integrity failure. Restart validates
+the entire cold failure ledger, byte-exact v10 invalidations, partial ancestry,
+lost-ack replay, mixed historical failure kinds, atomic rollback seams, and
+successful same-attempt temporary retry or next-attempt terminal recovery.
+Rust/TypeScript schema parity is executable at v61. The configured producer and
+scheduler still need to dispatch source failures through these cold commands;
+automatic source-reset detection, coverage-plan and contract-version
+replacement, compaction, local policy, richer queries, and promotion evidence
+remain open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
