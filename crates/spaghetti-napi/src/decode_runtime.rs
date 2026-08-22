@@ -256,7 +256,7 @@ fn is_safe_family_hint(value: &str) -> bool {
 }
 
 pub(crate) const MAX_DIAGNOSTIC_EXCERPT_BYTES: usize = 1_024;
-const MAX_DIAGNOSTIC_SHAPE_ITEMS: usize = 16;
+pub(crate) const MAX_DIAGNOSTIC_SHAPE_ITEMS: usize = 16;
 
 /// Produce useful quarantine context without retaining native values or even
 /// native JSON property names. Dynamic property names can themselves contain
