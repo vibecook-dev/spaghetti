@@ -12,11 +12,12 @@ use crate::adapter::{
 };
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::claude::catalog_runtime::{
-    claude_catalog_components, claude_catalog_source_instance,
-    claude_conformance_promoted_composition, claude_conformance_source_declaration_bytes,
-    claude_conformance_source_declaration_id, claude_conformance_support_release_bytes,
-    claude_conformance_support_release_id, claude_planned_catalog_composition,
-    produce_claude_library_coverage, produce_claude_library_coverage_with_post_head_mutation,
+    claude_authorized_catalog_composition, claude_catalog_components,
+    claude_catalog_source_instance, claude_conformance_promoted_composition,
+    claude_conformance_source_declaration_bytes, claude_conformance_source_declaration_id,
+    claude_conformance_support_release_bytes, claude_conformance_support_release_id,
+    claude_planned_catalog_composition, produce_claude_library_coverage,
+    produce_claude_library_coverage_with_post_head_mutation,
 };
 use crate::source::catalog_composition::{
     CatalogContribution, CatalogDecoderStateBoundary, CatalogDiscoveryBounds,
@@ -839,6 +840,33 @@ fn authorized_producer_matches_frozen_identity_without_authorizing_candidate() {
 }
 
 #[test]
+fn typed_authorization_derives_the_runtime_composition_binding() {
+    let selection = catalog_contract_selection();
+    let access = synthetic_claude_catalog_access(&selection, CompatibilityClass::ExactSupported);
+    let composition = claude_authorized_catalog_composition(&access).unwrap();
+    assert_eq!(
+        composition.support_release_id(),
+        claude_conformance_support_release_id()
+    );
+    assert_eq!(
+        composition.source_declaration_id(),
+        "claude-code-sources-2026-08-21-candidate"
+    );
+    let executable = composition.authorize_execution(access).unwrap();
+    let produced = produce_from_root(
+        &executable,
+        &fixture_root(),
+        FIXTURE_SOURCE_INSTANCE,
+        CatalogAccessPolicyDigest::derive(1, b"authorized-runtime-composition").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        produced.assembly.source_coverage().completeness,
+        crate::adapter::CoverageSetCompleteness::Complete
+    );
+}
+
+#[test]
 fn planned_and_builtin_candidate_cannot_authorize_producer_execution() {
     let selection = catalog_contract_selection();
     let planned = claude_planned_catalog_composition().unwrap();
@@ -968,7 +996,7 @@ fn produce_error_for_composition(
 fn assert_rejected_before_source_access(composition: CatalogSourceComposition) {
     let message = produce_error_for_composition(&composition, Path::new(ABSENT_CATALOG_ROOT));
     assert!(
-        message.contains("exact synthetic Claude catalog conformance composition"),
+        message.contains("exact compiled source declaration and component topology"),
         "composition drift must fail closed before source access, got {message}"
     );
     assert!(!message.contains("failed to read"));

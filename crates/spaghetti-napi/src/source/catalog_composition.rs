@@ -1001,6 +1001,27 @@ impl CatalogSourceComposition {
         )
     }
 
+    /// Construct the promoted binding only from one borrowed typed catalog
+    /// authorization. The resulting composition is still not an access
+    /// capability: [`Self::authorize_execution`] must consume the same proof
+    /// and revalidate every retained coordinate before source access.
+    pub(crate) fn from_authorized_catalog_access(
+        authorization: &AuthorizedCatalogAccess<'_>,
+        source_declaration_id: impl Into<String>,
+        components: Vec<CatalogSourceComponent>,
+    ) -> Result<Self, CatalogCompositionError> {
+        Self::new_promoted(
+            authorization.adapter_id(),
+            authorization.support_release_id(),
+            source_declaration_id,
+            CatalogPromotedBinding::from_digests(
+                *authorization.source_declaration_digest().as_bytes(),
+                *authorization.support_release_digest().as_bytes(),
+            )?,
+            components,
+        )
+    }
+
     fn new_with_binding(
         adapter_id: impl Into<String>,
         support_release_id: impl Into<String>,

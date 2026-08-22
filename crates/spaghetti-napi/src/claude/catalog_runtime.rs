@@ -1,10 +1,11 @@
 //! Crate-private Claude catalog source-access/coverage producer.
 //!
 //! Candidate declarations describe 4/8 MiB `full_only` AppendDelimited streams.
-//! This producer executes a distinct 64 KiB/idempotent catalog topology under
-//! synthetic fixture IDs and digests. It cannot mint catalog authorization or
-//! source-access from a raw path. Native paths stay out of returned types,
-//! Debug, and error messages.
+//! This producer executes a distinct 64 KiB/idempotent catalog topology only
+//! after a borrowed typed catalog authorization has bound the promoted release,
+//! source declaration, selected contracts, and exact source streams. It cannot
+//! mint catalog authorization or source access from a raw path. Native paths
+//! stay out of returned types, Debug, and error messages.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -13,9 +14,9 @@ use sha2::{Digest as _, Sha256};
 
 use super::adapter::ClaudeCodeAdapter;
 use crate::adapter::{
-    AdapterId, AdapterObjectContext, AgentAdapter, CanonicalSourceInstanceKey, DecodeDisposition,
-    DriverSpec, Fact, FactSemanticContext, SessionFact, SourceInstance, SourceObjectDescriptor,
-    StreamSpec,
+    AdapterId, AdapterObjectContext, AgentAdapter, AuthorizedCatalogAccess,
+    CanonicalSourceInstanceKey, DecodeDisposition, DriverSpec, Fact, FactSemanticContext,
+    SessionFact, SourceInstance, SourceObjectDescriptor, StreamSpec,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -24,14 +25,15 @@ use crate::decode_runtime::{
     decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecodedFactBatch,
     DecoderDependenciesDenied,
 };
+#[cfg(test)]
+use crate::source::catalog_composition::CatalogPromotedBinding;
 use crate::source::catalog_composition::{
     CatalogBoundSourceAccess, CatalogCompletedCoverageObject, CatalogComponentCoverageCompletion,
     CatalogCompositionError, CatalogContribution, CatalogDecoderStateBoundary,
     CatalogDiscoveryBounds, CatalogExecutableComposition, CatalogLibraryCoverageAssembly,
     CatalogMemberRef, CatalogMembershipAuthorityEvidence, CatalogMembershipEntry,
-    CatalogOverlapStrategy, CatalogPromotedBinding, CatalogSourceComponent,
-    CatalogSourceComposition, CatalogSourcePrimitive, MAX_CATALOG_COVERAGE_POINTS,
-    MAX_MEMBERSHIP_MEMBERS,
+    CatalogOverlapStrategy, CatalogSourceComponent, CatalogSourceComposition,
+    CatalogSourcePrimitive, MAX_CATALOG_COVERAGE_POINTS, MAX_MEMBERSHIP_MEMBERS,
 };
 use crate::source::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
@@ -50,13 +52,19 @@ const NESTED_COMPONENT_ID: &str = "nested-parent-membership";
 const HEAD_COMPONENT_ID: &str = "transcript-head-fallback";
 const INDEX_STREAM_ID: &str = "session-indexes";
 const PARENT_STREAM_ID: &str = "session-transcripts";
+const SOURCE_DECLARATION_ID: &str = "claude-code-sources-2026-08-21-candidate";
+#[cfg(test)]
 const PLANNING_EVIDENCE_ID: &str = "phase0-catalog-census-2026-08-15";
+#[cfg(test)]
 const PLANNED_SUPPORT_RELEASE_ID: &str = "claude-code.catalog-candidate-2026-08-15";
+#[cfg(test)]
 const PLANNED_SOURCE_DECLARATION_ID: &str = "claude-code.catalog-sources-v1";
+#[cfg(test)]
 const CONFORMANCE_SUPPORT_RELEASE_ID: &str = "claude-code.catalog-conformance-support-v1";
-const CONFORMANCE_SOURCE_DECLARATION_ID: &str = "claude-code.catalog-conformance-sources-v1";
+#[cfg(test)]
 const CONFORMANCE_SOURCE_DECLARATION: &[u8] =
     b"spaghetti/rfc012b/claude-catalog-conformance-declaration/v1";
+#[cfg(test)]
 const CONFORMANCE_SUPPORT_RELEASE: &[u8] =
     b"spaghetti/rfc012b/claude-catalog-conformance-support/v1";
 const CANDIDATE_HEAD_BYTES: u64 = 64 * 1024;
@@ -179,6 +187,19 @@ pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {
     ]
 }
 
+/// Build the exact compiled Claude catalog topology from a non-transferable
+/// typed authorization. Candidate releases cannot produce this proof, and the
+/// returned value must still consume it through `authorize_execution`.
+pub(crate) fn claude_authorized_catalog_composition(
+    authorization: &AuthorizedCatalogAccess<'_>,
+) -> Result<CatalogSourceComposition, CatalogCompositionError> {
+    CatalogSourceComposition::from_authorized_catalog_access(
+        authorization,
+        SOURCE_DECLARATION_ID,
+        claude_catalog_components(),
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn claude_planned_catalog_composition(
 ) -> Result<CatalogSourceComposition, CatalogCompositionError> {
@@ -197,7 +218,7 @@ pub(crate) fn claude_conformance_promoted_composition(
     CatalogSourceComposition::new_promoted(
         ADAPTER_ID,
         CONFORMANCE_SUPPORT_RELEASE_ID,
-        CONFORMANCE_SOURCE_DECLARATION_ID,
+        SOURCE_DECLARATION_ID,
         CatalogPromotedBinding::from_digests(
             Sha256::digest(CONFORMANCE_SOURCE_DECLARATION).into(),
             Sha256::digest(CONFORMANCE_SUPPORT_RELEASE).into(),
@@ -223,7 +244,7 @@ pub(crate) fn claude_conformance_support_release_id() -> &'static str {
 
 #[cfg(test)]
 pub(crate) fn claude_conformance_source_declaration_id() -> &'static str {
-    CONFORMANCE_SOURCE_DECLARATION_ID
+    SOURCE_DECLARATION_ID
 }
 
 pub(crate) fn produce_claude_library_coverage(
@@ -292,7 +313,7 @@ fn produce_claude_library_coverage_after_heads(
     let executable = access.executable();
     executable.validate_complete_coverage_authority()?;
     let composition = executable.composition();
-    require_exact_conformance_composition(composition)?;
+    require_exact_runtime_composition(composition)?;
     let source_instance_key = access.source_instance_key()?;
     let instance = access.instance();
     let index_component = expect_component(composition, INDEX_COMPONENT_ID)?;
@@ -845,13 +866,9 @@ fn catalog_component(
     }
 }
 
-fn require_exact_conformance_composition(
+fn require_exact_runtime_composition(
     composition: &CatalogSourceComposition,
 ) -> Result<(), CatalogCompositionError> {
-    let expected_binding = CatalogPromotedBinding::from_digests(
-        Sha256::digest(CONFORMANCE_SOURCE_DECLARATION).into(),
-        Sha256::digest(CONFORMANCE_SUPPORT_RELEASE).into(),
-    )?;
     let mut expected_components = claude_catalog_components();
     expected_components = expected_components
         .into_iter()
@@ -859,13 +876,11 @@ fn require_exact_conformance_composition(
         .collect::<Result<Vec<_>, _>>()?;
     expected_components.sort_by(|left, right| left.component_id.cmp(&right.component_id));
     if composition.adapter_id() != ADAPTER_ID
-        || composition.support_release_id() != CONFORMANCE_SUPPORT_RELEASE_ID
-        || composition.source_declaration_id() != CONFORMANCE_SOURCE_DECLARATION_ID
-        || composition.promoted_binding() != Some(expected_binding)
+        || composition.source_declaration_id() != SOURCE_DECLARATION_ID
         || composition.components() != expected_components
     {
         return Err(CatalogCompositionError::invalid(
-            "Claude catalog producer cannot execute a composition that is not the exact synthetic Claude catalog conformance composition",
+            "Claude catalog producer requires the exact compiled source declaration and component topology",
         ));
     }
     Ok(())

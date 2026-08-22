@@ -333,14 +333,12 @@ fn json_value_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Test-only source-access policy for candidate conformance decoders that
-/// declare no secondary source dependencies. Keeping this policy beside the
-/// common decode boundary prevents individual vendor oracles from silently
-/// widening native I/O or diverging in privacy-safe failure behavior.
-#[cfg(test)]
+/// Source-access policy for catalog and conformance decoders that declare no
+/// secondary source dependencies. Keeping this policy beside the common
+/// decode boundary prevents vendor producers from silently widening native
+/// I/O or diverging in privacy-safe failure behavior.
 pub(crate) struct DecoderDependenciesDenied;
 
-#[cfg(test)]
 impl SourceAccess for DecoderDependenciesDenied {
     fn read_object(
         &self,

@@ -912,6 +912,14 @@ version and therefore cannot grant typed access. Codex and Grok remain
 Candidate/non-authorizing until their separate artifact pins, fixture-backed
 version ceilings, and promotion gates are complete.
 
+The Claude coverage producer is now compiled in the default runtime and no
+longer accepts only synthetic conformance IDs and digests. A common constructor
+derives its promoted binding from a borrowed typed `CatalogDiscovery`
+authorization, and the producer separately requires the exact compiled Claude
+source-declaration ID and normalized component topology before native I/O.
+Candidate support still cannot create that authorization, and this slice adds
+no engine runner, publication, public query transport, or release promotion.
+
 The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
 `ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,
 Codex, and Grok candidate catalog paths and freezes regression guards against

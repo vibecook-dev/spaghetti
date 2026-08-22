@@ -8,7 +8,6 @@
 pub mod adapter;
 #[cfg(test)]
 mod catalog_conformance;
-#[cfg(test)]
 pub(crate) mod catalog_runtime;
 /// On-disk fingerprint discovery + `source_files` store helpers.
 ///
