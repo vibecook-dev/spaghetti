@@ -6,6 +6,7 @@
 mod access;
 mod append_delimited;
 pub(crate) mod catalog_composition;
+pub(crate) mod catalog_projection;
 mod directory_snapshot;
 mod file;
 mod key_value_snapshot;

@@ -1,0 +1,702 @@
+//! Source-neutral RFC 012B handoff from complete native membership to B3.
+//!
+//! A B2 producer proves a complete opaque member set and exact source-object
+//! coverage. B3 additionally requires typed reducer assertions and a one-to-one
+//! binding from every admitted member to its base session assertion. This
+//! module is the only bridge between those contracts. It deliberately accepts
+//! no durable row DTOs and derives semantic revisions from native semantic
+//! values rather than source topology or observation coordinates.
+
+use std::collections::BTreeSet;
+use std::fmt;
+
+use crate::adapter::{
+    CanonicalEntityKey, CanonicalFactId, ContractCompleteness, FactRevisionId, NativeIdentity,
+    QualifiedValue, QualifiedValueQuality, SemanticRevisionRef,
+};
+use crate::catalog_contract::evidence::{
+    CatalogAvailability, CatalogDisclosureClass, CatalogEntityRef, CatalogEvidenceOwner,
+    CatalogFieldAuthority, CatalogProjectAssertion, CatalogQualifiedField, CatalogReducer,
+    CatalogSessionAssertion, ProjectAssociationBasis, SessionProjectAssociationFact,
+};
+use crate::catalog_contract::publication::{
+    CatalogCompleteSourceAssembly, CatalogPublicationMemberBinding, CatalogPublicationMemberRef,
+};
+
+use super::catalog_composition::{CatalogCompositionError, CatalogMemberRef};
+
+const PROJECTION_REVISION_CONTRACT_VERSION: u32 = 1;
+const NATIVE_IDENTITY_AUTHORITY: &str = "native-catalog-identity";
+const AVAILABILITY_AUTHORITY: &str = "catalog-membership-availability";
+const ASSOCIATION_AUTHORITY: &str = "native-project-association";
+
+/// One admitted native session and the exact covered object that owns its
+/// minimum catalog evidence. Fields stay private so callers cannot bypass the
+/// canonical member/reference checks performed by [`CatalogSourceProjection`].
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogSourceMemberProjection {
+    owner: CatalogEvidenceOwner,
+    native_project_key: String,
+    native_session_id: String,
+    availability: CatalogAvailability,
+    association_basis: ProjectAssociationBasis,
+}
+
+impl CatalogSourceMemberProjection {
+    pub(crate) fn new(
+        owner: CatalogEvidenceOwner,
+        native_project_key: impl Into<String>,
+        native_session_id: impl Into<String>,
+        availability: CatalogAvailability,
+        association_basis: ProjectAssociationBasis,
+    ) -> Self {
+        Self {
+            owner,
+            native_project_key: native_project_key.into(),
+            native_session_id: native_session_id.into(),
+            availability,
+            association_basis,
+        }
+    }
+}
+
+impl fmt::Debug for CatalogSourceMemberProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogSourceMemberProjection")
+            .field("adapter_id", &self.owner.adapter_id)
+            .field("source_instance_key", &self.owner.source_instance_key)
+            .field("generation", &self.owner.generation)
+            .field("availability", &availability_tag(&self.availability))
+            .field("association_basis", &self.association_basis)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Checked B2-to-B3 projection for one complete source. Applying it to a
+/// reducer is atomic in memory: a rejected assertion cannot leave a prefix of
+/// the source installed.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogSourceProjection {
+    source: CatalogCompleteSourceAssembly,
+    project_assertions: Vec<CatalogProjectAssertion>,
+    session_assertions: Vec<CatalogSessionAssertion>,
+    associations: Vec<SessionProjectAssociationFact>,
+    member_bindings: Vec<CatalogPublicationMemberBinding>,
+}
+
+impl CatalogSourceProjection {
+    pub(crate) fn assemble(
+        source: CatalogCompleteSourceAssembly,
+        mut members: Vec<CatalogSourceMemberProjection>,
+    ) -> Result<Self, CatalogCompositionError> {
+        if members.len() != source.member_count() {
+            return Err(CatalogCompositionError::invalid(
+                "catalog source projection requires exactly one input for every admitted member",
+            ));
+        }
+
+        let plan_source = source.plan_source();
+        let live_owners = source
+            .source_coverage()
+            .points
+            .iter()
+            .map(|point| {
+                CatalogEvidenceOwner::new(
+                    point.adapter_id.clone(),
+                    point.source_instance_key,
+                    point.stream_key,
+                    point.object_key,
+                    point.generation,
+                )
+                .map_err(|_| {
+                    CatalogCompositionError::invalid(
+                        "catalog source projection contains invalid coverage ownership",
+                    )
+                })
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+
+        members.sort_by(|left, right| {
+            left.native_session_id
+                .cmp(&right.native_session_id)
+                .then_with(|| left.native_project_key.cmp(&right.native_project_key))
+                .then_with(|| left.owner.cmp(&right.owner))
+        });
+
+        let mut seen_members = BTreeSet::new();
+        let mut project_assertions = Vec::with_capacity(members.len());
+        let mut session_assertions = Vec::with_capacity(members.len());
+        let mut associations = Vec::with_capacity(members.len());
+        let mut member_bindings = Vec::with_capacity(members.len());
+
+        for member in members {
+            if member.owner.adapter_id != plan_source.adapter_id
+                || member.owner.source_instance_key != plan_source.source_instance_key
+                || !live_owners.contains(&member.owner)
+            {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog source projection evidence is outside complete live coverage",
+                ));
+            }
+
+            let member_ref = CatalogMemberRef::from_canonical_session(
+                source.member_identity_contract_id(),
+                &plan_source.adapter_id,
+                plan_source.source_instance_key,
+                member.native_session_id.as_bytes(),
+            )?;
+            if !seen_members.insert(member_ref) {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog source projection contains duplicate canonical members",
+                ));
+            }
+            let publication_member_ref =
+                CatalogPublicationMemberRef::from_digest(*member_ref.as_bytes());
+
+            let project_key = CanonicalEntityKey::derive(
+                &plan_source.adapter_id,
+                &plan_source.source_instance_key,
+                "project",
+                member.native_project_key.as_bytes(),
+            )
+            .map_err(|_| {
+                CatalogCompositionError::invalid(
+                    "catalog source projection contains an invalid native project identity",
+                )
+            })?;
+            let session_key = CanonicalEntityKey::derive(
+                &plan_source.adapter_id,
+                &plan_source.source_instance_key,
+                "session",
+                member.native_session_id.as_bytes(),
+            )
+            .map_err(|_| {
+                CatalogCompositionError::invalid(
+                    "catalog source projection contains an invalid native session identity",
+                )
+            })?;
+            let project_ref = CatalogEntityRef::project(project_key);
+            let session_ref = CatalogEntityRef::session(session_key);
+            let availability_semantics = availability_semantics(&member.availability);
+
+            let project_revision = semantic_revision(
+                &member.owner,
+                "catalog.project",
+                member.native_project_key.as_bytes(),
+                &[
+                    member.native_project_key.as_bytes(),
+                    &availability_semantics,
+                ],
+            )?;
+            let session_revision = semantic_revision(
+                &member.owner,
+                "catalog.session",
+                member.native_session_id.as_bytes(),
+                &[
+                    member.native_session_id.as_bytes(),
+                    member.native_project_key.as_bytes(),
+                    &availability_semantics,
+                ],
+            )?;
+            let association_revision = semantic_revision(
+                &member.owner,
+                "catalog.project-association",
+                member.native_session_id.as_bytes(),
+                &[
+                    member.native_session_id.as_bytes(),
+                    member.native_project_key.as_bytes(),
+                    association_basis_tag(member.association_basis),
+                ],
+            )?;
+
+            let project_identity = known_field(
+                NativeIdentity {
+                    native_namespace: "catalog.project".to_owned(),
+                    native_id: member.native_project_key.clone(),
+                },
+                QualifiedValueQuality::NativeClaimed,
+                NATIVE_IDENTITY_AUTHORITY,
+                CatalogDisclosureClass::LocalSensitive,
+                project_revision,
+            )?;
+            let project_availability = known_field(
+                member.availability.clone(),
+                QualifiedValueQuality::Exact,
+                AVAILABILITY_AUTHORITY,
+                CatalogDisclosureClass::Public,
+                project_revision,
+            )?;
+            let project_stable_key = projection_key(
+                b"project-assertion",
+                member_ref.as_bytes(),
+                member.native_project_key.as_bytes(),
+            );
+            let project_assertion = CatalogProjectAssertion::new(
+                member.owner.clone(),
+                &project_stable_key,
+                project_ref,
+                Some(project_identity),
+                None,
+                None,
+                None,
+                None,
+                project_availability,
+                vec![project_revision],
+            )
+            .map_err(|_| {
+                CatalogCompositionError::invalid(
+                    "catalog project evidence is outside the bounded projection contract",
+                )
+            })?;
+
+            let session_identity = known_field(
+                NativeIdentity {
+                    native_namespace: "catalog.session".to_owned(),
+                    native_id: member.native_session_id.clone(),
+                },
+                QualifiedValueQuality::NativeClaimed,
+                NATIVE_IDENTITY_AUTHORITY,
+                CatalogDisclosureClass::LocalSensitive,
+                session_revision,
+            )?;
+            let session_availability = known_field(
+                member.availability,
+                QualifiedValueQuality::Exact,
+                AVAILABILITY_AUTHORITY,
+                CatalogDisclosureClass::Public,
+                session_revision,
+            )?;
+            let session_stable_key = projection_key(
+                b"session-assertion",
+                member_ref.as_bytes(),
+                member.native_session_id.as_bytes(),
+            );
+            let session_assertion = CatalogSessionAssertion::new(
+                member.owner.clone(),
+                &session_stable_key,
+                session_ref,
+                Some(session_identity),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                session_availability,
+                vec![session_revision],
+            )
+            .map_err(|_| {
+                CatalogCompositionError::invalid(
+                    "catalog session evidence is outside the bounded projection contract",
+                )
+            })?;
+            let association_stable_key = projection_key(
+                b"project-association",
+                member_ref.as_bytes(),
+                member.native_session_id.as_bytes(),
+            );
+            let association = SessionProjectAssociationFact::new(
+                member.owner,
+                &association_stable_key,
+                session_ref,
+                project_ref,
+                member.association_basis,
+                None,
+                None,
+                CatalogFieldAuthority::new(ASSOCIATION_AUTHORITY, 100, true).map_err(|_| {
+                    CatalogCompositionError::invalid("catalog association authority is invalid")
+                })?,
+                QualifiedValueQuality::NativeClaimed,
+                ContractCompleteness::Complete,
+                None,
+                vec![association_revision],
+            )
+            .map_err(|_| {
+                CatalogCompositionError::invalid(
+                    "catalog association evidence is outside the bounded projection contract",
+                )
+            })?;
+            let binding = source
+                .member_binding(
+                    publication_member_ref,
+                    session_assertion.assertion_key,
+                    session_ref,
+                )
+                .map_err(|_| {
+                    CatalogCompositionError::invalid(
+                        "catalog source projection does not match complete membership",
+                    )
+                })?;
+
+            project_assertions.push(project_assertion);
+            session_assertions.push(session_assertion);
+            associations.push(association);
+            member_bindings.push(binding);
+        }
+
+        Ok(Self {
+            source,
+            project_assertions,
+            session_assertions,
+            associations,
+            member_bindings,
+        })
+    }
+
+    pub(crate) fn reduce_into(
+        &self,
+        mut reducer: CatalogReducer,
+        observation_commit: u64,
+    ) -> Result<CatalogReducer, CatalogCompositionError> {
+        for assertion in &self.project_assertions {
+            reducer
+                .upsert_project_assertion(assertion.clone(), observation_commit)
+                .map_err(|_| {
+                    CatalogCompositionError::invalid(
+                        "catalog project projection could not be reduced",
+                    )
+                })?;
+        }
+        for assertion in &self.session_assertions {
+            reducer
+                .upsert_session_assertion(assertion.clone(), observation_commit)
+                .map_err(|_| {
+                    CatalogCompositionError::invalid(
+                        "catalog session projection could not be reduced",
+                    )
+                })?;
+        }
+        for association in &self.associations {
+            reducer
+                .upsert_association(association.clone(), observation_commit)
+                .map_err(|_| {
+                    CatalogCompositionError::invalid(
+                        "catalog association projection could not be reduced",
+                    )
+                })?;
+        }
+        Ok(reducer)
+    }
+
+    pub(crate) fn member_count(&self) -> usize {
+        self.member_bindings.len()
+    }
+
+    pub(crate) fn into_publication_parts(
+        self,
+    ) -> (
+        CatalogCompleteSourceAssembly,
+        Vec<CatalogPublicationMemberBinding>,
+    ) {
+        (self.source, self.member_bindings)
+    }
+}
+
+impl fmt::Debug for CatalogSourceProjection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogSourceProjection")
+            .field("source", &self.source)
+            .field("project_assertions", &self.project_assertions.len())
+            .field("session_assertions", &self.session_assertions.len())
+            .field("associations", &self.associations.len())
+            .field("member_bindings", &self.member_bindings.len())
+            .finish()
+    }
+}
+
+fn known_field<T>(
+    value: T,
+    quality: QualifiedValueQuality,
+    authority: &str,
+    disclosure: CatalogDisclosureClass,
+    revision: SemanticRevisionRef,
+) -> Result<CatalogQualifiedField<T>, CatalogCompositionError> {
+    let authority = CatalogFieldAuthority::new(authority, 100, true)
+        .map_err(|_| CatalogCompositionError::invalid("catalog field authority is invalid"))?;
+    let qualified = QualifiedValue::from_parts(
+        Some(value),
+        quality,
+        authority,
+        ContractCompleteness::Complete,
+        None,
+        None,
+        vec![revision],
+    )
+    .map_err(|_| CatalogCompositionError::invalid("catalog qualified field is invalid"))?;
+    CatalogQualifiedField::new(qualified, disclosure)
+        .map_err(|_| CatalogCompositionError::invalid("catalog qualified field is invalid"))
+}
+
+fn semantic_revision(
+    owner: &CatalogEvidenceOwner,
+    fact_kind: &str,
+    stable_native_fact_key: &[u8],
+    semantic_components: &[&[u8]],
+) -> Result<SemanticRevisionRef, CatalogCompositionError> {
+    let fact_id = CanonicalFactId::native(
+        &owner.adapter_id,
+        &owner.source_instance_key,
+        fact_kind,
+        stable_native_fact_key,
+    )
+    .map_err(|_| CatalogCompositionError::invalid("catalog semantic fact identity is invalid"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-semantic-revision-v1\0");
+    hasher.update(&(semantic_components.len() as u64).to_be_bytes());
+    for component in semantic_components {
+        hasher.update(&(component.len() as u64).to_be_bytes());
+        hasher.update(component);
+    }
+    let digest = hasher.finalize();
+    let revision = FactRevisionId::derive(
+        &fact_id,
+        PROJECTION_REVISION_CONTRACT_VERSION,
+        digest.as_bytes(),
+    )
+    .map_err(|_| CatalogCompositionError::invalid("catalog semantic revision is invalid"))?;
+    Ok(SemanticRevisionRef::new(revision))
+}
+
+fn projection_key(domain: &[u8], member_ref: &[u8; 32], native_key: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-source-projection-key-v1\0");
+    hasher.update(&(domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    hasher.update(member_ref);
+    hasher.update(&(native_key.len() as u64).to_be_bytes());
+    hasher.update(native_key);
+    *hasher.finalize().as_bytes()
+}
+
+fn availability_tag(availability: &CatalogAvailability) -> &'static str {
+    match availability {
+        CatalogAvailability::MetadataOnly => "metadata_only",
+        CatalogAvailability::TranscriptDiscovered => "transcript_discovered",
+        CatalogAvailability::Hydrating => "hydrating",
+        CatalogAvailability::HistoryReady => "history_ready",
+        CatalogAvailability::Unavailable { .. } => "unavailable",
+    }
+}
+
+fn availability_semantics(availability: &CatalogAvailability) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-availability-v1\0");
+    let tag = availability_tag(availability).as_bytes();
+    hasher.update(&(tag.len() as u64).to_be_bytes());
+    hasher.update(tag);
+    if let CatalogAvailability::Unavailable { reason } = availability {
+        hasher.update(&(reason.len() as u64).to_be_bytes());
+        hasher.update(reason.as_bytes());
+    } else {
+        hasher.update(&0_u64.to_be_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn association_basis_tag(basis: ProjectAssociationBasis) -> &'static [u8] {
+    match basis {
+        ProjectAssociationBasis::NativeProjectIndex => b"native_project_index",
+        ProjectAssociationBasis::TranscriptCwd => b"transcript_cwd",
+        ProjectAssociationBasis::SessionDirectory => b"session_directory",
+        ProjectAssociationBasis::RolloutHeader => b"rollout_header",
+        ProjectAssociationBasis::DeclaredDerivedAncestor => b"declared_derived_ancestor",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::adapter::{
+        CanonicalSourceInstanceKey, ContractVersionSelection, CoverageDeclarationDigest,
+        CoverageDomain, CoverageMembershipRevision, CoverageObjectKey, CoveragePosition,
+        CoveragePositionKind, CoverageProvenance, CoverageSetCompleteness, CoverageStatus,
+        CoverageStreamKey, SourceCoveragePoint, SourceCoverageSet,
+        CONTRACT_VERSION_SELECTION_VERSION,
+    };
+    use crate::catalog_contract::evidence::CatalogReducerPublicationLimits;
+    use crate::catalog_contract::publication::{
+        CatalogSourceCompletionRevision, CatalogSourceMembershipRevision,
+    };
+    use crate::catalog_contract::{
+        CatalogAccessPolicyDigest, CatalogCoveragePlanSource, CatalogCoverageScope,
+        CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
+    };
+
+    const ADAPTER_ID: &str = "fixture-agent";
+    const MEMBER_CONTRACT: &str = "catalog-session-identity-v1";
+
+    fn selection() -> ContractVersionSelection {
+        ContractVersionSelection {
+            selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+            model_major: 1,
+            external_entity_reference_version: 1,
+            semantic_revision_reference_version: 1,
+            coverage_contract_version: 1,
+            fact_family_versions: BTreeMap::from([
+                ("catalog.project".to_owned(), 1),
+                ("catalog.session".to_owned(), 1),
+            ]),
+            query_pack_version: Some(1),
+            observation_contract_version: None,
+        }
+    }
+
+    fn fixture(
+        object_label: &str,
+    ) -> (CatalogCompleteSourceAssembly, CatalogSourceMemberProjection) {
+        let source_key = CanonicalSourceInstanceKey::derive(1, b"projection-source").unwrap();
+        let stream_key = CoverageStreamKey::derive(ADAPTER_ID, b"catalog-stream").unwrap();
+        let object_key =
+            CoverageObjectKey::derive("catalog-stream", object_label.as_bytes()).unwrap();
+        let owner =
+            CatalogEvidenceOwner::new(ADAPTER_ID, source_key, stream_key, object_key, 1).unwrap();
+        let plan_source = CatalogCoveragePlanSource::new(
+            ADAPTER_ID,
+            source_key,
+            "fixture-support-v1",
+            CoverageDeclarationDigest::derive(b"fixture-declaration-v1").unwrap(),
+            CatalogAccessPolicyDigest::derive(1, b"fixture-withheld-policy-v1").unwrap(),
+        )
+        .unwrap();
+        let domain = CoverageDomain::ProjectionPack {
+            pack: CATALOG_PROJECTION_PACK_ID.to_owned(),
+            version: CATALOG_QUERY_PACK_CONTRACT_VERSION,
+        };
+        let point = SourceCoveragePoint::new(
+            domain.clone(),
+            ADAPTER_ID,
+            source_key,
+            stream_key,
+            object_key,
+            1,
+            Some(
+                CoveragePosition::derive(
+                    CoveragePositionKind::SnapshotRevision,
+                    object_label.as_bytes(),
+                    None,
+                )
+                .unwrap(),
+            ),
+            CoverageStatus::ExactSnapshot,
+            CoverageProvenance::default(),
+        )
+        .unwrap();
+        let coverage = SourceCoverageSet::new(
+            domain,
+            plan_source.coverage_scope(CatalogCoverageScope::Library),
+            CoverageMembershipRevision::derive(object_label.as_bytes()).unwrap(),
+            vec![point],
+            Vec::new(),
+            Vec::new(),
+            CoverageSetCompleteness::Complete,
+        )
+        .unwrap();
+        let member_ref = CatalogMemberRef::from_canonical_session(
+            MEMBER_CONTRACT,
+            ADAPTER_ID,
+            source_key,
+            b"session-a",
+        )
+        .unwrap();
+        let source = CatalogCompleteSourceAssembly::from_complete_library_coverage(
+            plan_source,
+            selection(),
+            MEMBER_CONTRACT,
+            CatalogSourceMembershipRevision::from_digest(
+                *blake3::hash(format!("membership:{object_label}").as_bytes()).as_bytes(),
+            ),
+            CatalogSourceCompletionRevision::from_digest(
+                *blake3::hash(format!("completion:{object_label}").as_bytes()).as_bytes(),
+            ),
+            vec![CatalogPublicationMemberRef::from_digest(
+                *member_ref.as_bytes(),
+            )],
+            coverage,
+        )
+        .unwrap();
+        let input = CatalogSourceMemberProjection::new(
+            owner,
+            "project-a",
+            "session-a",
+            CatalogAvailability::TranscriptDiscovered,
+            ProjectAssociationBasis::RolloutHeader,
+        );
+        (source, input)
+    }
+
+    #[test]
+    fn complete_membership_projects_to_bounded_reducer_and_exact_binding() {
+        let (source, input) = fixture("object-a");
+        let projection = CatalogSourceProjection::assemble(source, vec![input]).unwrap();
+        assert_eq!(projection.member_count(), 1);
+        let debug = format!("{projection:?}");
+        assert!(!debug.contains("project-a"));
+        assert!(!debug.contains("session-a"));
+
+        let reducer = projection
+            .reduce_into(CatalogReducer::default(), 1)
+            .unwrap();
+        let frozen = reducer
+            .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+            .unwrap();
+        assert_eq!(frozen.project_row_count(), 1);
+        assert_eq!(frozen.session_row_count(), 1);
+        let (source, bindings) = projection.into_publication_parts();
+        assert_eq!(source.member_count(), 1);
+        assert_eq!(bindings.len(), 1);
+    }
+
+    #[test]
+    fn projection_rejects_uncovered_or_duplicate_members_without_echoing_values() {
+        let (source, input) = fixture("object-a");
+        let mut uncovered = input.clone();
+        uncovered.owner = CatalogEvidenceOwner::new(
+            ADAPTER_ID,
+            uncovered.owner.source_instance_key,
+            uncovered.owner.stream_key,
+            CoverageObjectKey::derive("catalog-stream", b"private/path/session-a").unwrap(),
+            1,
+        )
+        .unwrap();
+        let error = CatalogSourceProjection::assemble(source.clone(), vec![uncovered])
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("private"));
+        assert!(!error.contains("session-a"));
+
+        let error = CatalogSourceProjection::assemble(source, vec![input.clone(), input])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("exactly one input"));
+        assert!(!error.contains("session-a"));
+    }
+
+    #[test]
+    fn semantic_revisions_ignore_equivalent_source_topology() {
+        let (left_source, left_input) = fixture("object-a");
+        let (right_source, right_input) = fixture("object-b");
+        let left = CatalogSourceProjection::assemble(left_source, vec![left_input]).unwrap();
+        let right = CatalogSourceProjection::assemble(right_source, vec![right_input]).unwrap();
+
+        assert_eq!(
+            left.project_assertions[0].provenance,
+            right.project_assertions[0].provenance
+        );
+        assert_eq!(
+            left.session_assertions[0].provenance,
+            right.session_assertions[0].provenance
+        );
+        assert_eq!(
+            left.associations[0].provenance,
+            right.associations[0].provenance
+        );
+        assert_ne!(
+            left.session_assertions[0].assertion_key, right.session_assertions[0].assertion_key,
+            "source evidence identity must still distinguish topology"
+        );
+    }
+}
