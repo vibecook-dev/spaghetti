@@ -125,6 +125,10 @@ pub(crate) struct PreparedObservationSupervisor {
     inner: Option<PreparedObservationSupervisorInner>,
 }
 
+pub(crate) struct StartingObservationSupervisor {
+    inner: Option<PreparedObservationSupervisorInner>,
+}
+
 struct PreparedObservationSupervisorInner {
     adapter_id: String,
     watched_instances: u32,
@@ -357,7 +361,11 @@ impl PreparedObservationSupervisor {
         self.inner().watcher_available.load(Ordering::Acquire)
     }
 
-    pub(crate) fn start(mut self) -> Result<ObservationSupervisor, EngineError> {
+    pub(crate) fn start(self) -> Result<ObservationSupervisor, EngineError> {
+        self.begin()?.finish()
+    }
+
+    pub(crate) fn begin(mut self) -> Result<StartingObservationSupervisor, EngineError> {
         let mut inner = self
             .inner
             .take()
@@ -376,6 +384,22 @@ impl PreparedObservationSupervisor {
                 worker: "observation supervisor",
             });
         }
+        Ok(StartingObservationSupervisor { inner: Some(inner) })
+    }
+
+    fn inner(&self) -> &PreparedObservationSupervisorInner {
+        self.inner
+            .as_ref()
+            .expect("prepared supervisor retains its worker until start or drop")
+    }
+}
+
+impl StartingObservationSupervisor {
+    pub(crate) fn finish(mut self) -> Result<ObservationSupervisor, EngineError> {
+        let mut inner = self
+            .inner
+            .take()
+            .expect("starting supervisor retains its worker until finish or drop");
         match inner.started.recv() {
             Ok(Ok(())) => Ok(ObservationSupervisor {
                 adapter_id: inner.adapter_id,
@@ -400,12 +424,6 @@ impl PreparedObservationSupervisor {
             }
         }
     }
-
-    fn inner(&self) -> &PreparedObservationSupervisorInner {
-        self.inner
-            .as_ref()
-            .expect("prepared supervisor retains its worker until start or drop")
-    }
 }
 
 impl PreparedObservationSupervisorInner {
@@ -420,6 +438,14 @@ impl PreparedObservationSupervisorInner {
 }
 
 impl Drop for PreparedObservationSupervisor {
+    fn drop(&mut self) {
+        if let Some(mut inner) = self.inner.take() {
+            inner.shutdown();
+        }
+    }
+}
+
+impl Drop for StartingObservationSupervisor {
     fn drop(&mut self) {
         if let Some(mut inner) = self.inner.take() {
             inner.shutdown();
@@ -1593,6 +1619,61 @@ mod tests {
         assert_eq!(object_count, 0);
         drop(connection);
         engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn every_prepared_scan_can_begin_before_any_scan_finishes() {
+        const WAIT: Duration = Duration::from_secs(15);
+        let temp = TempDir::new().unwrap();
+        let first_root = temp.path().join("first");
+        let second_root = temp.path().join("second");
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&second_root).unwrap();
+        std::fs::write(
+            first_root.join("settings.json"),
+            br#"{"model":"claude-sonnet"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            second_root.join("settings.json"),
+            br#"{"model":"claude-opus"}"#,
+        )
+        .unwrap();
+        let first_engine = open_engine(temp.path().join("first-start.db"));
+        let second_engine = open_engine(temp.path().join("second-start.db"));
+        let first_gate = Arc::new(DecodeGate::default());
+        let second_gate = Arc::new(DecodeGate::default());
+
+        let first = ObservationSupervisor::prepare_with_watcher_factory(
+            Arc::clone(&first_engine),
+            GatedClaudeAdapter::new(Arc::clone(&first_gate)),
+            ObservationSupervisorOptions::new(vec![first_root]),
+            silent_watcher,
+            QueryCancellationToken::default(),
+        )
+        .unwrap();
+        let second = ObservationSupervisor::prepare_with_watcher_factory(
+            Arc::clone(&second_engine),
+            GatedClaudeAdapter::new(Arc::clone(&second_gate)),
+            ObservationSupervisorOptions::new(vec![second_root]),
+            silent_watcher,
+            QueryCancellationToken::default(),
+        )
+        .unwrap();
+
+        let first = first.begin().unwrap();
+        first_gate.wait_until_blocked(WAIT);
+        let second = second.begin().unwrap();
+        second_gate.wait_until_blocked(WAIT);
+        first_gate.release();
+        second_gate.release();
+
+        let mut first = first.finish().unwrap();
+        let mut second = second.finish().unwrap();
+        first.shutdown().unwrap();
+        second.shutdown().unwrap();
+        first_engine.shutdown().unwrap();
+        second_engine.shutdown().unwrap();
     }
 
     #[test]
