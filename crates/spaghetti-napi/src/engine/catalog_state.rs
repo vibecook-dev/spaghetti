@@ -1,13 +1,14 @@
 //! Source-neutral RFC 012B Library plan and initial build-state durability.
 //!
-//! This module owns `Pending`/`Building` administration, reconstructs the
-//! initial `Ready` snapshot published atomically by `catalog_publication`, and
-//! can durably begin an ordinary refresh while retaining that exact snapshot.
-//! An active refresh may also fail with exact independently-safe integrity
-//! evidence while the prior publication remains queryable. It still owns no
-//! source reads, refresh completion/retirement policy, or public query
-//! authority.
+//! This module owns `Pending`/`Building`/`Partial` administration, reconstructs
+//! the `Ready` snapshot published atomically by `catalog_publication`, and can
+//! durably begin or recover a refresh while retaining that exact snapshot. An
+//! active build may publish bounded partial milestones or fail with exact
+//! integrity evidence; independently safe prior publications remain queryable.
+//! It still owns no source reads, refresh completion/retirement policy, or
+//! public query authority.
 
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -22,7 +23,7 @@ use crate::catalog_contract::{
     validate_reason_code, CatalogCoveragePlan, CatalogCoveragePlanId, CatalogCoverageScope,
     CatalogIntegritySnapshotDisposition, CatalogReadinessMachine, CatalogReadinessPhase,
     CatalogReadinessReason, CatalogReadinessSnapshot, CatalogSnapshotId,
-    CATALOG_READINESS_CONTRACT_VERSION,
+    CATALOG_QUERY_PACK_CONTRACT_VERSION, CATALOG_READINESS_CONTRACT_VERSION,
 };
 
 use super::catalog_publication::CatalogReadyPublicationIdentity;
@@ -32,11 +33,13 @@ use super::EngineError;
 pub(super) const LIBRARY_SCOPE: &str = "library";
 const PENDING_STATE: &str = "pending";
 const BUILDING_STATE: &str = "building";
+const PARTIAL_STATE: &str = "partial";
 const READY_STATE: &str = "ready";
 const DEGRADED_STATE: &str = "degraded";
 const ERROR_STATE: &str = "error";
 const REGISTER_REASON: &str = "catalog.library.plan.registered";
 const SCHEDULE_REASON: &str = "catalog.library.build.scheduled";
+pub(super) const PARTIAL_REASON: &str = "catalog.library.build.partial";
 pub(super) const INITIAL_PUBLICATION_REASON: &str = "catalog.library.initial_snapshot.published";
 const INITIAL_INTEGRITY_FAILURE_REASON: &str = "catalog.library.build.integrity_failed";
 const REFRESH_STARTED_REASON: &str = "catalog.library.refresh.started";
@@ -51,22 +54,29 @@ const REFRESH_CHANGE_SCHEMA_VERSION: u32 = 3;
 const INTEGRITY_FAILURE_CHANGE_SCHEMA_VERSION: u32 = 5;
 const SOURCE_UNAVAILABLE_CHANGE_SCHEMA_VERSION: u32 = 6;
 const INITIAL_INTEGRITY_FAILURE_CHANGE_SCHEMA_VERSION: u32 = 7;
+const PARTIAL_CHANGE_SCHEMA_VERSION: u32 = 8;
 const MAX_CATALOG_PLAN_JSON_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PARTIAL_SOURCE_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PARTIAL_COVERAGE_BYTES: usize = 512 * 1024 * 1024;
+const MAX_PARTIAL_SOURCES: usize = 4_096;
+const MAX_PARTIAL_HISTORY: usize = 8_192;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CatalogDurableBuildPhase {
     Pending,
     Building,
+    Partial,
     Ready,
     Degraded,
     Error,
 }
 
 impl CatalogDurableBuildPhase {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Pending => PENDING_STATE,
             Self::Building => BUILDING_STATE,
+            Self::Partial => PARTIAL_STATE,
             Self::Ready => READY_STATE,
             Self::Degraded => DEGRADED_STATE,
             Self::Error => ERROR_STATE,
@@ -77,6 +87,7 @@ impl CatalogDurableBuildPhase {
         match value {
             PENDING_STATE => Ok(Self::Pending),
             BUILDING_STATE => Ok(Self::Building),
+            PARTIAL_STATE => Ok(Self::Partial),
             READY_STATE => Ok(Self::Ready),
             DEGRADED_STATE => Ok(Self::Degraded),
             ERROR_STATE => Ok(Self::Error),
@@ -104,6 +115,7 @@ pub(crate) struct CatalogInitialBuildIntegrityExpectation {
     desired_contract_version: u32,
     epoch: u64,
     attempt: u64,
+    state: CatalogDurableBuildPhase,
     build_started_commit_seq: u64,
 }
 
@@ -116,8 +128,44 @@ impl std::fmt::Debug for CatalogInitialBuildIntegrityExpectation {
             .field("desired_contract_version", &self.desired_contract_version)
             .field("epoch", &self.epoch)
             .field("attempt", &self.attempt)
+            .field("state", &self.state)
             .field("build_started_commit_seq", &self.build_started_commit_seq)
             .finish()
+    }
+}
+
+/// Non-transferable compare-and-swap proof for one durable Partial milestone.
+/// The writer derives it from restart-validated state; callers cannot invent a
+/// predecessor commit or move progress across plan/epoch/attempt lineages.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogPartialBuildExpectation {
+    scope: CatalogCoverageScope,
+    coverage_plan_id: CatalogCoveragePlanId,
+    desired_contract_version: u32,
+    epoch: u64,
+    attempt: u64,
+    state: CatalogDurableBuildPhase,
+    state_commit_seq: u64,
+}
+
+impl std::fmt::Debug for CatalogPartialBuildExpectation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogPartialBuildExpectation")
+            .field("scope", &self.scope)
+            .field("coverage_plan_id", &self.coverage_plan_id)
+            .field("desired_contract_version", &self.desired_contract_version)
+            .field("epoch", &self.epoch)
+            .field("attempt", &self.attempt)
+            .field("state", &self.state)
+            .field("state_commit_seq", &self.state_commit_seq)
+            .finish()
+    }
+}
+
+impl CatalogPartialBuildExpectation {
+    pub(crate) fn state_commit_seq(&self) -> u64 {
+        self.state_commit_seq
     }
 }
 
@@ -157,6 +205,7 @@ pub(crate) struct CatalogActiveRefreshPublicationExpectation {
 enum CatalogRefreshExecutionLineage {
     ActiveReady,
     RecoveryBuilding,
+    RecoveryPartial,
 }
 
 impl std::fmt::Debug for CatalogActiveRefreshPublicationExpectation {
@@ -211,7 +260,19 @@ impl CatalogActiveRefreshPublicationExpectation {
     }
 
     pub(super) fn is_recovery(&self) -> bool {
-        self.lineage == CatalogRefreshExecutionLineage::RecoveryBuilding
+        matches!(
+            self.lineage,
+            CatalogRefreshExecutionLineage::RecoveryBuilding
+                | CatalogRefreshExecutionLineage::RecoveryPartial
+        )
+    }
+
+    pub(super) fn durable_state(&self) -> CatalogDurableBuildPhase {
+        match self.lineage {
+            CatalogRefreshExecutionLineage::ActiveReady => CatalogDurableBuildPhase::Ready,
+            CatalogRefreshExecutionLineage::RecoveryBuilding => CatalogDurableBuildPhase::Building,
+            CatalogRefreshExecutionLineage::RecoveryPartial => CatalogDurableBuildPhase::Partial,
+        }
     }
 
     pub(super) fn retry_reason_code(&self) -> Option<&str> {
@@ -245,6 +306,12 @@ pub(crate) enum CatalogBuildStateCommand {
     },
     Schedule {
         expected: CatalogBuildExpectation,
+        started_at: i64,
+        committed_at: i64,
+    },
+    RecordPartial {
+        expected: CatalogPartialBuildExpectation,
+        source_coverage: Vec<SourceCoverageSet>,
         started_at: i64,
         committed_at: i64,
     },
@@ -306,6 +373,20 @@ impl CatalogBuildStateCommand {
     ) -> Self {
         Self::Schedule {
             expected,
+            started_at,
+            committed_at,
+        }
+    }
+
+    pub(crate) fn record_partial(
+        expected: CatalogPartialBuildExpectation,
+        source_coverage: Vec<SourceCoverageSet>,
+        started_at: i64,
+        committed_at: i64,
+    ) -> Self {
+        Self::RecordPartial {
+            expected,
+            source_coverage,
             started_at,
             committed_at,
         }
@@ -433,7 +514,10 @@ impl DurableCatalogBuildState {
         &self,
     ) -> Result<CatalogInitialBuildIntegrityExpectation, EngineError> {
         if self.readiness.scope != CatalogCoverageScope::Library
-            || self.readiness.state != CatalogReadinessPhase::Building
+            || !matches!(
+                self.readiness.state,
+                CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
+            )
             || self.readiness.completed_contract_version.is_some()
             || self.readiness.complete_through_commit.is_some()
             || self.readiness.last_complete_snapshot.is_some()
@@ -441,7 +525,7 @@ impl DurableCatalogBuildState {
             || self.readiness.reason.is_some()
         {
             return Err(EngineError::InvalidCommit(
-                "catalog initial integrity failure requires one exact no-snapshot Building lineage"
+                "catalog initial integrity failure requires one exact no-snapshot active-build lineage"
                     .to_string(),
             ));
         }
@@ -451,7 +535,60 @@ impl DurableCatalogBuildState {
             desired_contract_version: self.readiness.desired_contract_version,
             epoch: self.readiness.epoch,
             attempt: self.readiness.attempt,
+            state: durable_phase(self.readiness.state)?,
             build_started_commit_seq: self.last_commit_seq,
+        })
+    }
+
+    pub(crate) fn partial_expectation(
+        &self,
+    ) -> Result<CatalogPartialBuildExpectation, EngineError> {
+        if self.readiness.scope != CatalogCoverageScope::Library
+            || !matches!(
+                self.readiness.state,
+                CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
+            )
+            || self.readiness.complete_through_commit.is_some()
+            || self.readiness.refreshing_from_snapshot.is_some()
+            || self.readiness.reason.is_some()
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog partial progress requires one exact active build lineage".to_string(),
+            ));
+        }
+        match (
+            self.readiness.completed_contract_version,
+            self.readiness.last_complete_snapshot,
+        ) {
+            (None, None) => {}
+            (Some(completed), Some(snapshot))
+                if completed == snapshot.pack_contract_version
+                    && completed == self.readiness.desired_contract_version
+                    && self.readiness.attempt
+                        > self
+                            .ready_publication_attempt
+                            .unwrap_or(self.readiness.attempt) => {}
+            _ => {
+                return Err(EngineError::InvalidCommit(
+                    "catalog partial progress has an invalid retained-snapshot shape".to_string(),
+                ));
+            }
+        }
+        if self.readiness.state == CatalogReadinessPhase::Partial
+            && self.readiness.source_coverage.is_empty()
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog Partial readiness is missing durable source coverage".to_string(),
+            ));
+        }
+        Ok(CatalogPartialBuildExpectation {
+            scope: self.readiness.scope,
+            coverage_plan_id: self.readiness.coverage_plan_id,
+            desired_contract_version: self.readiness.desired_contract_version,
+            epoch: self.readiness.epoch,
+            attempt: self.readiness.attempt,
+            state: durable_phase(self.readiness.state)?,
+            state_commit_seq: self.last_commit_seq,
         })
     }
 
@@ -500,9 +637,9 @@ impl DurableCatalogBuildState {
                 None,
                 Some(CatalogReadinessReason::TerminalSourceUnavailable { .. }),
             ) => self.last_commit_seq > snapshot_id.complete_commit,
-            (CatalogReadinessPhase::Building, None, None)
+            (CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial, None, None)
             | (
-                CatalogReadinessPhase::Building,
+                CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial,
                 None,
                 Some(CatalogReadinessReason::SourceRetrying { .. }),
             ) => {
@@ -520,7 +657,9 @@ impl DurableCatalogBuildState {
             || (self.readiness.complete_through_commit.is_none()
                 && matches!(
                     self.readiness.state,
-                    CatalogReadinessPhase::Building | CatalogReadinessPhase::Degraded
+                    CatalogReadinessPhase::Building
+                        | CatalogReadinessPhase::Partial
+                        | CatalogReadinessPhase::Degraded
                 ));
         if self.plan.scope != CatalogCoverageScope::Library
             || self.readiness.coverage_plan_id != self.plan.coverage_plan_id
@@ -635,7 +774,7 @@ impl DurableCatalogBuildState {
             {
                 CatalogRefreshExecutionLineage::ActiveReady
             }
-            CatalogReadinessPhase::Building
+            CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
                 if self.readiness.refreshing_from_snapshot.is_none()
                     && self.readiness.complete_through_commit.is_none()
                     && matches!(
@@ -649,7 +788,11 @@ impl DurableCatalogBuildState {
                             .ready_publication_attempt
                             .unwrap_or(self.readiness.attempt) =>
             {
-                CatalogRefreshExecutionLineage::RecoveryBuilding
+                if self.readiness.state == CatalogReadinessPhase::Partial {
+                    CatalogRefreshExecutionLineage::RecoveryPartial
+                } else {
+                    CatalogRefreshExecutionLineage::RecoveryBuilding
+                }
             }
             _ => {
                 return Err(EngineError::InvalidCommit(
@@ -831,6 +974,7 @@ pub(super) enum CatalogCommitStage {
     BeforeTransaction,
     AfterCommitInsert,
     AfterPlanWrite,
+    AfterPartialCoverageWrite,
     AfterFailureEvidenceWrite,
     AfterBuildStateWrite,
     AfterOutboxInsert,
@@ -860,6 +1004,22 @@ struct CatalogReadinessChangedPayload {
     epoch: u64,
     attempt: u64,
     state: CatalogReadinessPhase,
+    commit_seq: u64,
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogPartialChangedPayload {
+    readiness_contract_version: u32,
+    scope: &'static str,
+    coverage_plan_id: CatalogCoveragePlanId,
+    desired_contract_version: u32,
+    epoch: u64,
+    attempt: u64,
+    state: CatalogReadinessPhase,
+    source_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason_code: Option<String>,
     commit_seq: u64,
 }
 
@@ -953,6 +1113,10 @@ struct CatalogRefreshRecoveryStartedPayload {
 enum CatalogBuildStateWrite<'a> {
     InsertPlan,
     Schedule,
+    RecordPartial {
+        expected: &'a CatalogPartialBuildExpectation,
+        prepared: &'a PreparedCatalogPartialCoverage,
+    },
     BeginRefresh {
         expected: &'a CatalogReadyRefreshExpectation,
     },
@@ -975,6 +1139,171 @@ enum CatalogBuildStateWrite<'a> {
     RetryTerminalRefresh {
         expected: &'a CatalogBuildExpectation,
     },
+}
+
+#[derive(Debug)]
+struct PreparedCatalogPartialSource {
+    adapter_id: String,
+    source_instance_key: [u8; 32],
+    payload: Vec<u8>,
+    payload_digest: [u8; 32],
+}
+
+#[derive(Debug)]
+struct PreparedCatalogPartialCoverage {
+    sources: Vec<PreparedCatalogPartialSource>,
+    encoded_bytes: usize,
+    entries_digest: [u8; 32],
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl BoundedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+        }
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let next = self
+            .bytes
+            .len()
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("catalog partial coverage size overflow"))?;
+        if next > self.limit {
+            return Err(io::Error::other(
+                "catalog partial source coverage exceeds its byte limit",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn visit_partial_coverage<F>(
+    source_coverage: &[SourceCoverageSet],
+    mut visit: F,
+) -> Result<(usize, [u8; 32]), EngineError>
+where
+    F: FnMut(&SourceCoverageSet, Vec<u8>, [u8; 32]) -> Result<(), EngineError>,
+{
+    if source_coverage.is_empty() || source_coverage.len() > MAX_PARTIAL_SOURCES {
+        return Err(EngineError::InvalidCommit(
+            "catalog partial coverage source count is empty or unbounded".to_string(),
+        ));
+    }
+    if !source_coverage.windows(2).all(|pair| {
+        (&pair[0].scope.adapter_id, pair[0].scope.source_instance_key)
+            < (&pair[1].scope.adapter_id, pair[1].scope.source_instance_key)
+    }) {
+        return Err(EngineError::InvalidCommit(
+            "catalog partial coverage must be canonical and duplicate-free".to_string(),
+        ));
+    }
+
+    let mut encoded_bytes = 0_usize;
+    let mut entries_hasher = blake3::Hasher::new();
+    entries_hasher.update(b"catalog-partial-coverage-entries-v1\0");
+    for (ordinal, coverage) in source_coverage.iter().enumerate() {
+        coverage.validate().map_err(|_| {
+            EngineError::InvalidCommit("invalid catalog partial coverage".to_string())
+        })?;
+        let mut writer = BoundedJsonWriter::new(MAX_PARTIAL_SOURCE_PAYLOAD_BYTES);
+        serde_json::to_writer(&mut writer, coverage).map_err(|_| {
+            EngineError::InvalidCommit(
+                "catalog partial source coverage exceeds its durable encoding bound".to_string(),
+            )
+        })?;
+        if writer.bytes.is_empty() {
+            return Err(EngineError::InvalidCommit(
+                "catalog partial source coverage encoded to an empty payload".to_string(),
+            ));
+        }
+        encoded_bytes = encoded_bytes
+            .checked_add(writer.bytes.len())
+            .ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog partial coverage aggregate byte count overflowed".to_string(),
+                )
+            })?;
+        if encoded_bytes > MAX_PARTIAL_COVERAGE_BYTES {
+            return Err(EngineError::InvalidCommit(
+                "catalog partial coverage exceeds its aggregate byte bound".to_string(),
+            ));
+        }
+        let payload_digest = *blake3::hash(&writer.bytes).as_bytes();
+        let ordinal = u64::try_from(ordinal).map_err(|_| {
+            EngineError::InvalidCommit("catalog partial source ordinal overflowed".to_string())
+        })?;
+        entries_hasher.update(&ordinal.to_be_bytes());
+        entries_hasher.update(&(coverage.scope.adapter_id.len() as u64).to_be_bytes());
+        entries_hasher.update(coverage.scope.adapter_id.as_bytes());
+        entries_hasher.update(coverage.scope.source_instance_key.as_bytes());
+        entries_hasher.update(&(writer.bytes.len() as u64).to_be_bytes());
+        entries_hasher.update(&payload_digest);
+        visit(coverage, writer.bytes, payload_digest)?;
+    }
+    Ok((encoded_bytes, *entries_hasher.finalize().as_bytes()))
+}
+
+fn prepare_partial_coverage(
+    source_coverage: &[SourceCoverageSet],
+) -> Result<PreparedCatalogPartialCoverage, EngineError> {
+    let mut sources = Vec::with_capacity(source_coverage.len());
+    let (encoded_bytes, entries_digest) =
+        visit_partial_coverage(source_coverage, |coverage, payload, payload_digest| {
+            sources.push(PreparedCatalogPartialSource {
+                adapter_id: coverage.scope.adapter_id.clone(),
+                source_instance_key: *coverage.scope.source_instance_key.as_bytes(),
+                payload,
+                payload_digest,
+            });
+            Ok(())
+        })?;
+    Ok(PreparedCatalogPartialCoverage {
+        sources,
+        encoded_bytes,
+        entries_digest,
+    })
+}
+
+fn partial_progress_strictly_advances(
+    previous: &[SourceCoverageSet],
+    next: &[SourceCoverageSet],
+) -> bool {
+    let mut changed = false;
+    for prior in previous {
+        let Some(current) = next.iter().find(|candidate| {
+            candidate.scope.adapter_id == prior.scope.adapter_id
+                && candidate.scope.source_instance_key == prior.scope.source_instance_key
+        }) else {
+            return false;
+        };
+        if current == prior {
+            continue;
+        }
+        let rank = |value: CoverageSetCompleteness| match value {
+            CoverageSetCompleteness::Unavailable => 0_u8,
+            CoverageSetCompleteness::Partial => 1,
+            CoverageSetCompleteness::Complete => 2,
+        };
+        if rank(current.completeness) <= rank(prior.completeness) {
+            return false;
+        }
+        changed = true;
+    }
+    changed || next.len() > previous.len()
 }
 
 fn unavailable_source_coverage(
@@ -1025,6 +1354,18 @@ fn active_refresh_matches_expectation(
             .is_some_and(|identity| identity == &expected.publication_identity)
 }
 
+fn refresh_execution_reason(expected: &CatalogActiveRefreshPublicationExpectation) -> &'static str {
+    if expected.retry_reason_code().is_some() {
+        REFRESH_SOURCE_RETRYING_REASON
+    } else if expected.durable_state() == CatalogDurableBuildPhase::Partial {
+        PARTIAL_REASON
+    } else if expected.is_recovery() {
+        REFRESH_RECOVERY_STARTED_REASON
+    } else {
+        REFRESH_STARTED_REASON
+    }
+}
+
 pub(super) fn apply_catalog_build_state_commit(
     connection: &mut Connection,
     command: &CatalogBuildStateCommand,
@@ -1037,6 +1378,12 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
     command: &CatalogBuildStateCommand,
     hook: &dyn CatalogCommitHook,
 ) -> Result<Option<CatalogBuildStateReceipt>, EngineError> {
+    let prepared_partial = match command {
+        CatalogBuildStateCommand::RecordPartial {
+            source_coverage, ..
+        } => Some(prepare_partial_coverage(source_coverage)?),
+        _ => None,
+    };
     validate_command(command)?;
     hook.reach(CatalogCommitStage::BeforeTransaction)?;
     let transaction = connection
@@ -1058,6 +1405,7 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
                         current.readiness.state,
                         CatalogReadinessPhase::Pending
                             | CatalogReadinessPhase::Building
+                            | CatalogReadinessPhase::Partial
                             | CatalogReadinessPhase::Ready
                             | CatalogReadinessPhase::Degraded
                             | CatalogReadinessPhase::Error
@@ -1128,6 +1476,64 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
                 *committed_at,
                 SCHEDULE_REASON,
                 CatalogBuildStateWrite::Schedule,
+            )
+        }
+        CatalogBuildStateCommand::RecordPartial {
+            expected,
+            source_coverage,
+            started_at,
+            committed_at,
+        } => {
+            let Some(current) = current else {
+                return Err(EngineError::InvalidCommit(
+                    "catalog partial progress requires durable active readiness".to_string(),
+                ));
+            };
+            let prepared = prepared_partial.as_ref().ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog partial progress is missing its bounded encoding".to_string(),
+                )
+            })?;
+            if current.readiness.state == CatalogReadinessPhase::Partial
+                && exact_partial_progress_exists(
+                    &transaction,
+                    &current,
+                    expected,
+                    prepared,
+                    *started_at,
+                    *committed_at,
+                )?
+            {
+                transaction.commit().map_err(|error| {
+                    sqlite_error("finish unchanged catalog partial progress", error)
+                })?;
+                return Ok(None);
+            }
+            if current.partial_expectation()? != *expected {
+                return Err(EngineError::InvalidCommit(
+                    "catalog partial-progress expectation is stale or foreign".to_string(),
+                ));
+            }
+            if !partial_progress_strictly_advances(
+                &current.readiness.source_coverage,
+                source_coverage,
+            ) {
+                return Err(EngineError::InvalidCommit(
+                    "catalog partial progress must strictly advance source coverage".to_string(),
+                ));
+            }
+            let mut machine =
+                CatalogReadinessMachine::resume(current.plan.clone(), current.readiness.clone())
+                    .map_err(catalog_contract_error)?;
+            machine
+                .record_partial(source_coverage.clone())
+                .map_err(catalog_contract_error)?;
+            (
+                machine,
+                *started_at,
+                *committed_at,
+                PARTIAL_REASON,
+                CatalogBuildStateWrite::RecordPartial { expected, prepared },
             )
         }
         CatalogBuildStateCommand::BeginRefresh {
@@ -1456,6 +1862,10 @@ pub(super) fn apply_catalog_build_state_commit_with_hook(
         insert_plan(&transaction, machine.plan(), commit_seq)?;
     }
     hook.reach(CatalogCommitStage::AfterPlanWrite)?;
+    if let CatalogBuildStateWrite::RecordPartial { expected, prepared } = write {
+        insert_partial_coverage(&transaction, commit_seq, expected, prepared, committed_at)?;
+        hook.reach(CatalogCommitStage::AfterPartialCoverageWrite)?;
+    }
     if let CatalogBuildStateWrite::FailInitialBuildIntegrity {
         expected,
         reason_code,
@@ -1535,7 +1945,7 @@ pub(super) fn load_catalog_build_state(
                    build.epoch,
                    build.attempt,
                    CASE WHEN typeof(build.state) = 'text'
-                                  AND build.state IN ('pending', 'building', 'ready', 'degraded', 'error')
+                                  AND build.state IN ('pending', 'building', 'partial', 'ready', 'degraded', 'error')
                         THEN build.state END,
                    build.completed_contract_version,
                    build.complete_through_commit,
@@ -1562,6 +1972,7 @@ pub(super) fn load_catalog_build_state(
                                   AND state_commit.reason IN (
                                       'catalog.library.plan.registered',
                                       'catalog.library.build.scheduled',
+                                      'catalog.library.build.partial',
                                       'catalog.library.initial_snapshot.published',
                                       'catalog.library.build.integrity_failed',
                                       'catalog.library.refresh.started',
@@ -1667,6 +2078,566 @@ struct StoredCatalogBuildState {
     state_fact_count: i64,
 }
 
+struct StoredCatalogPartialHeader {
+    partial_commit_seq: i64,
+    predecessor_state_commit_seq: i64,
+    coverage_plan_id: Option<Vec<u8>>,
+    readiness_epoch: i64,
+    attempt: i64,
+    source_count: i64,
+    encoded_bytes: i64,
+    entries_digest: Option<Vec<u8>>,
+    committed_at: i64,
+    owner_source: Option<i64>,
+    owner_reason: Option<String>,
+    owner_started_at: i64,
+    owner_committed_at: Option<i64>,
+    owner_fact_count: i64,
+}
+
+struct StoredCatalogPartialBaseChange {
+    topic: Option<String>,
+    schema_version: i64,
+    entity_key: Option<Vec<u8>>,
+    operation: Option<String>,
+    payload: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy)]
+enum CatalogPartialCoverageTarget {
+    Exact {
+        epoch: u64,
+        attempt: u64,
+        commit: u64,
+    },
+    LatestBefore {
+        epoch: u64,
+        attempt: u64,
+        commit: u64,
+    },
+}
+
+impl CatalogPartialCoverageTarget {
+    fn matches_terminal(self, epoch: u64, attempt: u64, commit: u64) -> bool {
+        match self {
+            Self::Exact {
+                epoch: target_epoch,
+                attempt: target_attempt,
+                commit: target_commit,
+            } => epoch == target_epoch && attempt == target_attempt && commit == target_commit,
+            Self::LatestBefore {
+                epoch: target_epoch,
+                attempt: target_attempt,
+                commit: target_commit,
+            } => epoch == target_epoch && attempt == target_attempt && commit < target_commit,
+        }
+    }
+}
+
+fn validate_partial_terminal_anchor(
+    connection: &Connection,
+    plan: &CatalogCoveragePlan,
+    epoch: u64,
+    attempt: u64,
+    last_partial: u64,
+) -> Result<(), EngineError> {
+    let anchored: i64 = connection
+        .query_row(
+            r#"
+            SELECT
+              EXISTS(SELECT 1 FROM catalog_snapshots
+                     WHERE build_commit_seq = ?1
+                       AND coverage_plan_id = ?2
+                       AND readiness_epoch = ?3
+                       AND attempt = ?4)
+              OR EXISTS(SELECT 1 FROM catalog_refresh_integrity_failures
+                        WHERE failed_refresh_commit_seq = ?1
+                          AND coverage_plan_id = ?2
+                          AND readiness_epoch = ?3
+                          AND attempt = ?4
+                          AND snapshot_disposition = 'discarded')
+              OR EXISTS(SELECT 1 FROM catalog_refresh_source_failures
+                        WHERE failed_refresh_commit_seq = ?1
+                          AND coverage_plan_id = ?2
+                          AND readiness_epoch = ?3
+                          AND attempt = ?4)
+              OR EXISTS(SELECT 1 FROM catalog_build_state
+                        WHERE last_commit_seq = ?1
+                          AND coverage_plan_id = ?2
+                          AND epoch = ?3
+                          AND attempt = ?4
+                          AND state = 'partial')
+              OR EXISTS(
+                SELECT 1
+                FROM ingest_commits AS retry
+                WHERE retry.commit_seq > ?1
+                  AND retry.source_instance_id IS NULL
+                  AND retry.reason = 'catalog.library.refresh.source_retrying'
+                  AND retry.committed_at IS NOT NULL
+                  AND retry.fact_count = 0
+                  AND (
+                    EXISTS(SELECT 1 FROM catalog_snapshots
+                           WHERE build_commit_seq = retry.commit_seq
+                             AND coverage_plan_id = ?2
+                             AND readiness_epoch = ?3
+                             AND attempt = ?4)
+                    OR EXISTS(SELECT 1 FROM catalog_refresh_integrity_failures
+                              WHERE failed_refresh_commit_seq = retry.commit_seq
+                                AND coverage_plan_id = ?2
+                                AND readiness_epoch = ?3
+                                AND attempt = ?4)
+                    OR EXISTS(SELECT 1 FROM catalog_refresh_source_failures
+                              WHERE failed_refresh_commit_seq = retry.commit_seq
+                                AND coverage_plan_id = ?2
+                                AND readiness_epoch = ?3
+                                AND attempt = ?4)
+                    OR EXISTS(SELECT 1 FROM catalog_build_state
+                              WHERE last_commit_seq = retry.commit_seq
+                                AND coverage_plan_id = ?2
+                                AND epoch = ?3
+                                AND attempt = ?4
+                                AND state = 'partial'
+                                AND reason_code IS NOT NULL)
+                  )
+              )
+            "#,
+            params![
+                to_i64(last_partial, "catalog last partial commit")?,
+                plan.coverage_plan_id.storage_bytes().as_slice(),
+                to_i64(epoch, "catalog partial epoch")?,
+                to_i64(attempt, "catalog partial attempt")?,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|error| sqlite_error("validate catalog partial terminal owner", error))?;
+    if anchored != 1 {
+        return Err(corrupt_catalog_state(
+            "catalog partial chain is orphaned from durable readiness",
+        ));
+    }
+    Ok(())
+}
+
+fn load_and_validate_partial_history(
+    connection: &Connection,
+    plan: &CatalogCoveragePlan,
+    target: Option<CatalogPartialCoverageTarget>,
+) -> Result<Option<Vec<SourceCoverageSet>>, EngineError> {
+    let history_limit = MAX_PARTIAL_HISTORY.checked_add(1).ok_or_else(|| {
+        corrupt_catalog_state("catalog partial-history validation limit overflow")
+    })?;
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT partial.partial_commit_seq,
+                   partial.predecessor_state_commit_seq,
+                   CASE WHEN typeof(partial.coverage_plan_id) = 'blob'
+                                  AND length(partial.coverage_plan_id) = 32
+                        THEN partial.coverage_plan_id END,
+                   partial.readiness_epoch, partial.attempt,
+                   partial.source_count, partial.encoded_bytes,
+                   CASE WHEN typeof(partial.entries_digest) = 'blob'
+                                  AND length(partial.entries_digest) = 32
+                        THEN partial.entries_digest END,
+                   partial.committed_at,
+                   owner.source_instance_id,
+                   CASE WHEN typeof(owner.reason) = 'text'
+                                  AND owner.reason = 'catalog.library.build.partial'
+                        THEN owner.reason END,
+                   owner.started_at, owner.committed_at, owner.fact_count
+            FROM catalog_partial_builds AS partial
+            LEFT JOIN ingest_commits AS owner
+              ON owner.commit_seq = partial.partial_commit_seq
+            ORDER BY partial.partial_commit_seq
+            LIMIT ?1
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare catalog partial history", error))?;
+    let rows = statement
+        .query_map(
+            [to_i64(
+                history_limit as u64,
+                "catalog partial-history limit",
+            )?],
+            |row| {
+                Ok(StoredCatalogPartialHeader {
+                    partial_commit_seq: row.get(0)?,
+                    predecessor_state_commit_seq: row.get(1)?,
+                    coverage_plan_id: row.get(2)?,
+                    readiness_epoch: row.get(3)?,
+                    attempt: row.get(4)?,
+                    source_count: row.get(5)?,
+                    encoded_bytes: row.get(6)?,
+                    entries_digest: row.get(7)?,
+                    committed_at: row.get(8)?,
+                    owner_source: row.get(9)?,
+                    owner_reason: row.get(10)?,
+                    owner_started_at: row.get(11)?,
+                    owner_committed_at: row.get(12)?,
+                    owner_fact_count: row.get(13)?,
+                })
+            },
+        )
+        .map_err(|error| sqlite_error("load catalog partial history", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| sqlite_error("decode catalog partial history", error))?;
+    if rows.len() > MAX_PARTIAL_HISTORY {
+        return Err(corrupt_catalog_state(
+            "catalog partial history exceeds its bounded restart scan",
+        ));
+    }
+
+    // Coverage payloads may be hundreds of MiB. Validate the immutable history
+    // one lineage at a time and retain only the terminal milestone required to
+    // reconstruct the current Partial state. The history-row limit bounds SQL
+    // work; this streaming shape independently bounds decoded payload memory.
+    let mut active_group: Option<(u64, u64, u64, Vec<SourceCoverageSet>)> = None;
+    let mut target_coverage = None;
+    for stored in rows {
+        let partial_commit = positive_u64(stored.partial_commit_seq, "catalog partial commit")?;
+        let predecessor = positive_u64(
+            stored.predecessor_state_commit_seq,
+            "catalog partial predecessor commit",
+        )?;
+        let epoch = positive_u64(stored.readiness_epoch, "catalog partial epoch")?;
+        let attempt = positive_u64(stored.attempt, "catalog partial attempt")?;
+        let source_count = usize::try_from(stored.source_count)
+            .map_err(|_| corrupt_catalog_state("catalog partial source count is outside usize"))?;
+        let encoded_bytes = usize::try_from(stored.encoded_bytes).map_err(|_| {
+            corrupt_catalog_state("catalog partial encoded bytes are outside usize")
+        })?;
+        if stored.coverage_plan_id.as_deref()
+            != Some(plan.coverage_plan_id.storage_bytes().as_slice())
+            || source_count == 0
+            || source_count > MAX_PARTIAL_SOURCES
+            || encoded_bytes == 0
+            || encoded_bytes > MAX_PARTIAL_COVERAGE_BYTES
+            || stored.entries_digest.as_deref().map(<[u8]>::len) != Some(32)
+            || predecessor >= partial_commit
+            || stored.owner_source.is_some()
+            || stored.owner_reason.as_deref() != Some(PARTIAL_REASON)
+            || stored.owner_started_at > stored.committed_at
+            || stored.owner_committed_at != Some(stored.committed_at)
+            || stored.owner_fact_count != 0
+        {
+            return Err(corrupt_catalog_state(
+                "catalog partial header differs from its bounded administrative owner",
+            ));
+        }
+
+        let mut entry_statement = connection
+            .prepare(
+                r#"
+                SELECT ordinal,
+                       CASE WHEN typeof(adapter_id) = 'text'
+                                      AND length(CAST(adapter_id AS BLOB)) BETWEEN 1 AND 128
+                            THEN adapter_id END,
+                       CASE WHEN typeof(canonical_source_instance_key) = 'blob'
+                                      AND length(canonical_source_instance_key) = 32
+                            THEN canonical_source_instance_key END,
+                       CASE WHEN typeof(payload) = 'blob'
+                                      AND length(payload) BETWEEN 1 AND ?2
+                            THEN payload END,
+                       CASE WHEN typeof(payload_digest) = 'blob'
+                                      AND length(payload_digest) = 32
+                            THEN payload_digest END
+                FROM catalog_partial_sources
+                WHERE partial_commit_seq = ?1
+                ORDER BY ordinal
+                LIMIT ?3
+                "#,
+            )
+            .map_err(|error| sqlite_error("prepare catalog partial sources", error))?;
+        let entry_limit = source_count.checked_add(1).ok_or_else(|| {
+            corrupt_catalog_state("catalog partial source validation limit overflow")
+        })?;
+        let entries = entry_statement
+            .query_map(
+                params![
+                    to_i64(partial_commit, "catalog partial commit")?,
+                    MAX_PARTIAL_SOURCE_PAYLOAD_BYTES as i64,
+                    to_i64(entry_limit as u64, "catalog partial source limit")?,
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<Vec<u8>>>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
+                        row.get::<_, Option<Vec<u8>>>(4)?,
+                    ))
+                },
+            )
+            .map_err(|error| sqlite_error("load catalog partial sources", error))?;
+        let mut coverage = Vec::with_capacity(source_count);
+        for entry in entries {
+            let (ordinal, adapter_id, source_key, payload, payload_digest) =
+                entry.map_err(|error| sqlite_error("decode catalog partial source", error))?;
+            let expected_ordinal = coverage.len();
+            let payload = payload.ok_or_else(|| {
+                corrupt_catalog_state("catalog partial source payload exceeds its byte bound")
+            })?;
+            let payload_digest = payload_digest.ok_or_else(|| {
+                corrupt_catalog_state("catalog partial source digest is malformed")
+            })?;
+            let adapter_id = adapter_id.ok_or_else(|| {
+                corrupt_catalog_state("catalog partial source adapter is malformed")
+            })?;
+            let source_key = source_key.ok_or_else(|| {
+                corrupt_catalog_state("catalog partial source identity is malformed")
+            })?;
+            if usize::try_from(ordinal).ok() != Some(expected_ordinal)
+                || blake3::hash(&payload).as_bytes().as_slice() != payload_digest
+            {
+                return Err(corrupt_catalog_state(
+                    "catalog partial source ordinal or payload digest is invalid",
+                ));
+            }
+            let set: SourceCoverageSet = serde_json::from_slice(&payload)
+                .map_err(|_| corrupt_catalog_state("catalog partial source payload is invalid"))?;
+            set.validate()
+                .map_err(|_| corrupt_catalog_state("catalog partial source coverage is invalid"))?;
+            if set.scope.adapter_id != adapter_id
+                || set.scope.source_instance_key.as_bytes().as_slice() != source_key
+            {
+                return Err(corrupt_catalog_state(
+                    "catalog partial source coordinates differ from its payload",
+                ));
+            }
+            coverage.push(set);
+        }
+        if coverage.len() != source_count {
+            return Err(corrupt_catalog_state(
+                "catalog partial source count differs from its header",
+            ));
+        }
+        let (canonical_encoded_bytes, canonical_entries_digest) =
+            visit_partial_coverage(&coverage, |_, _, _| Ok(())).map_err(|_| {
+                corrupt_catalog_state("catalog partial coverage encoding is not canonical")
+            })?;
+        if canonical_encoded_bytes != encoded_bytes
+            || stored.entries_digest.as_deref() != Some(canonical_entries_digest.as_slice())
+        {
+            return Err(corrupt_catalog_state(
+                "catalog partial coverage commitment differs from its entries",
+            ));
+        }
+        let same_group = active_group
+            .as_ref()
+            .is_some_and(|(prior_epoch, prior_attempt, _, _)| {
+                (*prior_epoch, *prior_attempt) == (epoch, attempt)
+            });
+        if same_group {
+            let (_, _, prior_commit, prior_coverage) = active_group
+                .as_ref()
+                .expect("same partial-history group exists");
+            if predecessor != *prior_commit
+                || !partial_progress_strictly_advances(prior_coverage, &coverage)
+            {
+                return Err(corrupt_catalog_state(
+                    "catalog partial milestones do not form one strictly advancing chain",
+                ));
+            }
+        } else {
+            if let Some((prior_epoch, prior_attempt, prior_commit, prior_coverage)) =
+                active_group.take()
+            {
+                if (epoch, attempt) <= (prior_epoch, prior_attempt) {
+                    return Err(corrupt_catalog_state(
+                        "catalog partial lineages are not strictly ordered",
+                    ));
+                }
+                validate_partial_terminal_anchor(
+                    connection,
+                    plan,
+                    prior_epoch,
+                    prior_attempt,
+                    prior_commit,
+                )?;
+                if target.is_some_and(|target| {
+                    target.matches_terminal(prior_epoch, prior_attempt, prior_commit)
+                }) {
+                    target_coverage = Some(prior_coverage);
+                }
+            }
+            let expected_reason = if attempt == 1 {
+                SCHEDULE_REASON
+            } else {
+                REFRESH_RECOVERY_STARTED_REASON
+            };
+            let (source, reason, committed_at, fact_count): (
+                Option<i64>,
+                Option<String>,
+                Option<i64>,
+                i64,
+            ) = connection
+                .query_row(
+                    r#"
+                    SELECT source_instance_id,
+                           CASE WHEN typeof(reason) = 'text' THEN reason END,
+                           committed_at, fact_count
+                    FROM ingest_commits WHERE commit_seq = ?1
+                    "#,
+                    [to_i64(predecessor, "catalog partial base commit")?],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .map_err(|error| sqlite_error("load catalog partial base owner", error))?;
+            if source.is_some()
+                || reason.as_deref() != Some(expected_reason)
+                || committed_at.is_none()
+                || fact_count != 0
+            {
+                return Err(corrupt_catalog_state(
+                    "catalog partial chain has a foreign build owner",
+                ));
+            }
+            validate_partial_base_change(
+                connection,
+                plan,
+                epoch,
+                attempt,
+                predecessor,
+                expected_reason,
+            )?;
+        }
+        active_group = Some((epoch, attempt, partial_commit, coverage));
+    }
+
+    if let Some((epoch, attempt, last_partial, coverage)) = active_group {
+        validate_partial_terminal_anchor(connection, plan, epoch, attempt, last_partial)?;
+        if target.is_some_and(|target| target.matches_terminal(epoch, attempt, last_partial)) {
+            target_coverage = Some(coverage);
+        }
+    }
+    Ok(target_coverage)
+}
+
+fn validate_partial_base_change(
+    connection: &Connection,
+    plan: &CatalogCoveragePlan,
+    epoch: u64,
+    attempt: u64,
+    base_commit: u64,
+    expected_reason: &str,
+) -> Result<(), EngineError> {
+    let change_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM change_log WHERE commit_seq = ?1",
+            [to_i64(base_commit, "catalog partial base commit")?],
+            |row| row.get(0),
+        )
+        .map_err(|error| sqlite_error("count catalog partial base changes", error))?;
+    let stored = connection
+        .query_row(
+            r#"
+            SELECT CASE WHEN typeof(topic) = 'text' THEN topic END,
+                   schema_version,
+                   CASE WHEN typeof(entity_key) = 'blob' AND length(entity_key) = 32
+                        THEN entity_key END,
+                   CASE WHEN typeof(operation) = 'text' THEN operation END,
+                   CASE WHEN typeof(payload) = 'blob' AND length(payload) BETWEEN 1 AND 65536
+                        THEN payload END
+            FROM change_log
+            WHERE commit_seq = ?1 AND ordinal = 0
+            "#,
+            [to_i64(base_commit, "catalog partial base commit")?],
+            |row| {
+                Ok(StoredCatalogPartialBaseChange {
+                    topic: row.get(0)?,
+                    schema_version: row.get(1)?,
+                    entity_key: row.get(2)?,
+                    operation: row.get(3)?,
+                    payload: row.get(4)?,
+                })
+            },
+        )
+        .map_err(|error| sqlite_error("load catalog partial base change", error))?;
+    let payload = stored.payload.ok_or_else(|| {
+        corrupt_catalog_state("catalog partial base invalidation exceeds its byte bound")
+    })?;
+    let value: serde_json::Value = serde_json::from_slice(&payload).map_err(|_| {
+        corrupt_catalog_state("catalog partial base invalidation is not canonical JSON")
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        corrupt_catalog_state("catalog partial base invalidation is not an object")
+    })?;
+    let expected_plan_id = serde_json::to_value(plan.coverage_plan_id).map_err(|_| {
+        corrupt_catalog_state("catalog partial base plan identity cannot be encoded")
+    })?;
+    let common_matches = change_count == 1
+        && stored.topic.as_deref() == Some(READINESS_CHANGE_TOPIC)
+        && stored.entity_key.as_deref() == Some(plan.coverage_plan_id.storage_bytes().as_slice())
+        && stored.operation.as_deref() == Some("upsert")
+        && object.get("readiness_contract_version")
+            == Some(&serde_json::Value::from(CATALOG_READINESS_CONTRACT_VERSION))
+        && object.get("scope") == Some(&serde_json::Value::from(LIBRARY_SCOPE))
+        && object.get("coverage_plan_id") == Some(&expected_plan_id)
+        && object.get("desired_contract_version")
+            == Some(&serde_json::Value::from(
+                CATALOG_QUERY_PACK_CONTRACT_VERSION,
+            ))
+        && object.get("epoch") == Some(&serde_json::Value::from(epoch))
+        && object.get("attempt") == Some(&serde_json::Value::from(attempt))
+        && object.get("state") == Some(&serde_json::Value::from(BUILDING_STATE))
+        && object.get("commit_seq") == Some(&serde_json::Value::from(base_commit));
+    let generic_keys = [
+        "attempt",
+        "commit_seq",
+        "coverage_plan_id",
+        "desired_contract_version",
+        "epoch",
+        "readiness_contract_version",
+        "scope",
+        "state",
+    ];
+    let generic = stored.schema_version == i64::from(READINESS_CHANGE_SCHEMA_VERSION)
+        && object.len() == generic_keys.len()
+        && generic_keys.iter().all(|key| object.contains_key(*key));
+    let recovery_keys = [
+        "attempt",
+        "commit_seq",
+        "completed_contract_version",
+        "coverage_plan_id",
+        "desired_contract_version",
+        "epoch",
+        "last_complete_snapshot",
+        "readiness_contract_version",
+        "scope",
+        "state",
+    ];
+    let recovery_snapshot = object
+        .get("last_complete_snapshot")
+        .cloned()
+        .map(serde_json::from_value::<CatalogSnapshotId>)
+        .transpose()
+        .map_err(|_| {
+            corrupt_catalog_state("catalog partial recovery base has an invalid snapshot")
+        })?;
+    let recovery = expected_reason == REFRESH_RECOVERY_STARTED_REASON
+        && stored.schema_version == i64::from(SOURCE_UNAVAILABLE_CHANGE_SCHEMA_VERSION)
+        && object.len() == recovery_keys.len()
+        && recovery_keys.iter().all(|key| object.contains_key(*key))
+        && object.get("completed_contract_version")
+            == Some(&serde_json::Value::from(
+                CATALOG_QUERY_PACK_CONTRACT_VERSION,
+            ))
+        && recovery_snapshot.is_some_and(|snapshot| {
+            snapshot.coverage_plan_id == plan.coverage_plan_id
+                && snapshot.readiness_epoch == epoch
+                && snapshot.pack_contract_version == CATALOG_QUERY_PACK_CONTRACT_VERSION
+                && snapshot.complete_commit < base_commit
+        });
+    if !common_matches
+        || !((expected_reason == SCHEDULE_REASON && generic)
+            || (expected_reason == REFRESH_RECOVERY_STARTED_REASON && (generic || recovery)))
+    {
+        return Err(corrupt_catalog_state(
+            "catalog partial base invalidation does not bind its exact build lineage",
+        ));
+    }
+    Ok(())
+}
+
 fn decode_stored_state(
     connection: &Connection,
     stored: StoredCatalogBuildState,
@@ -1708,7 +2679,6 @@ fn decode_stored_state(
             "catalog plan row does not match its validated Library plan",
         ));
     }
-
     let desired_contract_version = positive_u32(
         stored.desired_contract_version,
         "catalog desired contract version",
@@ -1728,6 +2698,22 @@ fn decode_stored_state(
             corrupt_catalog_state("catalog readiness reason is outside its machine-code bound")
         })?;
     }
+    let partial_target =
+        (phase == CatalogDurableBuildPhase::Partial).then_some(if stored_reason_code.is_some() {
+            CatalogPartialCoverageTarget::LatestBefore {
+                epoch,
+                attempt,
+                commit: last_commit_seq,
+            }
+        } else {
+            CatalogPartialCoverageTarget::Exact {
+                epoch,
+                attempt,
+                commit: last_commit_seq,
+            }
+        });
+    let mut partial_coverage =
+        load_and_validate_partial_history(connection, &plan, partial_target)?;
     validate_admin_commit(
         stored.plan_commit_source,
         plan_commit_reason,
@@ -1749,7 +2735,9 @@ fn decode_stored_state(
         } else if stored_reason_code.is_some()
             && matches!(
                 phase,
-                CatalogDurableBuildPhase::Ready | CatalogDurableBuildPhase::Building
+                CatalogDurableBuildPhase::Ready
+                    | CatalogDurableBuildPhase::Building
+                    | CatalogDurableBuildPhase::Partial
             )
         {
             REFRESH_SOURCE_RETRYING_REASON
@@ -1789,6 +2777,11 @@ fn decode_stored_state(
         CatalogDurableBuildPhase::Building if last_commit_seq <= created_commit_seq => {
             return Err(corrupt_catalog_state(
                 "building catalog state must follow its registration commit",
+            ));
+        }
+        CatalogDurableBuildPhase::Partial if last_commit_seq <= created_commit_seq => {
+            return Err(corrupt_catalog_state(
+                "partial catalog state must follow its registration commit",
             ));
         }
         CatalogDurableBuildPhase::Ready if last_commit_seq <= created_commit_seq => {
@@ -1849,6 +2842,26 @@ fn decode_stored_state(
                 "building catalog state is neither an initial build nor an exact retained-snapshot recovery",
             ));
         }
+        CatalogDurableBuildPhase::Partial
+            if !matches!(
+                (
+                    completed_contract_version,
+                    complete_through_commit,
+                    last_complete_snapshot_commit,
+                    refreshing_from_snapshot_commit,
+                ),
+                (None, None, None, None)
+            ) && !(completed_contract_version == Some(desired_contract_version)
+                && complete_through_commit.is_none()
+                && last_complete_snapshot_commit.is_some()
+                && refreshing_from_snapshot_commit.is_none()
+                && last_complete_snapshot_commit
+                    .is_some_and(|commit| last_commit_seq > commit)) =>
+        {
+            return Err(corrupt_catalog_state(
+                "partial catalog state has an invalid retained-snapshot shape",
+            ));
+        }
         CatalogDurableBuildPhase::Ready => match refreshing_from_snapshot_commit {
             None if completed_contract_version != Some(desired_contract_version)
                 || complete_through_commit != Some(last_commit_seq)
@@ -1907,9 +2920,7 @@ fn decode_stored_state(
         CatalogDurableBuildPhase::Degraded | CatalogDurableBuildPhase::Error => {
             stored_reason_code.is_some()
         }
-        CatalogDurableBuildPhase::Building => {
-            last_complete_snapshot_commit.is_some() || stored_reason_code.is_none()
-        }
+        CatalogDurableBuildPhase::Building | CatalogDurableBuildPhase::Partial => true,
         CatalogDurableBuildPhase::Ready => {
             refreshing_from_snapshot_commit.is_some() || stored_reason_code.is_none()
         }
@@ -2118,7 +3129,10 @@ fn decode_stored_state(
                 }),
                 None,
             )
-        } else if phase == CatalogDurableBuildPhase::Building {
+        } else if matches!(
+            phase,
+            CatalogDurableBuildPhase::Building | CatalogDurableBuildPhase::Partial
+        ) {
             let prior_attempt = attempt.checked_sub(1).ok_or_else(|| {
                 corrupt_catalog_state("catalog recovery attempt cannot be decremented")
             })?;
@@ -2186,9 +3200,27 @@ fn decode_stored_state(
                 stored_reason_code.map(|code| CatalogReadinessReason::SourceRetrying {
                     code: code.to_string(),
                 });
+            let current_coverage = if phase == CatalogDurableBuildPhase::Partial {
+                let milestone = partial_coverage.take().ok_or_else(|| {
+                    corrupt_catalog_state(
+                        "catalog Partial recovery is missing its exact coverage milestone",
+                    )
+                })?;
+                if recovery_reason.is_some() {
+                    retrying_source_coverage(&milestone)?
+                } else {
+                    milestone
+                }
+            } else {
+                unavailable_source_coverage(&publication_coverage)?
+            };
             (
-                CatalogReadinessPhase::Building,
-                unavailable_source_coverage(&publication_coverage)?,
+                if phase == CatalogDurableBuildPhase::Partial {
+                    CatalogReadinessPhase::Partial
+                } else {
+                    CatalogReadinessPhase::Building
+                },
+                current_coverage,
                 recovery_reason,
                 Some(recovery_origin),
             )
@@ -2261,6 +3293,67 @@ fn decode_stored_state(
                     ));
                 }
                 None
+            }
+            CatalogDurableBuildPhase::Partial => {
+                if stored_reason_code.is_some() {
+                    return Err(corrupt_catalog_state(
+                        "catalog Partial readiness cannot replace its milestone owner with a retry reason",
+                    ));
+                }
+                let recovery_origin = if attempt == 1 {
+                    if integrity_failure.is_some() {
+                        return Err(corrupt_catalog_state(
+                            "initial catalog Partial state contains prior integrity-failure evidence",
+                        ));
+                    }
+                    None
+                } else {
+                    let failure = integrity_failure.as_ref().ok_or_else(|| {
+                        corrupt_catalog_state(
+                            "no-snapshot catalog Partial recovery is missing discarded integrity evidence",
+                        )
+                    })?;
+                    validate_discarded_integrity_failure_for_restart(
+                        failure,
+                        CatalogDiscardedIntegrityRestartContext {
+                            plan: &plan,
+                            state_epoch: epoch,
+                            state_attempt: attempt,
+                            state_commit_seq: last_commit_seq,
+                            updated_at: stored.updated_at,
+                            recovering: true,
+                        },
+                    )?;
+                    machine = CatalogReadinessMachine::resume(
+                        plan.clone(),
+                        CatalogReadinessSnapshot {
+                            readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,
+                            scope: CatalogCoverageScope::Library,
+                            coverage_plan_id: plan.coverage_plan_id,
+                            desired_contract_version,
+                            completed_contract_version: None,
+                            epoch,
+                            attempt,
+                            state: CatalogReadinessPhase::Building,
+                            complete_through_commit: None,
+                            last_complete_snapshot: None,
+                            refreshing_from_snapshot: None,
+                            source_coverage: Vec::new(),
+                            reason: None,
+                        },
+                    )
+                    .map_err(catalog_contract_error)?;
+                    Some(CatalogDurableBuildPhase::Error)
+                };
+                let coverage = partial_coverage.take().ok_or_else(|| {
+                    corrupt_catalog_state(
+                        "catalog Partial readiness is missing its exact coverage milestone",
+                    )
+                })?;
+                machine
+                    .record_partial(coverage)
+                    .map_err(catalog_contract_error)?;
+                recovery_origin
             }
             CatalogDurableBuildPhase::Building if attempt == 1 => {
                 if integrity_failure.is_some() {
@@ -2406,6 +3499,34 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
             }
             (*started_at, *committed_at)
         }
+        CatalogBuildStateCommand::RecordPartial {
+            expected,
+            source_coverage,
+            started_at,
+            committed_at,
+        } => {
+            if expected.scope != CatalogCoverageScope::Library
+                || expected.desired_contract_version == 0
+                || expected.epoch == 0
+                || expected.attempt == 0
+                || expected.state_commit_seq == 0
+                || !matches!(
+                    expected.state,
+                    CatalogDurableBuildPhase::Building | CatalogDurableBuildPhase::Partial
+                )
+            {
+                return Err(EngineError::InvalidCommit(
+                    "catalog partial expectation is outside one active Library build lineage"
+                        .to_string(),
+                ));
+            }
+            if source_coverage.is_empty() || source_coverage.len() > MAX_PARTIAL_SOURCES {
+                return Err(EngineError::InvalidCommit(
+                    "catalog partial coverage source count is empty or unbounded".to_string(),
+                ));
+            }
+            (*started_at, *committed_at)
+        }
         CatalogBuildStateCommand::MarkActiveRefreshRetrying {
             expected,
             reason_code,
@@ -2486,9 +3607,13 @@ fn validate_command(command: &CatalogBuildStateCommand) -> Result<(), EngineErro
                 || expected.epoch == 0
                 || expected.attempt == 0
                 || expected.build_started_commit_seq == 0
+                || !matches!(
+                    expected.state,
+                    CatalogDurableBuildPhase::Building | CatalogDurableBuildPhase::Partial
+                )
             {
                 return Err(EngineError::InvalidCommit(
-                    "catalog initial integrity failure is outside one exact Building lineage"
+                    "catalog initial integrity failure is outside one exact active-build lineage"
                         .to_string(),
                 ));
             }
@@ -2653,6 +3778,166 @@ fn insert_plan(
         )
         .map_err(|error| sqlite_error("insert catalog coverage plan", error))?;
     Ok(())
+}
+
+fn insert_partial_coverage(
+    transaction: &Transaction<'_>,
+    commit_seq: u64,
+    expected: &CatalogPartialBuildExpectation,
+    prepared: &PreparedCatalogPartialCoverage,
+    committed_at: i64,
+) -> Result<(), EngineError> {
+    transaction
+        .execute(
+            r#"
+            INSERT INTO catalog_partial_builds (
+                partial_commit_seq, predecessor_state_commit_seq,
+                coverage_plan_id, readiness_epoch, attempt,
+                source_count, encoded_bytes, entries_digest, committed_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                to_i64(commit_seq, "catalog partial commit")?,
+                to_i64(
+                    expected.state_commit_seq,
+                    "catalog partial predecessor commit"
+                )?,
+                expected.coverage_plan_id.storage_bytes().as_slice(),
+                to_i64(expected.epoch, "catalog partial epoch")?,
+                to_i64(expected.attempt, "catalog partial attempt")?,
+                to_i64(
+                    prepared.sources.len() as u64,
+                    "catalog partial source count"
+                )?,
+                to_i64(
+                    prepared.encoded_bytes as u64,
+                    "catalog partial encoded bytes"
+                )?,
+                prepared.entries_digest.as_slice(),
+                committed_at,
+            ],
+        )
+        .map_err(|error| sqlite_error("insert catalog partial-build evidence", error))?;
+
+    let mut statement = transaction
+        .prepare_cached(
+            r#"
+            INSERT INTO catalog_partial_sources (
+                partial_commit_seq, ordinal, adapter_id,
+                canonical_source_instance_key, payload, payload_digest
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+        )
+        .map_err(|error| sqlite_error("prepare catalog partial-source evidence", error))?;
+    for (ordinal, source) in prepared.sources.iter().enumerate() {
+        statement
+            .execute(params![
+                to_i64(commit_seq, "catalog partial commit")?,
+                to_i64(ordinal as u64, "catalog partial source ordinal")?,
+                source.adapter_id,
+                source.source_instance_key.as_slice(),
+                source.payload,
+                source.payload_digest.as_slice(),
+            ])
+            .map_err(|error| sqlite_error("insert catalog partial-source evidence", error))?;
+    }
+    Ok(())
+}
+
+fn exact_partial_progress_exists(
+    connection: &Connection,
+    current: &DurableCatalogBuildState,
+    expected: &CatalogPartialBuildExpectation,
+    prepared: &PreparedCatalogPartialCoverage,
+    started_at: i64,
+    committed_at: i64,
+) -> Result<bool, EngineError> {
+    let stored = connection
+        .query_row(
+            r#"
+            SELECT partial.predecessor_state_commit_seq,
+                   CASE WHEN typeof(partial.coverage_plan_id) = 'blob'
+                                  AND length(partial.coverage_plan_id) = 32
+                        THEN partial.coverage_plan_id END,
+                   partial.readiness_epoch, partial.attempt,
+                   partial.source_count, partial.encoded_bytes,
+                   CASE WHEN typeof(partial.entries_digest) = 'blob'
+                                  AND length(partial.entries_digest) = 32
+                        THEN partial.entries_digest END,
+                   partial.committed_at,
+                   owner.source_instance_id,
+                   CASE WHEN typeof(owner.reason) = 'text'
+                                  AND owner.reason = 'catalog.library.build.partial'
+                        THEN owner.reason END,
+                   owner.started_at, owner.committed_at, owner.fact_count
+            FROM catalog_partial_builds AS partial
+            JOIN ingest_commits AS owner
+              ON owner.commit_seq = partial.partial_commit_seq
+            WHERE partial.partial_commit_seq = ?1
+            "#,
+            [to_i64(
+                current.last_commit_seq,
+                "catalog current partial commit",
+            )?],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, i64>(12)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| sqlite_error("load exact catalog partial progress", error))?;
+    let Some((
+        predecessor,
+        coverage_plan_id,
+        epoch,
+        attempt,
+        source_count,
+        encoded_bytes,
+        entries_digest,
+        evidence_committed_at,
+        owner_source,
+        owner_reason,
+        owner_started_at,
+        owner_committed_at,
+        owner_fact_count,
+    )) = stored
+    else {
+        return Ok(false);
+    };
+    Ok(current.readiness.state == CatalogReadinessPhase::Partial
+        && current.readiness.scope == expected.scope
+        && current.readiness.coverage_plan_id == expected.coverage_plan_id
+        && current.readiness.desired_contract_version == expected.desired_contract_version
+        && current.readiness.epoch == expected.epoch
+        && current.readiness.attempt == expected.attempt
+        && positive_u64(predecessor, "catalog partial predecessor commit")?
+            == expected.state_commit_seq
+        && coverage_plan_id.as_deref()
+            == Some(expected.coverage_plan_id.storage_bytes().as_slice())
+        && positive_u64(epoch, "catalog partial epoch")? == expected.epoch
+        && positive_u64(attempt, "catalog partial attempt")? == expected.attempt
+        && usize::try_from(source_count).ok() == Some(prepared.sources.len())
+        && usize::try_from(encoded_bytes).ok() == Some(prepared.encoded_bytes)
+        && entries_digest.as_deref() == Some(prepared.entries_digest.as_slice())
+        && evidence_committed_at == committed_at
+        && owner_source.is_none()
+        && owner_reason.as_deref() == Some(PARTIAL_REASON)
+        && owner_started_at == started_at
+        && owner_committed_at == Some(committed_at)
+        && owner_fact_count == 0)
 }
 
 fn insert_initial_integrity_failure_evidence(
@@ -2867,7 +4152,8 @@ fn load_latest_source_failure_evidence(
                                   AND refresh.reason IN (
                                       'catalog.library.refresh.started',
                                       'catalog.library.refresh.source_retrying',
-                                      'catalog.library.refresh.recovery_started'
+                                      'catalog.library.refresh.recovery_started',
+                                      'catalog.library.build.partial'
                                   )
                         THEN refresh.reason END,
                    refresh.committed_at,
@@ -2943,7 +4229,8 @@ fn validate_source_failure_ledger(connection: &Connection) -> Result<(), EngineE
                     (f.attempt > retained.attempt
                      AND refresh.reason IN (
                        'catalog.library.refresh.recovery_started',
-                       'catalog.library.refresh.source_retrying'
+                       'catalog.library.refresh.source_retrying',
+                       'catalog.library.build.partial'
                      ))
                ), 0) = 0
                OR f.coverage_plan_id != retained.coverage_plan_id
@@ -3057,6 +4344,7 @@ fn load_latest_integrity_failure_evidence(
                    CASE WHEN typeof(refresh.reason) = 'text'
                                   AND refresh.reason IN (
                                       'catalog.library.build.scheduled',
+                                      'catalog.library.build.partial',
                                       'catalog.library.refresh.started',
                                       'catalog.library.refresh.source_retrying',
                                       'catalog.library.refresh.recovery_started'
@@ -3146,7 +4434,8 @@ fn validate_integrity_failure_ledger(connection: &Connection) -> Result<(), Engi
                         (f.attempt > retained.attempt
                          AND refresh.reason IN (
                            'catalog.library.refresh.recovery_started',
-                           'catalog.library.refresh.source_retrying'
+                           'catalog.library.refresh.source_retrying',
+                           'catalog.library.build.partial'
                          ))
                       )
                       AND f.coverage_plan_id = retained.coverage_plan_id
@@ -3165,10 +4454,16 @@ fn validate_integrity_failure_ledger(connection: &Connection) -> Result<(), Engi
                       AND f.failed_refresh_commit_seq < f.failure_commit_seq
                       AND (
                         (f.attempt = 1
-                         AND refresh.reason = 'catalog.library.build.scheduled')
+                         AND refresh.reason IN (
+                           'catalog.library.build.scheduled',
+                           'catalog.library.build.partial'
+                         ))
                         OR
                         (f.attempt > 1
-                         AND refresh.reason = 'catalog.library.refresh.recovery_started')
+                         AND refresh.reason IN (
+                           'catalog.library.refresh.recovery_started',
+                           'catalog.library.build.partial'
+                         ))
                       )
                     )
                ), 0) = 0
@@ -3259,14 +4554,7 @@ fn exact_integrity_failure_exists(
         && stored.failure_committed_at == Some(committed_at)
         && stored.failure_fact_count == 0
         && stored.refresh_source.is_none()
-        && stored.refresh_reason.as_deref()
-            == Some(if expected.retry_reason_code().is_some() {
-                REFRESH_SOURCE_RETRYING_REASON
-            } else if expected.is_recovery() {
-                REFRESH_RECOVERY_STARTED_REASON
-            } else {
-                REFRESH_STARTED_REASON
-            })
+        && stored.refresh_reason.as_deref() == Some(refresh_execution_reason(expected))
         && stored.refresh_committed_at.is_some()
         && stored.refresh_fact_count == 0)
 }
@@ -3282,7 +4570,9 @@ fn exact_initial_integrity_failure_exists(
     let Some(stored) = load_latest_integrity_failure_evidence(connection)? else {
         return Ok(false);
     };
-    let expected_execution_reason = if expected.attempt == 1 {
+    let expected_execution_reason = if expected.state == CatalogDurableBuildPhase::Partial {
+        PARTIAL_REASON
+    } else if expected.attempt == 1 {
         SCHEDULE_REASON
     } else {
         REFRESH_RECOVERY_STARTED_REASON
@@ -3385,14 +4675,7 @@ fn exact_source_failure_exists(
         && stored.failure_committed_at == Some(committed_at)
         && stored.failure_fact_count == 0
         && stored.refresh_source.is_none()
-        && stored.refresh_reason.as_deref()
-            == Some(if expected.retry_reason_code().is_some() {
-                REFRESH_SOURCE_RETRYING_REASON
-            } else if expected.is_recovery() {
-                REFRESH_RECOVERY_STARTED_REASON
-            } else {
-                REFRESH_STARTED_REASON
-            })
+        && stored.refresh_reason.as_deref() == Some(refresh_execution_reason(expected))
         && stored.refresh_committed_at.is_some()
         && stored.refresh_fact_count == 0)
 }
@@ -3520,7 +4803,9 @@ fn validate_source_failure_for_restart(
         || !matches!(
             stored.refresh_reason.as_deref(),
             Some(reason)
-                if reason == expected_refresh_reason || reason == REFRESH_SOURCE_RETRYING_REASON
+                if reason == expected_refresh_reason
+                    || reason == REFRESH_SOURCE_RETRYING_REASON
+                    || reason == PARTIAL_REASON
         )
         || stored.refresh_committed_at.is_none()
         || stored.refresh_fact_count != 0
@@ -3612,7 +4897,9 @@ fn validate_integrity_failure_for_restart(
         || !matches!(
             stored.refresh_reason.as_deref(),
             Some(reason)
-                if reason == expected_refresh_reason || reason == REFRESH_SOURCE_RETRYING_REASON
+                if reason == expected_refresh_reason
+                    || reason == REFRESH_SOURCE_RETRYING_REASON
+                    || reason == PARTIAL_REASON
         )
         || stored.refresh_committed_at.is_none()
         || stored.refresh_fact_count != 0
@@ -3658,7 +4945,7 @@ fn validate_discarded_integrity_failure_for_restart(
     } else {
         context.state_attempt == failure_attempt && context.state_commit_seq == failure_commit
     };
-    let expected_execution_reason = if failure_attempt == 1 {
+    let base_execution_reason = if failure_attempt == 1 {
         SCHEDULE_REASON
     } else {
         REFRESH_RECOVERY_STARTED_REASON
@@ -3680,7 +4967,10 @@ fn validate_discarded_integrity_failure_for_restart(
         || stored.failure_committed_at != Some(stored.failed_at)
         || stored.failure_fact_count != 0
         || stored.refresh_source.is_some()
-        || stored.refresh_reason.as_deref() != Some(expected_execution_reason)
+        || !matches!(
+            stored.refresh_reason.as_deref(),
+            Some(reason) if reason == base_execution_reason || reason == PARTIAL_REASON
+        )
         || stored.refresh_committed_at.is_none()
         || stored.refresh_fact_count != 0
     {
@@ -3746,6 +5036,57 @@ fn write_build_state(
                 ],
             )
             .map_err(|error| sqlite_error("schedule catalog build state", error))?,
+        CatalogBuildStateWrite::RecordPartial { expected, .. } => {
+            if phase != CatalogDurableBuildPhase::Partial
+                || snapshot.complete_through_commit.is_some()
+                || snapshot.refreshing_from_snapshot.is_some()
+                || snapshot.reason.is_some()
+            {
+                return Err(EngineError::InvalidCommit(
+                    "catalog partial write differs from its active build lineage".to_string(),
+                ));
+            }
+            let retained_snapshot_commit = snapshot
+                .last_complete_snapshot
+                .map(|value| to_i64(value.complete_commit, "catalog retained partial snapshot"))
+                .transpose()?;
+            transaction
+                .execute(
+                    r#"
+                    UPDATE catalog_build_state
+                    SET state = 'partial', last_commit_seq = ?1, updated_at = ?2
+                    WHERE scope_kind = ?3
+                      AND coverage_plan_id = ?4
+                      AND desired_contract_version = ?5
+                      AND epoch = ?6
+                      AND attempt = ?7
+                      AND state = ?8
+                      AND completed_contract_version IS ?9
+                      AND complete_through_commit IS NULL
+                      AND last_complete_snapshot_commit IS ?10
+                      AND refreshing_from_snapshot_commit IS NULL
+                      AND reason_code IS NULL
+                      AND last_commit_seq = ?11
+                    "#,
+                    params![
+                        to_i64(commit_seq, "catalog partial state commit")?,
+                        updated_at,
+                        LIBRARY_SCOPE,
+                        snapshot.coverage_plan_id.storage_bytes().as_slice(),
+                        i64::from(snapshot.desired_contract_version),
+                        to_i64(snapshot.epoch, "catalog partial epoch")?,
+                        to_i64(snapshot.attempt, "catalog partial attempt")?,
+                        expected.state.as_str(),
+                        snapshot.completed_contract_version.map(i64::from),
+                        retained_snapshot_commit,
+                        to_i64(
+                            expected.state_commit_seq,
+                            "catalog partial predecessor commit"
+                        )?,
+                    ],
+                )
+                .map_err(|error| sqlite_error("record catalog partial progress", error))?
+        }
         CatalogBuildStateWrite::BeginRefresh { expected } => {
             let refreshing = snapshot.refreshing_from_snapshot.ok_or_else(|| {
                 EngineError::InvalidCommit(
@@ -3837,13 +5178,13 @@ fn write_build_state(
                       AND desired_contract_version = ?6
                       AND epoch = ?7
                       AND attempt = ?8
-                      AND state = 'building'
+                      AND state = ?9
                       AND completed_contract_version IS NULL
                       AND complete_through_commit IS NULL
                       AND last_complete_snapshot_commit IS NULL
                       AND refreshing_from_snapshot_commit IS NULL
                       AND reason_code IS NULL
-                      AND last_commit_seq = ?9
+                      AND last_commit_seq = ?10
                     "#,
                     params![
                         reason_code,
@@ -3854,6 +5195,7 @@ fn write_build_state(
                         i64::from(snapshot.desired_contract_version),
                         to_i64(snapshot.epoch, "catalog readiness epoch")?,
                         to_i64(snapshot.attempt, "catalog readiness attempt")?,
+                        expected.state.as_str(),
                         to_i64(
                             expected.build_started_commit_seq,
                             "catalog failed initial-build commit",
@@ -3903,7 +5245,7 @@ fn write_build_state(
                           AND desired_contract_version = ?7
                           AND epoch = ?8
                           AND attempt = ?9
-                          AND state = 'building'
+                          AND state = ?12
                           AND completed_contract_version = ?7
                           AND complete_through_commit IS NULL
                           AND last_complete_snapshot_commit = ?1
@@ -3929,6 +5271,7 @@ fn write_build_state(
                                 expected.refresh_started_commit_seq,
                                 "catalog failed recovery commit",
                             )?,
+                            expected.durable_state().as_str(),
                         ],
                     )
                     .map_err(|error| {
@@ -4002,11 +5345,7 @@ fn write_build_state(
                     "catalog source-retry write differs from its exact refresh".to_string(),
                 ));
             }
-            let expected_state = if expected.is_recovery() {
-                BUILDING_STATE
-            } else {
-                READY_STATE
-            };
+            let expected_state = expected.durable_state().as_str();
             transaction
                 .execute(
                     r#"
@@ -4085,7 +5424,7 @@ fn write_build_state(
                           AND desired_contract_version = ?6
                           AND epoch = ?7
                           AND attempt = ?8
-                          AND state = 'building'
+                          AND state = ?12
                           AND completed_contract_version = ?6
                           AND complete_through_commit IS NULL
                           AND last_complete_snapshot_commit = ?9
@@ -4111,6 +5450,7 @@ fn write_build_state(
                                 expected.refresh_started_commit_seq,
                                 "catalog recovery attempt commit",
                             )?,
+                            expected.durable_state().as_str(),
                         ],
                     )
                     .map_err(|error| sqlite_error("degrade recovering catalog refresh", error))?
@@ -4270,7 +5610,42 @@ fn write_readiness_change(
     commit_seq: u64,
     snapshot: &CatalogReadinessSnapshot,
 ) -> Result<(), EngineError> {
-    let (schema_version, payload) = if snapshot.state == CatalogReadinessPhase::Degraded {
+    let (schema_version, payload) = if snapshot.state == CatalogReadinessPhase::Partial {
+        if snapshot.source_coverage.is_empty()
+            || snapshot.complete_through_commit.is_some()
+            || snapshot.refreshing_from_snapshot.is_some()
+            || !matches!(
+                snapshot.reason.as_ref(),
+                None | Some(CatalogReadinessReason::SourceRetrying { .. })
+            )
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog Partial invalidation does not identify one bounded progress milestone"
+                    .to_string(),
+            ));
+        }
+        let reason_code = match snapshot.reason.as_ref() {
+            None => None,
+            Some(CatalogReadinessReason::SourceRetrying { code }) => {
+                validate_reason_code(code).map_err(catalog_contract_error)?;
+                Some(code.clone())
+            }
+            Some(_) => unreachable!("Partial reason shape checked above"),
+        };
+        let payload = serde_json::to_vec(&CatalogPartialChangedPayload {
+            readiness_contract_version: CATALOG_READINESS_CONTRACT_VERSION,
+            scope: LIBRARY_SCOPE,
+            coverage_plan_id: snapshot.coverage_plan_id,
+            desired_contract_version: snapshot.desired_contract_version,
+            epoch: snapshot.epoch,
+            attempt: snapshot.attempt,
+            state: snapshot.state,
+            source_count: snapshot.source_coverage.len(),
+            reason_code,
+            commit_seq,
+        });
+        (PARTIAL_CHANGE_SCHEMA_VERSION, payload)
+    } else if snapshot.state == CatalogReadinessPhase::Degraded {
         let completed_contract_version = snapshot.completed_contract_version.ok_or_else(|| {
             EngineError::InvalidCommit(
                 "catalog source-unavailable invalidation is missing its completed contract"
@@ -4566,6 +5941,7 @@ fn phase_reason(
     match (phase, refreshing) {
         (CatalogDurableBuildPhase::Pending, false) => Ok(REGISTER_REASON),
         (CatalogDurableBuildPhase::Building, false) => Ok(SCHEDULE_REASON),
+        (CatalogDurableBuildPhase::Partial, false) => Ok(PARTIAL_REASON),
         (CatalogDurableBuildPhase::Ready, false) => Ok(INITIAL_PUBLICATION_REASON),
         (CatalogDurableBuildPhase::Ready, true) => Ok(REFRESH_STARTED_REASON),
         (CatalogDurableBuildPhase::Degraded, false) => Ok(REFRESH_SOURCE_UNAVAILABLE_REASON),
@@ -4573,6 +5949,7 @@ fn phase_reason(
         (
             CatalogDurableBuildPhase::Pending
             | CatalogDurableBuildPhase::Building
+            | CatalogDurableBuildPhase::Partial
             | CatalogDurableBuildPhase::Degraded
             | CatalogDurableBuildPhase::Error,
             true,
@@ -4586,12 +5963,10 @@ fn durable_phase(state: CatalogReadinessPhase) -> Result<CatalogDurableBuildPhas
     match state {
         CatalogReadinessPhase::Pending => Ok(CatalogDurableBuildPhase::Pending),
         CatalogReadinessPhase::Building => Ok(CatalogDurableBuildPhase::Building),
+        CatalogReadinessPhase::Partial => Ok(CatalogDurableBuildPhase::Partial),
         CatalogReadinessPhase::Ready => Ok(CatalogDurableBuildPhase::Ready),
         CatalogReadinessPhase::Degraded => Ok(CatalogDurableBuildPhase::Degraded),
         CatalogReadinessPhase::Error => Ok(CatalogDurableBuildPhase::Error),
-        CatalogReadinessPhase::Partial => Err(EngineError::InvalidCommit(
-            "this catalog persistence slice does not yet support partial readiness".to_string(),
-        )),
     }
 }
 
@@ -4640,10 +6015,12 @@ pub(super) fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> E
 mod tests {
     use super::*;
     use crate::adapter::{
-        CanonicalEntityKey, CanonicalSourceInstanceKey, CoverageDeclarationDigest,
-        ExternalEntityRef,
+        CanonicalEntityKey, CanonicalSourceInstanceKey, CoverageDeclarationDigest, CoverageDomain,
+        CoverageMembershipRevision, ExternalEntityRef,
     };
-    use crate::catalog_contract::{CatalogAccessPolicyDigest, CatalogCoveragePlanSource};
+    use crate::catalog_contract::{
+        CatalogAccessPolicyDigest, CatalogCoveragePlanSource, CATALOG_PROJECTION_PACK_ID,
+    };
     use crate::core::schema;
     use crate::engine::{writer::WriterRuntime, EngineOptions, SpaghettiEngineCore};
     use tempfile::tempdir;
@@ -4676,6 +6053,7 @@ mod tests {
             CatalogCommitStage::BeforeTransaction => "before catalog transaction",
             CatalogCommitStage::AfterCommitInsert => "after catalog commit insert",
             CatalogCommitStage::AfterPlanWrite => "after catalog plan write",
+            CatalogCommitStage::AfterPartialCoverageWrite => "after catalog partial-coverage write",
             CatalogCommitStage::AfterFailureEvidenceWrite => {
                 "after catalog integrity-failure evidence write"
             }
@@ -4729,6 +6107,49 @@ mod tests {
 
     fn register(plan: CatalogCoveragePlan) -> CatalogBuildStateCommand {
         CatalogBuildStateCommand::register(plan, 1, 10, 11)
+    }
+
+    fn coverage(
+        plan: &CatalogCoveragePlan,
+        adapter_id: &str,
+        completeness: CoverageSetCompleteness,
+    ) -> SourceCoverageSet {
+        let source = plan
+            .required_sources
+            .iter()
+            .chain(plan.optional_sources.iter())
+            .find(|source| source.adapter_id == adapter_id)
+            .unwrap();
+        SourceCoverageSet::new(
+            CoverageDomain::ProjectionPack {
+                pack: CATALOG_PROJECTION_PACK_ID.to_string(),
+                version: 1,
+            },
+            source.coverage_scope(CatalogCoverageScope::Library),
+            CoverageMembershipRevision::derive(format!("{adapter_id}-members-v1").as_bytes())
+                .unwrap(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            completeness,
+        )
+        .unwrap()
+    }
+
+    fn scheduled_database() -> (Connection, CatalogCoveragePlan) {
+        let mut connection = database();
+        let plan = plan();
+        apply_catalog_build_state_commit(&mut connection, &register(plan.clone()))
+            .unwrap()
+            .unwrap();
+        let pending = load_catalog_build_state(&connection).unwrap().unwrap();
+        apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::schedule(pending.expectation().unwrap(), 20, 21),
+        )
+        .unwrap()
+        .unwrap();
+        (connection, plan)
     }
 
     fn counts(connection: &Connection) -> (i64, i64, i64, i64) {
@@ -5003,6 +6424,327 @@ mod tests {
             None
         );
         assert_eq!(counts(&connection), (2, 1, 1, 2));
+    }
+
+    #[test]
+    fn partial_progress_is_canonical_restart_safe_and_strictly_monotonic() {
+        let (mut connection, plan) = scheduled_database();
+        let building = load_catalog_build_state(&connection).unwrap().unwrap();
+        let expected = building.partial_expectation().unwrap();
+        let first_coverage = vec![coverage(
+            &plan,
+            "claude-code",
+            CoverageSetCompleteness::Complete,
+        )];
+        let first = CatalogBuildStateCommand::record_partial(
+            expected.clone(),
+            first_coverage.clone(),
+            30,
+            31,
+        );
+        let receipt = apply_catalog_build_state_commit(&mut connection, &first)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.commit_seq, 3);
+        assert_eq!(receipt.readiness.state, CatalogReadinessPhase::Partial);
+        assert_eq!(receipt.readiness.source_coverage, first_coverage);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM catalog_partial_builds", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM catalog_partial_sources", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        let (schema_version, payload): (i64, Vec<u8>) = connection
+            .query_row(
+                "SELECT schema_version, payload FROM change_log WHERE commit_seq = 3",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(schema_version, i64::from(PARTIAL_CHANGE_SCHEMA_VERSION));
+        let payload_text = String::from_utf8(payload.clone()).unwrap();
+        assert!(!payload_text.contains("claude-code"));
+        assert!(!payload_text.contains("fixture/"));
+        let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["state"], PARTIAL_STATE);
+        assert_eq!(payload["source_count"], 1);
+        assert!(payload.get("reason_code").is_none());
+
+        let restarted = load_catalog_build_state(&connection).unwrap().unwrap();
+        assert_eq!(restarted.readiness, receipt.readiness);
+        assert_eq!(
+            apply_catalog_build_state_commit(&mut connection, &first).unwrap(),
+            None
+        );
+
+        let mut complete = first_coverage.clone();
+        complete.push(coverage(&plan, "codex", CoverageSetCompleteness::Complete));
+        complete.sort_by(|left, right| {
+            (&left.scope.adapter_id, left.scope.source_instance_key)
+                .cmp(&(&right.scope.adapter_id, right.scope.source_instance_key))
+        });
+        assert!(apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::record_partial(
+                restarted.partial_expectation().unwrap(),
+                complete,
+                40,
+                41,
+            ),
+        )
+        .is_err());
+        assert!(apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::record_partial(
+                restarted.partial_expectation().unwrap(),
+                first_coverage,
+                40,
+                41,
+            ),
+        )
+        .is_err());
+        assert!(apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::record_partial(
+                expected,
+                vec![coverage(&plan, "grok", CoverageSetCompleteness::Complete,)],
+                40,
+                41,
+            ),
+        )
+        .is_err());
+        assert_eq!(
+            load_catalog_build_state(&connection)
+                .unwrap()
+                .unwrap()
+                .readiness
+                .state,
+            CatalogReadinessPhase::Partial
+        );
+    }
+
+    #[test]
+    fn partial_progress_rolls_back_every_crash_seam_and_replays_lost_ack() {
+        let stages = [
+            CatalogCommitStage::BeforeTransaction,
+            CatalogCommitStage::AfterCommitInsert,
+            CatalogCommitStage::AfterPlanWrite,
+            CatalogCommitStage::AfterPartialCoverageWrite,
+            CatalogCommitStage::AfterBuildStateWrite,
+            CatalogCommitStage::AfterOutboxInsert,
+            CatalogCommitStage::BeforeCommit,
+        ];
+        for stage in stages {
+            let (mut connection, plan) = scheduled_database();
+            let building = load_catalog_build_state(&connection).unwrap().unwrap();
+            let command = CatalogBuildStateCommand::record_partial(
+                building.partial_expectation().unwrap(),
+                vec![coverage(
+                    &plan,
+                    "claude-code",
+                    CoverageSetCompleteness::Complete,
+                )],
+                30,
+                31,
+            );
+            let result = apply_catalog_build_state_commit_with_hook(
+                &mut connection,
+                &command,
+                &FailAt(stage),
+            );
+            assert!(matches!(result, Err(EngineError::InjectedFailure { .. })));
+            assert_eq!(
+                load_catalog_build_state(&connection)
+                    .unwrap()
+                    .unwrap()
+                    .readiness
+                    .state,
+                CatalogReadinessPhase::Building,
+                "{stage:?}"
+            );
+            assert_eq!(
+                connection
+                    .query_row("SELECT COUNT(*) FROM catalog_partial_builds", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                0,
+                "{stage:?}"
+            );
+        }
+
+        let (mut connection, plan) = scheduled_database();
+        let building = load_catalog_build_state(&connection).unwrap().unwrap();
+        let command = CatalogBuildStateCommand::record_partial(
+            building.partial_expectation().unwrap(),
+            vec![coverage(
+                &plan,
+                "claude-code",
+                CoverageSetCompleteness::Complete,
+            )],
+            30,
+            31,
+        );
+        let result = apply_catalog_build_state_commit_with_hook(
+            &mut connection,
+            &command,
+            &FailAt(CatalogCommitStage::AfterCommit),
+        );
+        assert!(matches!(result, Err(EngineError::InjectedFailure { .. })));
+        assert_eq!(
+            apply_catalog_build_state_commit(&mut connection, &command).unwrap(),
+            None
+        );
+        assert_eq!(
+            load_catalog_build_state(&connection)
+                .unwrap()
+                .unwrap()
+                .readiness
+                .state,
+            CatalogReadinessPhase::Partial
+        );
+    }
+
+    #[test]
+    fn partial_restart_rejects_payload_chain_and_terminal_anchor_corruption() {
+        let corrupt = |statement: &str| {
+            let (mut connection, plan) = scheduled_database();
+            let building = load_catalog_build_state(&connection).unwrap().unwrap();
+            apply_catalog_build_state_commit(
+                &mut connection,
+                &CatalogBuildStateCommand::record_partial(
+                    building.partial_expectation().unwrap(),
+                    vec![coverage(
+                        &plan,
+                        "claude-code",
+                        CoverageSetCompleteness::Complete,
+                    )],
+                    30,
+                    31,
+                ),
+            )
+            .unwrap()
+            .unwrap();
+            connection
+                .execute_batch(
+                    "DROP TRIGGER catalog_partial_builds_no_update; \
+                     DROP TRIGGER catalog_partial_sources_no_update; \
+                     PRAGMA foreign_keys = OFF; \
+                     PRAGMA ignore_check_constraints = ON;",
+                )
+                .unwrap();
+            connection.execute_batch(statement).unwrap();
+            load_catalog_build_state(&connection).unwrap_err()
+        };
+
+        assert!(
+            corrupt("UPDATE catalog_partial_sources SET payload_digest = zeroblob(32);")
+                .to_string()
+                .contains("payload digest")
+        );
+        assert!(
+            corrupt("UPDATE catalog_partial_builds SET predecessor_state_commit_seq = 1;")
+                .to_string()
+                .contains("foreign build owner")
+        );
+        assert!(
+            corrupt("UPDATE change_log SET payload = x'7b7d' WHERE commit_seq = 2;")
+                .to_string()
+                .contains("base invalidation")
+        );
+        assert!(corrupt(
+            "UPDATE catalog_build_state SET state = 'building', last_commit_seq = 2, updated_at = 21;"
+        )
+        .to_string()
+        .contains("orphaned"));
+    }
+
+    #[test]
+    fn partial_initial_integrity_failure_anchors_progress_and_retries_a_new_attempt() {
+        let (mut connection, plan) = scheduled_database();
+        let building = load_catalog_build_state(&connection).unwrap().unwrap();
+        apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::record_partial(
+                building.partial_expectation().unwrap(),
+                vec![coverage(
+                    &plan,
+                    "claude-code",
+                    CoverageSetCompleteness::Complete,
+                )],
+                30,
+                31,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let partial = load_catalog_build_state(&connection).unwrap().unwrap();
+        let failed = apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::fail_initial_build_integrity(
+                partial.initial_integrity_expectation().unwrap(),
+                "partial_projection_invalid",
+                40,
+                41,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(failed.readiness.state, CatalogReadinessPhase::Error);
+        let restarted = load_catalog_build_state(&connection).unwrap().unwrap();
+        assert_eq!(restarted.readiness, failed.readiness);
+        let retried = apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::retry_terminal_refresh(
+                restarted.expectation().unwrap(),
+                50,
+                51,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retried.readiness.state, CatalogReadinessPhase::Building);
+        assert_eq!(retried.readiness.attempt, 2);
+        let recovered = load_catalog_build_state(&connection).unwrap().unwrap();
+        assert_eq!(
+            recovered.recovery_origin,
+            Some(CatalogDurableBuildPhase::Error)
+        );
+        apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::record_partial(
+                recovered.partial_expectation().unwrap(),
+                vec![coverage(
+                    &plan,
+                    "claude-code",
+                    CoverageSetCompleteness::Complete,
+                )],
+                60,
+                61,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let recovered_partial = load_catalog_build_state(&connection).unwrap().unwrap();
+        assert_eq!(
+            recovered_partial.readiness.state,
+            CatalogReadinessPhase::Partial
+        );
+        assert_eq!(recovered_partial.readiness.attempt, 2);
+        assert_eq!(
+            recovered_partial.recovery_origin,
+            Some(CatalogDurableBuildPhase::Error)
+        );
     }
 
     #[test]

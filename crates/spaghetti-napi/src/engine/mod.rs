@@ -575,6 +575,7 @@ pub struct SpaghettiEngineCore {
 pub(crate) struct CatalogInitialBuildContext {
     plan: CatalogCoveragePlan,
     readiness: crate::catalog_contract::CatalogReadinessSnapshot,
+    partial_expectation: catalog_state::CatalogPartialBuildExpectation,
     expected_build_commit_seq: u64,
 }
 
@@ -585,6 +586,10 @@ impl CatalogInitialBuildContext {
 
     pub(crate) fn observation_commit(&self) -> u64 {
         self.expected_build_commit_seq
+    }
+
+    pub(crate) fn progress_coverage(&self) -> &[SourceCoverageSet] {
+        &self.readiness.source_coverage
     }
 }
 
@@ -608,6 +613,9 @@ impl std::fmt::Debug for CatalogInitialBuildContext {
 pub(crate) struct CatalogRefreshBuildContext {
     plan: CatalogCoveragePlan,
     readiness: crate::catalog_contract::CatalogReadinessSnapshot,
+    prior_source_coverage: Vec<SourceCoverageSet>,
+    progress_coverage: Vec<SourceCoverageSet>,
+    partial_expectation: Option<catalog_state::CatalogPartialBuildExpectation>,
     expected: catalog_state::CatalogActiveRefreshPublicationExpectation,
 }
 
@@ -618,6 +626,18 @@ impl CatalogRefreshBuildContext {
 
     pub(crate) fn observation_commit(&self) -> u64 {
         self.expected.refresh_started_commit_seq()
+    }
+
+    pub(crate) fn is_recovery(&self) -> bool {
+        self.expected.is_recovery()
+    }
+
+    pub(crate) fn can_record_partial(&self) -> bool {
+        self.partial_expectation.is_some()
+    }
+
+    pub(crate) fn progress_coverage(&self) -> &[SourceCoverageSet] {
+        &self.progress_coverage
     }
 
     pub(crate) fn prior_reducer(
@@ -637,8 +657,7 @@ impl CatalogRefreshBuildContext {
                 "catalog refresh requested coverage outside its frozen plan".to_string(),
             ));
         }
-        self.readiness
-            .source_coverage
+        self.prior_source_coverage
             .iter()
             .find(|coverage| source.matches_coverage(coverage))
             .ok_or_else(|| {
@@ -658,6 +677,8 @@ impl std::fmt::Debug for CatalogRefreshBuildContext {
             .field("readiness_attempt", &self.readiness.attempt)
             .field("refresh_started_commit_seq", &self.observation_commit())
             .field("source_count", &self.readiness.source_coverage.len())
+            .field("prior_source_count", &self.prior_source_coverage.len())
+            .field("progress_source_count", &self.progress_coverage.len())
             .finish()
     }
 }
@@ -1692,15 +1713,54 @@ impl SpaghettiEngineCore {
                 )
             })?;
         }
-        if state.plan != plan || state.readiness.state != CatalogReadinessPhase::Building {
+        if state.plan != plan
+            || !matches!(
+                state.readiness.state,
+                CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
+            )
+        {
             return Err(EngineError::InvalidCommit(
-                "catalog initial build requires the exact durable Building lineage".to_string(),
+                "catalog initial build requires the exact durable active-build lineage".to_string(),
             ));
         }
+        let partial_expectation = state.partial_expectation()?;
         Ok(CatalogInitialBuildContext {
             plan,
             readiness: state.readiness,
-            expected_build_commit_seq: state.last_commit_seq,
+            expected_build_commit_seq: partial_expectation.state_commit_seq(),
+            partial_expectation,
+        })
+    }
+
+    pub(crate) fn record_initial_catalog_partial(
+        &self,
+        context: CatalogInitialBuildContext,
+        source_coverage: Vec<SourceCoverageSet>,
+    ) -> Result<CatalogInitialBuildContext, EngineError> {
+        let now = engine_now_unix_ms()?;
+        let partial_expectation = context.partial_expectation;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::record_partial(
+            partial_expectation,
+            source_coverage,
+            now,
+            now,
+        ))?;
+        let state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog partial progress lost its durable build state".to_string(),
+            )
+        })?;
+        if state.plan != context.plan || state.readiness.state != CatalogReadinessPhase::Partial {
+            return Err(EngineError::InvalidCommit(
+                "catalog partial progress resumed a different active build lineage".to_string(),
+            ));
+        }
+        let partial_expectation = state.partial_expectation()?;
+        Ok(CatalogInitialBuildContext {
+            plan: context.plan,
+            readiness: state.readiness,
+            expected_build_commit_seq: partial_expectation.state_commit_seq(),
+            partial_expectation,
         })
     }
 
@@ -1817,8 +1877,10 @@ impl SpaghettiEngineCore {
                 )
             })?;
         }
-        let recovering = state.readiness.state == CatalogReadinessPhase::Building
-            && state.readiness.last_complete_snapshot.is_some()
+        let recovering = matches!(
+            state.readiness.state,
+            CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
+        ) && state.readiness.last_complete_snapshot.is_some()
             && state.readiness.complete_through_commit.is_none();
         let active = state.readiness.state == CatalogReadinessPhase::Ready
             && state.readiness.refreshing_from_snapshot.is_some();
@@ -1828,10 +1890,65 @@ impl SpaghettiEngineCore {
             ));
         }
         let expected = state.refresh_publication_expectation()?;
-        let readiness = state.refresh_build_readiness()?;
+        let partial_expectation = (recovering && state.readiness.reason.is_none())
+            .then(|| state.partial_expectation())
+            .transpose()?;
+        let progress_coverage = state.readiness.source_coverage.clone();
+        let prior_source_coverage = state.refresh_build_readiness()?.source_coverage;
+        let readiness = state.readiness.clone();
         Ok(CatalogRefreshBuildContext {
             plan,
             readiness,
+            prior_source_coverage,
+            progress_coverage,
+            partial_expectation,
+            expected,
+        })
+    }
+
+    pub(crate) fn record_catalog_refresh_partial(
+        &self,
+        context: CatalogRefreshBuildContext,
+        source_coverage: Vec<SourceCoverageSet>,
+    ) -> Result<CatalogRefreshBuildContext, EngineError> {
+        if !context.expected.is_recovery() {
+            return Err(EngineError::InvalidCommit(
+                "ordinary Ready refreshes cannot be relabeled as Partial".to_string(),
+            ));
+        }
+        let partial_expectation = context.partial_expectation.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog recovery progress is missing its active-build authority".to_string(),
+            )
+        })?;
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::record_partial(
+            partial_expectation,
+            source_coverage,
+            now,
+            now,
+        ))?;
+        let state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog recovery progress lost its durable build state".to_string(),
+            )
+        })?;
+        if state.plan != context.plan || state.readiness.state != CatalogReadinessPhase::Partial {
+            return Err(EngineError::InvalidCommit(
+                "catalog recovery progress resumed a different active lineage".to_string(),
+            ));
+        }
+        let expected = state.refresh_publication_expectation()?;
+        let partial_expectation = Some(state.partial_expectation()?);
+        let progress_coverage = state.readiness.source_coverage.clone();
+        let prior_source_coverage = state.refresh_build_readiness()?.source_coverage;
+        let readiness = state.readiness.clone();
+        Ok(CatalogRefreshBuildContext {
+            plan: context.plan,
+            readiness,
+            prior_source_coverage,
+            progress_coverage,
+            partial_expectation,
             expected,
         })
     }

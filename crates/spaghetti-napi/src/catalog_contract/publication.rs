@@ -2373,8 +2373,12 @@ fn validate_initial_build(
     plan.validate()?;
     readiness.validate_against(plan)?;
     validate_contract_selection(selection)?;
+    let active_initial = (readiness.state == CatalogReadinessPhase::Building
+        && readiness.source_coverage.is_empty())
+        || (readiness.state == CatalogReadinessPhase::Partial
+            && !readiness.source_coverage.is_empty());
     if plan.scope != CatalogCoverageScope::Library
-        || readiness.state != CatalogReadinessPhase::Building
+        || !active_initial
         || readiness.desired_contract_version != CATALOG_QUERY_PACK_CONTRACT_VERSION
         || selection.query_pack_version != Some(readiness.desired_contract_version)
         || readiness.epoch != 1
@@ -2382,11 +2386,10 @@ fn validate_initial_build(
         || readiness.complete_through_commit.is_some()
         || readiness.last_complete_snapshot.is_some()
         || readiness.refreshing_from_snapshot.is_some()
-        || !readiness.source_coverage.is_empty()
         || readiness.reason.is_some()
     {
         return Err(CatalogContractError::invalid(
-            "initial catalog publication requires the exact empty durable Library Building expectation",
+            "initial catalog publication requires one exact durable Library Building/Partial expectation",
         ));
     }
     Ok(CatalogInitialBuildExpectation {
@@ -2415,8 +2418,10 @@ fn validate_refresh_build(
             readiness.reason.as_ref(),
             None | Some(CatalogReadinessReason::SourceRetrying { .. })
         );
-    let recovery_building = readiness.state == CatalogReadinessPhase::Building
-        && readiness.complete_through_commit.is_none()
+    let recovery_building = matches!(
+        readiness.state,
+        CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
+    ) && readiness.complete_through_commit.is_none()
         && readiness.refreshing_from_snapshot.is_none()
         && matches!(
             readiness.reason.as_ref(),

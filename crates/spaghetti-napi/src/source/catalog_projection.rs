@@ -16,7 +16,7 @@ use base64::Engine as _;
 
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, ContractCompleteness, CoverageAbsenceKind, FactRevisionId,
-    NativeIdentity, QualifiedValue, QualifiedValueQuality, SemanticRevisionRef,
+    NativeIdentity, QualifiedValue, QualifiedValueQuality, SemanticRevisionRef, SourceCoverageSet,
 };
 use crate::catalog_contract::evidence::{
     CatalogAvailability, CatalogDisclosureClass, CatalogEntityRef, CatalogEvidenceOwner,
@@ -152,6 +152,10 @@ pub(crate) struct CatalogSourceProjection {
 }
 
 impl CatalogSourceProjection {
+    pub(crate) fn source_coverage(&self) -> &SourceCoverageSet {
+        self.source.source_coverage()
+    }
+
     pub(crate) fn assemble(
         source: CatalogCompleteSourceAssembly,
         mut members: Vec<CatalogSourceMemberProjection>,

@@ -287,6 +287,17 @@ impl SpaghettiEngineCore {
             Some(CatalogReadinessPhase::Building) => {
                 publish_initial(self, plan, selection, &sources, &cancellation)
             }
+            Some(CatalogReadinessPhase::Partial)
+                if durable_state
+                    .as_ref()
+                    .and_then(|state| state.readiness.last_complete_snapshot)
+                    .is_some() =>
+            {
+                publish_refresh(self, plan, selection, &sources, &cancellation)
+            }
+            Some(CatalogReadinessPhase::Partial) => {
+                publish_initial(self, plan, selection, &sources, &cancellation)
+            }
             Some(CatalogReadinessPhase::Ready) => {
                 let refreshing = durable_state
                     .as_ref()
@@ -324,9 +335,6 @@ impl SpaghettiEngineCore {
             Some(CatalogReadinessPhase::Degraded) => {
                 publish_refresh(self, plan, selection, &sources, &cancellation)
             }
-            Some(_) => Err(EngineError::InvalidCommit(
-                "catalog build cannot resume from the durable readiness phase".to_string(),
-            )),
         }
     }
 }
@@ -363,16 +371,25 @@ fn publish_initial(
 ) -> Result<CatalogBuildOutcome, EngineError> {
     // This durable transition is intentionally before the first producer read:
     // a crash or cancellation leaves an exact resumable Building lineage.
-    let context = engine.begin_initial_catalog_build(plan)?;
+    let mut context = engine.begin_initial_catalog_build(plan)?;
     let outcome = (|| {
         check_cancelled(cancellation)?;
-        let projections = sources
-            .iter()
-            .map(|source| {
-                check_cancelled(cancellation)?;
-                produce_projection(source, None)
-            })
-            .collect::<Result<Vec<_>, EngineError>>()?;
+        let mut projections = Vec::with_capacity(sources.len());
+        for (index, source) in sources.iter().enumerate() {
+            check_cancelled(cancellation)?;
+            let projection = produce_projection(source, None)?;
+            if index + 1 < sources.len() {
+                if let Some(progress) = merge_partial_coverage(
+                    context.progress_coverage(),
+                    projection.source_coverage(),
+                )? {
+                    if partial_progress_eligible(context.plan(), &progress) {
+                        context = engine.record_initial_catalog_partial(context, progress)?;
+                    }
+                }
+            }
+            projections.push(projection);
+        }
         let batch = CatalogInitialProjectionBatch::assemble(
             projections,
             selection,
@@ -403,17 +420,27 @@ fn publish_refresh(
     sources: &[PreparedCatalogSource],
     cancellation: &QueryCancellationToken,
 ) -> Result<CatalogBuildOutcome, EngineError> {
-    let context = engine.begin_catalog_refresh(plan)?;
+    let mut context = engine.begin_catalog_refresh(plan)?;
     check_cancelled(cancellation)?;
     let mut projections = Vec::with_capacity(sources.len());
-    for source in sources {
+    for (index, source) in sources.iter().enumerate() {
         check_cancelled(cancellation)?;
         let plan_source = derive_plan_source(source)
             .map_err(|error| catalog_composition_error("bind catalog plan source", error))?;
         let prior = context
             .prior_source_coverage(&plan_source)
             .map_err(|_| catalog_integrity_error("bind prior catalog source coverage"))?;
-        projections.push(produce_projection(source, Some(prior))?);
+        let projection = produce_projection(source, Some(prior))?;
+        if context.is_recovery() && context.can_record_partial() && index + 1 < sources.len() {
+            if let Some(progress) =
+                merge_partial_coverage(context.progress_coverage(), projection.source_coverage())?
+            {
+                if partial_progress_eligible(context.plan(), &progress) {
+                    context = engine.record_catalog_refresh_partial(context, progress)?;
+                }
+            }
+        }
+        projections.push(projection);
     }
     let batch = CatalogRefreshProjectionBatch::assemble(
         projections,
@@ -432,6 +459,50 @@ fn publish_refresh(
         source_count,
         member_count,
     })
+}
+
+fn merge_partial_coverage(
+    current: &[SourceCoverageSet],
+    completed: &SourceCoverageSet,
+) -> Result<Option<Vec<SourceCoverageSet>>, EngineError> {
+    let mut next = current.to_vec();
+    if let Some(existing) = next.iter_mut().find(|candidate| {
+        candidate.scope.adapter_id == completed.scope.adapter_id
+            && candidate.scope.source_instance_key == completed.scope.source_instance_key
+    }) {
+        if existing == completed {
+            return Ok(None);
+        }
+        if existing.completeness == completed.completeness {
+            return Err(catalog_integrity_error(
+                "resume catalog partial source coverage",
+            ));
+        }
+        *existing = completed.clone();
+    } else {
+        next.push(completed.clone());
+    }
+    next.sort_by(|left, right| {
+        (&left.scope.adapter_id, left.scope.source_instance_key)
+            .cmp(&(&right.scope.adapter_id, right.scope.source_instance_key))
+    });
+    Ok(Some(next))
+}
+
+fn partial_progress_eligible(plan: &CatalogCoveragePlan, coverage: &[SourceCoverageSet]) -> bool {
+    let progressed = plan.required_sources.iter().any(|required| {
+        coverage.iter().any(|set| {
+            required.matches_coverage(set)
+                && set.completeness != crate::adapter::CoverageSetCompleteness::Unavailable
+        })
+    });
+    let complete = plan.required_sources.iter().all(|required| {
+        coverage.iter().any(|set| {
+            required.matches_coverage(set)
+                && set.completeness == crate::adapter::CoverageSetCompleteness::Complete
+        })
+    });
+    progressed && !complete
 }
 
 fn common_contract_selection(
@@ -518,9 +589,12 @@ mod tests {
 
     use crate::adapter::{
         AdapterError, AdapterId, AdapterManifest, AdapterObjectContext, AdapterRegistry,
-        AgentAdapter, DecodeContext, DecodeDisposition, DiscoveryContext, FactBatch,
-        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamSpec,
+        AgentAdapter, CanonicalSourceInstanceKey, CoverageDeclarationDigest, CoverageDomain,
+        CoverageMembershipRevision, CoverageSetCompleteness, DecodeContext, DecodeDisposition,
+        DiscoveryContext, FactBatch, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
+        SourceRoot, StreamSpec,
     };
+    use crate::catalog_contract::{CatalogCoveragePlanSource, CATALOG_PROJECTION_PACK_ID};
     use crate::engine::EngineOptions;
     use crate::source::SourceRecord;
 
@@ -806,6 +880,64 @@ mod tests {
         assert!(!message.contains("/Users/"));
         assert!(!message.contains("alice"));
         assert!(!message.contains("private"));
+    }
+
+    #[test]
+    fn partial_milestones_require_real_incomplete_required_source_progress() {
+        let source = |adapter_id: &str| {
+            CatalogCoveragePlanSource::new(
+                adapter_id,
+                CanonicalSourceInstanceKey::derive(1, adapter_id.as_bytes()).unwrap(),
+                format!("{adapter_id}@candidate-v1"),
+                CoverageDeclarationDigest::derive(format!("{adapter_id}-declaration").as_bytes())
+                    .unwrap(),
+                CatalogAccessPolicyDigest::derive(1, format!("{adapter_id}-policy").as_bytes())
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let required_one = source("required-one");
+        let required_two = source("required-two");
+        let optional = source("optional-one");
+        let plan = CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            vec![required_one.clone(), required_two.clone()],
+            vec![optional.clone()],
+        )
+        .unwrap();
+        let coverage = |source: &CatalogCoveragePlanSource, completeness| {
+            SourceCoverageSet::new(
+                CoverageDomain::ProjectionPack {
+                    pack: CATALOG_PROJECTION_PACK_ID.to_string(),
+                    version: crate::catalog_contract::CATALOG_QUERY_PACK_CONTRACT_VERSION,
+                },
+                source.coverage_scope(CatalogCoverageScope::Library),
+                CoverageMembershipRevision::derive(source.adapter_id.as_bytes()).unwrap(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                completeness,
+            )
+            .unwrap()
+        };
+        let unavailable_required = vec![
+            coverage(&required_one, CoverageSetCompleteness::Unavailable),
+            coverage(&required_two, CoverageSetCompleteness::Unavailable),
+            coverage(&optional, CoverageSetCompleteness::Complete),
+        ];
+        assert!(!partial_progress_eligible(&plan, &unavailable_required));
+
+        let one_required = vec![
+            coverage(&required_one, CoverageSetCompleteness::Complete),
+            coverage(&required_two, CoverageSetCompleteness::Unavailable),
+        ];
+        assert!(partial_progress_eligible(&plan, &one_required));
+
+        let all_required = vec![
+            coverage(&required_one, CoverageSetCompleteness::Complete),
+            coverage(&required_two, CoverageSetCompleteness::Complete),
+        ];
+        assert!(!partial_progress_eligible(&plan, &all_required));
     }
 
     #[test]

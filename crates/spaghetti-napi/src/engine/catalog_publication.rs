@@ -781,8 +781,10 @@ fn validate_refresh_semantics(
 ) -> Result<(), EngineError> {
     let expected = durable.build();
     let lineage_matches = if current.refresh_publication_expectation()?.is_recovery() {
-        current.readiness.state == CatalogReadinessPhase::Building
-            && current.readiness.refreshing_from_snapshot.is_none()
+        matches!(
+            current.readiness.state,
+            CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
+        ) && current.readiness.refreshing_from_snapshot.is_none()
             && current.readiness.complete_through_commit.is_none()
             && current
                 .readiness
@@ -861,8 +863,10 @@ fn validate_building_cas(
     expected_build_commit_seq: u64,
 ) -> Result<(), EngineError> {
     validate_semantic_build(current, durable)?;
-    if current.readiness.state != CatalogReadinessPhase::Building
-        || current.last_commit_seq != expected_build_commit_seq
+    if !matches!(
+        current.readiness.state,
+        CatalogReadinessPhase::Building | CatalogReadinessPhase::Partial
+    ) || current.last_commit_seq != expected_build_commit_seq
         || expected_build_commit_seq == 0
     {
         return Err(EngineError::InvalidCommit(
@@ -1072,7 +1076,7 @@ fn write_ready_state(
               AND desired_contract_version = ?6
               AND epoch = ?7
               AND attempt = ?8
-              AND state = 'building'
+              AND state IN ('building', 'partial')
               AND last_commit_seq = ?9
             "#,
             params![
@@ -1134,7 +1138,7 @@ fn write_refresh_ready_state(
                   AND desired_contract_version = ?5
                   AND epoch = ?6
                   AND attempt = ?7
-                  AND state = 'building'
+                  AND state = ?11
                   AND completed_contract_version = ?5
                   AND complete_through_commit IS NULL
                   AND last_complete_snapshot_commit = ?8
@@ -1159,6 +1163,7 @@ fn write_refresh_ready_state(
                         expected.refresh_started_commit_seq(),
                         "catalog recovery-start commit"
                     )?,
+                    expected.durable_state().as_str(),
                 ],
             )
             .map_err(|error| catalog_state::sqlite_error("publish catalog recovery Ready", error))?
@@ -2467,6 +2472,7 @@ fn validate_snapshot_lineage(
                 build_commit_seq,
                 &[
                     "catalog.library.build.scheduled",
+                    catalog_state::PARTIAL_REASON,
                     catalog_state::REFRESH_RECOVERY_STARTED_REASON,
                 ],
                 None,
@@ -2503,6 +2509,7 @@ fn validate_snapshot_lineage(
                     "catalog.library.refresh.started",
                     catalog_state::REFRESH_SOURCE_RETRYING_REASON,
                     catalog_state::REFRESH_RECOVERY_STARTED_REASON,
+                    catalog_state::PARTIAL_REASON,
                 ],
                 None,
             )?;
@@ -2835,6 +2842,17 @@ mod tests {
         .unwrap()
     }
 
+    fn second_plan_source() -> CatalogCoveragePlanSource {
+        CatalogCoveragePlanSource::new(
+            "fixture-agent-two",
+            CanonicalSourceInstanceKey::derive(1, b"private-source-instance-two").unwrap(),
+            "fixture-support@candidate-v1",
+            CoverageDeclarationDigest::derive(b"fixture-catalog-declaration-two-v1").unwrap(),
+            CatalogAccessPolicyDigest::derive(1, b"private-library-policy-two").unwrap(),
+        )
+        .unwrap()
+    }
+
     fn plan() -> CatalogCoveragePlan {
         CatalogCoveragePlan::new(
             CatalogCoverageScope::Library,
@@ -2847,7 +2865,13 @@ mod tests {
     fn complete_source(
         completion_label: &[u8],
     ) -> Result<CatalogCompleteSourceAssembly, crate::catalog_contract::CatalogContractError> {
-        let source = plan_source();
+        complete_plan_source(plan_source(), completion_label)
+    }
+
+    fn complete_plan_source(
+        source: CatalogCoveragePlanSource,
+        completion_label: &[u8],
+    ) -> Result<CatalogCompleteSourceAssembly, crate::catalog_contract::CatalogContractError> {
         let domain = CoverageDomain::ProjectionPack {
             pack: CATALOG_PROJECTION_PACK_ID.to_owned(),
             version: CATALOG_QUERY_PACK_CONTRACT_VERSION,
@@ -3333,6 +3357,257 @@ mod tests {
         assert_eq!(payload["project_row_count"], 0);
         assert_eq!(payload["session_row_count"], 0);
         assert_eq!(payload["tombstone_count"], 0);
+    }
+
+    #[test]
+    fn partial_initial_build_publishes_ready_against_its_exact_milestone() {
+        let mut connection = database();
+        let coverage_plan = CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            vec![plan_source(), second_plan_source()],
+            Vec::new(),
+        )
+        .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::register(coverage_plan.clone(), 1, 10, 11),
+        )
+        .unwrap()
+        .unwrap();
+        let pending = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::schedule(pending.expectation().unwrap(), 20, 21),
+        )
+        .unwrap()
+        .unwrap();
+        let building = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        let first_source = complete_source(b"partial-first").unwrap();
+        let partial = catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::record_partial(
+                building.partial_expectation().unwrap(),
+                vec![first_source.source_coverage().clone()],
+                30,
+                31,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(partial.readiness.state, CatalogReadinessPhase::Partial);
+        let restarted = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restarted.readiness, partial.readiness);
+
+        let second_source = complete_plan_source(second_plan_source(), b"partial-second").unwrap();
+        let assembly = CatalogInitialPublicationAssembly::assemble(
+            &coverage_plan,
+            &restarted.readiness,
+            selection(),
+            vec![first_source, second_source],
+            &CatalogReducer::default(),
+            Vec::new(),
+            CatalogPublicationLimits::default(),
+        )
+        .unwrap();
+        let receipt = apply_initial_catalog_publication(
+            &mut connection,
+            &CatalogInitialPublicationCommand::new(assembly, restarted.last_commit_seq, 40, 41),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(receipt.commit_seq, 4);
+        assert_eq!(receipt.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT build_commit_seq FROM catalog_snapshots WHERE snapshot_commit_seq = 4",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            catalog_state::load_catalog_build_state(&connection)
+                .unwrap()
+                .unwrap()
+                .readiness,
+            receipt.readiness
+        );
+    }
+
+    #[test]
+    fn partial_recovery_retains_prior_reads_and_publishes_one_refresh_successor() {
+        let mut connection = database();
+        let coverage_plan = CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            vec![plan_source(), second_plan_source()],
+            Vec::new(),
+        )
+        .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::register(coverage_plan.clone(), 1, 10, 11),
+        )
+        .unwrap()
+        .unwrap();
+        let pending = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        let scheduled = catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::schedule(pending.expectation().unwrap(), 20, 21),
+        )
+        .unwrap()
+        .unwrap();
+        let initial_sources = vec![
+            complete_source(b"recovery-initial-one").unwrap(),
+            complete_plan_source(second_plan_source(), b"recovery-initial-two").unwrap(),
+        ];
+        let initial_assembly = CatalogInitialPublicationAssembly::assemble(
+            &coverage_plan,
+            &scheduled.readiness,
+            selection(),
+            initial_sources,
+            &CatalogReducer::default(),
+            Vec::new(),
+            CatalogPublicationLimits::default(),
+        )
+        .unwrap();
+        let initial = apply_initial_catalog_publication(
+            &mut connection,
+            &CatalogInitialPublicationCommand::new(initial_assembly, scheduled.commit_seq, 30, 31),
+        )
+        .unwrap()
+        .unwrap();
+        let ready = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        let refresh = catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::begin_refresh(ready.refresh_expectation().unwrap(), 40, 41),
+        )
+        .unwrap()
+        .unwrap();
+        let active = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::degrade_active_refresh(
+                active.refresh_publication_expectation().unwrap(),
+                "source_temporarily_unavailable",
+                50,
+                51,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let degraded = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        let recovery = catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::retry_terminal_refresh(
+                degraded.expectation().unwrap(),
+                60,
+                61,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(recovery.readiness.state, CatalogReadinessPhase::Building);
+        assert!(catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap()
+            .ready_read_authority()
+            .is_ok());
+
+        let first_successor = complete_source(b"recovery-successor-one").unwrap();
+        let second_successor =
+            complete_plan_source(second_plan_source(), b"recovery-successor-two").unwrap();
+        let mut progress = recovery.readiness.source_coverage.clone();
+        let retained = progress
+            .iter_mut()
+            .find(|coverage| coverage.scope.adapter_id == "fixture-agent")
+            .unwrap();
+        *retained = first_successor.source_coverage().clone();
+        let recovery_state = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        let partial = catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::record_partial(
+                recovery_state.partial_expectation().unwrap(),
+                progress,
+                70,
+                71,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(partial.readiness.state, CatalogReadinessPhase::Partial);
+        let partial_state = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert!(partial_state.ready_read_authority().is_ok());
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::mark_active_refresh_retrying(
+                partial_state.refresh_publication_expectation().unwrap(),
+                "source_retry_pending",
+                75,
+                76,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let retrying = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retrying.readiness.state, CatalogReadinessPhase::Partial);
+        assert!(matches!(
+            retrying.readiness.reason.as_ref(),
+            Some(crate::catalog_contract::CatalogReadinessReason::SourceRetrying { .. })
+        ));
+        assert!(retrying.ready_read_authority().is_ok());
+        let expected = retrying.refresh_publication_expectation().unwrap();
+        let reducer = expected.resume_reducer();
+        let refresh_assembly = CatalogRefreshPublicationAssembly::assemble(
+            &coverage_plan,
+            &retrying.readiness,
+            retrying.last_commit_seq,
+            expected.predecessor().unwrap(),
+            expected.prior_reducer(),
+            expected.prior_member_history(),
+            selection(),
+            vec![first_successor, second_successor],
+            &reducer,
+            Vec::new(),
+            CatalogPublicationLimits::default(),
+        )
+        .unwrap();
+        let successor = apply_refresh_catalog_publication(
+            &mut connection,
+            &CatalogRefreshPublicationCommand::new(refresh_assembly, expected, 80, 81),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(successor.predecessor_snapshot, initial.snapshot_id);
+        assert_eq!(successor.snapshot_id.complete_commit, 9);
+        assert_eq!(successor.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(refresh.commit_seq, 4);
+        assert!(catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap()
+            .ready_read_authority()
+            .is_ok());
     }
 
     #[test]

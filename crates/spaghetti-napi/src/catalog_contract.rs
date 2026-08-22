@@ -472,9 +472,12 @@ impl CatalogCoveragePlan {
     }
 
     fn any_required_coverage_present(&self, coverage: &[SourceCoverageSet]) -> bool {
-        self.required_sources
-            .iter()
-            .any(|required| coverage.iter().any(|set| required.matches_coverage(set)))
+        self.required_sources.iter().any(|required| {
+            coverage.iter().any(|set| {
+                required.matches_coverage(set)
+                    && set.completeness != CoverageSetCompleteness::Unavailable
+            })
+        })
     }
 }
 
@@ -1088,12 +1091,17 @@ impl CatalogReadinessSnapshot {
                 ));
             }
         }
-        if self.state == CatalogReadinessPhase::Partial
-            && !plan.any_required_coverage_present(&self.source_coverage)
-        {
-            return Err(CatalogContractError::invalid(
-                "partial catalog state requires coverage for at least one required source",
-            ));
+        if self.state == CatalogReadinessPhase::Partial {
+            if !plan.any_required_coverage_present(&self.source_coverage) {
+                return Err(CatalogContractError::invalid(
+                    "partial catalog state requires coverage for at least one required source",
+                ));
+            }
+            if plan.required_coverage_complete(&self.source_coverage) {
+                return Err(CatalogContractError::invalid(
+                    "partial catalog state cannot claim complete required coverage",
+                ));
+            }
         }
         Ok(())
     }
