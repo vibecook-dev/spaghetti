@@ -1070,12 +1070,14 @@ complete replacement representation.
 Current C1 landing status (2026-08-21): actor-run, actor-affiliation, usage-v2,
 effective-state, user-input-request, interaction, message, task, plan, and tool
 v1 fixtures now have strict Rust, JSON-string N-API, and portable TypeScript
-consumers. Effective-state currently proves the independent Model dimension;
-interaction covers Pending | Resolved | Failed | Cancelled plus complete
-retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: remaining model/effort/mode dimensions, content/progress and
-capability families, complete family-by-family replacement/retraction cases,
-full semantic reduction, tier/view compositionality, and durable/scoped reducer
+consumers. Effective-state now freezes qualified Model, Effort, SessionMode, and
+PermissionMode values, keeps configured intent distinct from response or
+native-transition evidence, and binds each qualification into semantic
+identity. Interaction covers Pending | Resolved | Failed | Cancelled plus
+complete retract and partial non-retraction. The fixture breadth is
+substantial, but it does not close C1: content/progress and capability
+families, complete family-by-family replacement/retraction cases, full
+semantic reduction, tier/view compositionality, and durable/scoped reducer
 digest equality remain open.
 
 ### C2. Usage-v2 shadow projection
@@ -3724,8 +3726,8 @@ durable state except for the explicitly versioned usage-v2 correction.
 The next implementation sequence follows the remaining authority and semantic
 gates rather than the prior wave labels:
 
-1. finish C1/C2 family coverage and reducer laws, including the remaining
-   effective-state dimensions, progress/content/capability facts, complete
+1. finish C1/C2 family coverage and reducer laws, including qualified
+   effective-state reducer coverage, progress/content/capability facts, complete
    replacement/retraction fixtures, and equal durable/scoped reduced-state
    digests;
 2. complete B1-B4 with real promoted catalog source compositions, an

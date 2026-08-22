@@ -1,0 +1,75 @@
+{
+  "adapter_id": "fixture-adapter",
+  "family": "runtime.effective-state",
+  "family_version": 1,
+  "fixture_contract_version": 1,
+  "runtime_semantic_contract_version": 1,
+  "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM",
+  "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+  "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+  "dimension": "permission_mode",
+  "fact_id": "v1:23SlcyksXsLQP-Q7pNS4OQsWEHRvyZ3yzeMe6M_BTsw",
+  "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+  "configured": {
+    "completeness": "complete",
+    "evidence_kind": "configured_intent",
+    "operation": "upsert",
+    "semantic_revision_key_hex": "486c85e5dcd1af34221510632a4f33754576c9b457e056f41e8cf76555328c54",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:TE_-_MR5m97L82BOV9ZfPxOoQvekUbIlacIzlwBZ9_A"
+    },
+    "value": {
+      "value": "default",
+      "quality": "native_claimed",
+      "authority": "native_configuration",
+      "completeness": "complete",
+      "provenance": {
+        "native_field": "launch.permission_mode",
+        "normalization_contract_version": 1
+      }
+    }
+  },
+  "observed": {
+    "completeness": "complete",
+    "evidence_kind": "native_transition",
+    "operation": "upsert",
+    "semantic_revision_key_hex": "ec6969185f43553dfab9898c1028ae2d0bfec8b8df60fbe880525092dc6b3119",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:7pcj2DiHjC_MIMBRv8elc9lUbisrgkwLK1cifmzjXB8"
+    },
+    "value": {
+      "value": "accept_edits",
+      "quality": "exact",
+      "authority": "native_transition",
+      "completeness": "complete",
+      "effective_at": 1776211206000,
+      "provenance": {
+        "native_field": "runtime.permission_mode.transition",
+        "normalization_contract_version": 1
+      }
+    }
+  },
+  "retract": {
+    "completeness": "complete",
+    "evidence_kind": "native_transition",
+    "operation": "retract",
+    "semantic_revision_key_hex": "78bd8b362b779e992e88e6de4657652075833695c812c5bb8ed970a61b1acb41",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:7fO1aYqWx3cDzF70s9KRE1bMe5h2tFrE0sJsRbPXBHY"
+    },
+    "value": {
+      "value": "accept_edits",
+      "quality": "exact",
+      "authority": "native_transition",
+      "completeness": "complete",
+      "effective_at": 1776211207000,
+      "provenance": {
+        "native_field": "runtime.permission_mode.transition",
+        "normalization_contract_version": 1
+      }
+    }
+  }
+}

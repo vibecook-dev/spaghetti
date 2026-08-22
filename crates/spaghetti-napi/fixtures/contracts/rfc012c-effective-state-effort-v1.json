@@ -1,0 +1,75 @@
+{
+  "adapter_id": "fixture-adapter",
+  "family": "runtime.effective-state",
+  "family_version": 1,
+  "fixture_contract_version": 1,
+  "runtime_semantic_contract_version": 1,
+  "source_instance_key": "v1:x2EECJPiBmbePRdRR4PlzXDX2VM5vCQq6Yl51BO87NM",
+  "session": "v1:ytNPEO9TRMM8eBQ0fAEHu_GJG3sOwsDvXEudc4XpXNo",
+  "actor_run": "v1:N5X0T1KRSwzOMJBfGwPuHQtYdEMaHFr4QjoTAgn-Dlc",
+  "dimension": "effort",
+  "fact_id": "v1:S1t_ER2GGBECoBTMQPf7Z4s3cO9VtMCQBUg-bsp2FPU",
+  "source_record_id": "v1:8bUk2AWeTLW_sC4KScwzlBo_PokhnE4GGYAcSh69QzM",
+  "configured": {
+    "completeness": "complete",
+    "evidence_kind": "configured_intent",
+    "operation": "upsert",
+    "semantic_revision_key_hex": "4d3c0b4166e85408567646f210afe5194524328bf74491ee5f956fbe20007550",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:56LcS7tDckK8hJVTNkVmPv0d7j7lVDXkarplQ2k3lpg"
+    },
+    "value": {
+      "value": "high",
+      "quality": "native_claimed",
+      "authority": "native_configuration",
+      "completeness": "complete",
+      "provenance": {
+        "native_field": "launch.effort",
+        "normalization_contract_version": 1
+      }
+    }
+  },
+  "observed": {
+    "completeness": "complete",
+    "evidence_kind": "response_observed",
+    "operation": "upsert",
+    "semantic_revision_key_hex": "f3c94719a1dd9140c7725d14c3f40423dfb96287088da217cfb65ba2bd8a5b4f",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:RSms1PGaAKRoP7s_5Q-l1W6c5a6hBdPN0zktSQ5ltE4"
+    },
+    "value": {
+      "value": "high",
+      "quality": "exact",
+      "authority": "native_response",
+      "completeness": "complete",
+      "effective_at": 1776211202000,
+      "provenance": {
+        "native_field": "response.effort",
+        "normalization_contract_version": 1
+      }
+    }
+  },
+  "retract": {
+    "completeness": "complete",
+    "evidence_kind": "native_transition",
+    "operation": "retract",
+    "semantic_revision_key_hex": "74fc5bf143d94263772964f32121667386e0ea97ddb907c6c6c8a9a65942ae8e",
+    "semantic_revision_ref": {
+      "semantic_reference_contract_version": 1,
+      "fact_revision_id": "v1:79u-UavhDuQEH0iXTlVUmNtZ_rHS472JHrctz5j9Jzc"
+    },
+    "value": {
+      "value": "high",
+      "quality": "exact",
+      "authority": "native_transition",
+      "completeness": "complete",
+      "effective_at": 1776211203000,
+      "provenance": {
+        "native_field": "runtime.effort.transition",
+        "normalization_contract_version": 1
+      }
+    }
+  }
+}

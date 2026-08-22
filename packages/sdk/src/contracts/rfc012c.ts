@@ -1176,8 +1176,12 @@ function parseEffectiveStateFixtureShape(value: unknown): EffectiveStateFixture 
   if (configured.evidence_kind !== 'configured_intent' || configured.operation !== 'upsert') {
     throw new ContractValidationError('effective-state configured slot must be configured_intent upsert');
   }
-  if (observed.evidence_kind !== 'response_observed' || observed.operation !== 'upsert') {
-    throw new ContractValidationError('effective-state observed slot must be response_observed upsert');
+  const expectedObservedEvidence =
+    dimension === 'model' || dimension === 'effort' ? 'response_observed' : 'native_transition';
+  if (observed.evidence_kind !== expectedObservedEvidence || observed.operation !== 'upsert') {
+    throw new ContractValidationError(
+      `effective-state observed slot must be ${expectedObservedEvidence} upsert for ${dimension}`,
+    );
   }
   if (retract.evidence_kind !== 'native_transition' || retract.operation !== 'retract') {
     throw new ContractValidationError('effective-state retract slot must be native_transition retract');

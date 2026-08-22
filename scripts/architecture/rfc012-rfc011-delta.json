@@ -213,7 +213,22 @@
         {
           "state": "implemented",
           "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-v1.json",
-          "claim": "Versioned effective-state serialization covers configured, observed, and retract identities."
+          "claim": "Versioned model effective-state serialization covers qualified configured, response-observed, and retract identities."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-effort-v1.json",
+          "claim": "Effort remains an independent qualified configured and response-observed dimension."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-session-mode-v1.json",
+          "claim": "Session mode remains independent and requires native-transition evidence before becoming effective."
+        },
+        {
+          "state": "implemented",
+          "target": "crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-permission-mode-v1.json",
+          "claim": "Permission mode remains independent and requires native-transition evidence before becoming effective."
         }
       ]
     },

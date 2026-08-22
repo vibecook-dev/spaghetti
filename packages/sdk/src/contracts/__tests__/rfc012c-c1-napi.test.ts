@@ -27,6 +27,29 @@ const effectiveStateJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-v1.json', import.meta.url),
   'utf8',
 );
+const effectiveStateDimensionJsons = [
+  readFileSync(
+    new URL(
+      '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-effort-v1.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+  readFileSync(
+    new URL(
+      '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-session-mode-v1.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+  readFileSync(
+    new URL(
+      '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-permission-mode-v1.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+];
 const interactionJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-interaction-v1.json', import.meta.url),
   'utf8',
@@ -65,6 +88,22 @@ test('native RFC 012C effective-state helper preserves portable identities', () 
   pathProvenance.configured.value.provenance.native_field = '/Users/alice/model';
   assert.throws(() => native.parseRfc012cEffectiveStateV1Json(JSON.stringify(pathProvenance)));
   assert.throws(() => parseEffectiveStateFixture(pathProvenance, pathProvenance));
+});
+
+test('native RFC 012C effective-state helper preserves every independent dimension', () => {
+  const dimensions = new Set<string>();
+  const factIds = new Set<string>();
+  for (const json of [effectiveStateJson, ...effectiveStateDimensionJsons]) {
+    const committed = JSON.parse(json) as unknown;
+    const nativeFixture = parseEffectiveStateFixture(
+      JSON.parse(native.parseRfc012cEffectiveStateV1Json(json)) as unknown,
+      committed,
+    );
+    dimensions.add(nativeFixture.dimension);
+    factIds.add(nativeFixture.fact_id);
+  }
+  assert.deepEqual([...dimensions].sort(), ['effort', 'model', 'permission_mode', 'session_mode']);
+  assert.equal(factIds.size, 4);
 });
 
 test('native RFC 012C interaction helper preserves RFC 012C §11 lifecycle identities', () => {

@@ -1390,7 +1390,14 @@ fn validate_rfc012c_effective_state_fixture(
         fixture,
         "observed",
         &fixture.observed,
-        EffectiveStateEvidenceKind::ResponseObserved,
+        match fixture.dimension {
+            EffectiveStateDimension::Model | EffectiveStateDimension::Effort => {
+                EffectiveStateEvidenceKind::ResponseObserved
+            }
+            EffectiveStateDimension::SessionMode | EffectiveStateDimension::PermissionMode => {
+                EffectiveStateEvidenceKind::NativeTransition
+            }
+        },
         EffectiveStateOperation::Upsert,
     )?;
     validate_effective_state_slot(
@@ -2310,6 +2317,12 @@ mod tests {
     const RFC012C_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-runtime-v1.json");
     const RFC012C_EFFECTIVE_STATE_FIXTURE: &str =
         include_str!("../fixtures/contracts/rfc012c-effective-state-v1.json");
+    const RFC012C_EFFECTIVE_STATE_EFFORT_FIXTURE: &str =
+        include_str!("../fixtures/contracts/rfc012c-effective-state-effort-v1.json");
+    const RFC012C_EFFECTIVE_STATE_SESSION_MODE_FIXTURE: &str =
+        include_str!("../fixtures/contracts/rfc012c-effective-state-session-mode-v1.json");
+    const RFC012C_EFFECTIVE_STATE_PERMISSION_MODE_FIXTURE: &str =
+        include_str!("../fixtures/contracts/rfc012c-effective-state-permission-mode-v1.json");
     const RFC012C_INTERACTION_FIXTURE: &str =
         include_str!("../fixtures/contracts/rfc012c-interaction-v1.json");
     const RFC012C_MESSAGE_FIXTURE: &str =
@@ -2707,6 +2720,52 @@ mod tests {
                 serde_json::from_str(&format!("\"{name}\"")).unwrap();
             assert_eq!(effective_state_native_bytes(dimension), name.as_bytes());
         }
+    }
+
+    #[test]
+    fn rfc012c_effective_state_dimensions_are_independent_and_evidence_typed() {
+        let cases = [
+            (
+                RFC012C_EFFECTIVE_STATE_FIXTURE,
+                EffectiveStateDimension::Model,
+                EffectiveStateEvidenceKind::ResponseObserved,
+            ),
+            (
+                RFC012C_EFFECTIVE_STATE_EFFORT_FIXTURE,
+                EffectiveStateDimension::Effort,
+                EffectiveStateEvidenceKind::ResponseObserved,
+            ),
+            (
+                RFC012C_EFFECTIVE_STATE_SESSION_MODE_FIXTURE,
+                EffectiveStateDimension::SessionMode,
+                EffectiveStateEvidenceKind::NativeTransition,
+            ),
+            (
+                RFC012C_EFFECTIVE_STATE_PERMISSION_MODE_FIXTURE,
+                EffectiveStateDimension::PermissionMode,
+                EffectiveStateEvidenceKind::NativeTransition,
+            ),
+        ];
+        let mut fact_ids = BTreeSet::new();
+        for (json, dimension, observed_evidence) in cases {
+            let fixture = decode_rfc012c_effective_state_v1(json).unwrap();
+            assert_eq!(fixture.dimension, dimension);
+            assert_eq!(fixture.observed.evidence_kind, observed_evidence);
+            assert_eq!(
+                fixture.configured.value.authority,
+                crate::adapter::EffectiveStateValueAuthority::NativeConfiguration
+            );
+            assert_eq!(
+                fixture.observed.value.authority,
+                if observed_evidence == EffectiveStateEvidenceKind::ResponseObserved {
+                    crate::adapter::EffectiveStateValueAuthority::NativeResponse
+                } else {
+                    crate::adapter::EffectiveStateValueAuthority::NativeTransition
+                }
+            );
+            assert!(fact_ids.insert(fixture.fact_id));
+        }
+        assert_eq!(fact_ids.len(), 4);
     }
 
     #[test]

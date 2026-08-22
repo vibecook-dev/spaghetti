@@ -9,6 +9,27 @@ const effectiveStateJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-v1.json', import.meta.url),
   'utf8',
 );
+const effortStateJson = readFileSync(
+  new URL(
+    '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-effort-v1.json',
+    import.meta.url,
+  ),
+  'utf8',
+);
+const sessionModeStateJson = readFileSync(
+  new URL(
+    '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-session-mode-v1.json',
+    import.meta.url,
+  ),
+  'utf8',
+);
+const permissionModeStateJson = readFileSync(
+  new URL(
+    '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-effective-state-permission-mode-v1.json',
+    import.meta.url,
+  ),
+  'utf8',
+);
 const interactionJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-interaction-v1.json', import.meta.url),
   'utf8',
@@ -34,6 +55,26 @@ test('RFC 012C effective-state fixture validates configured, observed, and retra
     fixture.observed.semantic_revision_ref.fact_revision_id,
   );
   assert.doesNotMatch(JSON.stringify(fixture), /\/Users\/|~\/|\.db\b|claude-code|codex|grok/);
+});
+
+test('RFC 012C effective-state dimensions retain independent qualified evidence', () => {
+  const cases = [
+    [effectiveStateJson, 'model', 'response_observed', 'native_response'],
+    [effortStateJson, 'effort', 'response_observed', 'native_response'],
+    [sessionModeStateJson, 'session_mode', 'native_transition', 'native_transition'],
+    [permissionModeStateJson, 'permission_mode', 'native_transition', 'native_transition'],
+  ] as const;
+  const factIds = new Set<string>();
+  for (const [json, dimension, evidenceKind, authority] of cases) {
+    const context = JSON.parse(json) as unknown;
+    const fixture = parseRfc012cEffectiveStateV1Json(json, context);
+    assert.equal(fixture.dimension, dimension);
+    assert.equal(fixture.configured.value.authority, 'native_configuration');
+    assert.equal(fixture.observed.evidence_kind, evidenceKind);
+    assert.equal(fixture.observed.value.authority, authority);
+    factIds.add(fixture.fact_id);
+  }
+  assert.equal(factIds.size, 4);
 });
 
 test('RFC 012C interaction fixture validates RFC 012C §11 lifecycle slots', () => {
