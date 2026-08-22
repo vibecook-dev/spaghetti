@@ -617,18 +617,20 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
     required_directory_member_decode_bindings = (
         "pub(crate) struct ScopedObservationDirectoryMemberDecodedSnapshot",
         "pub(crate) enum ScopedObservationDirectoryMemberLifecycle",
-        "observe_replace_confined(",
-        ".read_confined(",
+        "observe_retained_replace(",
+        ".frame_retained_stable(",
         "decode_record(",
         "DirectoryMemberSourceAccessDenied",
         "admit_directory_member(",
-        "CoverageAbsenceKind::Absent",
         "ExactSnapshot",
     )
     if any(
         binding not in combined_directory_membership_text
         for binding in required_directory_member_decode_bindings
-    ) or "SqliteSnapshot" in source_access_text:
+    ) or any(
+        forbidden in source_access_text
+        for forbidden in (".read_confined(", "SqliteSnapshot")
+    ):
         found.add(f"{relative}#missing-authorized-directory-member-decode")
     continuity_wire = scoped_dir / "continuity_wire.rs"
     continuity_wire_text = (

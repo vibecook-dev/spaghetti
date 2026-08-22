@@ -1049,9 +1049,9 @@ impl ScopedObservationDirectoryListing {
     }
 
     /// Observe one already-bootstrapped selected child through the declaration-
-    /// owned ReplaceDocument confined read and the store-agnostic decode
-    /// runtime. The listing still owns the approved native root; callers cannot
-    /// supply a path.
+    /// owned ReplaceDocument framing and the store-agnostic decode runtime.
+    /// The only native bytes consumed here are those retained by the listing's
+    /// already-completed, access-accounted member read.
     pub(crate) fn observe_bootstrapped_member(
         &self,
         input: ScopedObservationDirectoryMemberDecodeInput,
@@ -1078,7 +1078,7 @@ impl ScopedObservationDirectoryListing {
                 input: Box::new(input),
             });
         }
-        input.observe_replace_confined(&self.root, origin)
+        input.observe_retained_replace(origin)
     }
 
     pub(super) fn finalize_for_membership(
@@ -1398,6 +1398,41 @@ impl ScopedObservationDirectoryMemberBinding {
 }
 
 impl ScopedObservationDirectoryMemberDecodeInput {
+    fn frame_initial_replace_parts(
+        &self,
+        origin: &RecordOrigin,
+    ) -> Result<(ReplaceCheckpoint, SourceRecord), ScopedSourceFailureClass> {
+        if !self.binding.valid_for_dependency_free_bootstrap()
+            || origin.source_instance_id != self.binding.source_instance().id
+        {
+            return Err(ScopedSourceFailureClass::InvalidCursor);
+        }
+        let DriverSpec::ReplaceDocument(config) = &self.binding.runtime_stream().driver else {
+            return Err(ScopedSourceFailureClass::InvalidConfiguration);
+        };
+        let driver = ReplaceDocument::new(config.clone())
+            .map_err(|error| super::source_failure_class(&error))?;
+        let read = driver
+            .frame_retained_stable(
+                &self.stamp,
+                &self.bytes,
+                self.content_revision,
+                None,
+                origin,
+                false,
+            )
+            .map_err(|error| super::source_failure_class(&error))?;
+        let ReplaceRead::Record {
+            record,
+            checkpoint,
+            generation_changed: true,
+        } = read
+        else {
+            return Err(ScopedSourceFailureClass::InvalidCursor);
+        };
+        Ok((checkpoint, record))
+    }
+
     pub(super) fn frame_initial_replace(
         self,
         origin: RecordOrigin,
@@ -1405,55 +1440,14 @@ impl ScopedObservationDirectoryMemberDecodeInput {
         ScopedObservationDirectoryMemberRecordInput,
         ScopedObservationDirectoryMemberFrameFailure,
     > {
-        if !self.binding.valid_for_dependency_free_bootstrap()
-            || origin.source_instance_id != self.binding.source_instance().id
-        {
-            return Err(ScopedObservationDirectoryMemberFrameFailure {
-                class: ScopedSourceFailureClass::InvalidCursor,
-                input: Box::new(self),
-            });
-        }
-        let DriverSpec::ReplaceDocument(config) = &self.binding.runtime_stream().driver else {
-            return Err(ScopedObservationDirectoryMemberFrameFailure {
-                class: ScopedSourceFailureClass::InvalidConfiguration,
-                input: Box::new(self),
-            });
-        };
-        let driver = match ReplaceDocument::new(config.clone()) {
-            Ok(driver) => driver,
-            Err(error) => {
+        let (checkpoint, record) = match self.frame_initial_replace_parts(&origin) {
+            Ok(parts) => parts,
+            Err(class) => {
                 return Err(ScopedObservationDirectoryMemberFrameFailure {
-                    class: super::source_failure_class(&error),
+                    class,
                     input: Box::new(self),
                 });
             }
-        };
-        let read = match driver.frame_retained_stable(
-            &self.stamp,
-            &self.bytes,
-            self.content_revision,
-            None,
-            &origin,
-            false,
-        ) {
-            Ok(read) => read,
-            Err(error) => {
-                return Err(ScopedObservationDirectoryMemberFrameFailure {
-                    class: super::source_failure_class(&error),
-                    input: Box::new(self),
-                });
-            }
-        };
-        let ReplaceRead::Record {
-            record,
-            checkpoint,
-            generation_changed: true,
-        } = read
-        else {
-            return Err(ScopedObservationDirectoryMemberFrameFailure {
-                class: ScopedSourceFailureClass::InvalidCursor,
-                input: Box::new(self),
-            });
         };
         let Self {
             binding,
@@ -1468,110 +1462,26 @@ impl ScopedObservationDirectoryMemberDecodeInput {
         })
     }
 
-    /// Re-open the completed child through the retained ReplaceDocument bound
-    /// and descriptor, then decode any present record without extra source
-    /// access. Missing and oversized outcomes never enter decode.
-    pub(super) fn observe_replace_confined(
+    /// Frame the exact retained stable read and decode it without another
+    /// native open. Missing, unstable, and oversized outcomes are decided by
+    /// `read_next_member` before a decode input can exist.
+    pub(super) fn observe_retained_replace(
         self,
-        root: &Path,
         origin: &RecordOrigin,
     ) -> Result<
         ScopedObservationDirectoryMemberLifecycle,
         ScopedObservationDirectoryMemberObserveFailure,
     > {
-        if !self.binding.valid_for_dependency_free_bootstrap()
-            || origin.source_instance_id != self.binding.source_instance().id
-            || root.as_os_str().is_empty()
-            || !root.is_absolute()
-        {
-            return Err(ScopedObservationDirectoryMemberObserveFailure {
-                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
-                    ScopedSourceFailureClass::InvalidCursor,
-                ),
-                input: Box::new(self),
-            });
-        }
-        let DriverSpec::ReplaceDocument(config) = &self.binding.runtime_stream().driver else {
-            return Err(ScopedObservationDirectoryMemberObserveFailure {
-                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
-                    ScopedSourceFailureClass::InvalidConfiguration,
-                ),
-                input: Box::new(self),
-            });
-        };
-        let driver = match ReplaceDocument::new(config.clone()) {
-            Ok(driver) => driver,
-            Err(error) => {
+        let (checkpoint, record) = match self.frame_initial_replace_parts(origin) {
+            Ok(parts) => parts,
+            Err(class) => {
                 return Err(ScopedObservationDirectoryMemberObserveFailure {
-                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
-                        super::source_failure_class(&error),
-                    ),
+                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(class),
                     input: Box::new(self),
                 });
             }
         };
-        let read = match driver.read_confined(
-            root,
-            &self.binding.descriptor().relative_path,
-            None,
-            origin,
-            false,
-        ) {
-            Ok(read) => read,
-            Err(error) => {
-                return Err(ScopedObservationDirectoryMemberObserveFailure {
-                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
-                        super::source_failure_class(&error),
-                    ),
-                    input: Box::new(self),
-                });
-            }
-        };
-        match read {
-            ReplaceRead::Missing => Ok(ScopedObservationDirectoryMemberLifecycle::Absent {
-                binding: self.binding,
-                generation: 1,
-                kind: CoverageAbsenceKind::Absent,
-            }),
-            ReplaceRead::RetryTransient => Err(ScopedObservationDirectoryMemberObserveFailure {
-                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
-                    ScopedSourceFailureClass::Unstable,
-                ),
-                input: Box::new(self),
-            }),
-            ReplaceRead::Unchanged { .. } => Err(ScopedObservationDirectoryMemberObserveFailure {
-                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
-                    ScopedSourceFailureClass::InvalidCursor,
-                ),
-                input: Box::new(self),
-            }),
-            ReplaceRead::Removed { checkpoint, .. } => {
-                Ok(ScopedObservationDirectoryMemberLifecycle::Absent {
-                    binding: self.binding,
-                    generation: checkpoint.generation,
-                    kind: CoverageAbsenceKind::Deleted,
-                })
-            }
-            ReplaceRead::Quarantined { .. } => {
-                Ok(ScopedObservationDirectoryMemberLifecycle::Oversized {
-                    binding: self.binding,
-                })
-            }
-            ReplaceRead::Record {
-                record,
-                checkpoint,
-                generation_changed: true,
-            } => self.decode_replace_record(record, checkpoint),
-            ReplaceRead::Record {
-                generation_changed: false,
-                ..
-            } => Err(ScopedObservationDirectoryMemberObserveFailure {
-                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
-                    ScopedSourceFailureClass::InvalidCursor,
-                ),
-                input: Box::new(self),
-            }),
-        }
+        self.decode_replace_record(record, checkpoint)
     }
 
     fn decode_replace_record(

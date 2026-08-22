@@ -5072,52 +5072,75 @@ pub(crate) mod tests {
         assert!(admission.pop_next().is_none());
         assert!(present_plan.report().verify_digest());
 
-        let missing_root = approved_root
+        let retained_root = approved_root
             .root
-            .join("sessions/missing-child-session-id/children");
-        std::fs::create_dir_all(missing_root.join("nested")).unwrap();
-        let missing_member = missing_root.join("nested/child.jsonl");
-        std::fs::write(&missing_member, nested_jsonl).unwrap();
-        let (missing_plan, missing_binding) = make_bound(b"missing-child-session-id");
-        let mut missing_listing =
-            match scan_observation_directory_membership_for_test(missing_binding, None).unwrap() {
+            .join("sessions/retained-child-session-id/children");
+        std::fs::create_dir_all(retained_root.join("nested")).unwrap();
+        let retained_member = retained_root.join("nested/child.jsonl");
+        std::fs::write(&retained_member, nested_jsonl).unwrap();
+        let (retained_plan, retained_binding) = make_bound(b"retained-child-session-id");
+        let mut retained_listing =
+            match scan_observation_directory_membership_for_test(retained_binding, None).unwrap() {
                 ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
-                other => panic!("expected a missing-child listing, got {other:?}"),
+                other => panic!("expected a retained-child listing, got {other:?}"),
             };
-        let Some(ScopedObservationDirectoryMemberRead::Stable(missing_content)) =
-            missing_listing.read_next_member().unwrap()
+        let Some(ScopedObservationDirectoryMemberRead::Stable(retained_content)) =
+            retained_listing.read_next_member().unwrap()
         else {
             panic!("expected one stable child before deletion")
         };
-        let missing_input = missing_content.bootstrap_for_test().unwrap();
-        std::fs::remove_file(&missing_member).unwrap();
-        let missing_lifecycle = missing_listing
-            .observe_bootstrapped_member(missing_input, &origin)
+        let retained_input = retained_content.bootstrap_for_test().unwrap();
+        std::fs::remove_file(&retained_member).unwrap();
+        let retained_lifecycle = retained_listing
+            .observe_bootstrapped_member(retained_input, &origin)
             .unwrap();
+        assert_eq!(retained_lifecycle.absence_for_test(), None);
         assert_eq!(
-            missing_lifecycle.absence_for_test(),
-            Some((1, CoverageAbsenceKind::Absent))
+            retained_lifecycle
+                .present_snapshot_for_test()
+                .expect("the authorized stable read remains the decode snapshot")
+                .record_payload_for_test(),
+            nested_jsonl
         );
-        let missing_rendered = format!("{missing_lifecycle:?}");
-        for private in ["missing-child-session-id", "child.jsonl", "nested-child"] {
-            assert!(!missing_rendered.contains(private));
+        let retained_rendered = format!("{retained_lifecycle:?}");
+        for private in ["retained-child-session-id", "child.jsonl", "nested-child"] {
+            assert!(!retained_rendered.contains(private));
         }
-        let missing_observation =
-            ScopedRelationMembershipObservation::from_directory_listing(missing_listing).unwrap();
-        let mut missing_admission = admission_lane_for_objects(2);
-        missing_admission
+        let retained_observation =
+            ScopedRelationMembershipObservation::from_directory_listing(retained_listing).unwrap();
+        let mut retained_admission = admission_lane_for_objects(2);
+        retained_admission
             .record_relation_membership(
                 8,
                 ScopedAppendDeliveryPhase::Bootstrap,
-                missing_observation,
+                retained_observation,
             )
             .unwrap();
-        let missing_receipt = missing_admission
-            .admit_directory_member(8, ScopedAppendDeliveryPhase::Bootstrap, missing_lifecycle)
+        let retained_receipt = retained_admission
+            .admit_directory_member(8, ScopedAppendDeliveryPhase::Bootstrap, retained_lifecycle)
             .unwrap();
-        assert_eq!(missing_receipt.data_events, 0);
-        assert!(missing_admission.pop_next().is_none());
-        assert!(missing_plan.report().verify_digest());
+        assert_eq!(retained_receipt.data_events, 1);
+        assert!(matches!(
+            retained_admission.pop_next(),
+            Some(ScopedQueuedObservationFrame::Decoded { .. })
+        ));
+        assert!(retained_admission.pop_next().is_none());
+        let retained_report = retained_plan.report();
+        let retained_relation = retained_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap();
+        assert_eq!(
+            retained_relation
+                .trace
+                .iter()
+                .filter(|entry| entry.operation == AccessOperation::ObjectRead)
+                .count(),
+            1,
+            "decode must not perform an unreserved second native read"
+        );
+        assert!(retained_report.verify_digest());
 
         let oversized_root = approved_root
             .root
