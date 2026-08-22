@@ -14,11 +14,13 @@ use sha2::{Digest as _, Sha256};
 
 use super::adapter::{normalize_session_meta, CodexAdapter};
 use crate::adapter::{
-    AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId, ContractVersionOffer,
-    ContractVersionRequest, DecodeContext, DriverSpec, Fact, FactBatch, FactRevisionId,
-    FactSemanticContext, NativeArtifactProbe, SourceInstance, SourceInstanceKey,
-    SourceInstanceSpec, SourceObjectDescriptor, SourceRecordId, SourceRoot, SupportReleaseStatus,
+    AdapterError, AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId,
+    ContractVersionOffer, ContractVersionRequest, DriverSpec, Fact, FactRevisionId,
+    FactSemanticContext, NativeArtifactProbe, SourceAccess, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest,
+    SourceQuery, SourceRecordId, SourceRoot, SourceRows, SourceSnapshot, SupportReleaseStatus,
 };
+use crate::decode_runtime::{decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest};
 use crate::source::{
     AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead, AppendTransition,
     DirectoryEntryKind, DirectoryScan, DirectorySelection, DirectorySnapshot,
@@ -359,6 +361,7 @@ fn full_decoder_identities(
     registration_seed: u64,
 ) -> ConformanceResult<NativeCatalogIdentities> {
     let adapter = CodexAdapter::new();
+    let adapter_id = AdapterId::new(ADAPTER_ID)?;
     let instance = SourceInstance {
         id: registration_seed,
         spec: SourceInstanceSpec {
@@ -405,6 +408,14 @@ fn full_decoder_identities(
             source_timestamp_hint: None,
             media_type: SourceMediaType::new("application/x-ndjson")?,
         };
+        let semantic_context = FactSemanticContext::new(
+            &adapter_id,
+            1,
+            FIXTURE_SOURCE_INSTANCE,
+            STREAM_ID.as_bytes(),
+            &object_key,
+            FRAMING_CONTRACT_VERSION,
+        )?;
         let descriptor = SourceObjectDescriptor {
             stream_id: stream.id.clone(),
             object_key,
@@ -437,18 +448,24 @@ fn full_decoder_identities(
                         return Err("Codex full fixture contains an oversized record".into())
                     }
                 };
-                let mut batch = FactBatch::new(64, 16)?;
-                adapter.decode(
-                    DecodeContext {
-                        decoder: &stream.decoder,
-                        object_context: &object_context,
-                        decoder_state: decoder_state.as_deref(),
+                let decoded = decode_record(DecodeRuntimeRequest {
+                    adapter: &adapter,
+                    decoder: &stream.decoder,
+                    object_context: &object_context,
+                    source_access: &CatalogDecoderDependencyAccessDenied,
+                    record: &record,
+                    semantic_context: &semantic_context,
+                    decoder_state: decoder_state.as_deref(),
+                    retention: stream.retention,
+                    limits: DecodeRuntimeLimits {
+                        max_facts: 64,
+                        max_diagnostics: 16,
                     },
-                    &record,
-                    &mut batch,
-                )?;
-                decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
-                for envelope in batch.facts() {
+                })
+                .result
+                .map_err(|_| "Codex catalog record failed at the common decode boundary")?;
+                decoder_state = decoded.next_decoder_state;
+                for envelope in decoded.batch.facts() {
                     if let Fact::Session(session) = &envelope.value {
                         projects
                             .insert((ADAPTER_ID.to_string(), session.native_project_key.clone()));
@@ -467,6 +484,36 @@ fn full_decoder_identities(
         }
     }
     Ok(NativeCatalogIdentities { projects, sessions })
+}
+
+struct CatalogDecoderDependencyAccessDenied;
+
+impl SourceAccess for CatalogDecoderDependencyAccessDenied {
+    fn read_object(
+        &self,
+        _root_name: &str,
+        _relative_path: &Path,
+        _max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Codex catalog decoder has no declared dependency read",
+        ))
+    }
+
+    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Codex catalog decoder has no declared dependency query",
+        ))
+    }
+
+    fn list_objects(
+        &self,
+        _request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Codex catalog decoder has no declared dependency listing",
+        ))
+    }
 }
 
 fn identity_digest<T>(values: &BTreeSet<T>) -> String

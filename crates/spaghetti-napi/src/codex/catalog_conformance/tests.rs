@@ -61,6 +61,16 @@ fn bounded_head_matches_independent_census_and_full_decoder_identity() {
 }
 
 #[test]
+fn full_catalog_oracle_uses_the_common_decode_boundary() {
+    let source = include_str!("../catalog_conformance.rs");
+    let direct_decode = [".de", "code("].concat();
+    let direct_batch = ["FactBatch::", "new("].concat();
+    assert!(source.contains("decode_record(DecodeRuntimeRequest"));
+    assert!(!source.contains(&direct_decode));
+    assert!(!source.contains(&direct_batch));
+}
+
+#[test]
 fn head_source_entity_and_fact_identities_ignore_registration_ids() {
     let first = head_projection(&fixture_root(), 7).unwrap().report();
     let reordered = head_projection(&fixture_root(), 70_007).unwrap().report();
