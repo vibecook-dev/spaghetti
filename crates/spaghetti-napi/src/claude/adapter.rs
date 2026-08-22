@@ -24,7 +24,8 @@ use crate::adapter::{
     InterpretationSettingsSnapshot, MessageFact, MessageRole, ObjectSelector,
     PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
     QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality,
-    RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact, ScopeProgramManifest,
+    RawRetentionPolicy, RelationStrength, RunEvidenceFact, RunFact, ScopeJoinEvidence,
+    ScopeJoinIdentityInput, ScopeJoinParameterSet, ScopeJoinUpdate, ScopeProgramManifest,
     SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance,
     SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
     StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage,
@@ -784,6 +785,210 @@ impl AgentAdapter for ClaudeCodeAdapter {
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
+
+    fn join_scope_relations(
+        &self,
+        context: DecodeContext<'_>,
+        _record: &SourceRecord,
+        decoded: &FactBatch,
+    ) -> Result<Vec<ScopeJoinUpdate>, AdapterError> {
+        claude_scope_join_updates(context, decoded)
+    }
+}
+
+const DESCENDANT_TRANSCRIPTS_RELATION: &str = "descendant-transcripts";
+const WORKFLOW_RECORDS_RELATION: &str = "workflow-records";
+const WORKFLOW_JOURNALS_RELATION: &str = "workflow-journals";
+const WORKFLOW_CHILD_TRANSCRIPTS_RELATION: &str = "workflow-child-transcripts";
+const TEAM_CONFIG_RELATION: &str = "team-config-from-evidence";
+const TEAM_INBOX_RELATION: &str = "team-inbox-from-evidence";
+const TODO_SNAPSHOT_RELATION: &str = "todo-snapshot-from-evidence";
+
+fn claude_scope_join_updates(
+    context: DecodeContext<'_>,
+    decoded: &FactBatch,
+) -> Result<Vec<ScopeJoinUpdate>, AdapterError> {
+    let transcript = match context.decoder.as_str() {
+        PARENT_DECODER | SUBAGENT_DECODER => {
+            Some(ClaudeTranscriptContext::decode(context.object_context)?)
+        }
+        _ => None,
+    };
+    let joins_team_evidence = context.decoder.as_str() == SUBAGENT_META_DECODER;
+    let mut updates = Vec::new();
+
+    for envelope in decoded.facts() {
+        let Some(semantic) = envelope.semantic_revision else {
+            continue;
+        };
+        let evidence = ScopeJoinEvidence::new(semantic.fact_id, semantic.semantic_revision_ref);
+        match &envelope.value {
+            Fact::ActorRunRevision(actor) => {
+                let Some(transcript) = transcript.as_ref() else {
+                    continue;
+                };
+                append_actor_scope_joins(&mut updates, evidence, transcript, actor)?;
+            }
+            Fact::ActorAffiliationRevision(affiliation)
+                if joins_team_evidence
+                    && affiliation.dimension == ActorAffiliationDimension::Team =>
+            {
+                let present = affiliation.state == ActorAffiliationState::Present;
+                let team_parameters = if present {
+                    affiliation
+                        .native_target_id
+                        .as_deref()
+                        .map(|team| scope_join_parameter(&[("observed-team-name", team)]))
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
+                append_scope_join(
+                    &mut updates,
+                    TEAM_CONFIG_RELATION,
+                    evidence,
+                    team_parameters,
+                )?;
+                let inbox_parameters = if present {
+                    affiliation
+                        .native_target_id
+                        .as_deref()
+                        .zip(affiliation.native_member_id.as_deref())
+                        .map(|(team, member)| {
+                            scope_join_parameter(&[
+                                ("observed-team-name", team),
+                                ("observed-recipient", member),
+                            ])
+                        })
+                        .transpose()?
+                        .flatten()
+                } else {
+                    None
+                };
+                append_scope_join(
+                    &mut updates,
+                    TEAM_INBOX_RELATION,
+                    evidence,
+                    inbox_parameters,
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(updates)
+}
+
+fn append_actor_scope_joins(
+    updates: &mut Vec<ScopeJoinUpdate>,
+    evidence: ScopeJoinEvidence,
+    context: &ClaudeTranscriptContext,
+    actor: &ActorRunRevisionFact,
+) -> Result<(), AdapterError> {
+    if actor.native_session_id.as_deref() != Some(context.session_id.as_str())
+        || (actor.role == ActorRunRole::Root) != context.agent_id.is_none()
+        || (actor.role == ActorRunRole::Child
+            && actor.native_actor_id.as_deref() != context.agent_id.as_deref())
+    {
+        return Err(AdapterError::invalid_contract(
+            "Claude scope join evidence does not match its decoder context",
+        ));
+    }
+
+    if actor.role == ActorRunRole::Root {
+        append_scope_join(
+            updates,
+            DESCENDANT_TRANSCRIPTS_RELATION,
+            evidence,
+            scope_join_parameter(&[
+                ("project-key", &context.project_slug),
+                ("native-session-id", &context.session_id),
+            ])?,
+        )?;
+    }
+
+    let native_actor_id = actor
+        .native_actor_id
+        .as_deref()
+        .or_else(|| (actor.role == ActorRunRole::Root).then_some(context.session_id.as_str()));
+    append_scope_join(
+        updates,
+        TODO_SNAPSHOT_RELATION,
+        evidence,
+        native_actor_id
+            .map(|native_actor_id| {
+                scope_join_parameter(&[
+                    ("native-session-id", &context.session_id),
+                    ("native-actor-id", native_actor_id),
+                ])
+            })
+            .transpose()?
+            .flatten(),
+    )?;
+
+    if actor.role == ActorRunRole::Child {
+        if let Some(native_workflow_id) = context.workflow_id.as_deref() {
+            let parameters = scope_join_parameter(&[
+                ("project-key", &context.project_slug),
+                ("native-session-id", &context.session_id),
+                ("observed-workflow-id", native_workflow_id),
+            ])?;
+            for relation in [
+                WORKFLOW_RECORDS_RELATION,
+                WORKFLOW_JOURNALS_RELATION,
+                WORKFLOW_CHILD_TRANSCRIPTS_RELATION,
+            ] {
+                append_scope_join(updates, relation, evidence, parameters.clone())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn scope_join_parameter(
+    inputs: &[(&str, &str)],
+) -> Result<Option<ScopeJoinParameterSet>, AdapterError> {
+    if inputs
+        .iter()
+        .any(|(_, value)| !is_confined_scope_component(value))
+    {
+        return Ok(None);
+    }
+    let inputs = inputs
+        .iter()
+        .map(|(name, value)| ScopeJoinIdentityInput::from_utf8(*name, value))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| {
+            AdapterError::invalid_contract("Claude scope join exceeds the common contract")
+        })?;
+    ScopeJoinParameterSet::new(inputs).map(Some).map_err(|_| {
+        AdapterError::invalid_contract("Claude scope join exceeds the common contract")
+    })
+}
+
+fn is_confined_scope_component(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    ScopeJoinIdentityInput::is_bounded_utf8_value(value)
+        && value != "."
+        && value != ".."
+        && !bytes
+            .iter()
+            .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
+        && !(bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+}
+
+fn append_scope_join(
+    updates: &mut Vec<ScopeJoinUpdate>,
+    relation: &str,
+    evidence: ScopeJoinEvidence,
+    parameter: Option<ScopeJoinParameterSet>,
+) -> Result<(), AdapterError> {
+    let parameters = parameter.into_iter().collect();
+    let update = ScopeJoinUpdate::new(relation, vec![evidence], parameters).map_err(|_| {
+        AdapterError::invalid_contract("Claude scope join exceeds the common contract")
+    })?;
+    updates.push(update);
+    Ok(())
 }
 
 fn claude_capabilities() -> Vec<CapabilityDeclaration> {
@@ -5061,6 +5266,60 @@ mod tests {
         )
     }
 
+    fn decode_scope_joins(
+        adapter: &ClaudeCodeAdapter,
+        instance: &SourceInstance,
+        stream: &str,
+        decoder: &str,
+        relative: &str,
+        record: &SourceRecord,
+    ) -> (FactBatch, Vec<ScopeJoinUpdate>) {
+        let object_context = adapter
+            .bootstrap_object(instance, &object(stream, relative))
+            .unwrap();
+        let decoder = DecoderId::new(decoder).unwrap();
+        let mut batch = semantic_batch(stream, relative, 16, 8);
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: None,
+                },
+                record,
+                &mut batch,
+            )
+            .unwrap();
+        let updates = adapter
+            .join_scope_relations(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: None,
+                },
+                record,
+                &batch,
+            )
+            .unwrap();
+        (batch, updates)
+    }
+
+    fn assert_scope_join(updates: &[ScopeJoinUpdate], relation: &str, expected: &[(&str, &str)]) {
+        let update = updates
+            .iter()
+            .find(|update| update.relation_id() == relation)
+            .unwrap_or_else(|| panic!("missing scope join relation {relation}"));
+        let [parameters] = update.parameters() else {
+            panic!("scope join relation {relation} did not have one parameter set");
+        };
+        let actual = parameters
+            .identity_inputs()
+            .iter()
+            .map(|input| (input.name(), std::str::from_utf8(input.value()).unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn discovery_and_streams_are_declarative_and_use_common_drivers() {
         let root = TempDir::new().unwrap();
@@ -9196,5 +9455,164 @@ mod tests {
             .unwrap();
         assert!(fact_values(&inbox_batch).any(|fact| matches!(fact, Fact::TeamInboxSnapshot(_))));
         assert!(!fact_values(&inbox_batch).any(|fact| matches!(fact, Fact::UnknownRecord { .. })));
+    }
+
+    #[test]
+    fn canonical_actor_and_affiliation_evidence_derives_bounded_scope_parameters() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let instance = instance(root.path());
+
+        let parent_relative = format!("project/{SESSION}.jsonl");
+        let parent_record = record(
+            format!(
+                r#"{{"type":"user","uuid":"root-message","timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","message":{{"role":"user","content":"root"}}}}"#
+            )
+            .as_bytes(),
+        );
+        let (parent_batch, root_updates) = decode_scope_joins(
+            &adapter,
+            &instance,
+            PARENT_STREAM,
+            PARENT_DECODER,
+            &parent_relative,
+            &parent_record,
+        );
+        assert_eq!(root_updates.len(), 2);
+        assert_scope_join(
+            &root_updates,
+            DESCENDANT_TRANSCRIPTS_RELATION,
+            &[("project-key", "project"), ("native-session-id", SESSION)],
+        );
+        assert_scope_join(
+            &root_updates,
+            TODO_SNAPSHOT_RELATION,
+            &[("native-session-id", SESSION), ("native-actor-id", SESSION)],
+        );
+        let actor_semantic = parent_batch
+            .facts()
+            .iter()
+            .find(|envelope| matches!(envelope.value, Fact::ActorRunRevision(_)))
+            .and_then(|envelope| envelope.semantic_revision)
+            .unwrap();
+        assert!(root_updates.iter().all(|update| {
+            update.evidence()
+                == [ScopeJoinEvidence::new(
+                    actor_semantic.fact_id,
+                    actor_semantic.semantic_revision_ref,
+                )]
+        }));
+
+        let child_relative =
+            format!("project/{SESSION}/subagents/workflows/wf_main/agents/agent-a1.jsonl");
+        let child_record = record(
+            format!(
+                r#"{{"type":"user","uuid":"child-message","timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","message":{{"role":"user","content":"child"}}}}"#
+            )
+            .as_bytes(),
+        );
+        let (_, child_updates) = decode_scope_joins(
+            &adapter,
+            &instance,
+            SUBAGENT_STREAM,
+            SUBAGENT_DECODER,
+            &child_relative,
+            &child_record,
+        );
+        assert_eq!(child_updates.len(), 4);
+        assert_scope_join(
+            &child_updates,
+            TODO_SNAPSHOT_RELATION,
+            &[("native-session-id", SESSION), ("native-actor-id", "a1")],
+        );
+        for relation in [
+            WORKFLOW_RECORDS_RELATION,
+            WORKFLOW_JOURNALS_RELATION,
+            WORKFLOW_CHILD_TRANSCRIPTS_RELATION,
+        ] {
+            assert_scope_join(
+                &child_updates,
+                relation,
+                &[
+                    ("project-key", "project"),
+                    ("native-session-id", SESSION),
+                    ("observed-workflow-id", "wf_main"),
+                ],
+            );
+        }
+        assert!(child_updates
+            .iter()
+            .all(|update| update.relation_id() != "descendant-metadata"));
+
+        let journal_relative =
+            format!("project/{SESSION}/subagents/workflows/wf_main/journal.jsonl");
+        let journal_record = record(br#"{"type":"started","agentId":"a1","key":"step-1"}"#);
+        let (_, journal_updates) = decode_scope_joins(
+            &adapter,
+            &instance,
+            WORKFLOW_JOURNAL_STREAM,
+            WORKFLOW_JOURNAL_DECODER,
+            &journal_relative,
+            &journal_record,
+        );
+        assert!(journal_updates.is_empty());
+
+        let team_record =
+            document_record(br#"{"agentType":"Explore","name":"team-lead","teamName":"alpha"}"#);
+        let team_relative = format!("project/{SESSION}/subagents/agent-a1.meta.json");
+        let (_, team_updates) = decode_scope_joins(
+            &adapter,
+            &instance,
+            SUBAGENT_META_STREAM,
+            SUBAGENT_META_DECODER,
+            &team_relative,
+            &team_record,
+        );
+        assert_eq!(team_updates.len(), 2);
+        assert_scope_join(
+            &team_updates,
+            TEAM_CONFIG_RELATION,
+            &[("observed-team-name", "alpha")],
+        );
+        assert_scope_join(
+            &team_updates,
+            TEAM_INBOX_RELATION,
+            &[
+                ("observed-team-name", "alpha"),
+                ("observed-recipient", "team-lead"),
+            ],
+        );
+    }
+
+    #[test]
+    fn unsafe_affiliation_locator_values_retract_without_disclosure() {
+        let root = TempDir::new().unwrap();
+        let adapter = ClaudeCodeAdapter::new();
+        let record = document_record(
+            br#"{"agentType":"Explore","name":"/Users/alice/private","teamName":"alpha"}"#,
+        );
+        let relative = format!("project/{SESSION}/subagents/agent-a1.meta.json");
+        let (_, updates) = decode_scope_joins(
+            &adapter,
+            &instance(root.path()),
+            SUBAGENT_META_STREAM,
+            SUBAGENT_META_DECODER,
+            &relative,
+            &record,
+        );
+        assert_scope_join(
+            &updates,
+            TEAM_CONFIG_RELATION,
+            &[("observed-team-name", "alpha")],
+        );
+        let inbox = updates
+            .iter()
+            .find(|update| update.relation_id() == TEAM_INBOX_RELATION)
+            .unwrap();
+        assert!(inbox.parameters().is_empty());
+        let debug = format!("{updates:?}");
+        for private in ["/Users/", "alice", "private"] {
+            assert!(!debug.contains(private));
+        }
     }
 }

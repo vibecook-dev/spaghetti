@@ -62,6 +62,21 @@ impl ScopeJoinIdentityInput {
         Ok(Self { name, value })
     }
 
+    /// Construct one UTF-8 identity value without allocating attacker-sized
+    /// input before the common per-value ceiling has been checked.
+    pub fn from_utf8(name: impl Into<String>, value: &str) -> Result<Self, ScopeContractError> {
+        if !Self::is_bounded_utf8_value(value) {
+            return Err(ScopeContractError::invalid(
+                "scope join identity value is empty or oversized",
+            ));
+        }
+        Self::new(name, value.as_bytes().to_vec())
+    }
+
+    pub fn is_bounded_utf8_value(value: &str) -> bool {
+        !value.is_empty() && value.len() <= MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -1141,6 +1156,14 @@ mod tests {
             vec![0; MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES + 1],
         )
         .is_err());
+        let exact_text = "x".repeat(MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES);
+        assert!(ScopeJoinIdentityInput::is_bounded_utf8_value(&exact_text));
+        assert!(ScopeJoinIdentityInput::from_utf8("native-id", &exact_text).is_ok());
+        let oversized_text = "x".repeat(MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES + 1);
+        assert!(!ScopeJoinIdentityInput::is_bounded_utf8_value(
+            &oversized_text
+        ));
+        assert!(ScopeJoinIdentityInput::from_utf8("native-id", &oversized_text).is_err());
         assert!(
             ScopeJoinUpdate::new("related-object", vec![evidence, evidence], Vec::new(),).is_err()
         );
