@@ -4468,6 +4468,7 @@ mod tests {
                 "locator": "known-object",
                 "identity_inputs": ["native-session-id"],
                 "bounds": {"max_fan_out": 1, "max_depth": 1, "max_objects": 1, "max_bytes": 1024, "max_rows": 0},
+                "observation_binding": {"stream_id": "root-stream", "source_pattern": "sessions/*.jsonl"},
                 "unavailable_behavior": "record_unavailable",
                 "claim_refs": ["scope-evidence"]
               },
@@ -4490,22 +4491,45 @@ mod tests {
         }"#)
         .unwrap();
         let mut source: SupportSourceDeclarationWire = serde_json::from_value(serde_json::json!({
-            "streams": [{
-                "stream_id": "descendant-stream",
-                "root_id": "root",
-                "relative_patterns": ["sessions/*/children/**/entry-*.jsonl"],
-                "decoder_id": "fixture-descendant",
-                "authority": "canonical",
-                "primitive": "AppendDelimited",
-                "topologies": ["durable", "scoped"],
-                "implementation_state": "existing",
-                "bounds": {"max_record_bytes": 4096, "max_batch_bytes": 8192, "max_records_per_batch": 64},
-                "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"],
-                "safe_decoder_state_boundary": "object_generation_cursor"
-            }]
+            "streams": [
+                {
+                    "stream_id": "root-stream",
+                    "root_id": "root",
+                    "relative_patterns": ["sessions/*.jsonl"],
+                    "decoder_id": "fixture-root",
+                    "authority": "canonical",
+                    "primitive": "AppendDelimited",
+                    "topologies": ["scoped"],
+                    "implementation_state": "existing",
+                    "bounds": {"max_record_bytes": 512, "max_batch_bytes": 1024, "max_records_per_batch": 16},
+                    "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"],
+                    "safe_decoder_state_boundary": "object_generation_cursor"
+                },
+                {
+                    "stream_id": "descendant-stream",
+                    "root_id": "root",
+                    "relative_patterns": ["sessions/*/children/**/entry-*.jsonl"],
+                    "decoder_id": "fixture-descendant",
+                    "authority": "canonical",
+                    "primitive": "AppendDelimited",
+                    "topologies": ["durable", "scoped"],
+                    "implementation_state": "existing",
+                    "bounds": {"max_record_bytes": 4096, "max_batch_bytes": 8192, "max_records_per_batch": 64},
+                    "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"],
+                    "safe_decoder_state_boundary": "object_generation_cursor"
+                }
+            ]
         }))
         .unwrap();
         let contracts = validate_scope_source_bindings(&scope, &source, false).unwrap();
+        assert_eq!(
+            contracts.get("root-stream").unwrap().driver(),
+            AuthorizedObservationSourceDriver::AppendDelimited {
+                max_record_bytes: 512,
+                max_batch_bytes: 1024,
+                max_records_per_batch: 16,
+            }
+        );
         assert_eq!(
             contracts.get("descendant-stream").unwrap().driver(),
             AuthorizedObservationSourceDriver::AppendDelimited {
@@ -4525,34 +4549,34 @@ mod tests {
             AuthorizedObservationSourceAuthority::Canonical
         );
 
-        source.streams[0].relative_patterns[0] = "sessions/*/other/**".to_string();
+        source.streams[1].relative_patterns[0] = "sessions/*/other/**".to_string();
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
-        source.streams[0].relative_patterns[0] = "sessions/*/children/**/entry-*.jsonl".to_string();
-        source.streams[0]
+        source.streams[1].relative_patterns[0] = "sessions/*/children/**/entry-*.jsonl".to_string();
+        source.streams[1]
             .relative_patterns
             .push("sessions/*/children/**/entry-*.jsonl".to_string());
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
-        source.streams[0].relative_patterns.pop();
-        source.streams[0].decoder_id = None;
+        source.streams[1].relative_patterns.pop();
+        source.streams[1].decoder_id = None;
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
-        source.streams[0].decoder_id = Some("fixture-descendant".to_string());
-        source.streams[0].authority = Some("private".to_string());
+        source.streams[1].decoder_id = Some("fixture-descendant".to_string());
+        source.streams[1].authority = Some("private".to_string());
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
-        source.streams[0].authority = Some("canonical".to_string());
-        source.streams[0].bounds.max_records_per_batch = None;
+        source.streams[1].authority = Some("canonical".to_string());
+        source.streams[1].bounds.max_records_per_batch = None;
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
-        source.streams[0].bounds.max_records_per_batch = Some(64);
-        source.streams[0].bounds.max_record_bytes = Some(16_384);
+        source.streams[1].bounds.max_records_per_batch = Some(64);
+        source.streams[1].bounds.max_record_bytes = Some(16_384);
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
-        source.streams[0].bounds.max_record_bytes = Some(4096);
-        source.streams[0].safe_decoder_state_boundary = "object_generation_revision".to_string();
+        source.streams[1].bounds.max_record_bytes = Some(4096);
+        source.streams[1].safe_decoder_state_boundary = "object_generation_revision".to_string();
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
 
-        source.streams[0].primitive = "PresenceObject".to_string();
-        source.streams[0].bounds.max_object_bytes = Some(1024);
-        source.streams[0].bounds.max_record_bytes = None;
-        source.streams[0].bounds.max_batch_bytes = None;
-        source.streams[0].lifecycle = vec![
+        source.streams[1].primitive = "PresenceObject".to_string();
+        source.streams[1].bounds.max_object_bytes = Some(1024);
+        source.streams[1].bounds.max_record_bytes = None;
+        source.streams[1].bounds.max_batch_bytes = None;
+        source.streams[1].lifecycle = vec![
             "replace".to_string(),
             "delete".to_string(),
             "recreate".to_string(),
@@ -4564,7 +4588,7 @@ mod tests {
                 max_object_bytes: 1024,
             }
         );
-        source.streams[0].primitive = "DirectoryMembership".to_string();
+        source.streams[1].primitive = "DirectoryMembership".to_string();
         assert!(validate_scope_source_bindings(&scope, &source, false).is_err());
     }
 

@@ -88,8 +88,11 @@ impl ScopeRelationSourceBinding {
 
 /// Exact source stream and selection authority for a scoped observation
 /// relation. The source pattern must occur in the digest-bound source
-/// declaration. Directory relations additionally carry a selector relative
-/// to their already-confined rendered locator; neither value is caller input.
+/// declaration. A known-object binding identifies the stream/pattern that a
+/// trusted attachment composer must match against its separately confined
+/// concrete locator. Directory relations additionally carry a selector
+/// relative to their already-confined rendered locator; neither value is
+/// caller input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeObservationSourceBinding {
@@ -108,9 +111,10 @@ impl ScopeObservationSourceBinding {
     ) -> Result<(), ScopeContractError> {
         validate_identifier("scope observation source stream id", &self.stream_id)?;
         validate_source_pattern("scope observation source pattern", &self.source_pattern)?;
-        let locator_pattern = locator_template_pattern(locator, identity_inputs)?;
         match (relation_primitive, self.relative_selector.as_deref()) {
+            (ScopeRelationPrimitive::KnownObject, None) => {}
             (ScopeRelationPrimitive::ChildDirectoryByNativeId, Some(selector)) => {
+                let locator_pattern = locator_template_pattern(locator, identity_inputs)?;
                 validate_source_pattern("scope observation relative selector", selector)?;
                 if format!("{locator_pattern}/{selector}") != self.source_pattern {
                     return Err(invalid(
@@ -123,8 +127,11 @@ impl ScopeObservationSourceBinding {
                     "child-directory observation binding requires a relative selector",
                 ));
             }
-            (ScopeRelationPrimitive::SiblingObject, None) => {}
+            (ScopeRelationPrimitive::SiblingObject, None) => {
+                locator_template_pattern(locator, identity_inputs)?;
+            }
             (ScopeRelationPrimitive::ReferencedObjectFromField, None) => {
+                let locator_pattern = locator_template_pattern(locator, identity_inputs)?;
                 if locator_pattern != self.source_pattern {
                     return Err(invalid(
                         "referenced-object locator does not compose to its declared source pattern",
@@ -132,7 +139,8 @@ impl ScopeObservationSourceBinding {
                 }
             }
             (
-                ScopeRelationPrimitive::SiblingObject
+                ScopeRelationPrimitive::KnownObject
+                | ScopeRelationPrimitive::SiblingObject
                 | ScopeRelationPrimitive::ReferencedObjectFromField,
                 Some(_),
             ) => {
@@ -142,7 +150,7 @@ impl ScopeObservationSourceBinding {
             }
             _ => {
                 return Err(invalid(
-                    "observation source bindings are limited to child-directory, sibling, and referenced-object relations",
+                    "observation source bindings are limited to known-object, child-directory, sibling, and referenced-object relations",
                 ));
             }
         }
@@ -654,6 +662,24 @@ mod tests {
         manifest.programs[0].relations[0].primitive = ScopeRelationPrimitive::KnownObject;
         manifest.programs[0].relations[0].observation_binding = None;
         manifest.validate().unwrap();
+
+        manifest.programs[0].relations[0].observation_binding =
+            Some(ScopeObservationSourceBinding {
+                stream_id: "history-documents".to_string(),
+                source_pattern: "**/history.jsonl".to_string(),
+                relative_selector: None,
+            });
+        manifest.validate().unwrap();
+        manifest.programs[0].relations[0]
+            .observation_binding
+            .as_mut()
+            .unwrap()
+            .relative_selector = Some("**".to_string());
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("exact-object observation binding"));
     }
 
     #[test]
