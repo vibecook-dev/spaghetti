@@ -289,12 +289,15 @@ Current landing status (2026-08-18):
   retention storage policy, and makes overlap replay idempotent without
   rolling a newer replacement backward. A stateful real-output conformance
   adapter proves prefix-plus-continuation equals full-only decoding and that a
-  window-boundary state reset is detectable. Actual Claude/Codex/Grok catalog
-  producers are not yet admitted by that gate: their candidate catalog paths
-  still contain direct adapter invocation and/or legacy catalog-relevant facts.
-  Vendor source composition, catalog/base-session identity equality, and the
-  public portable event specialists therefore remain open rather than being
-  inferred from the synthetic composition fixture.
+  window-boundary state reset is detectable. Claude, Codex, and Grok candidate
+  catalog oracle decodes now enter the common runtime boundary, including
+  panic containment, disposition/mapping validation, raw-retention policy,
+  semantic context, and decoder-state extraction. They are still not admitted
+  by the tier witness because their catalog-relevant envelopes remain legacy
+  RFC 011 values without canonical semantic revisions. Vendor source
+  composition, catalog/base-session identity equality, and the public portable
+  event specialists therefore remain open rather than being inferred from the
+  synthetic composition fixture or normalized after decode.
 
 The repository-wide native-surface validator also discovered current Claude
 drift that predates this model slice: `bridge-session` records now include
@@ -688,12 +691,14 @@ layout, next ordinal, and chain sequence. The original frozen conformance trace
 repartitions caller-supplied synthetic witness digests and therefore proves the
 planner/accumulator contract only; it is not evidence that a vendor decoder
 produces equal semantic facts. The common real-output witness and replacement
-digest boundary now exists under A1, but the candidate vendor producers still
-must enter it with completed common decode results. The 64 KiB head value
-remains candidate fixture evidence rather than a ratified global bound. Still
-open are promoted real source declarations/support
-releases, actual common-runtime and vendor composition, independent Phase 0
-catalog identity plus final hydrated-identity oracle parity, source
+digest boundary now exists under A1. Candidate Claude, Codex, and Grok oracle
+decodes enter the completed common runtime, but their legacy catalog-relevant
+fact envelopes correctly fail the semantic-revision admission check;
+post-decode filtering or payload normalization is not accepted as parity
+evidence. The 64 KiB head value remains candidate fixture evidence rather than
+a ratified global bound. Still open are promoted real source declarations/
+support releases, canonical vendor fact emission and composition, independent
+Phase 0 catalog identity plus final hydrated-identity oracle parity, source
 access/coverage integration, and calibrated performance evidence.
 
 The second B2 slice (`df3b6b0`) freezes a Codex-only candidate conformance
@@ -828,6 +833,15 @@ fail closed before filesystem reads. The built-in Candidate still cannot
 authorize `CatalogDiscovery`. Synthetic conformance constructors stay
 `#[cfg(test)]`. Codex/Grok producers, persistence, and public catalog N-API
 remain open.
+
+The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
+`ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,
+Codex, and Grok candidate catalog paths and freezes regression guards against
+reintroduction. A shared test-only no-dependency policy rejects undeclared
+secondary reads without native values in errors. This is structural boundary
+evidence only: Candidate remains non-authorizing, and legacy fact envelopes
+remain ineligible for RFC 012A tier parity until their payload identities and
+semantic revisions migrate together.
 
 ### B3. Durable pack, readiness, and pagination
 
