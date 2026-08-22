@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::adapter::{
     compare_coverage, CanonicalEntityKey, CanonicalFactId, ContractCompleteness,
-    CoverageComparison, CoverageSetCompleteness, SemanticContractError, SemanticRevisionRef,
-    SourceCoverageSet, UsageRevisionV2Fact,
+    CoverageComparison, CoverageDomain, CoverageSetCompleteness, FactRevisionId,
+    SemanticContractError, SemanticRevisionRef, SourceCoverageSet, UsageRevisionV2Fact,
 };
 use crate::semantic_contract::{
     decode_rfc012c_interaction_v1, InteractionFixtureWire, InteractionLifecycleSlotWire,
@@ -113,6 +113,43 @@ struct OverlayReduction {
     delivered: Vec<DeliveredObserverOccurrence>,
 }
 
+const USAGE_V2_FAMILY: &str = "runtime.usage-v2";
+const USAGE_V2_FAMILY_VERSION: u32 = 1;
+
+fn validate_usage_revision_identity(
+    fact_id: CanonicalFactId,
+    semantic_revision_ref: SemanticRevisionRef,
+    revision: &UsageRevisionV2Fact,
+) -> Result<(), SemanticMergeError> {
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| SemanticMergeError::invalid("usage revision is invalid"))?;
+    let expected = FactRevisionId::derive(&fact_id, USAGE_V2_FAMILY_VERSION, &revision_key)
+        .map(SemanticRevisionRef::new)
+        .map_err(|_| SemanticMergeError::invalid("usage revision identity is invalid"))?;
+    if semantic_revision_ref != expected {
+        return Err(SemanticMergeError::invalid(
+            "usage semantic revision reference does not bind its typed value",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_usage_coverage(coverage: &SourceCoverageSet) -> Result<(), SemanticMergeError> {
+    coverage.validate()?;
+    if coverage.coverage_domain
+        != (CoverageDomain::FactFamily {
+            family: USAGE_V2_FAMILY.to_string(),
+            version: USAGE_V2_FAMILY_VERSION,
+        })
+    {
+        return Err(SemanticMergeError::invalid(
+            "usage merge requires runtime.usage-v2@1 fact-family coverage",
+        ));
+    }
+    Ok(())
+}
+
 fn is_generation_retraction(event: &ScopedUsageObserverEvent) -> bool {
     matches!(
         event.operation,
@@ -127,7 +164,7 @@ fn is_generation_retraction(event: &ScopedUsageObserverEvent) -> bool {
 fn reduce_observer_events(
     events: &[ScopedUsageObserverEvent],
 ) -> Result<OverlayReduction, SemanticMergeError> {
-    let mut seen_event_ids = BTreeSet::new();
+    let mut seen_event_ids = BTreeMap::new();
     let mut unique = Vec::new();
     for event in events {
         if event.event_id.is_empty() {
@@ -135,8 +172,22 @@ fn reduce_observer_events(
                 "observer event_id must be a non-empty occurrence identity",
             ));
         }
-        if seen_event_ids.insert(event.event_id.clone()) {
-            unique.push(event);
+        validate_usage_revision_identity(
+            event.fact_id,
+            event.semantic_revision_ref,
+            &event.revision,
+        )?;
+        match seen_event_ids.get(event.event_id.as_str()) {
+            Some(previous) if *previous != event => {
+                return Err(SemanticMergeError::invalid(
+                    "one observer event_id cannot identify different event content",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                seen_event_ids.insert(event.event_id.as_str(), event);
+                unique.push(event);
+            }
         }
     }
 
@@ -279,8 +330,21 @@ pub(crate) fn merge_durable_and_scoped_usage(
     observer_events: &[ScopedUsageObserverEvent],
     observer_coverage: &SourceCoverageSet,
 ) -> Result<DurableLiveUsageMerge, SemanticMergeError> {
-    durable_coverage.validate()?;
-    observer_coverage.validate()?;
+    validate_usage_coverage(durable_coverage)?;
+    validate_usage_coverage(observer_coverage)?;
+    let mut durable_fact_ids = BTreeSet::new();
+    for contribution in durable {
+        if !durable_fact_ids.insert(contribution.fact_id) {
+            return Err(SemanticMergeError::invalid(
+                "durable usage contains a duplicate canonical fact identity",
+            ));
+        }
+        validate_usage_revision_identity(
+            contribution.fact_id,
+            contribution.semantic_revision_ref,
+            &contribution.revision,
+        )?;
+    }
     let overlay = reduce_observer_events(observer_events)?;
     let disposition = overlay_disposition(observer_coverage, durable_coverage)?;
     Ok(DurableLiveUsageMerge {

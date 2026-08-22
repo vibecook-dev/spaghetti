@@ -158,6 +158,68 @@ fn ordered_observer_delivery_deduplicates_by_event_id_and_preserves_a_b_a() {
 }
 
 #[test]
+fn merge_rejects_conflicting_event_ids_and_unbound_usage_revisions() {
+    let fixture = runtime_fixture();
+    let aba = &fixture.usage.response_revisions;
+    let (baseline, _, _) = coverage_sets();
+    let partial = with_completeness(&baseline, "partial");
+
+    let first = upsert_event("evt-conflict", &aba.a);
+    let conflicting = upsert_event("evt-conflict", &aba.b);
+    assert!(merge_durable_and_scoped_usage(
+        &[],
+        &baseline,
+        &[first.clone(), conflicting],
+        &partial,
+    )
+    .is_err());
+
+    let mut drifted_event = first;
+    drifted_event.semantic_revision_ref = aba.b.semantic_revision_ref;
+    let drifted_event_result =
+        merge_durable_and_scoped_usage(&[], &baseline, &[drifted_event], &partial);
+    assert!(drifted_event_result.is_err());
+
+    let drifted_durable = DurableUsageContribution {
+        fact_id: aba.a.fact_id,
+        semantic_revision_ref: aba.b.semantic_revision_ref,
+        revision: aba.a.revision.clone(),
+    };
+    let drifted_durable_result =
+        merge_durable_and_scoped_usage(&[drifted_durable], &baseline, &[], &partial);
+    assert!(drifted_durable_result.is_err());
+}
+
+#[test]
+fn merge_rejects_duplicate_durable_facts_and_non_usage_coverage() {
+    let fixture = runtime_fixture();
+    let (baseline, _, _) = coverage_sets();
+    let partial = with_completeness(&baseline, "partial");
+    let contribution = contribution(&fixture.usage.response_revisions.a);
+    assert!(merge_durable_and_scoped_usage(
+        &[contribution.clone(), contribution],
+        &baseline,
+        &[],
+        &partial,
+    )
+    .is_err());
+
+    let mut decode_value = serde_json::to_value(&baseline).expect("coverage json");
+    decode_value["coverage_domain"] = json!({"kind": "decode"});
+    for point in decode_value["points"]
+        .as_array_mut()
+        .expect("coverage points")
+    {
+        point["coverage_domain"] = json!({"kind": "decode"});
+    }
+    let decode_coverage: SourceCoverageSet =
+        serde_json::from_value(decode_value).expect("valid decode coverage");
+    let wrong_domain_result =
+        merge_durable_and_scoped_usage(&[], &decode_coverage, &[], &decode_coverage);
+    assert!(wrong_domain_result.is_err());
+}
+
+#[test]
 fn overlay_replaces_one_fact_identity_while_preserving_semantic_revision_refs() {
     let fixture = runtime_fixture();
     let aba = &fixture.usage.response_revisions;
