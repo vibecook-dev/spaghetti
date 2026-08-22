@@ -54,6 +54,9 @@ export type {
   WatchSessionObservationShadowOptions,
   SessionObservationShadow,
   SessionObservationShadowTail,
-  ScopedUsageShadowRecord,
-  ObserverRecordSource,
 } from './session-observation-shadow.js';
+export type {
+  SessionObservationShadowEntityEnvelope,
+  SessionObservationShadowPhase,
+  SessionObservationShadowSnapshot,
+} from './session-observation-epoch.js';
