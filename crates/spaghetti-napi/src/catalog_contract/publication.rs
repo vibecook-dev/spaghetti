@@ -2378,7 +2378,6 @@ fn validate_initial_build(
         || readiness.desired_contract_version != CATALOG_QUERY_PACK_CONTRACT_VERSION
         || selection.query_pack_version != Some(readiness.desired_contract_version)
         || readiness.epoch != 1
-        || readiness.attempt != 1
         || readiness.completed_contract_version.is_some()
         || readiness.complete_through_commit.is_some()
         || readiness.last_complete_snapshot.is_some()

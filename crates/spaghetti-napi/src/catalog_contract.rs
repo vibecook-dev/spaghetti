@@ -948,9 +948,10 @@ impl CatalogReadinessSnapshot {
                     if self.completed_contract_version.is_some()
                         || self.complete_through_commit.is_some()
                         || self.last_complete_snapshot.is_some()
+                        || !self.source_coverage.is_empty()
                     {
                         return Err(CatalogContractError::invalid(
-                            "discarded integrity failure cannot retain completed snapshot state",
+                            "discarded integrity failure cannot retain snapshot or coverage state",
                         ));
                     }
                 }
@@ -1318,6 +1319,7 @@ impl CatalogReadinessMachine {
                 candidate.completed_contract_version = None;
                 candidate.complete_through_commit = None;
                 candidate.last_complete_snapshot = None;
+                candidate.source_coverage.clear();
             }
         }
         self.replace_snapshot(candidate)
@@ -1335,13 +1337,19 @@ impl CatalogReadinessMachine {
                 "only a degraded or error catalog build can start a retry attempt",
             ));
         }
-        if !self.plan.required_coverage_present(&source_coverage)
-            || source_coverage
-                .iter()
-                .any(|coverage| coverage.completeness == CoverageSetCompleteness::Complete)
-        {
+        if self.snapshot.last_complete_snapshot.is_some() {
+            if !self.plan.required_coverage_present(&source_coverage)
+                || source_coverage
+                    .iter()
+                    .any(|coverage| coverage.completeness == CoverageSetCompleteness::Complete)
+            {
+                return Err(CatalogContractError::invalid(
+                    "catalog retry coverage must conservatively represent every required source",
+                ));
+            }
+        } else if !source_coverage.is_empty() {
             return Err(CatalogContractError::invalid(
-                "catalog retry coverage must conservatively represent every required source",
+                "catalog retry without a retained snapshot cannot claim source coverage",
             ));
         }
         let mut candidate = self.snapshot.clone();
@@ -1989,6 +1997,10 @@ mod tests {
             .unwrap();
         assert_eq!(machine.snapshot().last_complete_snapshot, None);
         assert_eq!(machine.snapshot().completed_contract_version, None);
+        assert!(machine.snapshot().source_coverage.is_empty());
+        machine.retry(Vec::new()).unwrap();
+        assert_eq!(machine.snapshot().state, CatalogReadinessPhase::Building);
+        assert_eq!(machine.snapshot().attempt, 3);
     }
 
     #[test]

@@ -273,6 +273,10 @@ impl std::fmt::Debug for CatalogReadyPublicationIdentity {
 }
 
 impl CatalogReadyPublicationIdentity {
+    pub(super) fn build_commit_seq(&self) -> u64 {
+        self.header.build_commit_seq
+    }
+
     pub(super) fn is_refresh(&self) -> bool {
         matches!(self.header.lineage, CatalogSnapshotLineage::Refresh { .. })
     }
@@ -2458,10 +2462,13 @@ fn validate_snapshot_lineage(
         replaces_content_digest,
     ) {
         (CATALOG_DURABLE_PUBLICATION_CONTRACT_VERSION, None, None, None) => {
-            validate_commit_owner(
+            validate_commit_owner_one_of(
                 connection,
                 build_commit_seq,
-                "catalog.library.build.scheduled",
+                &[
+                    "catalog.library.build.scheduled",
+                    catalog_state::REFRESH_RECOVERY_STARTED_REASON,
+                ],
                 None,
             )?;
             validate_commit_owner(

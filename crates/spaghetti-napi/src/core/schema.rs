@@ -200,7 +200,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// v57: append-only RFC 012B terminal source-unavailability evidence plus
 /// durable retrying/degraded/recovery Library readiness that retains its last
 /// safe snapshot.
-pub const SCHEMA_VERSION: u32 = 57;
+/// v58: RFC 012B discarded initial-build integrity evidence and retryable
+/// no-snapshot Error readiness.
+pub const SCHEMA_VERSION: u32 = 58;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -506,6 +508,7 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.plan.registered',
         'catalog.library.build.scheduled',
         'catalog.library.initial_snapshot.published',
+        'catalog.library.build.integrity_failed',
         'catalog.library.refresh.started',
         'catalog.library.refresh_snapshot.published',
         'catalog.library.refresh.integrity_failed',
@@ -646,9 +649,9 @@ CREATE TABLE IF NOT EXISTS catalog_refresh_integrity_failures (
   coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
   readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
   attempt INTEGER NOT NULL CHECK (attempt > 0),
-  retained_snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  retained_publication_digest BLOB NOT NULL CHECK (typeof(retained_publication_digest) = 'blob' AND length(retained_publication_digest) = 32),
-  retained_content_digest BLOB NOT NULL CHECK (typeof(retained_content_digest) = 'blob' AND length(retained_content_digest) = 32),
+  retained_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  retained_publication_digest BLOB CHECK (retained_publication_digest IS NULL OR (typeof(retained_publication_digest) = 'blob' AND length(retained_publication_digest) = 32)),
+  retained_content_digest BLOB CHECK (retained_content_digest IS NULL OR (typeof(retained_content_digest) = 'blob' AND length(retained_content_digest) = 32)),
   reason_code TEXT NOT NULL CHECK (
     typeof(reason_code) = 'text'
     AND length(CAST(reason_code AS BLOB)) BETWEEN 1 AND 64
@@ -656,9 +659,24 @@ CREATE TABLE IF NOT EXISTS catalog_refresh_integrity_failures (
     AND substr(reason_code, 1, 1) GLOB '[a-z]'
     AND reason_code NOT GLOB '*[^a-z0-9_]*'
   ),
-  snapshot_disposition TEXT NOT NULL CHECK (snapshot_disposition = 'independently_safe'),
+  snapshot_disposition TEXT NOT NULL CHECK (snapshot_disposition IN ('independently_safe', 'discarded')),
   failed_at INTEGER NOT NULL,
-  CHECK (retained_snapshot_commit_seq < failed_refresh_commit_seq),
+  CHECK (
+    (
+      snapshot_disposition = 'independently_safe'
+      AND retained_snapshot_commit_seq IS NOT NULL
+      AND retained_publication_digest IS NOT NULL
+      AND retained_content_digest IS NOT NULL
+    )
+    OR
+    (
+      snapshot_disposition = 'discarded'
+      AND retained_snapshot_commit_seq IS NULL
+      AND retained_publication_digest IS NULL
+      AND retained_content_digest IS NULL
+    )
+  ),
+  CHECK (retained_snapshot_commit_seq IS NULL OR retained_snapshot_commit_seq < failed_refresh_commit_seq),
   CHECK (failed_refresh_commit_seq < failure_commit_seq)
 );
 
@@ -779,14 +797,24 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
     OR
     (
       state = 'error'
-      AND completed_contract_version IS NOT NULL
-      AND complete_through_commit IS NOT NULL
-      AND last_complete_snapshot_commit IS NOT NULL
       AND refreshing_from_snapshot_commit IS NULL
       AND reason_code IS NOT NULL
-      AND completed_contract_version = desired_contract_version
-      AND complete_through_commit = last_complete_snapshot_commit
-      AND last_commit_seq > complete_through_commit
+      AND (
+        (
+          completed_contract_version IS NOT NULL
+          AND complete_through_commit IS NOT NULL
+          AND last_complete_snapshot_commit IS NOT NULL
+          AND completed_contract_version = desired_contract_version
+          AND complete_through_commit = last_complete_snapshot_commit
+          AND last_commit_seq > complete_through_commit
+        )
+        OR
+        (
+          completed_contract_version IS NULL
+          AND complete_through_commit IS NULL
+          AND last_complete_snapshot_commit IS NULL
+        )
+      )
     )
   )
 );
@@ -3956,6 +3984,8 @@ mod tests {
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.plan.registered', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.scheduled', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.initial_snapshot.published', 1, 2, 1)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.integrity_failed', 1, NULL, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.integrity_failed', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.started', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.integrity_failed', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.integrity_failed', 1, 2, 1)",
@@ -3978,6 +4008,7 @@ mod tests {
             "catalog.library.plan.registered",
             "catalog.library.build.scheduled",
             "catalog.library.initial_snapshot.published",
+            "catalog.library.build.integrity_failed",
             "catalog.library.refresh.started",
             "catalog.library.refresh_snapshot.published",
             "catalog.library.refresh.integrity_failed",
@@ -3996,7 +4027,7 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            10
+            11
         );
     }
 

@@ -307,6 +307,14 @@ impl SpaghettiEngineCore {
             {
                 Ok(CatalogBuildOutcome::LastCompleteRetained)
             }
+            Some(CatalogReadinessPhase::Error)
+                if durable_state
+                    .as_ref()
+                    .and_then(|state| state.readiness.last_complete_snapshot)
+                    .is_none() =>
+            {
+                publish_initial(self, plan, selection, &sources, &cancellation)
+            }
             Some(CatalogReadinessPhase::Error) => {
                 publish_refresh(self, plan, selection, &sources, &cancellation)
             }
@@ -356,30 +364,36 @@ fn publish_initial(
     // This durable transition is intentionally before the first producer read:
     // a crash or cancellation leaves an exact resumable Building lineage.
     let context = engine.begin_initial_catalog_build(plan)?;
-    check_cancelled(cancellation)?;
-    let projections = sources
-        .iter()
-        .map(|source| {
-            check_cancelled(cancellation)?;
-            produce_projection(source, None)
+    let outcome = (|| {
+        check_cancelled(cancellation)?;
+        let projections = sources
+            .iter()
+            .map(|source| {
+                check_cancelled(cancellation)?;
+                produce_projection(source, None)
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        let batch = CatalogInitialProjectionBatch::assemble(
+            projections,
+            selection,
+            context.observation_commit(),
+        )
+        .map_err(|_| catalog_integrity_error("assemble initial catalog projection"))?;
+        let source_count = batch.source_count();
+        let member_count = batch.member_count();
+        check_cancelled(cancellation)?;
+        let receipt = engine.commit_initial_catalog_projection(context, batch)?;
+        Ok(CatalogBuildOutcome::Published {
+            kind: CatalogPublicationKind::Initial,
+            commit_seq: receipt.map(|value| value.commit_seq),
+            source_count,
+            member_count,
         })
-        .collect::<Result<Vec<_>, EngineError>>()?;
-    let batch = CatalogInitialProjectionBatch::assemble(
-        projections,
-        selection,
-        context.observation_commit(),
-    )
-    .map_err(|_| catalog_integrity_error("assemble initial catalog projection"))?;
-    let source_count = batch.source_count();
-    let member_count = batch.member_count();
-    check_cancelled(cancellation)?;
-    let receipt = engine.commit_initial_catalog_projection(context, batch)?;
-    Ok(CatalogBuildOutcome::Published {
-        kind: CatalogPublicationKind::Initial,
-        commit_seq: receipt.map(|value| value.commit_seq),
-        source_count,
-        member_count,
-    })
+    })();
+    if matches!(&outcome, Err(EngineError::CatalogIntegrity { .. })) {
+        engine.fail_active_initial_catalog_integrity("catalog_initial_integrity_failed")?;
+    }
+    outcome
 }
 
 fn publish_refresh(
@@ -496,6 +510,7 @@ fn catalog_composition_error(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use rusqlite::Connection;
@@ -608,6 +623,22 @@ mod tests {
         let root = directory.path().join(name);
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn empty_catalog_selection(query_pack_version: Option<u32>) -> ContractVersionSelection {
+        ContractVersionSelection {
+            selection_contract_version: crate::adapter::CONTRACT_VERSION_SELECTION_VERSION,
+            model_major: 1,
+            external_entity_reference_version: 1,
+            semantic_revision_reference_version: 1,
+            coverage_contract_version: 1,
+            fact_family_versions: BTreeMap::from([
+                ("catalog.project".to_string(), 1),
+                ("catalog.session".to_string(), 1),
+            ]),
+            query_pack_version,
+            observation_contract_version: None,
+        }
     }
 
     #[test]
@@ -775,5 +806,53 @@ mod tests {
         assert!(!message.contains("/Users/"));
         assert!(!message.contains("alice"));
         assert!(!message.contains("private"));
+    }
+
+    #[test]
+    fn initial_publication_integrity_failure_is_durable_and_retried() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("catalog-initial-integrity.db");
+        let engine = non_authorizing_engine(database_path);
+        let plan = CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new())
+            .unwrap();
+        let invalid = PreparedCatalogBuild {
+            plan: plan.clone(),
+            selection: empty_catalog_selection(None),
+            sources: Vec::new(),
+            intent: CatalogBuildIntent::Startup,
+        };
+        assert!(matches!(
+            engine.publish_prepared_catalog(invalid, QueryCancellationToken::default()),
+            Err(EngineError::CatalogIntegrity {
+                operation: "validate initial catalog publication"
+            })
+        ));
+        let failed = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(failed.readiness.state, CatalogReadinessPhase::Error);
+        assert_eq!(failed.readiness.attempt, 1);
+        assert_eq!(failed.readiness.last_complete_snapshot, None);
+
+        let valid = PreparedCatalogBuild {
+            plan,
+            selection: empty_catalog_selection(Some(
+                crate::catalog_contract::CATALOG_QUERY_PACK_CONTRACT_VERSION,
+            )),
+            sources: Vec::new(),
+            intent: CatalogBuildIntent::Startup,
+        };
+        let outcome = engine
+            .publish_prepared_catalog(valid, QueryCancellationToken::default())
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            CatalogBuildOutcome::Published {
+                kind: CatalogPublicationKind::Initial,
+                ..
+            }
+        ));
+        let ready = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(ready.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(ready.readiness.attempt, 2);
+        engine.shutdown().unwrap();
     }
 }

@@ -1666,6 +1666,20 @@ impl SpaghettiEngineCore {
                 "catalog initial build resumed a different frozen plan".to_string(),
             ));
         }
+        if state.readiness.state == CatalogReadinessPhase::Error
+            && state.readiness.last_complete_snapshot.is_none()
+        {
+            self.commit_catalog_build_state(CatalogBuildStateCommand::retry_terminal_refresh(
+                state.expectation()?,
+                now,
+                now,
+            ))?;
+            state = self.load_catalog_build_state()?.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog initial recovery start lost its durable state".to_string(),
+                )
+            })?;
+        }
         if state.readiness.state == CatalogReadinessPhase::Pending {
             self.commit_catalog_build_state(CatalogBuildStateCommand::schedule(
                 state.expectation()?,
@@ -1690,6 +1704,44 @@ impl SpaghettiEngineCore {
         })
     }
 
+    pub(crate) fn fail_active_initial_catalog_integrity(
+        &self,
+        reason_code: &str,
+    ) -> Result<Option<u64>, EngineError> {
+        let state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog initial integrity failure requires durable Building readiness".to_string(),
+            )
+        })?;
+        if state.readiness.state == CatalogReadinessPhase::Error
+            && state.readiness.last_complete_snapshot.is_none()
+        {
+            if state.readiness.reason
+                == Some(
+                    crate::catalog_contract::CatalogReadinessReason::IntegrityFailure {
+                        code: reason_code.to_string(),
+                        snapshot_disposition:
+                            crate::catalog_contract::CatalogIntegritySnapshotDisposition::Discarded,
+                    },
+                )
+            {
+                return Ok(None);
+            }
+            return Err(EngineError::InvalidCommit(
+                "catalog initial integrity failure conflicts with durable failure evidence"
+                    .to_string(),
+            ));
+        }
+        let expected = state.initial_integrity_expectation()?;
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::fail_initial_build_integrity(
+            expected,
+            reason_code,
+            now,
+            now,
+        ))
+    }
+
     /// Consume one checked all-source projection and atomically publish it
     /// against the pre-read Building context. Exact lost-ack replay is handled
     /// by the existing writer publication contract.
@@ -1705,7 +1757,9 @@ impl SpaghettiEngineCore {
         }
         let assembly = batch
             .into_publication(&context.readiness, CatalogPublicationLimits::default())
-            .map_err(|error| EngineError::InvalidCommit(error.to_string()))?;
+            .map_err(|_| EngineError::CatalogIntegrity {
+                operation: "validate initial catalog publication",
+            })?;
         let now = engine_now_unix_ms()?;
         self.commit_initial_catalog_publication(CatalogInitialPublicationCommand::new(
             assembly,
@@ -3012,6 +3066,57 @@ mod tests {
             .commit_initial_catalog_projection(context, replay)
             .unwrap()
             .is_none());
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn initial_catalog_integrity_failure_restarts_on_a_fresh_attempt() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("catalog-initial-integrity.db");
+        let plan = CatalogCoveragePlan::new(
+            crate::catalog_contract::CatalogCoverageScope::Library,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let engine = SpaghettiEngineCore::open(options(database.clone())).unwrap();
+        let first = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        assert_eq!(first.readiness.attempt, 1);
+        assert!(engine
+            .fail_active_initial_catalog_integrity("initial_projection_invalid")
+            .unwrap()
+            .is_some());
+        assert!(engine
+            .fail_active_initial_catalog_integrity("initial_projection_invalid")
+            .unwrap()
+            .is_none());
+        let failed = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(failed.readiness.state, CatalogReadinessPhase::Error);
+        assert_eq!(failed.readiness.last_complete_snapshot, None);
+        assert!(!engine.status().catalog_query_ready);
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let engine = SpaghettiEngineCore::open(options(database)).unwrap();
+        let retry = engine.begin_initial_catalog_build(plan).unwrap();
+        assert_eq!(retry.readiness.state, CatalogReadinessPhase::Building);
+        assert_eq!(retry.readiness.attempt, 2);
+        assert_ne!(retry.observation_commit(), first.observation_commit());
+        let batch = CatalogInitialProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            retry.observation_commit(),
+        )
+        .unwrap();
+        engine
+            .commit_initial_catalog_projection(retry, batch)
+            .unwrap()
+            .unwrap();
+        let ready = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(ready.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(ready.readiness.attempt, 2);
+        assert!(ready.ready_read_authority().is_ok());
+        assert!(engine.status().catalog_query_ready);
         engine.shutdown().unwrap();
     }
 
