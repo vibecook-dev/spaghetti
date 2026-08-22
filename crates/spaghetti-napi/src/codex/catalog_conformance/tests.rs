@@ -16,6 +16,7 @@ use crate::codex::catalog_runtime::{
     codex_conformance_source_declaration_id, codex_conformance_support_release_bytes,
     codex_conformance_support_release_id, codex_planned_catalog_composition,
     produce_codex_library_coverage, produce_codex_library_coverage_with_post_head_mutation,
+    produce_codex_library_refresh,
 };
 
 const FROZEN_FIXTURE: &str = include_str!(concat!(
@@ -449,14 +450,18 @@ fn typed_authorization_derives_the_runtime_composition_binding() {
     let executable = composition.authorize_execution(access).unwrap();
     let instance = codex_catalog_source_instance(&fixture_root(), FIXTURE_SOURCE_INSTANCE).unwrap();
     let bound = executable.bind_source_instance(&instance).unwrap();
-    let produced = produce_codex_library_coverage(
-        &bound,
-        CatalogAccessPolicyDigest::derive(1, b"authorized-runtime-composition").unwrap(),
-    )
-    .unwrap();
+    let policy = CatalogAccessPolicyDigest::derive(1, b"authorized-runtime-composition").unwrap();
+    let produced = produce_codex_library_coverage(&bound, policy).unwrap();
     assert_eq!(
         produced.assembly.source_coverage().completeness,
         crate::adapter::CoverageSetCompleteness::Complete
+    );
+    let refresh =
+        produce_codex_library_refresh(&bound, policy, produced.assembly.source_coverage()).unwrap();
+    assert_eq!(
+        refresh.assembly.source_coverage(),
+        produced.assembly.source_coverage(),
+        "an exact full-scan replay must retain every object generation"
     );
 }
 

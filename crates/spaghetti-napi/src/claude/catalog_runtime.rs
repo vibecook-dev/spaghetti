@@ -16,7 +16,7 @@ use super::adapter::ClaudeCodeAdapter;
 use crate::adapter::{
     AdapterId, AdapterObjectContext, AgentAdapter, AuthorizedCatalogAccess,
     CanonicalSourceInstanceKey, DecodeDisposition, DriverSpec, Fact, FactSemanticContext,
-    SessionFact, SourceInstance, SourceObjectDescriptor, StreamSpec,
+    SessionFact, SourceCoverageSet, SourceInstance, SourceObjectDescriptor, StreamSpec,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -256,7 +256,20 @@ pub(crate) fn produce_claude_library_coverage(
     access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
 ) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
-    produce_claude_library_coverage_after_heads(access, access_policy_digest, |_| Ok(()))
+    produce_claude_library_coverage_after_heads(access, access_policy_digest, None, |_| Ok(()))
+}
+
+pub(crate) fn produce_claude_library_refresh(
+    access: &CatalogBoundSourceAccess<'_, '_, '_>,
+    access_policy_digest: CatalogAccessPolicyDigest,
+    prior_coverage: &SourceCoverageSet,
+) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
+    produce_claude_library_coverage_after_heads(
+        access,
+        access_policy_digest,
+        Some(prior_coverage),
+        |_| Ok(()),
+    )
 }
 
 #[cfg(test)]
@@ -265,7 +278,7 @@ pub(crate) fn produce_claude_library_coverage_with_post_head_mutation(
     access_policy_digest: CatalogAccessPolicyDigest,
     mutate: impl FnOnce(&Path),
 ) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
-    produce_claude_library_coverage_after_heads(access, access_policy_digest, |root| {
+    produce_claude_library_coverage_after_heads(access, access_policy_digest, None, |root| {
         mutate(root);
         Ok(())
     })
@@ -313,6 +326,7 @@ fn decode_catalog_record(
 fn produce_claude_library_coverage_after_heads(
     access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
+    prior_coverage: Option<&SourceCoverageSet>,
     after_heads: impl FnOnce(&Path) -> Result<(), CatalogCompositionError>,
 ) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
     let executable = access.executable();
@@ -753,7 +767,7 @@ fn produce_claude_library_coverage_after_heads(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let projection_members = members
+    let mut projection_members = members
         .iter()
         .map(|(member, state)| {
             let owner = state.projection_owner.as_ref().ok_or_else(|| {
@@ -838,6 +852,15 @@ fn produce_claude_library_coverage_after_heads(
         membership_entries,
         completions,
     )?;
+    let assembly = if let Some(prior_coverage) = prior_coverage {
+        let (assembly, generations) = assembly.reconcile_refresh_coverage(prior_coverage)?;
+        for member in &mut projection_members {
+            member.reconcile_refresh_generation(&generations)?;
+        }
+        assembly
+    } else {
+        assembly
+    };
     let publication_source = assembly.complete_publication_source().map_err(|_| {
         CatalogCompositionError::invalid(
             "Claude catalog coverage could not form a complete publication source",

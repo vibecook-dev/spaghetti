@@ -2081,16 +2081,10 @@ impl CatalogLibraryCoverageAssembly {
     /// is retained as an explicit deletion. This is the owned-set bridge that
     /// prevents a same-generation metadata snapshot from leaving removed
     /// members live.
-    pub(crate) fn refresh_publication_source(
+    pub(crate) fn reconcile_refresh_coverage(
         &self,
         prior: &SourceCoverageSet,
-    ) -> Result<
-        (
-            CatalogCompleteSourceAssembly,
-            CatalogRefreshCoverageGenerations,
-        ),
-        CatalogCompositionError,
-    > {
+    ) -> Result<(Self, CatalogRefreshCoverageGenerations), CatalogCompositionError> {
         prior.validate().map_err(|_| {
             CatalogCompositionError::invalid("catalog refresh predecessor coverage is invalid")
         })?;
@@ -2207,29 +2201,10 @@ impl CatalogLibraryCoverageAssembly {
                 "catalog refresh coverage reconciliation is outside contract bounds",
             )
         })?;
-        let publication = CatalogCompleteSourceAssembly::from_complete_library_coverage(
-            self.plan_source.clone(),
-            self.contract_selection.clone(),
-            self.member_identity_contract_id.clone(),
-            CatalogSourceMembershipRevision::from_digest(
-                *self.catalog_membership_revision.as_bytes(),
-            ),
-            CatalogSourceCompletionRevision::from_digest(
-                *self.component_completion_revision.as_bytes(),
-            ),
-            self.member_refs
-                .iter()
-                .map(|member_ref| CatalogPublicationMemberRef::from_digest(*member_ref.as_bytes()))
-                .collect(),
-            source_coverage,
-        )
-        .map_err(|_| {
-            CatalogCompositionError::invalid(
-                "catalog refresh publication source is outside contract bounds",
-            )
-        })?;
+        let mut assembly = self.clone();
+        assembly.source_coverage = source_coverage;
         Ok((
-            publication,
+            assembly,
             CatalogRefreshCoverageGenerations {
                 adapter_id: self.plan_source.adapter_id.clone(),
                 source_instance_key: self.plan_source.source_instance_key,

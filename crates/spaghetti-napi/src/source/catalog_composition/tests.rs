@@ -1328,9 +1328,10 @@ fn executable_composition_assembles_canonical_complete_library_coverage() {
         changed.generation,
     )
     .unwrap();
-    let (refresh_source, generations) = refreshed
-        .refresh_publication_source(&prior_coverage)
+    let (refresh_assembly, generations) = refreshed
+        .reconcile_refresh_coverage(&prior_coverage)
         .unwrap();
+    let refresh_source = refresh_assembly.complete_publication_source().unwrap();
     let changed_refresh = refresh_source
         .source_coverage()
         .points

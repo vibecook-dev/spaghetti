@@ -18,7 +18,7 @@ use super::adapter::{
 };
 use crate::adapter::{
     AdapterId, AgentAdapter, AuthorizedCatalogAccess, DecodeDisposition, DriverSpec, Fact,
-    FactSemanticContext, SourceObjectDescriptor, StreamSpec,
+    FactSemanticContext, SourceCoverageSet, SourceObjectDescriptor, StreamSpec,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -237,7 +237,20 @@ pub(crate) fn produce_grok_library_coverage(
     access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
 ) -> Result<GrokCatalogProduction, CatalogCompositionError> {
-    produce_grok_library_coverage_after_summaries(access, access_policy_digest, |_| Ok(()))
+    produce_grok_library_coverage_after_summaries(access, access_policy_digest, None, |_| Ok(()))
+}
+
+pub(crate) fn produce_grok_library_refresh(
+    access: &CatalogBoundSourceAccess<'_, '_, '_>,
+    access_policy_digest: CatalogAccessPolicyDigest,
+    prior_coverage: &SourceCoverageSet,
+) -> Result<GrokCatalogProduction, CatalogCompositionError> {
+    produce_grok_library_coverage_after_summaries(
+        access,
+        access_policy_digest,
+        Some(prior_coverage),
+        |_| Ok(()),
+    )
 }
 
 #[cfg(test)]
@@ -246,15 +259,21 @@ pub(crate) fn produce_grok_library_coverage_with_post_summary_mutation(
     access_policy_digest: CatalogAccessPolicyDigest,
     mutate: impl FnOnce(&Path),
 ) -> Result<GrokCatalogProduction, CatalogCompositionError> {
-    produce_grok_library_coverage_after_summaries(access, access_policy_digest, |sessions_root| {
-        mutate(sessions_root);
-        Ok(())
-    })
+    produce_grok_library_coverage_after_summaries(
+        access,
+        access_policy_digest,
+        None,
+        |sessions_root| {
+            mutate(sessions_root);
+            Ok(())
+        },
+    )
 }
 
 fn produce_grok_library_coverage_after_summaries(
     access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
+    prior_coverage: Option<&SourceCoverageSet>,
     after_summaries: impl FnOnce(&Path) -> Result<(), CatalogCompositionError>,
 ) -> Result<GrokCatalogProduction, CatalogCompositionError> {
     let executable = access.executable();
@@ -527,7 +546,7 @@ fn produce_grok_library_coverage_after_summaries(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let projection_members = members
+    let mut projection_members: Vec<CatalogSourceMemberProjection> = members
         .values()
         .map(|state| {
             CatalogSourceMemberProjection::new(
@@ -570,6 +589,15 @@ fn produce_grok_library_coverage_after_summaries(
         membership_entries,
         vec![membership_completion, summary_completion],
     )?;
+    let assembly = if let Some(prior_coverage) = prior_coverage {
+        let (assembly, generations) = assembly.reconcile_refresh_coverage(prior_coverage)?;
+        for member in &mut projection_members {
+            member.reconcile_refresh_generation(&generations)?;
+        }
+        assembly
+    } else {
+        assembly
+    };
     let publication_source = assembly.complete_publication_source().map_err(|_| {
         CatalogCompositionError::invalid(
             "Grok catalog coverage could not form a complete publication source",

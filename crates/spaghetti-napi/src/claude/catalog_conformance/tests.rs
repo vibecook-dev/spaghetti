@@ -17,7 +17,7 @@ use crate::claude::catalog_runtime::{
     claude_conformance_source_declaration_bytes, claude_conformance_source_declaration_id,
     claude_conformance_support_release_bytes, claude_conformance_support_release_id,
     claude_planned_catalog_composition, produce_claude_library_coverage,
-    produce_claude_library_coverage_with_post_head_mutation,
+    produce_claude_library_coverage_with_post_head_mutation, produce_claude_library_refresh,
 };
 use crate::source::catalog_composition::{
     CatalogContribution, CatalogDecoderStateBoundary, CatalogDiscoveryBounds,
@@ -728,6 +728,22 @@ fn produce_from_root(
     produce_claude_library_coverage(&access, policy).map_err(|error| error.to_string())
 }
 
+fn produce_refresh_from_root(
+    executable: &crate::source::catalog_composition::CatalogExecutableComposition<'_, '_>,
+    catalog_root: &Path,
+    discriminator: &[u8],
+    policy: crate::catalog_contract::CatalogAccessPolicyDigest,
+    prior_coverage: &crate::adapter::SourceCoverageSet,
+) -> Result<crate::claude::catalog_runtime::ClaudeCatalogProduction, String> {
+    let instance = claude_catalog_source_instance(catalog_root, discriminator)
+        .map_err(|error| error.to_string())?;
+    let access = executable
+        .bind_source_instance(&instance)
+        .map_err(|error| error.to_string())?;
+    produce_claude_library_refresh(&access, policy, prior_coverage)
+        .map_err(|error| error.to_string())
+}
+
 fn produce_fixture_with(
     compatibility: CompatibilityClass,
     policy: &[u8],
@@ -861,6 +877,68 @@ fn authorized_producer_matches_frozen_identity_without_authorizing_candidate() {
     assert!(!debug.contains("/Users/"));
     assert!(!debug.contains("/home/"));
     assert!(!debug.contains("03ddf851"));
+}
+
+#[test]
+fn complete_index_refresh_replaces_shared_owner_and_deletes_omitted_member() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path().join(".claude");
+    let project = root.join("projects/-tmp-project");
+    fs::create_dir_all(&project).unwrap();
+    write_index(
+        &project,
+        &[(INDEX_ONLY, "/tmp/project"), (TOP_ONLY, "/tmp/project")],
+    );
+
+    let composition = claude_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let access = synthetic_claude_catalog_access(&selection, CompatibilityClass::ExactSupported);
+    let executable = composition.authorize_execution(access).unwrap();
+    let policy = CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap();
+    let initial = produce_from_root(&executable, &root, FIXTURE_SOURCE_INSTANCE, policy).unwrap();
+    assert_eq!(initial.identity.session_count, 2);
+
+    write_index(&project, &[(INDEX_ONLY, "/tmp/project")]);
+    let refresh = produce_refresh_from_root(
+        &executable,
+        &root,
+        FIXTURE_SOURCE_INSTANCE,
+        policy,
+        initial.assembly.source_coverage(),
+    )
+    .unwrap();
+    assert_eq!(refresh.identity.session_count, 1);
+
+    let (prior_index, replaced_index) = refresh
+        .assembly
+        .source_coverage()
+        .points
+        .iter()
+        .find_map(|current| {
+            initial
+                .assembly
+                .source_coverage()
+                .points
+                .iter()
+                .find(|prior| {
+                    prior.stream_key == current.stream_key
+                        && prior.object_key == current.object_key
+                        && current.generation == prior.generation + 1
+                })
+                .map(|prior| (prior, current))
+        })
+        .expect("the rewritten index must advance its exact object generation");
+    assert_eq!(replaced_index.generation, prior_index.generation + 1);
+    assert!(refresh
+        .assembly
+        .source_coverage()
+        .explicit_absence_or_deletion
+        .iter()
+        .any(|absence| {
+            absence.stream_key == prior_index.stream_key
+                && absence.object_key == prior_index.object_key
+                && absence.generation == prior_index.generation
+        }));
 }
 
 #[test]

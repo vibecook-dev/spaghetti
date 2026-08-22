@@ -15,7 +15,7 @@ use sha2::{Digest as _, Sha256};
 use super::adapter::CodexAdapter;
 use crate::adapter::{
     AdapterId, AgentAdapter, AuthorizedCatalogAccess, DecodeDisposition, DriverSpec, Fact,
-    FactSemanticContext, SourceObjectDescriptor, StreamSpec,
+    FactSemanticContext, SourceCoverageSet, SourceObjectDescriptor, StreamSpec,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -206,7 +206,20 @@ pub(crate) fn produce_codex_library_coverage(
     access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
 ) -> Result<CodexCatalogProduction, CatalogCompositionError> {
-    produce_codex_library_coverage_after_heads(access, access_policy_digest, |_| Ok(()))
+    produce_codex_library_coverage_after_heads(access, access_policy_digest, None, |_| Ok(()))
+}
+
+pub(crate) fn produce_codex_library_refresh(
+    access: &CatalogBoundSourceAccess<'_, '_, '_>,
+    access_policy_digest: CatalogAccessPolicyDigest,
+    prior_coverage: &SourceCoverageSet,
+) -> Result<CodexCatalogProduction, CatalogCompositionError> {
+    produce_codex_library_coverage_after_heads(
+        access,
+        access_policy_digest,
+        Some(prior_coverage),
+        |_| Ok(()),
+    )
 }
 
 #[cfg(test)]
@@ -215,15 +228,21 @@ pub(crate) fn produce_codex_library_coverage_with_post_head_mutation(
     access_policy_digest: CatalogAccessPolicyDigest,
     mutate: impl FnOnce(&Path),
 ) -> Result<CodexCatalogProduction, CatalogCompositionError> {
-    produce_codex_library_coverage_after_heads(access, access_policy_digest, |sessions_root| {
-        mutate(sessions_root);
-        Ok(())
-    })
+    produce_codex_library_coverage_after_heads(
+        access,
+        access_policy_digest,
+        None,
+        |sessions_root| {
+            mutate(sessions_root);
+            Ok(())
+        },
+    )
 }
 
 fn produce_codex_library_coverage_after_heads(
     access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
+    prior_coverage: Option<&SourceCoverageSet>,
     after_heads: impl FnOnce(&Path) -> Result<(), CatalogCompositionError>,
 ) -> Result<CodexCatalogProduction, CatalogCompositionError> {
     let executable = access.executable();
@@ -456,6 +475,15 @@ fn produce_codex_library_coverage_after_heads(
         membership_entries,
         vec![completion],
     )?;
+    let assembly = if let Some(prior_coverage) = prior_coverage {
+        let (assembly, generations) = assembly.reconcile_refresh_coverage(prior_coverage)?;
+        for member in &mut projection_members {
+            member.reconcile_refresh_generation(&generations)?;
+        }
+        assembly
+    } else {
+        assembly
+    };
     let publication_source = assembly.complete_publication_source().map_err(|_| {
         CatalogCompositionError::invalid(
             "Codex catalog coverage could not form a complete publication source",
