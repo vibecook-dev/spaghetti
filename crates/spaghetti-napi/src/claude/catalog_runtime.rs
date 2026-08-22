@@ -16,8 +16,8 @@ use super::adapter::ClaudeCodeAdapter;
 use crate::adapter::{
     AdapterId, AdapterObjectContext, AgentAdapter, AuthorizedCatalogAccess,
     CanonicalSourceInstanceKey, DecodeDisposition, DriverSpec, Fact, FactSemanticContext,
-    SessionFact, SourceCoverageSet, SourceInstance, SourceObjectDescriptor, StreamSpec,
-    TypedAccessAuthorization,
+    QualifiedValueQuality, SessionFact, SourceCoverageSet, SourceInstance, SourceObjectDescriptor,
+    StreamSpec, TypedAccessAuthorization,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -434,7 +434,8 @@ fn produce_claude_library_coverage_after_heads(
                     entry.generation,
                 )?,
                 ProjectAssociationBasis::SessionDirectory,
-            ),
+            )
+            .with_locator(entry.path_key.clone()),
         );
     }
     for entry in nested_scan.entries.values() {
@@ -462,7 +463,8 @@ fn produce_claude_library_coverage_after_heads(
                     entry.generation,
                 )?,
                 ProjectAssociationBasis::SessionDirectory,
-            ),
+            )
+            .with_locator(entry.path_key.clone()),
         );
     }
 
@@ -828,13 +830,21 @@ fn produce_claude_library_coverage_after_heads(
             } else {
                 CatalogAvailability::MetadataOnly
             };
-            Ok(CatalogSourceMemberProjection::new(
+            let projection = CatalogSourceMemberProjection::new(
                 owner.owner.clone(),
                 member.0.clone(),
                 member.1.clone(),
                 availability,
                 owner.association_basis,
-            ))
+            );
+            match owner.locator_path_key.as_deref() {
+                Some(path_key) => projection.with_confined_locator(
+                    PROJECTS_ROOT_ID,
+                    path_key,
+                    QualifiedValueQuality::Exact,
+                ),
+                None => Ok(projection),
+            }
         })
         .collect::<Result<Vec<_>, CatalogCompositionError>>()?;
 
@@ -943,6 +953,7 @@ struct ProjectionOwner {
     priority: u8,
     owner: CatalogEvidenceOwner,
     association_basis: ProjectAssociationBasis,
+    locator_path_key: Option<Vec<u8>>,
 }
 
 impl ProjectionOwner {
@@ -955,7 +966,13 @@ impl ProjectionOwner {
             priority,
             owner,
             association_basis,
+            locator_path_key: None,
         }
+    }
+
+    fn with_locator(mut self, locator_path_key: Vec<u8>) -> Self {
+        self.locator_path_key = Some(locator_path_key);
+        self
     }
 }
 

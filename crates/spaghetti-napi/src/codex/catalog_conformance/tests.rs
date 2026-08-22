@@ -407,6 +407,10 @@ fn synthetic_producer_matches_frozen_identity_and_complete_coverage() {
         produced.projection.member_count(),
         produced.identity.session_count as usize
     );
+    assert_eq!(
+        produced.projection.locator_count(),
+        produced.identity.session_count as usize
+    );
     let reducer = produced
         .projection
         .reduce_into(

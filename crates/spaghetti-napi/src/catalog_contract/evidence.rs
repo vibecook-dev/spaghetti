@@ -31,6 +31,7 @@ const MAX_PRESENTATION_MEMBERS: usize = 4_096;
 const MAX_REPLACEMENT_RELATIONS: usize = 4_096;
 const MAX_PUBLICATION_REDUCER_ENTRIES: usize = 1_000_000;
 const MAX_PUBLICATION_ROWS: usize = 1_000_000;
+const MAX_CATALOG_LOCATOR_VALUE_BYTES: usize = 8 * 1024;
 
 struct BoundedJsonWriter {
     bytes: Vec<u8>,
@@ -844,13 +845,22 @@ impl CatalogLocatorValue {
             ));
         }
         if let Some(value) = &self.native_value {
-            validate_optional_text("catalog native locator", value)?;
+            validate_locator_text("catalog native locator", value)?;
         }
         if let Some(value) = &self.canonical_local_path {
-            validate_optional_text("catalog canonical local path", value)?;
+            validate_locator_text("catalog canonical local path", value)?;
         }
         Ok(())
     }
+}
+
+fn validate_locator_text(label: &str, value: &str) -> Result<(), CatalogContractError> {
+    if value.is_empty() || value.trim() != value || value.len() > MAX_CATALOG_LOCATOR_VALUE_BYTES {
+        return Err(CatalogContractError::invalid(format!(
+            "{label} must be canonical and at most {MAX_CATALOG_LOCATOR_VALUE_BYTES} bytes"
+        )));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

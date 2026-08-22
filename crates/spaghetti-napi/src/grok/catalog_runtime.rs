@@ -18,8 +18,8 @@ use super::adapter::{
 };
 use crate::adapter::{
     AdapterId, AgentAdapter, AuthorizedCatalogAccess, DecodeDisposition, DriverSpec, Fact,
-    FactSemanticContext, SourceCoverageSet, SourceInstance, SourceObjectDescriptor, StreamSpec,
-    TypedAccessAuthorization,
+    FactSemanticContext, QualifiedValueQuality, SourceCoverageSet, SourceInstance,
+    SourceObjectDescriptor, StreamSpec, TypedAccessAuthorization,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -361,7 +361,11 @@ fn produce_grok_library_coverage_after_summaries(
                     "one Grok session directory produced conflicting coordinates",
                 ));
             }
-            existing.retain_projection_owner(projection_owner, transcript_discovered);
+            existing.retain_projection_owner(
+                projection_owner,
+                transcript_discovered,
+                &entry.path_key,
+            );
             existing.transcript_discovered |= transcript_discovered;
             continue;
         }
@@ -403,6 +407,7 @@ fn produce_grok_library_coverage_after_summaries(
                 summary_metadata: false,
                 transcript_discovered,
                 projection_owner,
+                locator_path_key: transcript_discovered.then(|| entry.path_key.clone()),
             },
         );
     }
@@ -595,7 +600,7 @@ fn produce_grok_library_coverage_after_summaries(
     let mut projection_members: Vec<CatalogSourceMemberProjection> = members
         .values()
         .map(|state| {
-            CatalogSourceMemberProjection::new(
+            let projection = CatalogSourceMemberProjection::new(
                 state.projection_owner.clone(),
                 state.coordinates.native_project_key.clone(),
                 state.coordinates.session_id.clone(),
@@ -605,9 +610,17 @@ fn produce_grok_library_coverage_after_summaries(
                     CatalogAvailability::MetadataOnly
                 },
                 ProjectAssociationBasis::SessionDirectory,
-            )
+            );
+            match state.locator_path_key.as_deref() {
+                Some(path_key) => projection.with_confined_locator(
+                    SESSIONS_ROOT_ID,
+                    path_key,
+                    QualifiedValueQuality::Exact,
+                ),
+                None => Ok(projection),
+            }
         })
-        .collect();
+        .collect::<Result<Vec<_>, CatalogCompositionError>>()?;
     let membership_completion = complete_directory(
         executable,
         source_instance_key,
@@ -670,6 +683,7 @@ struct MemberState {
     summary_metadata: bool,
     transcript_discovered: bool,
     projection_owner: CatalogEvidenceOwner,
+    locator_path_key: Option<Vec<u8>>,
 }
 
 impl MemberState {
@@ -677,12 +691,14 @@ impl MemberState {
         &mut self,
         candidate: CatalogEvidenceOwner,
         candidate_is_transcript: bool,
+        candidate_path_key: &[u8],
     ) {
         let current_is_transcript = self.transcript_discovered;
         if candidate_is_transcript && !current_is_transcript
             || candidate_is_transcript == current_is_transcript && candidate < self.projection_owner
         {
             self.projection_owner = candidate;
+            self.locator_path_key = candidate_is_transcript.then(|| candidate_path_key.to_vec());
         }
     }
 }

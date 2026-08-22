@@ -852,6 +852,8 @@ fn authorized_producer_matches_frozen_identity_without_authorizing_candidate() {
         produced.projection.member_count(),
         produced.identity.session_count as usize
     );
+    assert!(produced.projection.locator_count() > 0);
+    assert!(produced.projection.locator_count() <= produced.projection.member_count());
     let reducer = produced
         .projection
         .reduce_into(

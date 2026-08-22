@@ -9,6 +9,10 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::PathBuf;
+
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, ContractCompleteness, CoverageAbsenceKind, FactRevisionId,
@@ -16,9 +20,10 @@ use crate::adapter::{
 };
 use crate::catalog_contract::evidence::{
     CatalogAvailability, CatalogDisclosureClass, CatalogEntityRef, CatalogEvidenceOwner,
-    CatalogFieldAuthority, CatalogProjectAssertion, CatalogQualifiedField, CatalogReducer,
-    CatalogReducerPublication, CatalogRetractionCause, CatalogRetractionEvidence,
-    CatalogSessionAssertion, ProjectAssociationBasis, SessionProjectAssociationFact,
+    CatalogFieldAuthority, CatalogLocatorKind, CatalogLocatorValue, CatalogProjectAssertion,
+    CatalogQualifiedField, CatalogReducer, CatalogReducerPublication, CatalogRetractionCause,
+    CatalogRetractionEvidence, CatalogSessionAssertion, NativeLocatorClaim,
+    ProjectAssociationBasis, SessionProjectAssociationFact,
 };
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogInitialPublicationAssembly, CatalogPublicationLimits,
@@ -32,11 +37,22 @@ use crate::catalog_contract::{
 use super::catalog_composition::{
     CatalogCompositionError, CatalogMemberRef, CatalogRefreshCoverageGenerations,
 };
+use super::confined_relative_path_from_key;
 
 const PROJECTION_REVISION_CONTRACT_VERSION: u32 = 1;
 const NATIVE_IDENTITY_AUTHORITY: &str = "native-catalog-identity";
 const AVAILABILITY_AUTHORITY: &str = "catalog-membership-availability";
 const ASSOCIATION_AUTHORITY: &str = "native-project-association";
+const LOCATOR_AUTHORITY: &str = "catalog-source-locator";
+const CONFINED_LOCATOR_PREFIX: &str = "confined-object-v1:";
+const MAX_LOCATOR_ROOT_NAME_BYTES: usize = 128;
+const MAX_CONFINED_LOCATOR_PATH_KEY_BYTES: usize = 4 * 1024;
+
+#[derive(Clone, PartialEq, Eq)]
+struct CatalogSourceLocatorProjection {
+    encoded_value: String,
+    quality: QualifiedValueQuality,
+}
 
 /// One admitted native session and the exact covered object that owns its
 /// minimum catalog evidence. Fields stay private so callers cannot bypass the
@@ -48,6 +64,7 @@ pub(crate) struct CatalogSourceMemberProjection {
     native_session_id: String,
     availability: CatalogAvailability,
     association_basis: ProjectAssociationBasis,
+    locator: Option<CatalogSourceLocatorProjection>,
 }
 
 impl CatalogSourceMemberProjection {
@@ -64,7 +81,66 @@ impl CatalogSourceMemberProjection {
             native_session_id: native_session_id.into(),
             availability,
             association_basis,
+            locator: None,
         }
+    }
+
+    /// Bind one exact, descriptor-confined source object without retaining a
+    /// display path. The encoded locator is reversible only inside the native
+    /// engine and remains `LocalSensitive` in the catalog reducer.
+    pub(crate) fn with_confined_locator(
+        mut self,
+        root_name: &str,
+        confined_path_key: &[u8],
+        quality: QualifiedValueQuality,
+    ) -> Result<Self, CatalogCompositionError> {
+        if self.locator.is_some()
+            || root_name.is_empty()
+            || root_name.len() > MAX_LOCATOR_ROOT_NAME_BYTES
+            || !root_name
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            || !root_name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || confined_path_key.len() > MAX_CONFINED_LOCATOR_PATH_KEY_BYTES
+            || !matches!(
+                quality,
+                QualifiedValueQuality::Exact
+                    | QualifiedValueQuality::NativeClaimed
+                    | QualifiedValueQuality::Derived
+            )
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog source locator coordinates are invalid",
+            ));
+        }
+        confined_relative_path_from_key(confined_path_key).map_err(|_| {
+            CatalogCompositionError::invalid("catalog source locator path key is invalid")
+        })?;
+        let root_len = u16::try_from(root_name.len()).map_err(|_| {
+            CatalogCompositionError::invalid("catalog source locator root is too long")
+        })?;
+        let payload_capacity = 3_usize
+            .checked_add(root_name.len())
+            .and_then(|length| length.checked_add(confined_path_key.len()))
+            .ok_or_else(|| {
+                CatalogCompositionError::invalid("catalog source locator length overflowed")
+            })?;
+        let mut payload = Vec::with_capacity(payload_capacity);
+        payload.push(1);
+        payload.extend_from_slice(&root_len.to_be_bytes());
+        payload.extend_from_slice(root_name.as_bytes());
+        payload.extend_from_slice(confined_path_key);
+        self.locator = Some(CatalogSourceLocatorProjection {
+            encoded_value: format!(
+                "{CONFINED_LOCATOR_PREFIX}{}",
+                URL_SAFE_NO_PAD.encode(payload)
+            ),
+            quality,
+        });
+        Ok(self)
     }
 
     pub(crate) fn reconcile_refresh_generation(
@@ -98,6 +174,7 @@ pub(crate) struct CatalogSourceProjection {
     project_assertions: Vec<CatalogProjectAssertion>,
     session_assertions: Vec<CatalogSessionAssertion>,
     associations: Vec<SessionProjectAssociationFact>,
+    locators: Vec<NativeLocatorClaim>,
     member_bindings: Vec<CatalogPublicationMemberBinding>,
 }
 
@@ -144,6 +221,7 @@ impl CatalogSourceProjection {
         let mut project_assertions = Vec::with_capacity(members.len());
         let mut session_assertions = Vec::with_capacity(members.len());
         let mut associations = Vec::with_capacity(members.len());
+        let mut locators = Vec::with_capacity(members.len());
         let mut member_bindings = Vec::with_capacity(members.len());
 
         for member in members {
@@ -154,6 +232,20 @@ impl CatalogSourceProjection {
                 return Err(CatalogCompositionError::invalid(
                     "catalog source projection evidence is outside complete live coverage",
                 ));
+            }
+            match (&member.availability, member.locator.is_some()) {
+                (
+                    CatalogAvailability::TranscriptDiscovered
+                    | CatalogAvailability::Hydrating
+                    | CatalogAvailability::HistoryReady,
+                    false,
+                )
+                | (CatalogAvailability::MetadataOnly, true) => {
+                    return Err(CatalogCompositionError::invalid(
+                        "catalog transcript availability does not match locator evidence",
+                    ));
+                }
+                _ => {}
             }
 
             let member_ref = CatalogMemberRef::from_canonical_session(
@@ -283,6 +375,47 @@ impl CatalogSourceProjection {
                 CatalogDisclosureClass::Public,
                 session_revision,
             )?;
+            let locator_claim = member
+                .locator
+                .as_ref()
+                .map(|locator| {
+                    let locator_revision = semantic_revision(
+                        &member.owner,
+                        "catalog.transcript-locator",
+                        member.native_session_id.as_bytes(),
+                        &[
+                            member.native_session_id.as_bytes(),
+                            locator.encoded_value.as_bytes(),
+                            association_basis_tag(member.association_basis),
+                            qualified_value_quality_tag(locator.quality),
+                        ],
+                    )?;
+                    let locator_field = known_field(
+                        CatalogLocatorValue {
+                            native_value: Some(locator.encoded_value.clone()),
+                            canonical_local_path: None,
+                        },
+                        locator.quality,
+                        LOCATOR_AUTHORITY,
+                        CatalogDisclosureClass::LocalSensitive,
+                        locator_revision,
+                    )?;
+                    NativeLocatorClaim::new(
+                        member.owner.clone(),
+                        member.native_session_id.as_bytes(),
+                        session_ref,
+                        CatalogLocatorKind::Filesystem,
+                        locator_field,
+                        member.association_basis,
+                        vec![locator_revision],
+                    )
+                    .map_err(|_| {
+                        CatalogCompositionError::invalid(
+                            "catalog locator evidence is outside the bounded projection contract",
+                        )
+                    })
+                })
+                .transpose()?;
             let session_stable_key = projection_key(
                 b"session-assertion",
                 member_ref.as_bytes(),
@@ -298,7 +431,7 @@ impl CatalogSourceProjection {
                 None,
                 None,
                 None,
-                None,
+                locator_claim.as_ref().map(|claim| claim.locator_claim_key),
                 session_availability,
                 vec![session_revision],
             )
@@ -313,7 +446,7 @@ impl CatalogSourceProjection {
                 member.native_project_key.as_bytes(),
             );
             let association = SessionProjectAssociationFact::new(
-                member.owner,
+                member.owner.clone(),
                 &association_stable_key,
                 session_ref,
                 project_ref,
@@ -333,6 +466,9 @@ impl CatalogSourceProjection {
                     "catalog association evidence is outside the bounded projection contract",
                 )
             })?;
+            if let Some(locator_claim) = locator_claim {
+                locators.push(locator_claim);
+            }
             let binding = source
                 .member_binding(
                     publication_member_ref,
@@ -356,6 +492,7 @@ impl CatalogSourceProjection {
             project_assertions,
             session_assertions,
             associations,
+            locators,
             member_bindings,
         })
     }
@@ -392,11 +529,24 @@ impl CatalogSourceProjection {
                     )
                 })?;
         }
+        for locator in &self.locators {
+            reducer
+                .upsert_locator_claim(locator.clone(), observation_commit)
+                .map_err(|_| {
+                    CatalogCompositionError::invalid(
+                        "catalog locator projection could not be reduced",
+                    )
+                })?;
+        }
         Ok(reducer)
     }
 
     pub(crate) fn member_count(&self) -> usize {
         self.member_bindings.len()
+    }
+
+    pub(crate) fn locator_count(&self) -> usize {
+        self.locators.len()
     }
 
     pub(crate) fn into_publication_parts(
@@ -417,9 +567,69 @@ impl fmt::Debug for CatalogSourceProjection {
             .field("project_assertions", &self.project_assertions.len())
             .field("session_assertions", &self.session_assertions.len())
             .field("associations", &self.associations.len())
+            .field("locators", &self.locators.len())
             .field("member_bindings", &self.member_bindings.len())
             .finish()
     }
+}
+
+/// Decode a reducer-authorized native locator back to its exact configured
+/// root relation and descriptor-confined relative path. This never accepts a
+/// display path or an unversioned string.
+pub(crate) fn decode_catalog_confined_locator(
+    locator: &CatalogLocatorValue,
+) -> Result<(String, PathBuf), CatalogCompositionError> {
+    if locator.canonical_local_path.is_some() {
+        return Err(CatalogCompositionError::invalid(
+            "catalog hydration locator has an unsupported path representation",
+        ));
+    }
+    let encoded = locator
+        .native_value
+        .as_deref()
+        .and_then(|value| value.strip_prefix(CONFINED_LOCATOR_PREFIX))
+        .ok_or_else(|| {
+            CatalogCompositionError::invalid(
+                "catalog hydration locator has an unsupported native representation",
+            )
+        })?;
+    let payload = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| {
+        CatalogCompositionError::invalid("catalog hydration locator is not canonical base64url")
+    })?;
+    if URL_SAFE_NO_PAD.encode(&payload) != encoded || payload.len() < 4 || payload[0] != 1 {
+        return Err(CatalogCompositionError::invalid(
+            "catalog hydration locator encoding is invalid",
+        ));
+    }
+    let root_len = usize::from(u16::from_be_bytes([payload[1], payload[2]]));
+    let root_end = 3_usize.checked_add(root_len).ok_or_else(|| {
+        CatalogCompositionError::invalid("catalog hydration locator root length overflowed")
+    })?;
+    if root_len == 0 || root_len > MAX_LOCATOR_ROOT_NAME_BYTES || root_end >= payload.len() {
+        return Err(CatalogCompositionError::invalid(
+            "catalog hydration locator root is invalid",
+        ));
+    }
+    let root_name = std::str::from_utf8(&payload[3..root_end]).map_err(|_| {
+        CatalogCompositionError::invalid("catalog hydration locator root is invalid")
+    })?;
+    if !root_name
+        .bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !root_name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || payload.len() - root_end > MAX_CONFINED_LOCATOR_PATH_KEY_BYTES
+    {
+        return Err(CatalogCompositionError::invalid(
+            "catalog hydration locator root is invalid",
+        ));
+    }
+    let relative_path = confined_relative_path_from_key(&payload[root_end..]).map_err(|_| {
+        CatalogCompositionError::invalid("catalog hydration locator path key is invalid")
+    })?;
+    Ok((root_name.to_owned(), relative_path))
 }
 
 /// Canonical all-source input to one initial Library publication. The batch
@@ -869,9 +1079,20 @@ fn association_basis_tag(basis: ProjectAssociationBasis) -> &'static [u8] {
     }
 }
 
+fn qualified_value_quality_tag(quality: QualifiedValueQuality) -> &'static [u8] {
+    match quality {
+        QualifiedValueQuality::Exact => b"exact",
+        QualifiedValueQuality::NativeClaimed => b"native_claimed",
+        QualifiedValueQuality::Derived => b"derived",
+        QualifiedValueQuality::Estimated => b"estimated",
+        QualifiedValueQuality::Unknown => b"unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::Path;
 
     use super::*;
     use crate::adapter::{
@@ -882,7 +1103,8 @@ mod tests {
         CONTRACT_VERSION_SELECTION_VERSION,
     };
     use crate::catalog_contract::evidence::{
-        CatalogAssociationCoverage, CatalogReducerPublicationLimits,
+        CatalogAssociationCoverage, CatalogPolicyView, CatalogReducerPublicationLimits,
+        CatalogSessionAttachHandoff,
     };
     use crate::catalog_contract::publication::{
         CatalogSourceCompletionRevision, CatalogSourceMembershipRevision,
@@ -1002,13 +1224,18 @@ mod tests {
             coverage,
         )
         .unwrap();
+        let locator_key =
+            super::super::confined_relative_path_key(Path::new("project-a/session-a.jsonl"))
+                .unwrap();
         let input = CatalogSourceMemberProjection::new(
             owner,
             "project-a",
             "session-a",
             CatalogAvailability::TranscriptDiscovered,
             ProjectAssociationBasis::RolloutHeader,
-        );
+        )
+        .with_confined_locator("history", &locator_key, QualifiedValueQuality::Exact)
+        .unwrap();
         (source, input)
     }
 
@@ -1073,6 +1300,28 @@ mod tests {
         let reducer = projection
             .reduce_into(CatalogReducer::default(), 1)
             .unwrap();
+        let session_ref = projection.session_assertions[0].session_ref;
+        let session_row = reducer.session_row(session_ref).unwrap();
+        assert_eq!(session_row.transcript_locator_claim_keys.len(), 1);
+        let handoff = CatalogSessionAttachHandoff::new(
+            session_ref,
+            vec![session_ref],
+            Vec::new(),
+            session_ref,
+            session_row.transcript_locator_claim_keys[0],
+        )
+        .unwrap();
+        assert!(reducer
+            .resolve_attach_target(&handoff, CatalogPolicyView::WITHHELD)
+            .is_err());
+        let target = reducer
+            .resolve_attach_target(&handoff, CatalogPolicyView::LOCAL)
+            .unwrap();
+        let locator = target.locator.value.as_ref().unwrap();
+        let (root_name, relative_path) = decode_catalog_confined_locator(locator).unwrap();
+        assert_eq!(root_name, "history");
+        assert_eq!(relative_path, Path::new("project-a/session-a.jsonl"));
+        assert!(!format!("{projection:?}").contains("session-a.jsonl"));
         let frozen = reducer
             .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
             .unwrap();
@@ -1081,6 +1330,36 @@ mod tests {
         let (source, bindings) = projection.into_publication_parts();
         assert_eq!(source.member_count(), 1);
         assert_eq!(bindings.len(), 1);
+    }
+
+    #[test]
+    fn confined_locator_encoding_is_single_assignment_bounded_and_strict() {
+        let (_, input) = fixture("object-a");
+        let path_key = super::super::confined_relative_path_key(Path::new("other.jsonl")).unwrap();
+        assert!(input
+            .clone()
+            .with_confined_locator("history", &path_key, QualifiedValueQuality::Exact)
+            .is_err());
+
+        let mut unbound = input;
+        unbound.locator = None;
+        assert!(unbound
+            .clone()
+            .with_confined_locator(
+                "history",
+                &vec![b'x'; MAX_CONFINED_LOCATOR_PATH_KEY_BYTES + 1],
+                QualifiedValueQuality::Exact,
+            )
+            .is_err());
+        assert!(unbound
+            .with_confined_locator("-invalid", &path_key, QualifiedValueQuality::Exact)
+            .is_err());
+
+        let unsupported = CatalogLocatorValue {
+            native_value: Some("confined-object-v1:not+base64".to_owned()),
+            canonical_local_path: None,
+        };
+        assert!(decode_catalog_confined_locator(&unsupported).is_err());
     }
 
     #[test]

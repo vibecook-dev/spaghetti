@@ -15,8 +15,8 @@ use sha2::{Digest as _, Sha256};
 use super::adapter::CodexAdapter;
 use crate::adapter::{
     AdapterId, AgentAdapter, AuthorizedCatalogAccess, DecodeDisposition, DriverSpec, Fact,
-    FactSemanticContext, SourceCoverageSet, SourceInstance, SourceObjectDescriptor, StreamSpec,
-    TypedAccessAuthorization,
+    FactSemanticContext, QualifiedValueQuality, SourceCoverageSet, SourceInstance,
+    SourceObjectDescriptor, StreamSpec, TypedAccessAuthorization,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -450,17 +450,24 @@ fn produce_codex_library_coverage_after_heads(
                     session.native_project_key.clone(),
                     session.native_session_id.clone(),
                 ));
-                projection_members.push(CatalogSourceMemberProjection::new(
-                    projection_owner(
-                        source_instance_key,
+                projection_members.push(
+                    CatalogSourceMemberProjection::new(
+                        projection_owner(
+                            source_instance_key,
+                            &entry.path_key,
+                            head_checkpoint.generation,
+                        )?,
+                        session.native_project_key.clone(),
+                        session.native_session_id.clone(),
+                        CatalogAvailability::TranscriptDiscovered,
+                        ProjectAssociationBasis::RolloutHeader,
+                    )
+                    .with_confined_locator(
+                        SESSIONS_ROOT_ID,
                         &entry.path_key,
-                        head_checkpoint.generation,
+                        QualifiedValueQuality::Exact,
                     )?,
-                    session.native_project_key.clone(),
-                    session.native_session_id.clone(),
-                    CatalogAvailability::TranscriptDiscovered,
-                    ProjectAssociationBasis::RolloutHeader,
-                ));
+                );
             }
             DecodeDisposition::IgnoredKnown => {}
             _ => {
