@@ -1,0 +1,582 @@
+//! Engine-owned RFC 012B catalog build orchestration.
+//!
+//! This module joins already-reviewed authority, source-composition, projection,
+//! and durable-publication seams. It deliberately has no public transport: a
+//! configured source without promoted catalog authority returns an explicit
+//! non-authorizing outcome and cannot cause catalog reads or a false Ready
+//! publication.
+
+use std::collections::BTreeSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::adapter::{ContractVersionSelection, SourceCoverageSet, SourceInstance};
+use crate::catalog_contract::{
+    CatalogAccessPolicyDigest, CatalogCoveragePlan, CatalogCoveragePlanSource,
+    CatalogCoverageScope, CatalogReadinessPhase,
+};
+use crate::source::catalog_projection::{
+    CatalogInitialProjectionBatch, CatalogRefreshProjectionBatch, CatalogSourceProjection,
+};
+use crate::source::catalog_runtime_registry::CatalogSourceRuntime;
+
+use super::{EngineError, ObservationCoordinator, QueryCancellationToken, SpaghettiEngineCore};
+
+#[derive(Debug, Clone)]
+pub(crate) struct CatalogConfiguredSource {
+    adapter_id: String,
+    configured_roots: Vec<PathBuf>,
+    access_policy_digest: CatalogAccessPolicyDigest,
+}
+
+impl CatalogConfiguredSource {
+    pub(crate) fn new(
+        adapter_id: impl Into<String>,
+        configured_roots: Vec<PathBuf>,
+        access_policy_digest: CatalogAccessPolicyDigest,
+    ) -> Self {
+        Self {
+            adapter_id: adapter_id.into(),
+            configured_roots,
+            access_policy_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CatalogBuildIntent {
+    Startup,
+    Refresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CatalogPublicationKind {
+    Initial,
+    Refresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CatalogBuildOutcome {
+    /// Every instance is registered, but at least one configured adapter has
+    /// no promoted catalog authority. No catalog source object was read.
+    AuthorizationUnavailable { adapter_ids: Vec<String> },
+    /// Startup retained the restart-authenticated last complete publication
+    /// without manufacturing a refresh or consuming native catalog sources.
+    LastCompleteRetained,
+    Published {
+        kind: CatalogPublicationKind,
+        commit_seq: Option<u64>,
+        source_count: usize,
+        member_count: usize,
+    },
+}
+
+struct PreparedCatalogSource {
+    instance: SourceInstance,
+    authorization: crate::adapter::TypedAccessAuthorization,
+    access_policy_digest: CatalogAccessPolicyDigest,
+    runtime: Arc<dyn CatalogSourceRuntime>,
+}
+
+impl SpaghettiEngineCore {
+    /// Register the complete configured source set, obtain catalog-only typed
+    /// authority for every required source, freeze the normalized Library plan,
+    /// and only then read bounded native catalog objects and publish atomically.
+    ///
+    /// `Startup` retains an already-safe warm publication. `Refresh` explicitly
+    /// starts (or resumes) an ordinary same-plan refresh. A changed plan remains
+    /// fail-closed until the durable plan-transition contract is implemented.
+    pub(crate) fn reconcile_configured_catalog(
+        self: &Arc<Self>,
+        configured: Vec<CatalogConfiguredSource>,
+        intent: CatalogBuildIntent,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CatalogBuildOutcome, EngineError> {
+        check_cancelled(&cancellation)?;
+        if configured.is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "catalog build requires at least one configured source".to_string(),
+            ));
+        }
+        let mut adapter_ids = BTreeSet::new();
+        for source in &configured {
+            crate::adapter::AdapterId::new(source.adapter_id.as_str())
+                .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
+            if !adapter_ids.insert(source.adapter_id.clone()) {
+                return Err(EngineError::InvalidConfig(
+                    "catalog build contains a duplicate configured adapter".to_string(),
+                ));
+            }
+        }
+
+        // Phase 1: discover and register every configured instance before any
+        // support probe or catalog producer is allowed to read native objects.
+        let coordinator =
+            ObservationCoordinator::with_cancellation(Arc::clone(self), cancellation.clone());
+        let mut registered = Vec::with_capacity(configured.len());
+        for source in configured {
+            check_cancelled(&cancellation)?;
+            let adapter = self.registered_adapter(&source.adapter_id)?;
+            let instances = coordinator
+                .discover_and_register_sources(adapter.as_ref(), source.configured_roots.clone())?;
+            registered.push((source, instances));
+        }
+
+        // Phase 2: require typed promoted authority for the entire required
+        // set before constructing a source-access capability for any member.
+        let mut unavailable = Vec::new();
+        let mut authorized = Vec::new();
+        for (source, instances) in registered {
+            check_cancelled(&cancellation)?;
+            let Some(authorization) =
+                self.catalog_authorization_for_roots(&source.adapter_id, &source.configured_roots)?
+            else {
+                unavailable.push(source.adapter_id);
+                continue;
+            };
+            let runtime = self
+                .catalog_source_runtimes
+                .resolve(&source.adapter_id)
+                .map_err(|error| catalog_build_error("resolve catalog source runtime", error))?;
+            for instance in instances {
+                authorized.push(PreparedCatalogSource {
+                    instance,
+                    authorization: authorization.clone(),
+                    access_policy_digest: source.access_policy_digest,
+                    runtime: Arc::clone(&runtime),
+                });
+            }
+        }
+        if !unavailable.is_empty() {
+            unavailable.sort();
+            return Ok(CatalogBuildOutcome::AuthorizationUnavailable {
+                adapter_ids: unavailable,
+            });
+        }
+        if authorized.is_empty() {
+            return Err(EngineError::InvalidConfig(
+                "catalog build produced no authorized source instances".to_string(),
+            ));
+        }
+
+        let selection = common_contract_selection(&authorized)?;
+        let mut plan_sources = Vec::with_capacity(authorized.len());
+        for source in &authorized {
+            check_cancelled(&cancellation)?;
+            plan_sources.push(derive_plan_source(source)?);
+        }
+        let plan =
+            CatalogCoveragePlan::new(CatalogCoverageScope::Library, plan_sources, Vec::new())
+                .map_err(|error| catalog_build_error("freeze catalog coverage plan", error))?;
+
+        let durable_state = self.load_catalog_build_state()?;
+        if durable_state
+            .as_ref()
+            .is_some_and(|state| state.plan != plan)
+        {
+            return Err(EngineError::InvalidCommit(
+                "configured catalog source set does not match the durable frozen plan".to_string(),
+            ));
+        }
+
+        match durable_state.as_ref().map(|state| state.readiness.state) {
+            None | Some(CatalogReadinessPhase::Pending | CatalogReadinessPhase::Building) => {
+                publish_initial(self, plan, selection, &authorized, &cancellation)
+            }
+            Some(CatalogReadinessPhase::Ready) => {
+                let refreshing = durable_state
+                    .as_ref()
+                    .and_then(|state| state.readiness.refreshing_from_snapshot)
+                    .is_some();
+                if intent == CatalogBuildIntent::Startup && !refreshing {
+                    Ok(CatalogBuildOutcome::LastCompleteRetained)
+                } else {
+                    publish_refresh(self, plan, selection, &authorized, &cancellation)
+                }
+            }
+            Some(CatalogReadinessPhase::Error)
+                if intent == CatalogBuildIntent::Startup
+                    && durable_state
+                        .as_ref()
+                        .and_then(|state| state.readiness.last_complete_snapshot)
+                        .is_some() =>
+            {
+                Ok(CatalogBuildOutcome::LastCompleteRetained)
+            }
+            Some(_) => Err(EngineError::InvalidCommit(
+                "catalog build cannot resume from the durable readiness phase".to_string(),
+            )),
+        }
+    }
+}
+
+fn publish_initial(
+    engine: &Arc<SpaghettiEngineCore>,
+    plan: CatalogCoveragePlan,
+    selection: ContractVersionSelection,
+    sources: &[PreparedCatalogSource],
+    cancellation: &QueryCancellationToken,
+) -> Result<CatalogBuildOutcome, EngineError> {
+    // This durable transition is intentionally before the first producer read:
+    // a crash or cancellation leaves an exact resumable Building lineage.
+    let context = engine.begin_initial_catalog_build(plan)?;
+    check_cancelled(cancellation)?;
+    let projections = sources
+        .iter()
+        .map(|source| {
+            check_cancelled(cancellation)?;
+            produce_projection(source, None)
+        })
+        .collect::<Result<Vec<_>, EngineError>>()?;
+    let batch = CatalogInitialProjectionBatch::assemble(
+        projections,
+        selection,
+        context.observation_commit(),
+    )
+    .map_err(|error| catalog_build_error("assemble initial catalog projection", error))?;
+    let source_count = batch.source_count();
+    let member_count = batch.member_count();
+    check_cancelled(cancellation)?;
+    let receipt = engine.commit_initial_catalog_projection(context, batch)?;
+    Ok(CatalogBuildOutcome::Published {
+        kind: CatalogPublicationKind::Initial,
+        commit_seq: receipt.map(|value| value.commit_seq),
+        source_count,
+        member_count,
+    })
+}
+
+fn publish_refresh(
+    engine: &Arc<SpaghettiEngineCore>,
+    plan: CatalogCoveragePlan,
+    selection: ContractVersionSelection,
+    sources: &[PreparedCatalogSource],
+    cancellation: &QueryCancellationToken,
+) -> Result<CatalogBuildOutcome, EngineError> {
+    let context = engine.begin_catalog_refresh(plan)?;
+    check_cancelled(cancellation)?;
+    let mut projections = Vec::with_capacity(sources.len());
+    for source in sources {
+        check_cancelled(cancellation)?;
+        let plan_source = derive_plan_source(source)?;
+        let prior = context.prior_source_coverage(&plan_source)?;
+        projections.push(produce_projection(source, Some(prior))?);
+    }
+    let batch = CatalogRefreshProjectionBatch::assemble(
+        projections,
+        selection,
+        context.observation_commit(),
+        context.prior_reducer(),
+    )
+    .map_err(|error| catalog_build_error("assemble catalog refresh projection", error))?;
+    let source_count = batch.source_count();
+    let member_count = batch.member_count();
+    check_cancelled(cancellation)?;
+    let receipt = engine.commit_catalog_refresh_projection(context, batch)?;
+    Ok(CatalogBuildOutcome::Published {
+        kind: CatalogPublicationKind::Refresh,
+        commit_seq: receipt.map(|value| value.commit_seq),
+        source_count,
+        member_count,
+    })
+}
+
+fn common_contract_selection(
+    sources: &[PreparedCatalogSource],
+) -> Result<ContractVersionSelection, EngineError> {
+    let selection = sources
+        .first()
+        .expect("authorized source count checked")
+        .authorization
+        .contracts()
+        .clone();
+    if sources
+        .iter()
+        .any(|source| source.authorization.contracts() != &selection)
+    {
+        return Err(EngineError::InvalidConfig(
+            "configured catalog sources negotiated different contract selections".to_string(),
+        ));
+    }
+    Ok(selection)
+}
+
+fn derive_plan_source(
+    source: &PreparedCatalogSource,
+) -> Result<CatalogCoveragePlanSource, EngineError> {
+    source
+        .runtime
+        .library_plan_source(
+            &source.authorization,
+            &source.instance,
+            source.access_policy_digest,
+        )
+        .map_err(|error| catalog_build_error("bind catalog plan source", error))
+}
+
+fn produce_projection(
+    source: &PreparedCatalogSource,
+    prior: Option<&SourceCoverageSet>,
+) -> Result<CatalogSourceProjection, EngineError> {
+    source
+        .runtime
+        .produce_library_projection(
+            &source.authorization,
+            &source.instance,
+            source.access_policy_digest,
+            prior,
+        )
+        .map_err(|error| catalog_build_error("produce catalog source", error))
+}
+
+fn check_cancelled(cancellation: &QueryCancellationToken) -> Result<(), EngineError> {
+    if cancellation.is_cancelled() {
+        Err(EngineError::QueryCancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn catalog_build_error(operation: &'static str, error: impl std::fmt::Display) -> EngineError {
+    EngineError::Observation {
+        operation,
+        detail: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use rusqlite::Connection;
+    use tempfile::TempDir;
+
+    use crate::adapter::{
+        AdapterError, AdapterId, AdapterManifest, AdapterObjectContext, AdapterRegistry,
+        AgentAdapter, DecodeContext, DecodeDisposition, DiscoveryContext, FactBatch,
+        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamSpec,
+    };
+    use crate::engine::EngineOptions;
+    use crate::source::SourceRecord;
+
+    use super::*;
+
+    struct RegistrationOnlyAdapter {
+        manifest: AdapterManifest,
+    }
+
+    impl RegistrationOnlyAdapter {
+        fn new(adapter_id: &str) -> Self {
+            Self {
+                manifest: AdapterManifest {
+                    id: AdapterId::new(adapter_id).unwrap(),
+                    display_name: adapter_id.to_string(),
+                    adapter_version: "1.0.0".to_string(),
+                    contract_version: 1,
+                    support_binding: None,
+                    scope_programs: None,
+                    source_schema_versions: Vec::new(),
+                    capabilities: Vec::new(),
+                },
+            }
+        }
+    }
+
+    impl AgentAdapter for RegistrationOnlyAdapter {
+        fn manifest(&self) -> &AdapterManifest {
+            &self.manifest
+        }
+
+        fn discover(
+            &self,
+            context: &DiscoveryContext,
+        ) -> Result<Vec<SourceInstanceSpec>, AdapterError> {
+            context
+                .configured_roots
+                .iter()
+                .map(|root| {
+                    let mut stable_key = self.manifest.id.as_str().as_bytes().to_vec();
+                    stable_key.push(0);
+                    stable_key.extend_from_slice(root.as_os_str().as_encoded_bytes());
+                    Ok(SourceInstanceSpec {
+                        identity_contract_version: 1,
+                        stable_key: SourceInstanceKey::new(stable_key)?,
+                        display_name: format!("{} test source", self.manifest.id),
+                        roots: vec![SourceRoot {
+                            name: "root".to_string(),
+                            path: root.clone(),
+                        }],
+                        discovery_reason: "catalog registration test".to_string(),
+                    })
+                })
+                .collect()
+        }
+
+        fn streams(&self, _instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
+            Ok(Vec::new())
+        }
+
+        fn bootstrap_object(
+            &self,
+            _instance: &SourceInstance,
+            _object: &SourceObjectDescriptor,
+        ) -> Result<AdapterObjectContext, AdapterError> {
+            panic!("catalog registration must not bootstrap a source object")
+        }
+
+        fn decode(
+            &self,
+            _context: DecodeContext<'_>,
+            _record: &SourceRecord,
+            _output: &mut FactBatch,
+        ) -> Result<DecodeDisposition, AdapterError> {
+            panic!("catalog registration must not decode a source record")
+        }
+    }
+
+    fn non_authorizing_engine(database_path: PathBuf) -> Arc<SpaghettiEngineCore> {
+        let registry = AdapterRegistry::builder()
+            .register(RegistrationOnlyAdapter::new("alpha"))
+            .register(RegistrationOnlyAdapter::new("beta"))
+            .register(RegistrationOnlyAdapter::new("gamma"))
+            .build()
+            .unwrap();
+        SpaghettiEngineCore::open_with_registry(
+            EngineOptions {
+                database_path,
+                query_workers: Some(1),
+                owner_label: Some("catalog-build-non-authorizing-test".to_string()),
+                defer_query_structures: false,
+                source_pass_pool: None,
+            },
+            registry,
+        )
+        .unwrap()
+    }
+
+    fn root(directory: &TempDir, name: &str) -> PathBuf {
+        let root = directory.path().join(name);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn non_authorizing_sources_register_but_cannot_start_or_publish_catalog_work() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("catalog.db");
+        let engine = non_authorizing_engine(database_path.clone());
+        let policy = CatalogAccessPolicyDigest::derive(1, b"withheld-test-policy").unwrap();
+
+        let outcome = engine
+            .reconcile_configured_catalog(
+                vec![CatalogConfiguredSource::new(
+                    "alpha",
+                    vec![root(&directory, "alpha")],
+                    policy,
+                )],
+                CatalogBuildIntent::Startup,
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            CatalogBuildOutcome::AuthorizationUnavailable {
+                adapter_ids: vec!["alpha".to_string()]
+            }
+        );
+        assert!(engine.load_catalog_build_state().unwrap().is_none());
+
+        let connection = Connection::open(database_path).unwrap();
+        let source_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let object_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source_count, 1, "configured source must be registered");
+        assert_eq!(
+            object_count, 0,
+            "authority denial must precede catalog reads"
+        );
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn every_configured_source_registers_before_all_source_authority_denial() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("catalog.db");
+        let engine = non_authorizing_engine(database_path.clone());
+        let policy = CatalogAccessPolicyDigest::derive(1, b"withheld-test-policy").unwrap();
+
+        let outcome = engine
+            .reconcile_configured_catalog(
+                vec![
+                    CatalogConfiguredSource::new("gamma", vec![root(&directory, "gamma")], policy),
+                    CatalogConfiguredSource::new("alpha", vec![root(&directory, "alpha")], policy),
+                    CatalogConfiguredSource::new("beta", vec![root(&directory, "beta")], policy),
+                ],
+                CatalogBuildIntent::Startup,
+                QueryCancellationToken::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            CatalogBuildOutcome::AuthorizationUnavailable {
+                adapter_ids: vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string(),]
+            }
+        );
+        assert!(engine.load_catalog_build_state().unwrap().is_none());
+
+        let connection = Connection::open(database_path).unwrap();
+        let source_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let object_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source_count, 3);
+        assert_eq!(object_count, 0);
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn duplicate_or_cancelled_catalog_configuration_mutates_nothing() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("catalog.db");
+        let engine = non_authorizing_engine(database_path.clone());
+        let policy = CatalogAccessPolicyDigest::derive(1, b"withheld-test-policy").unwrap();
+        let source = CatalogConfiguredSource::new("alpha", vec![root(&directory, "alpha")], policy);
+
+        assert!(matches!(
+            engine.reconcile_configured_catalog(
+                vec![source.clone(), source.clone()],
+                CatalogBuildIntent::Startup,
+                QueryCancellationToken::default(),
+            ),
+            Err(EngineError::InvalidConfig(_))
+        ));
+        let cancellation = QueryCancellationToken::default();
+        cancellation.cancel();
+        assert!(matches!(
+            engine.reconcile_configured_catalog(
+                vec![source],
+                CatalogBuildIntent::Startup,
+                cancellation,
+            ),
+            Err(EngineError::QueryCancelled)
+        ));
+
+        let connection = Connection::open(database_path).unwrap();
+        let source_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(source_count, 0);
+        engine.shutdown().unwrap();
+    }
+}

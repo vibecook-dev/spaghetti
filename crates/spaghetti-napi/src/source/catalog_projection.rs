@@ -666,6 +666,14 @@ impl CatalogRefreshProjectionBatch {
         &self.plan
     }
 
+    pub(crate) fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    pub(crate) fn member_count(&self) -> usize {
+        self.member_bindings.len()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn into_publication(
         self,

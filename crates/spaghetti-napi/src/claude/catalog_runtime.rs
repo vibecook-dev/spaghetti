@@ -17,6 +17,7 @@ use crate::adapter::{
     AdapterId, AdapterObjectContext, AgentAdapter, AuthorizedCatalogAccess,
     CanonicalSourceInstanceKey, DecodeDisposition, DriverSpec, Fact, FactSemanticContext,
     SessionFact, SourceCoverageSet, SourceInstance, SourceObjectDescriptor, StreamSpec,
+    TypedAccessAuthorization,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
@@ -39,6 +40,7 @@ use crate::source::catalog_composition::{
     CatalogSourcePrimitive, MAX_CATALOG_COVERAGE_POINTS, MAX_MEMBERSHIP_MEMBERS,
 };
 use crate::source::catalog_projection::{CatalogSourceMemberProjection, CatalogSourceProjection};
+use crate::source::catalog_runtime_registry::CatalogSourceRuntime;
 use crate::source::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
     AppendTransition, DirectoryCheckpoint, DirectoryEntryKind, DirectoryEntryState, DirectoryScan,
@@ -95,6 +97,50 @@ pub(crate) struct ClaudeCatalogProduction {
     pub(crate) identity: ClaudeCatalogIdentity,
     pub(crate) assembly: CatalogLibraryCoverageAssembly,
     pub(crate) projection: CatalogSourceProjection,
+}
+
+pub(crate) struct ClaudeCatalogSourceRuntime;
+
+impl CatalogSourceRuntime for ClaudeCatalogSourceRuntime {
+    fn adapter_id(&self) -> &'static str {
+        ADAPTER_ID
+    }
+
+    fn library_plan_source(
+        &self,
+        authorization: &TypedAccessAuthorization,
+        instance: &SourceInstance,
+        access_policy_digest: CatalogAccessPolicyDigest,
+    ) -> Result<crate::catalog_contract::CatalogCoveragePlanSource, CatalogCompositionError> {
+        let access = authorization
+            .select_catalog_access()
+            .map_err(|_| CatalogCompositionError::invalid("Claude catalog authority is invalid"))?;
+        let composition = claude_authorized_catalog_composition(&access)?;
+        let executable = composition.authorize_execution(access)?;
+        executable
+            .bind_source_instance(instance)?
+            .library_plan_source(access_policy_digest)
+    }
+
+    fn produce_library_projection(
+        &self,
+        authorization: &TypedAccessAuthorization,
+        instance: &SourceInstance,
+        access_policy_digest: CatalogAccessPolicyDigest,
+        prior_coverage: Option<&SourceCoverageSet>,
+    ) -> Result<CatalogSourceProjection, CatalogCompositionError> {
+        let access = authorization
+            .select_catalog_access()
+            .map_err(|_| CatalogCompositionError::invalid("Claude catalog authority is invalid"))?;
+        let composition = claude_authorized_catalog_composition(&access)?;
+        let executable = composition.authorize_execution(access)?;
+        let bound = executable.bind_source_instance(instance)?;
+        let production = match prior_coverage {
+            Some(prior) => produce_claude_library_refresh(&bound, access_policy_digest, prior)?,
+            None => produce_claude_library_coverage(&bound, access_policy_digest)?,
+        };
+        Ok(production.projection)
+    }
 }
 
 pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {

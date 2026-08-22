@@ -15,10 +15,11 @@ use sha2::{Digest as _, Sha256};
 use super::adapter::CodexAdapter;
 use crate::adapter::{
     AdapterId, AgentAdapter, AuthorizedCatalogAccess, DecodeDisposition, DriverSpec, Fact,
-    FactSemanticContext, SourceCoverageSet, SourceObjectDescriptor, StreamSpec,
+    FactSemanticContext, SourceCoverageSet, SourceInstance, SourceObjectDescriptor, StreamSpec,
+    TypedAccessAuthorization,
 };
 #[cfg(test)]
-use crate::adapter::{SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceRoot};
+use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
 use crate::catalog_contract::evidence::{
     CatalogAvailability, CatalogEvidenceOwner, ProjectAssociationBasis,
 };
@@ -36,6 +37,7 @@ use crate::source::catalog_composition::{
     CatalogSourceComponent, CatalogSourceComposition, CatalogSourcePrimitive,
 };
 use crate::source::catalog_projection::{CatalogSourceMemberProjection, CatalogSourceProjection};
+use crate::source::catalog_runtime_registry::CatalogSourceRuntime;
 use crate::source::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
     AppendTransition, DirectoryEntryKind, DirectoryScan, DirectorySelection, DirectorySnapshot,
@@ -83,6 +85,50 @@ pub(crate) struct CodexCatalogProduction {
     pub(crate) identity: CodexCatalogIdentity,
     pub(crate) assembly: CatalogLibraryCoverageAssembly,
     pub(crate) projection: CatalogSourceProjection,
+}
+
+pub(crate) struct CodexCatalogSourceRuntime;
+
+impl CatalogSourceRuntime for CodexCatalogSourceRuntime {
+    fn adapter_id(&self) -> &'static str {
+        ADAPTER_ID
+    }
+
+    fn library_plan_source(
+        &self,
+        authorization: &TypedAccessAuthorization,
+        instance: &SourceInstance,
+        access_policy_digest: CatalogAccessPolicyDigest,
+    ) -> Result<crate::catalog_contract::CatalogCoveragePlanSource, CatalogCompositionError> {
+        let access = authorization
+            .select_catalog_access()
+            .map_err(|_| CatalogCompositionError::invalid("Codex catalog authority is invalid"))?;
+        let composition = codex_authorized_catalog_composition(&access)?;
+        let executable = composition.authorize_execution(access)?;
+        executable
+            .bind_source_instance(instance)?
+            .library_plan_source(access_policy_digest)
+    }
+
+    fn produce_library_projection(
+        &self,
+        authorization: &TypedAccessAuthorization,
+        instance: &SourceInstance,
+        access_policy_digest: CatalogAccessPolicyDigest,
+        prior_coverage: Option<&SourceCoverageSet>,
+    ) -> Result<CatalogSourceProjection, CatalogCompositionError> {
+        let access = authorization
+            .select_catalog_access()
+            .map_err(|_| CatalogCompositionError::invalid("Codex catalog authority is invalid"))?;
+        let composition = codex_authorized_catalog_composition(&access)?;
+        let executable = composition.authorize_execution(access)?;
+        let bound = executable.bind_source_instance(instance)?;
+        let production = match prior_coverage {
+            Some(prior) => produce_codex_library_refresh(&bound, access_policy_digest, prior)?,
+            None => produce_codex_library_coverage(&bound, access_policy_digest)?,
+        };
+        Ok(production.projection)
+    }
 }
 
 pub(crate) fn codex_catalog_components() -> Vec<CatalogSourceComponent> {

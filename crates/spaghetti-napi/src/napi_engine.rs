@@ -143,6 +143,18 @@ fn verified_builtin_registry(
         .build_verified(support_catalog)
 }
 
+fn builtin_catalog_source_runtimes() -> std::result::Result<
+    crate::source::catalog_runtime_registry::CatalogSourceRuntimeRegistry,
+    AdapterError,
+> {
+    crate::source::catalog_runtime_registry::CatalogSourceRuntimeRegistry::builder()
+        .register(crate::claude::catalog_runtime::ClaudeCatalogSourceRuntime)
+        .register(crate::codex::catalog_runtime::CodexCatalogSourceRuntime)
+        .register(crate::grok::catalog_runtime::GrokCatalogSourceRuntime)
+        .build()
+        .map_err(|error| AdapterError::invalid_contract(error.to_string()))
+}
+
 fn ns_to_ms(value: u64) -> f64 {
     value as f64 / 1_000_000.0
 }
@@ -5260,7 +5272,9 @@ impl Task for OpenEngineTask {
             .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
         let registry = verified_builtin_registry(support_catalog)
             .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
-        let inner = SpaghettiEngineCore::open_with_registry(
+        let catalog_source_runtimes = builtin_catalog_source_runtimes()
+            .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
+        let inner = SpaghettiEngineCore::open_with_runtime_registry(
             EngineOptions {
                 database_path: PathBuf::from(&self.options.db_path),
                 query_workers,
@@ -5269,6 +5283,7 @@ impl Task for OpenEngineTask {
                 source_pass_pool: None,
             },
             registry,
+            catalog_source_runtimes,
         )
         .map_err(napi_error)?;
         Ok(SpaghettiEngine { inner })

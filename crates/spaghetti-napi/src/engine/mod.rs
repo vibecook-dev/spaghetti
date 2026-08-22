@@ -6,6 +6,7 @@
 
 mod artifact_projection;
 mod capability_query;
+mod catalog_build;
 mod catalog_publication;
 mod catalog_query;
 mod catalog_retention;
@@ -62,6 +63,7 @@ use crate::catalog_contract::{CatalogCoveragePlan, CatalogReadinessPhase};
 use crate::source::catalog_projection::{
     CatalogInitialProjectionBatch, CatalogRefreshProjectionBatch,
 };
+use crate::source::catalog_runtime_registry::CatalogSourceRuntimeRegistry;
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
@@ -538,6 +540,7 @@ pub struct SpaghettiEngineCore {
     owner: OwnerMetadata,
     query_workers: usize,
     adapters: Arc<AdapterRegistry>,
+    catalog_source_runtimes: Arc<CatalogSourceRuntimeRegistry>,
     observation: Arc<ObservationRuntime>,
     source_telemetry: Arc<SourceTelemetry>,
     observation_workers: Mutex<Option<Arc<rayon::ThreadPool>>>,
@@ -656,6 +659,14 @@ impl SpaghettiEngineCore {
         options: EngineOptions,
         adapters: AdapterRegistry,
     ) -> Result<Arc<Self>, EngineError> {
+        Self::open_with_runtime_registry(options, adapters, CatalogSourceRuntimeRegistry::default())
+    }
+
+    pub(crate) fn open_with_runtime_registry(
+        options: EngineOptions,
+        adapters: AdapterRegistry,
+        catalog_source_runtimes: CatalogSourceRuntimeRegistry,
+    ) -> Result<Arc<Self>, EngineError> {
         let database_path = normalize_database_path(&options.database_path)?;
         let query_workers = options.query_workers.unwrap_or(DEFAULT_QUERY_WORKERS);
         if !(1..=MAX_QUERY_WORKERS).contains(&query_workers) {
@@ -700,6 +711,7 @@ impl SpaghettiEngineCore {
             owner,
             query_workers,
             adapters: Arc::new(adapters),
+            catalog_source_runtimes: Arc::new(catalog_source_runtimes),
             observation: ObservationRuntime::new(),
             source_telemetry: SourceTelemetry::new(),
             observation_workers: Mutex::new(Some(Arc::new(observation_workers))),
@@ -2076,6 +2088,31 @@ impl SpaghettiEngineCore {
         };
         self.adapters
             .authorize_durable_if_supported(&adapter_id, &probe)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))
+    }
+
+    /// Run the bounded native probe and mint catalog-only authority for one
+    /// configured adapter. Candidate and unsupported releases return `None`;
+    /// this seam never falls back to durable or legacy source authority.
+    pub(crate) fn catalog_authorization_for_roots(
+        &self,
+        adapter_id: &str,
+        roots: &[PathBuf],
+    ) -> Result<Option<TypedAccessAuthorization>, EngineError> {
+        if !self.adapters.has_verified_support_catalog() {
+            return Ok(None);
+        }
+        let adapter_id = AdapterId::new(adapter_id)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?;
+        let Some(probe) = self
+            .adapters
+            .probe_native_support(&adapter_id, roots)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        self.adapters
+            .authorize_catalog_if_supported(&adapter_id, &probe)
             .map_err(|error| EngineError::InvalidConfig(error.to_string()))
     }
 
