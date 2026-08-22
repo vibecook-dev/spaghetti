@@ -295,10 +295,10 @@ impl CatalogSourceProjection {
                     "catalog session evidence is outside the bounded projection contract",
                 )
             })?;
-            let association_stable_key = projection_key(
-                b"project-association",
+            let association_stable_key = association_projection_key(
                 member_ref.as_bytes(),
                 member.native_session_id.as_bytes(),
+                member.native_project_key.as_bytes(),
             );
             let association = SessionProjectAssociationFact::new(
                 member.owner,
@@ -572,6 +572,24 @@ fn projection_key(domain: &[u8], member_ref: &[u8; 32], native_key: &[u8]) -> [u
     *hasher.finalize().as_bytes()
 }
 
+fn association_projection_key(
+    member_ref: &[u8; 32],
+    native_session_id: &[u8],
+    native_project_key: &[u8],
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012b/catalog-source-projection-key-v1\0");
+    let domain = b"project-association";
+    hasher.update(&(domain.len() as u64).to_be_bytes());
+    hasher.update(domain);
+    hasher.update(member_ref);
+    hasher.update(&(native_session_id.len() as u64).to_be_bytes());
+    hasher.update(native_session_id);
+    hasher.update(&(native_project_key.len() as u64).to_be_bytes());
+    hasher.update(native_project_key);
+    *hasher.finalize().as_bytes()
+}
+
 fn availability_tag(availability: &CatalogAvailability) -> &'static str {
     match availability {
         CatalogAvailability::MetadataOnly => "metadata_only",
@@ -619,7 +637,9 @@ mod tests {
         CoverageStreamKey, SourceCoveragePoint, SourceCoverageSet,
         CONTRACT_VERSION_SELECTION_VERSION,
     };
-    use crate::catalog_contract::evidence::CatalogReducerPublicationLimits;
+    use crate::catalog_contract::evidence::{
+        CatalogAssociationCoverage, CatalogReducerPublicationLimits,
+    };
     use crate::catalog_contract::publication::{
         CatalogSourceCompletionRevision, CatalogSourceMembershipRevision,
     };
@@ -822,5 +842,33 @@ mod tests {
             left.session_assertions[0].assertion_key, right.session_assertions[0].assertion_key,
             "source evidence identity must still distinguish topology"
         );
+    }
+
+    #[test]
+    fn project_reassociation_retains_competing_evidence_and_selects_the_new_observation() {
+        let (source, input) = fixture("object-a");
+        let mut moved = input.clone();
+        moved.native_project_key = "project-b".to_owned();
+        let initial = CatalogSourceProjection::assemble(source.clone(), vec![input]).unwrap();
+        let reassociated = CatalogSourceProjection::assemble(source, vec![moved]).unwrap();
+        assert_ne!(
+            initial.associations[0].association_key,
+            reassociated.associations[0].association_key
+        );
+
+        let reducer = initial.reduce_into(CatalogReducer::default(), 1).unwrap();
+        let reducer = reassociated.reduce_into(reducer, 2).unwrap();
+        let session_ref = reassociated.session_assertions[0].session_ref;
+        match reducer.association_for_session(session_ref) {
+            CatalogAssociationCoverage::Available { selection } => {
+                assert_eq!(
+                    selection.association.project_ref,
+                    reassociated.associations[0].project_ref
+                );
+                assert_eq!(selection.competing_associations.len(), 1);
+                assert_eq!(selection.conflicting_association_keys.len(), 1);
+            }
+            CatalogAssociationCoverage::Unknown => panic!("reassociation must remain available"),
+        }
     }
 }
