@@ -3455,7 +3455,12 @@ fn apply_usage_v2_facts(
                     source_generation = excluded.source_generation,
                     cursor_end = excluded.cursor_end,
                     last_commit_seq = excluded.last_commit_seq
-                WHERE excluded.cursor_end > usage_v2_response_contributions.cursor_end
+                WHERE excluded.response_key = usage_v2_response_contributions.response_key
+                  AND excluded.response_identity = usage_v2_response_contributions.response_identity
+                  AND excluded.native_message_id IS usage_v2_response_contributions.native_message_id
+                  AND excluded.source_object_id = usage_v2_response_contributions.source_object_id
+                  AND excluded.source_generation = usage_v2_response_contributions.source_generation
+                  AND excluded.cursor_end > usage_v2_response_contributions.cursor_end
                   AND excluded.fact_revision_id <> usage_v2_response_contributions.fact_revision_id
             "#,
             params![
@@ -3518,7 +3523,7 @@ fn apply_usage_v2_facts(
                 continue;
             }
             return Err(EngineError::InvalidCommit(
-                "usage-v2 revision arrived behind the accepted source cursor".to_string(),
+                "usage-v2 revision conflicts with its stable contribution identity or arrived behind the accepted source cursor".to_string(),
             ));
         }
         if affected != 1 {
@@ -4583,15 +4588,16 @@ mod tests {
     use walkdir::WalkDir;
 
     use crate::adapter::{
-        ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState, AdapterId,
-        AdapterObjectContext, AgentAdapter, ArtifactCapture, ArtifactContentFact,
-        ArtifactMetadataEntry, ArtifactMetadataSnapshotFact, ArtifactObservationKind, ContentBlock,
-        DecodeContext, DecoderId, DependencyRevision, EvidenceKind, EvidenceStrength, FactBatch,
-        FactSemanticContext, HookEventSummary, InterpretationSettingsDocumentStatus,
-        InterpretationSettingsFact, InterpretationSettingsLayer, InterpretationSettingsSnapshot,
-        MessageFact, PersistedToolResultFact, PlanSnapshotFact, PresenceFact,
-        ProjectMemoryDocumentFact, RecordMappingDisposition, RunEvidenceFact, RunFact, SessionFact,
-        SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
+        ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
+        ActorRunRole, AdapterId, AdapterObjectContext, AgentAdapter, ArtifactCapture,
+        ArtifactContentFact, ArtifactMetadataEntry, ArtifactMetadataSnapshotFact,
+        ArtifactObservationKind, ContentBlock, DecodeContext, DecoderId, DependencyRevision,
+        EvidenceKind, EvidenceStrength, FactBatch, FactSemanticContext, HookEventSummary,
+        InterpretationSettingsDocumentStatus, InterpretationSettingsFact,
+        InterpretationSettingsLayer, InterpretationSettingsSnapshot, MessageFact,
+        PersistedToolResultFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
+        RecordMappingDisposition, RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot,
+        SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
         SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
         StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
         TaskStatus, TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot,
@@ -8448,18 +8454,15 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn rfc012c_fixture_identities_survive_durable_usage_v2_query() {
-        let fixture = rfc012c_runtime_fixture();
-        let mut connection = database();
-        register_object(&mut connection);
-
-        let context = rfc012c_semantic_context();
-        let first_record = direct_record(1, 0, 4, 4, b"{}");
-        let mut first_batch = FactBatch::new_with_semantic_context(8, 2, context.clone()).unwrap();
-        first_batch
+    fn rfc012c_initial_durable_batch(
+        fixture: &RuntimeContractFixtureWire,
+        record: &SourceRecord,
+        context: &FactSemanticContext,
+    ) -> FactBatch {
+        let mut batch = FactBatch::new_with_semantic_context(8, 2, context.clone()).unwrap();
+        batch
             .push(
-                &first_record,
+                record,
                 Fact::Session(SessionFact {
                     session: entity("session", &fixture.source.session.native_session_id),
                     project: entity("project", PROJECT),
@@ -8474,47 +8477,253 @@ mod tests {
                 }),
             )
             .unwrap();
-        first_batch
+        batch
             .push_native(
-                &first_record,
+                record,
                 b"fixture-root-actor",
                 Fact::ActorRunRevision(fixture.actors.root.revision.clone()),
             )
             .unwrap();
-        first_batch
+        batch
             .push_native(
-                &first_record,
+                record,
                 b"fixture-child-actor",
                 Fact::ActorRunRevision(fixture.actors.child.revision.clone()),
             )
             .unwrap();
-        first_batch
+        batch
             .push_native(
-                &first_record,
+                record,
                 b"fixture-child-actor/team/fixture-team-1",
                 Fact::ActorAffiliationRevision(
                     fixture.affiliations.child_team_present.revision.clone(),
                 ),
             )
             .unwrap();
-        first_batch
+        batch
             .push_native(
-                &first_record,
+                record,
                 b"fixture-child-actor/workflow/fixture-workflow-1",
                 Fact::ActorAffiliationRevision(
                     fixture.affiliations.child_workflow_present.revision.clone(),
                 ),
             )
             .unwrap();
-        let usage_a = &fixture.usage.response_revisions.a;
-        first_batch
+        let usage = &fixture.usage.response_revisions.a.revision;
+        batch
             .push_native_object_scoped_with_revision(
-                &first_record,
-                &usage_a.revision.response_key,
-                &usage_a.revision.semantic_revision_key().unwrap(),
-                Fact::UsageRevisionV2(usage_a.revision.clone()),
+                record,
+                &usage.response_key,
+                &usage.semantic_revision_key().unwrap(),
+                Fact::UsageRevisionV2(usage.clone()),
             )
             .unwrap();
+        batch
+    }
+
+    fn rfc012c_rejected_durable_correction(
+        connection: &mut Connection,
+        record: &SourceRecord,
+        batch: &FactBatch,
+        clock: i64,
+    ) -> String {
+        let error = apply_fact_observation_commit(
+            connection,
+            &request(
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: SourceCursor::append_offset(4).into_bytes(),
+                },
+                1,
+                record.cursor_end.as_bytes().to_vec(),
+                clock,
+            ),
+            batch,
+        )
+        .unwrap_err();
+        match error {
+            EngineError::InvalidCommit(message) => message,
+            other => panic!("expected invalid semantic correction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rfc012c_durable_selected_identity_drift_fails_closed() {
+        let fixture = rfc012c_runtime_fixture();
+        let context = rfc012c_semantic_context();
+        let mut connection = database();
+        register_object(&mut connection);
+        let first_record = direct_record(1, 0, 4, 4, b"{}");
+        let first_batch = rfc012c_initial_durable_batch(&fixture, &first_record, &context);
+        commit_direct_batch(&mut connection, &first_record, 1, 0, 11, &first_batch);
+
+        let accepted_child_session: Vec<u8> = connection
+            .query_row(
+                "SELECT session_key FROM runtime_actor_runs_v2 WHERE role = 'child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let accepted_response_key: Vec<u8> = connection
+            .query_row(
+                "SELECT response_key FROM usage_v2_response_contributions",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let correction = direct_record(1, 4, 7, 12, b"{}");
+        let mut actor_drift = fixture.actors.child.revision.clone();
+        let mut actor_batch = FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap();
+        actor_drift.role = ActorRunRole::Root;
+        actor_drift.parent_actor_run = None;
+        actor_batch
+            .push_native(
+                &correction,
+                b"fixture-child-actor",
+                Fact::ActorRunRevision(actor_drift),
+            )
+            .unwrap();
+        assert!(rfc012c_rejected_durable_correction(
+            &mut connection,
+            &correction,
+            &actor_batch,
+            13,
+        )
+        .contains("actor-run revision conflicts"));
+
+        let mut affiliation_drift = fixture.affiliations.child_workflow_present.revision.clone();
+        affiliation_drift.dimension = ActorAffiliationDimension::Team;
+        let mut affiliation_batch =
+            FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap();
+        affiliation_batch
+            .push_native(
+                &correction,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(affiliation_drift),
+            )
+            .unwrap();
+        assert!(rfc012c_rejected_durable_correction(
+            &mut connection,
+            &correction,
+            &affiliation_batch,
+            14,
+        )
+        .contains("actor-affiliation revision conflicts"));
+
+        let usage_a = &fixture.usage.response_revisions.a;
+        let mut usage_drift = usage_a.revision.clone();
+        let usage_stable_key = usage_drift.response_key.clone();
+        usage_drift.response_key = b"retargeted-response".to_vec();
+        usage_drift.native_message_id = Some("retargeted-response".to_string());
+        let usage_revision_key = usage_drift.semantic_revision_key().unwrap();
+        let mut usage_batch = FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap();
+        usage_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_stable_key,
+                &usage_revision_key,
+                Fact::UsageRevisionV2(usage_drift),
+            )
+            .unwrap();
+        assert!(rfc012c_rejected_durable_correction(
+            &mut connection,
+            &correction,
+            &usage_batch,
+            15,
+        )
+        .contains("stable contribution identity"));
+
+        assert_eq!(count(&connection, "runtime_actor_runs_v2"), 2);
+        assert_eq!(count(&connection, "runtime_actor_affiliations_v2"), 2);
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT session_key FROM runtime_actor_runs_v2 WHERE role = 'child'",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .unwrap(),
+            accepted_child_session
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT response_key FROM usage_v2_response_contributions",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .unwrap(),
+            accepted_response_key
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM runtime_actor_affiliations_v2 WHERE dimension = 'workflow'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+
+        let mut actor_correction = fixture.actors.child.revision.clone();
+        actor_correction.native_actor_type = Some("corrected-child-type".to_string());
+        let mut usage_attribution = usage_a.revision.clone();
+        usage_attribution.actor_run = fixture.actors.root.revision.actor_run;
+        let usage_stable_key = usage_attribution.response_key.clone();
+        let usage_revision_key = usage_attribution.semantic_revision_key().unwrap();
+        let mut valid_batch = FactBatch::new_with_semantic_context(2, 1, context).unwrap();
+        valid_batch
+            .push_native(
+                &correction,
+                b"fixture-child-actor",
+                Fact::ActorRunRevision(actor_correction),
+            )
+            .unwrap();
+        valid_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_stable_key,
+                &usage_revision_key,
+                Fact::UsageRevisionV2(usage_attribution),
+            )
+            .unwrap();
+        commit_direct_batch(&mut connection, &correction, 1, 4, 16, &valid_batch);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT native_actor_type FROM runtime_actor_runs_v2 WHERE role = 'child'",
+                    [],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .unwrap()
+                .as_deref(),
+            Some("corrected-child-type")
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT actor_run_key FROM usage_v2_response_contributions",
+                    [],
+                    |row| row.get::<_, Vec<u8>>(0),
+                )
+                .unwrap(),
+            fixture.actors.root.revision.actor_run.as_bytes()
+        );
+    }
+
+    #[test]
+    fn rfc012c_fixture_identities_survive_durable_usage_v2_query() {
+        let fixture = rfc012c_runtime_fixture();
+        let mut connection = database();
+        register_object(&mut connection);
+
+        let context = rfc012c_semantic_context();
+        let first_record = direct_record(1, 0, 4, 4, b"{}");
+        let first_batch = rfc012c_initial_durable_batch(&fixture, &first_record, &context);
+        let usage_a = &fixture.usage.response_revisions.a;
         commit_direct_batch(&mut connection, &first_record, 1, 0, 11, &first_batch);
         assert_eq!(count(&connection, "canonical_sessions"), 1);
         assert_eq!(count(&connection, "runtime_actor_runs_v2"), 2);

@@ -50,13 +50,15 @@ use crate::observation_contract::{
     ObservationNegotiationError,
 };
 use crate::runtime_semantic_reducer::{
-    effective_state_reduced_state_digest, reduce_content_block_revision,
-    reduce_effective_state_revision, reduce_message_revision, reduce_native_marker_revision,
-    reduce_plan_revision, reduce_task_revision, reduce_tool_revision, reduce_user_input_revision,
-    EffectiveStateReducedDigestEntity, MessageReducedDigestEntity, PlanReducedDigestEntity,
-    RevisionedEntityReduction, RevisionedEntityValueReduction, RuntimeSemanticReductionError,
-    RuntimeSemanticSourceRef, TaskReducedDigestEntity, ToolReducedDigestEntity,
-    UserInputReducedDigestEntity, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    effective_state_reduced_state_digest, reduce_actor_affiliation_revision,
+    reduce_actor_run_revision, reduce_content_block_revision, reduce_effective_state_revision,
+    reduce_message_revision, reduce_native_marker_revision, reduce_plan_revision,
+    reduce_task_revision, reduce_tool_revision, reduce_usage_v2_revision,
+    reduce_user_input_revision, EffectiveStateReducedDigestEntity, MessageReducedDigestEntity,
+    PlanReducedDigestEntity, RevisionedEntityReduction, RevisionedEntityValueReduction,
+    RuntimeSemanticReductionError, RuntimeSemanticSourceRef, TaskReducedDigestEntity,
+    ToolReducedDigestEntity, UserInputReducedDigestEntity,
+    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -13306,6 +13308,11 @@ impl ScopedObservationProjectionSink {
                         .actor_upserts
                         .get(&key)
                         .or_else(|| self.actor_runs.get(&key));
+                    let reduction = reduce_actor_run_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(runtime_semantic_projection_error)?;
                     if let Some(current) = current {
                         validate_actor_revision_progress(
                             (
@@ -13323,9 +13330,9 @@ impl ScopedObservationProjectionSink {
                                 &state.revision,
                             ),
                         )?;
-                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
-                            continue;
-                        }
+                    }
+                    if reduction == RevisionedEntityReduction::Unchanged {
+                        continue;
                     }
                     mutation.actor_upserts.insert(key, state);
                 }
@@ -13342,6 +13349,11 @@ impl ScopedObservationProjectionSink {
                         .affiliation_upserts
                         .get(&key)
                         .or_else(|| self.actor_affiliations.get(&key));
+                    let reduction = reduce_actor_affiliation_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(runtime_semantic_projection_error)?;
                     if let Some(current) = current {
                         validate_actor_revision_progress(
                             (
@@ -13359,9 +13371,9 @@ impl ScopedObservationProjectionSink {
                                 &state.revision,
                             ),
                         )?;
-                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
-                            continue;
-                        }
+                    }
+                    if reduction == RevisionedEntityReduction::Unchanged {
+                        continue;
                     }
                     mutation.affiliation_upserts.insert(key, state);
                 }
@@ -14243,14 +14255,19 @@ impl ScopedObservationProjectionSink {
                 .usage_upserts
                 .get(&state.semantic.fact_id)
                 .or_else(|| self.usage_v2.get(&state.semantic.fact_id));
+            let reduction = reduce_usage_v2_revision(
+                current.map(|current| (&current.semantic, &current.revision)),
+                (&state.semantic, &state.revision),
+            )
+            .map_err(runtime_semantic_projection_error)?;
             if let Some(current) = current {
-                if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
-                    continue;
-                }
                 if current.object_token != state.object_token
                     || current.generation != state.generation
                 {
                     return Err(ScopedProjectionError::ConflictingOwnership);
+                }
+                if reduction == RevisionedEntityReduction::Unchanged {
+                    continue;
                 }
                 let old_cursor = current.source.cursor_end.append_offset_value();
                 let next_cursor = state.source.cursor_end.append_offset_value();
@@ -28102,6 +28119,201 @@ mod projection_tests {
             )
             .unwrap();
         batch
+    }
+
+    fn seeded_rfc012c_projection(
+        fixture: &RuntimeContractFixtureWire,
+    ) -> ScopedObservationProjectionSink {
+        let mut projection = multi_family_sink(8);
+        let first = rfc012c_record(0, 3, 4);
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                    &first,
+                    rfc012c_initial_batch(fixture, &first),
+                ))
+                .unwrap()
+                .len(),
+            5
+        );
+        projection
+    }
+
+    #[test]
+    fn selected_actor_and_usage_identity_drift_fails_closed() {
+        let fixture = rfc012c_fixture();
+        let correction = rfc012c_record(3, 6, 5);
+
+        let mut actor_projection = seeded_rfc012c_projection(&fixture);
+        let mut actor_drift = fixture.actors.child.revision.clone();
+        let mut actor_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        actor_drift.role = ActorRunRole::Root;
+        actor_drift.parent_actor_run = None;
+        actor_batch
+            .push_native(
+                &correction,
+                b"fixture-child-actor",
+                Fact::ActorRunRevision(actor_drift),
+            )
+            .unwrap();
+        assert_eq!(
+            actor_projection.project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &correction,
+                actor_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_eq!(
+            actor_projection
+                .actor_runs
+                .get(&fixture.actors.child.revision.actor_run)
+                .unwrap()
+                .revision,
+            fixture.actors.child.revision
+        );
+
+        let mut affiliation_projection = seeded_rfc012c_projection(&fixture);
+        let mut affiliation_drift = fixture.affiliations.child_workflow_present.revision.clone();
+        affiliation_drift.dimension = ActorAffiliationDimension::Team;
+        let mut affiliation_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        affiliation_batch
+            .push_native(
+                &correction,
+                b"fixture-child-actor/workflow/fixture-workflow-1",
+                Fact::ActorAffiliationRevision(affiliation_drift),
+            )
+            .unwrap();
+        assert_eq!(
+            affiliation_projection.project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &correction,
+                affiliation_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_eq!(
+            affiliation_projection
+                .actor_affiliations
+                .get(
+                    &fixture
+                        .affiliations
+                        .child_workflow_present
+                        .revision
+                        .affiliation,
+                )
+                .unwrap()
+                .revision,
+            fixture.affiliations.child_workflow_present.revision
+        );
+
+        let mut usage_projection = seeded_rfc012c_projection(&fixture);
+        let usage_a = &fixture.usage.response_revisions.a;
+        let mut usage_drift = usage_a.revision.clone();
+        let usage_stable_key = usage_drift.response_key.clone();
+        usage_drift.response_key = b"retargeted-response".to_vec();
+        usage_drift.native_message_id = Some("retargeted-response".to_string());
+        let usage_revision_key = usage_drift.semantic_revision_key().unwrap();
+        let mut usage_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        usage_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_stable_key,
+                &usage_revision_key,
+                Fact::UsageRevisionV2(usage_drift),
+            )
+            .unwrap();
+        assert_eq!(
+            usage_projection.project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &correction,
+                usage_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_eq!(
+            usage_projection
+                .usage_v2
+                .get(&usage_a.fact_id)
+                .unwrap()
+                .revision,
+            usage_a.revision
+        );
+
+        let mut actor_correction = fixture.actors.child.revision.clone();
+        actor_correction.native_actor_type = Some("corrected-child-type".to_string());
+        let mut actor_correction_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        actor_correction_batch
+            .push_native(
+                &correction,
+                b"fixture-child-actor",
+                Fact::ActorRunRevision(actor_correction.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            actor_projection
+                .project(&rfc012c_decoded_frame(
+                    3,
+                    ScopedAppendDeliveryPhase::Live,
+                    &correction,
+                    actor_correction_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            actor_projection
+                .actor_runs
+                .get(&actor_correction.actor_run)
+                .unwrap()
+                .revision,
+            actor_correction
+        );
+
+        let mut usage_attribution = usage_a.revision.clone();
+        usage_attribution.actor_run = fixture.actors.root.revision.actor_run;
+        let usage_stable_key = usage_attribution.response_key.clone();
+        let usage_revision_key = usage_attribution.semantic_revision_key().unwrap();
+        let mut usage_attribution_batch =
+            FactBatch::new_with_semantic_context(1, 1, rfc012c_semantic_context()).unwrap();
+        usage_attribution_batch
+            .push_native_object_scoped_with_revision(
+                &correction,
+                &usage_stable_key,
+                &usage_revision_key,
+                Fact::UsageRevisionV2(usage_attribution.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            usage_projection
+                .project(&rfc012c_decoded_frame(
+                    3,
+                    ScopedAppendDeliveryPhase::Live,
+                    &correction,
+                    usage_attribution_batch,
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            usage_projection
+                .usage_v2
+                .get(&usage_a.fact_id)
+                .unwrap()
+                .revision,
+            usage_attribution
+        );
     }
 
     #[test]

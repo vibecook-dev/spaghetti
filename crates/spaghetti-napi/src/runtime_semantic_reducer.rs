@@ -6,15 +6,16 @@
 //! that shared law; it deliberately contains no database or observer types.
 
 use crate::adapter::{
-    AdapterId, CanonicalSourceInstanceKey, ContentBlockRevisionFact, ContentBlockRevisionValue,
-    ContractCompleteness, CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension,
-    EffectiveStateEvidenceKind, EffectiveStateRevisionFact, EffectiveStateValueAuthority,
-    FactProvenance, FactRevisionId, FactSemanticRevision, MessageRevisionFact, MessageRevisionRole,
-    NativeCompactionPhase, NativeProgressState, NativeQueueOperation,
-    NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PlanRevisionFact,
-    QualifiedUnknownReason, QualifiedValueQuality, SourceRecordId, TaskLifecycleState,
-    TaskRevisionFact, ToolRevisionFact, ToolRevisionKind, UserInputKind, UserInputLifecycleState,
-    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
+    ActorAffiliationRevisionFact, ActorRunRevisionFact, AdapterId, CanonicalSourceInstanceKey,
+    ContentBlockRevisionFact, ContentBlockRevisionValue, ContractCompleteness, CoverageObjectKey,
+    CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
+    EffectiveStateRevisionFact, EffectiveStateValueAuthority, FactProvenance, FactRevisionId,
+    FactSemanticRevision, MessageRevisionFact, MessageRevisionRole, NativeCompactionPhase,
+    NativeProgressState, NativeQueueOperation, NativeRuntimeMarkerRevisionFact,
+    NativeRuntimeMarkerValue, PlanRevisionFact, QualifiedUnknownReason, QualifiedValueQuality,
+    SourceRecordId, TaskLifecycleState, TaskRevisionFact, ToolRevisionFact, ToolRevisionKind,
+    UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState, UserInputOperation,
+    UserInputQuestion, UserInputRequestRevisionFact,
 };
 use crate::source::SourceRecordState;
 
@@ -218,6 +219,149 @@ fn validate_tool_entity(
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
     Ok(())
+}
+
+fn validate_actor_run_entity(
+    semantic: &FactSemanticRevision,
+    revision: &ActorRunRevisionFact,
+) -> Result<(), RuntimeSemanticReductionError> {
+    revision
+        .validate()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    Ok(())
+}
+
+fn validate_actor_affiliation_entity(
+    semantic: &FactSemanticRevision,
+    revision: &ActorAffiliationRevisionFact,
+) -> Result<(), RuntimeSemanticReductionError> {
+    revision
+        .validate()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    Ok(())
+}
+
+fn validate_usage_v2_entity(
+    semantic: &FactSemanticRevision,
+    revision: &UsageRevisionV2Fact,
+) -> Result<(), RuntimeSemanticReductionError> {
+    revision
+        .validate()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    Ok(())
+}
+
+/// Reduce one actor-run value while preserving the entity coordinates that
+/// define its stable lineage. Parentage and native descriptive attributes may
+/// be corrected, but an existing run cannot move to another session or change
+/// root/child role under the same identity.
+pub(crate) fn reduce_actor_run_revision(
+    current: Option<(&FactSemanticRevision, &ActorRunRevisionFact)>,
+    incoming: (&FactSemanticRevision, &ActorRunRevisionFact),
+) -> Result<RevisionedEntityReduction, RuntimeSemanticReductionError> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    validate_actor_run_entity(incoming_semantic, incoming_revision)?;
+    if let Some((current_semantic, current_revision)) = current {
+        validate_actor_run_entity(current_semantic, current_revision)?;
+        if current_semantic.fact_id != incoming_semantic.fact_id
+            || current_revision.actor_run != incoming_revision.actor_run
+            || current_revision.session != incoming_revision.session
+            || current_revision.role != incoming_revision.role
+        {
+            return Err(RuntimeSemanticReductionError::InvalidRevision);
+        }
+        if current_semantic.fact_revision_id == incoming_semantic.fact_revision_id {
+            return Ok(RevisionedEntityReduction::Unchanged);
+        }
+    }
+    Ok(RevisionedEntityReduction::Upsert)
+}
+
+/// Reduce one affiliation value without allowing its stable relation identity
+/// to be retargeted. Member/native attributes and explicit Present/Removed/
+/// Unknown state remain revisioned values of the same actor/dimension/target
+/// relation.
+pub(crate) fn reduce_actor_affiliation_revision(
+    current: Option<(&FactSemanticRevision, &ActorAffiliationRevisionFact)>,
+    incoming: (&FactSemanticRevision, &ActorAffiliationRevisionFact),
+) -> Result<RevisionedEntityReduction, RuntimeSemanticReductionError> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    validate_actor_affiliation_entity(incoming_semantic, incoming_revision)?;
+    if let Some((current_semantic, current_revision)) = current {
+        validate_actor_affiliation_entity(current_semantic, current_revision)?;
+        if current_semantic.fact_id != incoming_semantic.fact_id
+            || current_revision.affiliation != incoming_revision.affiliation
+            || current_revision.actor_run != incoming_revision.actor_run
+            || current_revision.session != incoming_revision.session
+            || current_revision.dimension != incoming_revision.dimension
+            || current_revision.target != incoming_revision.target
+        {
+            return Err(RuntimeSemanticReductionError::InvalidRevision);
+        }
+        if current_semantic.fact_revision_id == incoming_semantic.fact_revision_id {
+            return Ok(RevisionedEntityReduction::Unchanged);
+        }
+    }
+    Ok(RevisionedEntityReduction::Upsert)
+}
+
+/// Reduce one response-level usage contribution. Counters, qualifications,
+/// attribution, correlation metadata, model/effort, and native time may be
+/// corrected, but the contribution cannot be retargeted to another response
+/// identity under the same canonical fact ID.
+pub(crate) fn reduce_usage_v2_revision(
+    current: Option<(&FactSemanticRevision, &UsageRevisionV2Fact)>,
+    incoming: (&FactSemanticRevision, &UsageRevisionV2Fact),
+) -> Result<RevisionedEntityReduction, RuntimeSemanticReductionError> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    validate_usage_v2_entity(incoming_semantic, incoming_revision)?;
+    if let Some((current_semantic, current_revision)) = current {
+        validate_usage_v2_entity(current_semantic, current_revision)?;
+        if current_semantic.fact_id != incoming_semantic.fact_id
+            || current_revision.response_key != incoming_revision.response_key
+            || current_revision.response_identity != incoming_revision.response_identity
+            || current_revision.native_message_id != incoming_revision.native_message_id
+        {
+            return Err(RuntimeSemanticReductionError::InvalidRevision);
+        }
+        if current_semantic.fact_revision_id == incoming_semantic.fact_revision_id {
+            return Ok(RevisionedEntityReduction::Unchanged);
+        }
+    }
+    Ok(RevisionedEntityReduction::Upsert)
 }
 
 fn merge_user_input_questions(

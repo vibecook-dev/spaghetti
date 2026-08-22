@@ -1128,6 +1128,15 @@ unmatched results and may revise correlation. Durable `FactBatch` reduction
 and selected scoped projection share the exact reduced entities and path-free
 digest through unmatched, correlated, retracted, restored, and incomplete
 states. Its portable selected event specialist remains open.
+The selected actor-run, actor-affiliation, and usage-v2 paths now also share
+topology-neutral stable-identity guards. An actor cannot change session or
+root/child role under one run identity; an affiliation cannot retarget its
+actor, session, dimension, or target; and one usage contribution cannot change
+its response identity. Durable SQL compare-and-set clauses enforce the same
+axes and roll the whole commit back on drift. Parentage, native actor metadata,
+usage attribution, counters, qualifications, and correlation metadata remain
+revisionable values, as required by RFC 012C, and focused durable/scoped tests
+prove both the rejection and allowed-correction sides.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,

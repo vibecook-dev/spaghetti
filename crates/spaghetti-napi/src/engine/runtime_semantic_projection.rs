@@ -119,7 +119,10 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                               ELSE excluded.cursor_end
                             END,
                             last_commit_seq = excluded.last_commit_seq
-                        WHERE excluded.source_object_id = runtime_actor_runs_v2.source_object_id
+                        WHERE excluded.semantic_fact_id = runtime_actor_runs_v2.semantic_fact_id
+                          AND excluded.session_key = runtime_actor_runs_v2.session_key
+                          AND excluded.role = runtime_actor_runs_v2.role
+                          AND excluded.source_object_id = runtime_actor_runs_v2.source_object_id
                           AND (
                             excluded.source_generation > runtime_actor_runs_v2.source_generation
                             OR (
@@ -222,7 +225,12 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                               ELSE excluded.cursor_end
                             END,
                             last_commit_seq = excluded.last_commit_seq
-                        WHERE excluded.source_object_id = runtime_actor_affiliations_v2.source_object_id
+                        WHERE excluded.semantic_fact_id = runtime_actor_affiliations_v2.semantic_fact_id
+                          AND excluded.actor_run_key = runtime_actor_affiliations_v2.actor_run_key
+                          AND excluded.session_key = runtime_actor_affiliations_v2.session_key
+                          AND excluded.dimension = runtime_actor_affiliations_v2.dimension
+                          AND excluded.target_key = runtime_actor_affiliations_v2.target_key
+                          AND excluded.source_object_id = runtime_actor_affiliations_v2.source_object_id
                           AND (
                             excluded.source_generation > runtime_actor_affiliations_v2.source_generation
                             OR (
