@@ -905,6 +905,19 @@ pub(crate) struct AuthorizedObservationSourceReservation {
     scope_program_digest: [u8; 32],
 }
 
+/// Borrowed declaration/runtime coordinates used to validate one adapter
+/// stream. Centralizing this law lets attachment-time known roots reuse the
+/// dynamic reservation verifier without copying its checks.
+struct ObservationRuntimeStreamBinding<'a> {
+    adapter_id: &'a str,
+    support_release_id: &'a str,
+    source_declaration_digest: &'a [u8; 32],
+    scope_program_digest: &'a [u8; 32],
+    access_root: &'a str,
+    binding: &'a ScopeObservationSourceBinding,
+    source_contract: &'a AuthorizedObservationSourceContract,
+}
+
 /// One declaration reservation bound to the exact runtime stream returned by
 /// the selected adapter for one source instance. This still carries no native
 /// root authority: the future attachment owner must match that instance's root
@@ -1161,6 +1174,25 @@ impl AuthorizedObservationSourceReservation {
         adapter: &dyn AgentAdapter,
         instance: &SourceInstance,
     ) -> Result<StreamSpec, AccessBudgetError> {
+        ObservationRuntimeStreamBinding {
+            adapter_id: &self.adapter_id,
+            support_release_id: &self.support_release_id,
+            source_declaration_digest: &self.source_declaration_digest,
+            scope_program_digest: &self.scope_program_digest,
+            access_root: self.access_root(),
+            binding: &self.binding,
+            source_contract: &self.source_contract,
+        }
+        .select(adapter, instance)
+    }
+}
+
+impl ObservationRuntimeStreamBinding<'_> {
+    fn select(
+        &self,
+        adapter: &dyn AgentAdapter,
+        instance: &SourceInstance,
+    ) -> Result<StreamSpec, AccessBudgetError> {
         let manifest = adapter.manifest();
         let support_binding = manifest
             .support_binding
@@ -1170,15 +1202,15 @@ impl AuthorizedObservationSourceReservation {
             || manifest.id.as_str() != self.adapter_id
             || support_binding.support_release_id() != self.support_release_id
             || support_binding.source_declaration_digest().as_bytes()
-                != &self.source_declaration_digest
-            || support_binding.scope_program_digest().as_bytes() != &self.scope_program_digest
+                != self.source_declaration_digest
+            || support_binding.scope_program_digest().as_bytes() != self.scope_program_digest
             || instance.id == 0
             || instance.spec.validate().is_err()
             || instance
                 .spec
                 .roots
                 .iter()
-                .filter(|root| root.name == self.access_root())
+                .filter(|root| root.name == self.access_root)
                 .count()
                 != 1
         {
@@ -1190,7 +1222,7 @@ impl AuthorizedObservationSourceReservation {
             .map_err(|_| invalid_observation_runtime_stream_binding())?;
         let mut selected = None;
         for stream in streams {
-            if stream.id.as_str() != self.stream_id() {
+            if stream.id.as_str() != self.source_contract.stream_id() {
                 continue;
             }
             if selected.replace(stream).is_some() {
@@ -1198,13 +1230,13 @@ impl AuthorizedObservationSourceReservation {
             }
         }
         let stream = selected.ok_or_else(invalid_observation_runtime_stream_binding)?;
-        if stream.validate(instance).is_err() || !self.runtime_stream_matches(&stream) {
+        if stream.validate(instance).is_err() || !self.matches(&stream) {
             return Err(invalid_observation_runtime_stream_binding());
         }
         Ok(stream)
     }
 
-    fn runtime_stream_matches(&self, stream: &StreamSpec) -> bool {
+    fn matches(&self, stream: &StreamSpec) -> bool {
         let authority = match self.source_contract.authority() {
             AuthorizedObservationSourceAuthority::Canonical => StreamAuthority::Canonical,
             AuthorizedObservationSourceAuthority::Supplemental => StreamAuthority::Supplemental,
@@ -1255,7 +1287,7 @@ impl AuthorizedObservationSourceReservation {
             }
             _ => false,
         };
-        stream.selector.root_name == self.access_root()
+        stream.selector.root_name == self.access_root
             && stream.selector.include.as_slice() == self.source_contract.relative_patterns()
             && stream.selector.exclude.is_empty()
             && stream.decoder.as_str() == self.source_contract.decoder_id()
@@ -1265,12 +1297,14 @@ impl AuthorizedObservationSourceReservation {
                 .source_contract
                 .relative_patterns()
                 .iter()
-                .filter(|pattern| pattern.as_str() == self.source_pattern())
+                .filter(|pattern| pattern.as_str() == self.binding.source_pattern)
                 .count()
                 == 1
             && driver_matches
     }
+}
 
+impl AuthorizedObservationSourceReservation {
     pub(crate) fn complete(
         self,
         bytes_read: u64,
