@@ -5,10 +5,11 @@
   now verifies every compiled built-in support package, but all current-agent
   releases remain candidates and therefore grant no typed RFC 012 authority.
   The retained RFC 011 compatibility path cannot publish promoted RFC 012
-  coverage, replay it, or select its query pack. Catalog, remaining runtime
-  families, the public scoped-observer transport, complete performance reports,
-  and default-on rollout are still in progress. Child-RFC 012B/C/D ratification
-  remains a later product decision.
+  coverage, replay it, or select its query pack. The bounded native/SDK scoped
+  observer transport has landed, but related-object scope composition,
+  remaining runtime families, released downstream integration, complete
+  performance reports, and default-on rollout are still in progress.
+  Child-RFC 012B/C/D ratification remains a later product decision.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -138,10 +139,10 @@ prerequisite for early vertical slices.
 | C2. Usage-v2 shadow projection           | 012C                | In progress | private parity; complete coverage/topology gate open                                 |
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof                       |
 | C4. Runtime semantic downstream suite    | 012C                | In progress | Rust all-family merge/digests landed; remaining integration matrices open            |
-| D1. Store-free observer kernel           | 012D                | In progress | substantial internal kernel; public/multi-object surface open                        |
-| D2. Claude scope composition             | 012D                | In progress | bounded internal directory membership; runtime promotion open                        |
+| D1. Store-free observer kernel           | 012D                | In progress | native/SDK owner and epoch transport landed; related-object composition open          |
+| D2. Claude scope composition             | 012D                | In progress | configured directory bootstrap/replay/poll landed; sibling/referenced joins open      |
 | D3. Control lane and epoch replacement   | 012D                | In progress | internal interaction replacement; six-family portable union; interaction wire open   |
-| D4. SDK and Chopsticks migration         | 012D                | In progress | injected-source shadow only; public observer transport open                          |
+| D4. SDK and Chopsticks migration         | 012D                | In progress | owned observer shadow landed; all-family/released integration open                    |
 | D5. Observer performance calibration     | 012D                | In progress | partial timings; memory/access/slow-consumer report open                             |
 | X1. Search/finalization separation       | 012B integration    | In progress | strategy harness landed; required report fields open                                 |
 | X2. Diagnostic disposition/aggregation   | 012A implementation | In progress | bounded machinery landed; retained reduction/parity report open                      |
@@ -1969,7 +1970,17 @@ source/decoder registry used by the durable host. It must:
 - expose RFC 012A source/family coverage from poll and barriers; and
 - instrument every access for no-global-scan conformance.
 
-Current landing status (2026-08-20):
+Current status correction (2026-08-22): the bounded observer facade is now a
+real native/SDK owner rather than an internal-only kernel. The JSON-only N-API
+entry point returns a `SpaghettiSessionObserver`; the SDK `observeSession()`
+owner exposes event drain/acknowledgement, exact polls, ready/resync barriers,
+and idempotent close while retaining native lifecycle ownership. This does not
+authorize a Candidate support package or widen its grants. The public request
+currently carries only the closed actor-run, actor-affiliation, and usage-v2
+portable family set, so related-object composition and the remaining portable
+fact union are still release gates.
+
+Earlier landing status (2026-08-20):
 
 - the crate-private composition root performs strict support/contract/program
   selection before validating exact grants and exposes no spoofable N-API
@@ -2968,7 +2979,22 @@ primitives.
 Hooks remain in Chopsticks as root lifecycle and immediate-poll signals during
 this package.
 
-Current landing status (2026-08-21): D2 remains `In progress`. Decoder-executed
+Current status correction (2026-08-22): configured
+`ChildDirectoryByNativeId` relations now execute through pass-bound confined
+directory reads. Bootstrap and whole-epoch replacement share one bounded
+snapshot extractor; replacement reconstructs dynamic membership from a fresh
+revalidated listing rather than carrying stale children forward. Directory
+polls release unused append access, force one full replacement, and complete
+the exact logical poll only after the replacement watermark is applied. A poll
+admitted after that replacement starts remains pending for the next epoch.
+Membership is revalidated after member reads, and replacement coverage binds
+the newly decoded child state. Built-in support remains Candidate and cannot
+authorize this path. `SiblingObject`, `ReferencedObjectFromField`, and the
+other evidence-derived relations still need a bounded adapter join over
+already decoded facts before the Claude program can execute or be promoted.
+
+Earlier landing status (2026-08-21): D2 remained `In progress`.
+Decoder-executed
 `claude_root_child_workflow_and_team_compose_typed_facts_not_unknown_records`
 now also decodes the team-inbox sidecar to `Fact::TeamInboxSnapshot` rather
 than `UnknownRecord`, and still proves typed root/child/workflow/team facts.
@@ -4061,13 +4087,17 @@ Shadow on sanitized/frozen scenarios. Do not remove the compatibility tail or
 update the pinned SDK until a released Spaghetti observer passes the full
 matrix.
 
-Current landing status (2026-08-21): the SDK has a feature-flagged shadow
-wrapper beside `watchSessionTranscript`, but enabling it requires a
-caller-injected `ObserverRecordSource`. It does not open or own the Rust scoped
-observer, and it currently transports only the narrow typed usage shadow
-record. There is no public N-API/IPC observer facade, lifecycle/error transport,
-all-family normalization, or released Chopsticks integration. The legacy tail
-therefore remains the only production source. D4 remains `In progress`.
+Current landing status (2026-08-22): the feature-flagged Chopsticks shadow now
+opens and owns the SDK `SessionObserver` beside `watchSessionTranscript`; it
+continuously drains the native event stream and fails independently from the
+agent process. The native `SpaghettiSessionObserver` and SDK
+`observeSession()` transport the closed lifecycle/error/event contract instead
+of requiring a caller-injected record source. The built-in Claude package is
+still Candidate/non-authorizing, the public request covers only the three
+portable actor/usage families, and the legacy tail remains the production
+source. Full relation composition, all-family normalization, released SDK
+pinning, and the shadow comparison/rollback matrix remain open. D4 therefore
+remains `In progress`.
 
 ### D5. Performance calibration
 
@@ -4276,9 +4306,10 @@ gates rather than the prior wave labels:
 2. complete B1-B4 with real promoted catalog source compositions, an
    authorization-bound public catalog query/retention policy, selected-session
    hydration, and the cold/warm progressive-host matrix;
-3. complete D1-D3 dynamic scope composition and publish one intentionally
-   bounded native observer facade before treating D4's injected shadow source
-   as a product migration;
+3. complete D1-D3 related-object scope composition and the remaining portable
+   event union on the already-published bounded native/SDK observer facade,
+   then complete D4's owned-shadow comparison and rollback matrix before
+   treating it as a product migration;
 4. replace the diagnostic B5/D5/X1/X2 timing fixtures with reproducible reports
    satisfying section 12, then review numeric ceilings instead of inferring
    them from single runs;
@@ -4294,9 +4325,9 @@ Later product decisions, not implementation gates:
    cycle of telemetry and rollback;
 3. amend RFC 012B/012D only if numeric p95 ceilings are actually ratified.
 
-Publishing the bounded scoped-observer facade and wiring D4's
-`observerSource` to it are implementation gates, not optional product
-decisions.
+Completing the related-object join, all-family portable transport, and D4
+shadow/released-SDK matrix on the published bounded observer facade are
+implementation gates, not optional product decisions.
 
 No step may use a temporary renderer catalog, private adapter tail, arbitrary
 scope search, second database, or duplicated native decoder to shorten the
