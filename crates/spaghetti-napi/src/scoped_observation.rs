@@ -4178,6 +4178,56 @@ pub struct ScopedObservationStartupReconcilePass {
     completed: bool,
 }
 
+/// Transactionally closes the bootstrap phase on every exact append object.
+/// A failed barrier offer restores the objects to bootstrap mode before the
+/// startup lock is released, so a watcher callback can never route a retry as
+/// live work ahead of `observer.bootstrap_complete`.
+struct ScopedBootstrapCompletionTransaction<'a> {
+    objects: &'a mut [ScopedKnownAppendObject],
+    committed: bool,
+}
+
+impl<'a> ScopedBootstrapCompletionTransaction<'a> {
+    fn begin(
+        objects: &'a mut [ScopedKnownAppendObject],
+    ) -> Result<Self, ScopedObservationAccessError> {
+        if objects.iter().any(|object| {
+            object.lifecycle != ScopedAppendObjectLifecycle::Active
+                || !object.bootstrap_active
+                || object.pending.is_some()
+                || !object.presence_state.is_known()
+                || object.bootstrap_blocked
+        }) {
+            return Err(ScopedObservationAccessError::BootstrapNotDrained);
+        }
+        for object in objects.iter_mut() {
+            object.bootstrap_active = false;
+        }
+        Ok(Self {
+            objects,
+            committed: false,
+        })
+    }
+
+    fn objects(&self) -> &[ScopedKnownAppendObject] {
+        self.objects
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ScopedBootstrapCompletionTransaction<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            for object in self.objects.iter_mut() {
+                object.bootstrap_active = true;
+            }
+        }
+    }
+}
+
 impl ScopedObservationStartupReconcilePass {
     pub fn hints(&self) -> &[DirtyHint] {
         &self.hints
@@ -21876,6 +21926,61 @@ impl ScopedObservationWatcherOrchestrator {
             .finish_reconcile(barrier.barrier_sequence)
             .expect("startup lock keeps the verified empty hint set stable");
         debug_assert!(matches!(transition, StartupAction::Live { .. }));
+        Ok(barrier)
+    }
+
+    /// Atomically close every append object's bootstrap phase and offer the
+    /// completion barrier while watcher callbacks remain serialized behind
+    /// the startup lock. Delivery backpressure or any validation failure
+    /// restores every object to bootstrap mode before callbacks can enqueue
+    /// another reconciliation pass.
+    pub fn complete_and_offer_bootstrap(
+        &self,
+        host: &ScopedObservationAccessHost,
+        append_objects: &mut [ScopedKnownAppendObject],
+        admission: &ScopedObservationAdmissionLane,
+        projection: &ScopedObservationProjectionSink,
+        drain: &mut ScopedObservationConsumerDrain,
+        observed_at: i64,
+    ) -> Result<Arc<ScopedBootstrapBarrier>, ScopedObservationStartupError> {
+        self.validate_host(host)?;
+        let mut startup = self.lock_startup();
+        if let StartupPhase::Live { .. } = startup.ordering.phase() {
+            return host
+                .engine_ready(drain)?
+                .ok_or(ScopedObservationStartupError::InvalidPhase {
+                    operation: "reuse bootstrap barrier",
+                    phase: scoped_watcher_phase(&startup),
+                });
+        }
+        if startup.ordering.phase() != StartupPhase::Reconciling {
+            return Err(ScopedObservationStartupError::InvalidPhase {
+                operation: "complete and offer bootstrap",
+                phase: scoped_watcher_phase(&startup),
+            });
+        }
+        if startup.reconcile_pass_active {
+            return Err(ScopedObservationStartupError::ReconcilePassActive);
+        }
+        let pending_hints = startup.ordering.pending_hint_count();
+        if pending_hints > 0 {
+            return Err(ScopedObservationStartupError::ReconcilePending { pending_hints });
+        }
+
+        let completion = ScopedBootstrapCompletionTransaction::begin(append_objects)?;
+        let barrier = host.offer_consumer_bootstrap_complete(
+            completion.objects(),
+            admission,
+            projection,
+            drain,
+            observed_at,
+        )?;
+        let transition = startup
+            .ordering
+            .finish_reconcile(barrier.barrier_sequence)
+            .expect("startup lock keeps the verified empty hint set stable");
+        debug_assert!(matches!(transition, StartupAction::Live { .. }));
+        completion.commit();
         Ok(barrier)
     }
 }

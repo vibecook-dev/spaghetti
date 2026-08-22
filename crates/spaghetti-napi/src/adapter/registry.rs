@@ -10081,7 +10081,7 @@ pub(crate) mod tests {
             .open_consumer_drain(ScopedObservationDeliveryLimits {
                 max_semantic_events: 4,
                 max_retained_native_bytes: 0,
-                max_source_control_items: 2,
+                max_source_control_items: 1,
             })
             .unwrap();
         let ready_waiter = host.ready_waiter().unwrap();
@@ -10262,8 +10262,24 @@ pub(crate) mod tests {
             ScopedObservationStartupReconcileAction::CaughtUp
         ));
 
-        // A callback after the provisional empty check still blocks the
-        // barrier and receives another exact pass.
+        // The already-offered presence control fills the one-item source
+        // control lane. Atomic bootstrap completion must roll the object back
+        // before releasing the startup lock, so a callback racing the retry
+        // remains startup reconciliation rather than being mislabeled Live.
+        assert!(matches!(
+            startup.complete_and_offer_bootstrap(
+                &host,
+                std::slice::from_mut(&mut object),
+                &admission,
+                &projection,
+                &mut drain,
+                50,
+            ),
+            Err(ScopedObservationStartupError::Bootstrap(
+                ScopedBootstrapBarrierError::Delivery(ScopedDeliveryError::SourceControlQueueFull)
+            ))
+        ));
+        assert!(object.bootstrap_active());
         assert!(matches!(
             startup
                 .record_hint(
@@ -10275,17 +10291,6 @@ pub(crate) mod tests {
                 )
                 .unwrap(),
             ScopedObservationWatcherHintAction::Buffered(HintEnqueue::Added)
-        ));
-        assert!(matches!(
-            startup.offer_bootstrap_complete(
-                &host,
-                std::slice::from_ref(&object),
-                &admission,
-                &projection,
-                &mut drain,
-                50,
-            ),
-            Err(ScopedObservationStartupError::ReconcilePending { pending_hints: 1 })
         ));
         let ScopedObservationStartupReconcileAction::Reconcile(reconcile) =
             startup.next_reconcile(&host, 4).unwrap()
@@ -10312,17 +10317,25 @@ pub(crate) mod tests {
             ScopedObservationStartupReconcileAction::CaughtUp
         ));
 
-        object.complete_bootstrap().unwrap();
+        let presence = drain.next().unwrap().unwrap();
+        assert!(matches!(
+            presence.envelope.event,
+            ScopedObservationEvent::SourcePresence { .. }
+        ));
+        drain
+            .acknowledge_applied(presence.application_receipt())
+            .unwrap();
         let barrier = startup
-            .offer_bootstrap_complete(
+            .complete_and_offer_bootstrap(
                 &host,
-                std::slice::from_ref(&object),
+                std::slice::from_mut(&mut object),
                 &admission,
                 &projection,
                 &mut drain,
                 50,
             )
             .unwrap();
+        assert!(!object.bootstrap_active());
         assert_eq!(barrier.barrier_sequence, 2);
         let ready_resolution = ready_rx
             .recv_timeout(std::time::Duration::from_secs(2))
@@ -10494,9 +10507,9 @@ pub(crate) mod tests {
             ));
         }
 
-        // The created-source and bootstrap controls still fill the bounded
-        // delivery lane. Admission may commit the later deletion cursor, but
-        // a failed offer must keep the poll pending and the deletion queued.
+        // The bootstrap control still fills the one-item bounded control
+        // lane. Admission may commit the later deletion cursor, but a failed
+        // offer must keep the poll pending and the deletion queued.
         std::fs::remove_file(root.join("session.jsonl")).unwrap();
         let deletion_ticket = host.request_poll().unwrap();
         let deletion_lease = host.begin_poll().unwrap().unwrap();
@@ -10520,16 +10533,6 @@ pub(crate) mod tests {
             ScopedObservationPollResolution::Pending
         );
 
-        let created_delivery = drain.next().unwrap().unwrap();
-        assert!(matches!(
-            created_delivery.envelope.event,
-            ScopedObservationEvent::SourcePresence {
-                change: ScopedAppendPresenceChange::Created { generation: 1 }
-            }
-        ));
-        drain
-            .acknowledge_applied(created_delivery.application_receipt())
-            .unwrap();
         let bootstrap_delivery = drain.next().unwrap().unwrap();
         assert!(matches!(
             bootstrap_delivery.envelope.event,
