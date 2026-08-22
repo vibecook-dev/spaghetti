@@ -2652,6 +2652,59 @@ pub(crate) mod tests {
             "root, directory membership, and selected child must be complete before Ready"
         );
         assert_eq!(registrations.lock().unwrap().len(), 1);
+        std::fs::write(
+            children.join("nested/child.jsonl"),
+            b"{\"type\":\"child-replaced\"}\n",
+        )
+        .unwrap();
+
+        let resync_task = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.resync_applied_at(40).await }
+        });
+        let mut replacement = None;
+        for _ in 0..32 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("dynamic configured supervisor stopped during replacement: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            if let ScopedObservationEvent::ObserverResyncComplete { barrier } =
+                &yielded.envelope.event
+            {
+                replacement = Some(Arc::clone(barrier));
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if replacement.is_some() {
+                break;
+            }
+        }
+        let replacement =
+            replacement.expect("dynamic membership must enter the replacement barrier");
+        assert_eq!(replacement.scope_epoch, 2);
+        assert_ne!(
+            replacement.coverage_snapshot_digest,
+            bootstrap.snapshot_digest
+        );
+        assert_eq!(replacement.scope_coverage.relations().len(), 2);
+        let decode = replacement
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            decode.points.len() + decode.explicit_absence_or_deletion.len(),
+            3,
+            "replacement must retain root, directory membership, and selected child coverage"
+        );
+        assert!(matches!(
+            resync_task.await.unwrap().unwrap(),
+            ScopedObservationResyncResolution::Ready(resolved)
+                if Arc::ptr_eq(&resolved, &replacement)
+        ));
 
         let close = handle.request_close();
         let stopped = tokio::time::timeout(Duration::from_secs(2), supervisor_task)

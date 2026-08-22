@@ -101,6 +101,8 @@ mod watermark_wire;
 
 use observation_source_access::{
     ScopedObservationDirectoryListing, ScopedObservationDirectoryMemberAdmissionParts,
+    ScopedObservationDirectoryMemberContent,
+    ScopedObservationDirectoryMemberRead as ScopedDirectoryMemberRead,
 };
 pub(crate) use observation_source_access::{
     ScopedObservationDirectoryMemberLifecycle, ScopedObservationDirectoryScan,
@@ -7666,6 +7668,7 @@ impl ScopedObservationAsyncResyncHandoff {
                 &handle,
                 active,
                 &bindings,
+                &directory_bindings,
                 source_policy,
                 &mut replacement_observed_at,
             ));
@@ -7916,6 +7919,7 @@ async fn scoped_replay_complete_replacement<C>(
     handle: &ScopedObservationAsyncHandle,
     mut active: ScopedObservationEpochState,
     bindings: &[ScopedObservationAppendPassBinding],
+    directory_bindings: &[ScopedObservationDirectoryPassBinding],
     retry_policy: ScopedObservationSourceOwnerRetryPolicy,
     observed_at: &mut C,
 ) -> Result<ScopedObservationEpochState, ScopedObservationAutomaticResyncError>
@@ -7929,6 +7933,7 @@ where
             handle,
             &mut active,
             bindings,
+            directory_bindings,
             retry_policy,
             observed_at,
         )
@@ -7999,6 +8004,7 @@ async fn scoped_replay_started_replacement<C>(
     handle: &ScopedObservationAsyncHandle,
     active: &mut ScopedObservationEpochState,
     bindings: &[ScopedObservationAppendPassBinding],
+    directory_bindings: &[ScopedObservationDirectoryPassBinding],
     retry_policy: ScopedObservationSourceOwnerRetryPolicy,
     observed_at: &mut C,
 ) -> Result<(), ScopedObservationAutomaticResyncError>
@@ -8242,6 +8248,79 @@ where
                 }
             ) {
                 break;
+            }
+        }
+    }
+
+    let mut ordered_directory_bindings = directory_bindings.iter().collect::<Vec<_>>();
+    ordered_directory_bindings.sort_by(|left, right| left.relation_id.cmp(&right.relation_id));
+    for (relation_index, binding) in ordered_directory_bindings.into_iter().enumerate() {
+        if !stage.admission.is_empty() {
+            return Err(ScopedObservationAutomaticResyncError::Admission(
+                ScopedAdmissionError::InvalidCoverage,
+            ));
+        }
+        let relation_ordinal = u64::try_from(relation_index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(ScopedObservationAutomaticResyncError::SourceAccess)?;
+        let previous = active
+            .admission
+            .directory_relation_listing(binding.relation_id());
+        let batch = scoped_read_directory_relation_snapshot(
+            handle.host(),
+            &pass,
+            binding,
+            ScopedObservationDirectorySnapshotRequest {
+                previous,
+                prior_admission: &active.admission,
+                phase: AccessPhase::Revalidation,
+                relation_ordinal,
+                observed_at: observed_at(),
+            },
+        )
+        .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+        stage
+            .admission
+            .record_relation_membership(
+                pass.pass_id(),
+                ScopedAppendDeliveryPhase::Correction,
+                batch.membership,
+            )
+            .map_err(ScopedObservationAutomaticResyncError::Admission)?;
+        loop {
+            let reduced = {
+                let drain = handle.shared.lock_drain();
+                stage
+                    .reduce_next(drain.delivery_lane())
+                    .map_err(scoped_automatic_resync_replacement_error)?
+            };
+            if !reduced {
+                break;
+            }
+        }
+
+        for lifecycle in batch.members {
+            stage
+                .admission
+                .admit_directory_member(
+                    pass.pass_id(),
+                    ScopedAppendDeliveryPhase::Correction,
+                    lifecycle,
+                )
+                .map_err(|failure| {
+                    ScopedObservationAutomaticResyncError::Admission(failure.error)
+                })?;
+            loop {
+                let reduced = {
+                    let drain = handle.shared.lock_drain();
+                    stage
+                        .reduce_next(drain.delivery_lane())
+                        .map_err(scoped_automatic_resync_replacement_error)?
+                };
+                if !reduced {
+                    break;
+                }
             }
         }
     }
@@ -18710,6 +18789,110 @@ impl std::fmt::Debug for ScopedObservationDirectoryPassBinding {
     }
 }
 
+struct ScopedObservationDirectorySnapshotBatch {
+    membership: ScopedRelationMembershipObservation,
+    members: Vec<ScopedObservationDirectoryMemberLifecycle>,
+}
+
+struct ScopedObservationDirectorySnapshotRequest<'prior> {
+    previous: Option<&'prior ScopedObservationDirectoryListing>,
+    prior_admission: &'prior ScopedObservationAdmissionLane,
+    phase: AccessPhase,
+    relation_ordinal: u64,
+    observed_at: i64,
+}
+
+/// Read, decode, and final-scan one exact directory relation without mutating
+/// admission or delivery. Callers may therefore fail before publishing a
+/// membership checkpoint, while bootstrap and replacement choose their own
+/// ordered drain semantics after this batch is complete.
+fn scoped_read_directory_relation_snapshot(
+    host: &ScopedObservationAccessHost,
+    pass: &ScopedObservationAccessPass,
+    binding: &ScopedObservationDirectoryPassBinding,
+    request: ScopedObservationDirectorySnapshotRequest<'_>,
+) -> Result<ScopedObservationDirectorySnapshotBatch, ()> {
+    if request.relation_ordinal == 0 {
+        return Err(());
+    }
+    let identity_inputs = binding.borrowed_identity_inputs();
+    let mut listing = match host
+        .scan_directory_relation_membership(
+            pass,
+            binding.relation_id(),
+            &identity_inputs,
+            request.phase,
+            request.previous,
+        )
+        .map_err(|_| ())?
+    {
+        ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+        ScopedObservationDirectoryScan::Unavailable
+        | ScopedObservationDirectoryScan::RetryTransient => return Err(()),
+    };
+
+    let mut contents = Vec::<ScopedObservationDirectoryMemberContent>::new();
+    while let Some(read) = listing.read_next_member().map_err(|_| ())? {
+        match read {
+            ScopedDirectoryMemberRead::Stable(content) => contents.push(content),
+            ScopedDirectoryMemberRead::RetryTransient
+            | ScopedDirectoryMemberRead::Oversized { .. } => return Err(()),
+        }
+    }
+
+    let media_type = SourceMediaType::new("application/octet-stream").map_err(|_| ())?;
+    let mut members = Vec::with_capacity(contents.len());
+    for (member_index, content) in contents.into_iter().enumerate() {
+        let source_instance_id = content.source_instance().id;
+        let prior_decoder_state = request
+            .prior_admission
+            .directory_member_decoder_state(content.identity().source())
+            .map(<[u8]>::to_vec);
+        let input = content.bootstrap().map_err(|_| ())?;
+        let object_id = u64::try_from(member_index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or(())?;
+        let origin = RecordOrigin {
+            source_instance_id,
+            stream_id: request.relation_ordinal,
+            object_id,
+            observed_at: request.observed_at,
+            source_timestamp_hint: None,
+            media_type: media_type.clone(),
+        };
+        members.push(
+            listing
+                .observe_bootstrapped_member(input, &origin, prior_decoder_state.as_deref())
+                .map_err(|_| ())?,
+        );
+    }
+
+    let verification = match host
+        .scan_directory_relation_membership(
+            pass,
+            binding.relation_id(),
+            &identity_inputs,
+            request.phase,
+            Some(&listing),
+        )
+        .map_err(|_| ())?
+    {
+        ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+        ScopedObservationDirectoryScan::Unavailable
+        | ScopedObservationDirectoryScan::RetryTransient => return Err(()),
+    };
+    listing
+        .confirm_membership_unchanged(verification)
+        .map_err(|_| ())?;
+    let membership =
+        ScopedRelationMembershipObservation::from_directory_listing(listing).map_err(|_| ())?;
+    Ok(ScopedObservationDirectorySnapshotBatch {
+        membership,
+        members,
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ScopedObservationSourceOwnerRetryPolicyError {
     #[error("scoped source-owner retry interval is outside the supported bound")]
@@ -21317,12 +21500,23 @@ impl ScopedObservationAccessHost {
         let semantic = self.open_projection_resync_stage(&active.projection, delivery)?;
         let mut admission = ScopedObservationAdmissionLane::new(active.admission.limits)
             .map_err(|_| ScopedReplacementStageError::InvalidSourceState)?;
-        // Membership is an authorized property of the exact replacement
-        // relation set, not something a successful native read is allowed to
-        // invent. Seed only these opaque identities so a first-access failure
-        // can publish explicit Unavailable coverage without fabricating a
-        // cursor or carrying any prior offered source state forward.
-        admission.known_coverage_objects = active.admission.known_coverage_objects.clone();
+        // Static membership is an authorized property of the exact
+        // replacement relation set, not something a successful native read is
+        // allowed to invent. Seed only exact known-object identities so a
+        // first-access failure can publish explicit Unavailable coverage.
+        // Dynamic relation membership and children must come from the fresh
+        // replacement listing; carrying either across epochs would certify
+        // stale native state.
+        admission.known_coverage_objects = active
+            .admission
+            .known_coverage_objects
+            .iter()
+            .filter(|(_, membership)| {
+                self.known_objects
+                    .contains_key(membership.relation_id.as_ref())
+            })
+            .map(|(source, membership)| (source.clone(), membership.clone()))
+            .collect();
         let prior_lifecycles = active
             .append_objects
             .iter()

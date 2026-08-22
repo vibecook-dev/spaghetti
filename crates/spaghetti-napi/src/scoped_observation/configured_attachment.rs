@@ -25,10 +25,6 @@ use crate::source::{
     SourceMediaType, MAX_IDENTITY_VALUE_BYTES,
 };
 
-use super::observation_source_access::{
-    ScopedObservationDirectoryMemberContent, ScopedObservationDirectoryMemberRead,
-};
-
 use super::{
     artifact_access, prepare_scoped_observation_support, PreparedScopedObservationSupport,
     ScopedAccessRootGrant, ScopedAppendDecodeOutcome, ScopedAppendDecoderConfig,
@@ -49,8 +45,8 @@ use super::{
     ScopedObservationSourceOwnerRetryPolicy, ScopedObservationStartupError,
     ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
     ScopedObservationUnknownWireNegotiation, ScopedObserverFailureReason,
-    ScopedProjectionDeliveryError, ScopedRelationMembershipObservation, ScopedRootIdentityRequest,
-    ScopedSourceObjectErrorRuntime, ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
+    ScopedProjectionDeliveryError, ScopedRootIdentityRequest, ScopedSourceObjectErrorRuntime,
+    ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
 };
 
 const MAX_CONFIGURED_ROOTS: usize = 16;
@@ -1058,101 +1054,35 @@ async fn configured_execute_directory_pass(
         AccessPhase::Initial => ScopedAppendDeliveryPhase::Bootstrap,
         AccessPhase::Revalidation => ScopedAppendDeliveryPhase::Correction,
     };
-    let media_type = SourceMediaType::new("application/octet-stream")
-        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
-
     for (relation_index, binding) in bindings.iter().enumerate() {
         if !admission.is_empty() {
             return Err(ConfiguredScopedObservationRuntimeError::Admission);
         }
-        let identity_inputs = binding.borrowed_identity_inputs();
         let previous = admission.directory_relation_listing(binding.relation_id());
-        let mut listing = match handle.host().scan_directory_relation_membership(
-            pass,
-            binding.relation_id(),
-            &identity_inputs,
-            phase,
-            previous,
-        ) {
-            Ok(super::ScopedObservationDirectoryScan::Snapshot(listing)) => *listing,
-            Ok(
-                super::ScopedObservationDirectoryScan::Unavailable
-                | super::ScopedObservationDirectoryScan::RetryTransient,
-            )
-            | Err(_) => return Err(ConfiguredScopedObservationRuntimeError::SourcePass),
-        };
-
-        let mut contents = Vec::<ScopedObservationDirectoryMemberContent>::new();
-        while let Some(read) = listing
-            .read_next_member()
-            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?
-        {
-            match read {
-                ScopedObservationDirectoryMemberRead::Stable(content) => contents.push(content),
-                ScopedObservationDirectoryMemberRead::RetryTransient
-                | ScopedObservationDirectoryMemberRead::Oversized { .. } => {
-                    return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
-                }
-            }
-        }
-
         let relation_ordinal = u64::try_from(relation_index)
             .ok()
             .and_then(|index| index.checked_add(1))
             .ok_or(ConfiguredScopedObservationRuntimeError::SourcePass)?;
-        let mut lifecycles = Vec::with_capacity(contents.len());
-        for (member_index, content) in contents.into_iter().enumerate() {
-            let source_instance_id = content.source_instance().id;
-            let prior_decoder_state = admission
-                .directory_member_decoder_state(content.identity().source())
-                .map(<[u8]>::to_vec);
-            let input = content
-                .bootstrap()
-                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
-            let object_id = u64::try_from(member_index)
-                .ok()
-                .and_then(|index| index.checked_add(1))
-                .ok_or(ConfiguredScopedObservationRuntimeError::SourcePass)?;
-            let origin = RecordOrigin {
-                source_instance_id,
-                stream_id: relation_ordinal,
-                object_id,
-                observed_at,
-                source_timestamp_hint: None,
-                media_type: media_type.clone(),
-            };
-            lifecycles.push(
-                listing
-                    .observe_bootstrapped_member(input, &origin, prior_decoder_state.as_deref())
-                    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?,
-            );
-        }
-
-        let verification = match handle.host().scan_directory_relation_membership(
+        let owner_binding = binding.owner_binding()?;
+        let batch = super::scoped_read_directory_relation_snapshot(
+            handle.host(),
             pass,
-            binding.relation_id(),
-            &identity_inputs,
-            phase,
-            Some(&listing),
-        ) {
-            Ok(super::ScopedObservationDirectoryScan::Snapshot(verification)) => *verification,
-            Ok(
-                super::ScopedObservationDirectoryScan::Unavailable
-                | super::ScopedObservationDirectoryScan::RetryTransient,
-            )
-            | Err(_) => return Err(ConfiguredScopedObservationRuntimeError::SourcePass),
-        };
-        listing
-            .confirm_membership_unchanged(verification)
-            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
-        let membership = ScopedRelationMembershipObservation::from_directory_listing(listing)
-            .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            &owner_binding,
+            super::ScopedObservationDirectorySnapshotRequest {
+                previous,
+                prior_admission: admission,
+                phase,
+                relation_ordinal,
+                observed_at,
+            },
+        )
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
         admission
-            .record_relation_membership(pass.pass_id(), delivery_phase, membership)
+            .record_relation_membership(pass.pass_id(), delivery_phase, batch.membership)
             .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
         configured_offer_pending(handle, admission, projection).await?;
 
-        for lifecycle in lifecycles {
+        for lifecycle in batch.members {
             admission
                 .admit_directory_member(pass.pass_id(), delivery_phase, lifecycle)
                 .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
