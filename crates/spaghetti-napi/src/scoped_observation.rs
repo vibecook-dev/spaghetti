@@ -28,7 +28,7 @@ use crate::adapter::{
     RecordMappingDisposition, ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest,
     SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceObjectList,
     SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
-    SupportOperation, TaskRevisionFact, TimestampQuality, ToolRevisionFact, ToolRevisionKind,
+    SupportOperation, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
     TypedAccessAuthorization, UsageRevisionV2Fact, UserInputOperation,
     UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
@@ -52,11 +52,11 @@ use crate::observation_contract::{
 use crate::runtime_semantic_reducer::{
     effective_state_reduced_state_digest, reduce_content_block_revision,
     reduce_effective_state_revision, reduce_message_revision, reduce_native_marker_revision,
-    reduce_plan_revision, reduce_task_revision, reduce_user_input_revision,
+    reduce_plan_revision, reduce_task_revision, reduce_tool_revision, reduce_user_input_revision,
     EffectiveStateReducedDigestEntity, MessageReducedDigestEntity, PlanReducedDigestEntity,
     RevisionedEntityReduction, RevisionedEntityValueReduction, RuntimeSemanticReductionError,
-    RuntimeSemanticSourceRef, TaskReducedDigestEntity, UserInputReducedDigestEntity,
-    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    RuntimeSemanticSourceRef, TaskReducedDigestEntity, ToolReducedDigestEntity,
+    UserInputReducedDigestEntity, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -13864,20 +13864,35 @@ impl ScopedObservationProjectionSink {
                                 &state.revision,
                             ),
                         )?;
-                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
+                    }
+                    match reduce_tool_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(runtime_semantic_projection_error)?
+                    {
+                        RevisionedEntityValueReduction::Unchanged => continue,
+                        RevisionedEntityValueReduction::Retract => {
+                            queue_projection_retraction(
+                                &self.tools,
+                                &mut mutation.tool_upserts,
+                                &mut mutation.tool_retractions,
+                                key,
+                            );
+                            if self.families.tool {
+                                tool_events.push(ScopedProjectedObservation::Tool {
+                                    lane_ordinal,
+                                    event: Box::new(tool_event(
+                                        &state,
+                                        ScopedRevisionedEntityOperation::Retract,
+                                        phase,
+                                    )),
+                                });
+                            }
                             continue;
                         }
-                        if state.revision.operation == UserInputOperation::Retract
-                            && state.revision.completeness != ContractCompleteness::Complete
-                        {
-                            continue;
-                        }
-                        if state.revision.completeness == ContractCompleteness::Partial
-                            && state.revision.operation == UserInputOperation::Upsert
-                            && state.revision.correlated_native_id.is_none()
-                        {
-                            state.revision.correlated_native_id =
-                                current.revision.correlated_native_id.clone();
+                        RevisionedEntityValueReduction::Upsert(reduced) => {
+                            state.revision = reduced;
                             rebind_reduced_semantic_revision(
                                 &mut state.semantic,
                                 state
@@ -13885,34 +13900,7 @@ impl ScopedObservationProjectionSink {
                                     .semantic_revision_key()
                                     .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
                             )?;
-                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
-                            {
-                                continue;
-                            }
                         }
-                    } else if state.revision.operation == UserInputOperation::Retract
-                        && state.revision.completeness != ContractCompleteness::Complete
-                    {
-                        continue;
-                    }
-                    if state.revision.operation == UserInputOperation::Retract {
-                        queue_projection_retraction(
-                            &self.tools,
-                            &mut mutation.tool_upserts,
-                            &mut mutation.tool_retractions,
-                            key,
-                        );
-                        if self.families.tool {
-                            tool_events.push(ScopedProjectedObservation::Tool {
-                                lane_ordinal,
-                                event: Box::new(tool_event(
-                                    &state,
-                                    ScopedRevisionedEntityOperation::Retract,
-                                    phase,
-                                )),
-                            });
-                        }
-                        continue;
                     }
                     mutation.tool_upserts.insert(key, state);
                 }
@@ -16184,50 +16172,16 @@ fn task_replacement_snapshot_is_valid(
 fn tool_replacement_digest(
     entities: &[ScopedToolReplacementEntity],
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
-    let entity_count = u64::try_from(entities.len())
-        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = replacement_family_digest(
-        b"runtime.tool",
-        RUNTIME_TOOL_FACT_FAMILY_CONTRACT_VERSION,
-        entity_count,
-    );
-    for entity in entities {
-        validate_and_hash_replacement_source(
-            &mut hasher,
-            &entity.semantic,
-            entity.generation,
-            &entity.source,
-        )?;
-        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.native_tool_id.as_bytes());
-        hasher.update(&[match entity.revision.kind {
-            ToolRevisionKind::Call => 1,
-            ToolRevisionKind::Result => 2,
-        }]);
-        hash_event_component(&mut hasher, entity.revision.tool_name.as_bytes());
-        match &entity.revision.correlated_native_id {
-            Some(correlated) => {
-                hasher.update(&[1]);
-                hash_event_component(&mut hasher, correlated.as_bytes());
+    let digest =
+        crate::runtime_semantic_reducer::tool_reduced_state_digest(entities.iter().map(|entity| {
+            ToolReducedDigestEntity {
+                semantic: &entity.semantic,
+                source: runtime_semantic_source_ref(entity.generation, &entity.source),
+                revision: &entity.revision,
             }
-            None => {
-                hasher.update(&[0]);
-            }
-        }
-        hasher.update(&[match entity.revision.operation {
-            UserInputOperation::Upsert => 1,
-            UserInputOperation::Retract => 2,
-        }]);
-        hasher.update(&[match entity.revision.completeness {
-            ContractCompleteness::Complete => 1,
-            ContractCompleteness::Partial => 2,
-            ContractCompleteness::Unknown => 3,
-        }]);
-    }
-    Ok(ScopedReplacementSemanticDigest(
-        *hasher.finalize().as_bytes(),
-    ))
+        }))
+        .map_err(runtime_semantic_projection_error)?;
+    Ok(ScopedReplacementSemanticDigest(digest))
 }
 
 fn tool_replacement_snapshot_is_valid(
@@ -23825,18 +23779,19 @@ mod projection_tests {
         ContractVersionRequest, CoverageMembershipRevision, EffectiveStateDimension,
         EffectiveStateEvidenceKind, MessageRevisionRole, NativeIdentity, QualifiedTimestamp,
         QualifiedValue, QualifiedValueQuality, TaskLifecycleState, TimestampQuality,
-        UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity, UsageValueAuthority,
-        UsageValueProvenance, UserInputLifecycleState,
+        ToolRevisionKind, UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity,
+        UsageValueAuthority, UsageValueProvenance, UserInputLifecycleState,
     };
     use crate::runtime_semantic_reducer::{
         content_block_reduced_state_digest, effective_state_reduced_state_digest,
         message_reduced_state_digest, native_marker_reduced_state_digest,
         plan_reduced_state_digest, reduce_content_block_revision, reduce_effective_state_revision,
         reduce_native_marker_revision, reduce_plan_revision, reduce_task_revision,
-        task_reduced_state_digest, user_input_reduced_state_digest,
-        ContentBlockReducedDigestEntity, EffectiveStateReducedDigestEntity,
-        MessageReducedDigestEntity, NativeMarkerReducedDigestEntity, PlanReducedDigestEntity,
-        RevisionedEntityReduction, RuntimeSemanticSourceRef, TaskReducedDigestEntity,
+        reduce_tool_revision, task_reduced_state_digest, tool_reduced_state_digest,
+        user_input_reduced_state_digest, ContentBlockReducedDigestEntity,
+        EffectiveStateReducedDigestEntity, MessageReducedDigestEntity,
+        NativeMarkerReducedDigestEntity, PlanReducedDigestEntity, RevisionedEntityReduction,
+        RuntimeSemanticSourceRef, TaskReducedDigestEntity, ToolReducedDigestEntity,
         UserInputReducedDigestEntity,
     };
     use crate::semantic_contract::{
@@ -27009,6 +26964,13 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurableToolEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
     fn reduce_durable_user_input(
         current: &mut BTreeMap<CanonicalFactId, DurableUserInputEntity>,
         source: ScopedSourceObjectIdentity,
@@ -27461,6 +27423,114 @@ mod projection_tests {
         for (fact_id, durable_entity) in durable {
             let scoped_entity = scoped.tasks.get(fact_id).unwrap();
             let Fact::TaskRevision(durable_revision) = &durable_entity.envelope.value else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn reduce_durable_tool(
+        current: &mut BTreeMap<CanonicalFactId, DurableToolEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        mut envelope: FactEnvelope,
+    ) -> Result<RevisionedEntityReduction, RuntimeSemanticReductionError> {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("tool durable fact has semantic identity");
+        let Fact::ToolRevision(revision) = &envelope.value else {
+            panic!("durable tool reducer received another family");
+        };
+        let fact_id = semantic.fact_id;
+        let decision = reduce_tool_revision(
+            current.get(&fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::ToolRevision(current_revision) = &entity.envelope.value else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )?;
+        let reduction = match decision {
+            RevisionedEntityValueReduction::Unchanged => RevisionedEntityReduction::Unchanged,
+            RevisionedEntityValueReduction::Retract => {
+                current.remove(&fact_id);
+                RevisionedEntityReduction::Retract
+            }
+            RevisionedEntityValueReduction::Upsert(reduced) => {
+                envelope.value = Fact::ToolRevision(reduced.clone());
+                let semantic = envelope.semantic_revision.as_mut().unwrap();
+                rebind_reduced_semantic_revision(
+                    semantic,
+                    reduced.semantic_revision_key().unwrap(),
+                )
+                .unwrap();
+                current.insert(
+                    semantic.fact_id,
+                    DurableToolEntity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+                RevisionedEntityReduction::Upsert
+            }
+        };
+        Ok(reduction)
+    }
+
+    fn durable_tool_digest(current: &BTreeMap<CanonicalFactId, DurableToolEntity>) -> [u8; 32] {
+        tool_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::ToolRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            ToolReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_tool_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurableToolEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        let snapshot = scoped
+            .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(snapshot.entity_count as usize, durable.len());
+        assert_eq!(
+            snapshot.semantic_digest.as_bytes(),
+            &durable_tool_digest(durable),
+            "durable and scoped tool reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.tools.get(fact_id).unwrap();
+            let Fact::ToolRevision(durable_revision) = &durable_entity.envelope.value else {
                 unreachable!();
             };
             assert_eq!(
@@ -31147,6 +31217,7 @@ mod projection_tests {
             &selection.contract_versions,
         )
         .unwrap();
+        let mut durable = BTreeMap::<CanonicalFactId, DurableToolEntity>::new();
         let fact_for =
             |batch: &FactBatch,
              native_tool_id: &str,
@@ -31178,6 +31249,17 @@ mod projection_tests {
                 Fact::ToolRevision(call.clone()),
             )
             .unwrap();
+        let call_envelope = call_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                call_record.clone(),
+                call_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
         assert_eq!(
             projection
                 .project(&rfc012c_decoded_frame(
@@ -31191,6 +31273,7 @@ mod projection_tests {
             1
         );
         assert_eq!(projection.tools.len(), 1);
+        assert_tool_topology_parity(&durable, &projection);
         assert_eq!(
             projection.tools.values().next().unwrap().revision.kind,
             ToolRevisionKind::Call
@@ -31220,6 +31303,17 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let unmatched_envelope = unmatched_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                unmatched_record.clone(),
+                unmatched_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 2,
@@ -31229,6 +31323,7 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(projection.tools.len(), 2);
+        assert_tool_topology_parity(&durable, &projection);
         assert!(projection.tools.values().any(|state| {
             state.revision.kind == ToolRevisionKind::Result
                 && state.revision.correlated_native_id.is_none()
@@ -31248,6 +31343,17 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let correlated_call_envelope = correlated_call_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                correlated_call_record.clone(),
+                correlated_call_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 3,
@@ -31270,6 +31376,17 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let correlated_result_envelope = correlated_result_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                correlated_result_record.clone(),
+                correlated_result_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 4,
@@ -31279,6 +31396,7 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(projection.tools.len(), 2);
+        assert_tool_topology_parity(&durable, &projection);
         let call_state = projection
             .tools
             .values()
@@ -31312,6 +31430,55 @@ mod projection_tests {
         assert_eq!(bootstrap.entity_count, 2);
         assert_eq!(bootstrap.semantic_digest, resync.semantic_digest);
 
+        for (index, mutate) in ["correlation", "kind", "tool-name"].iter().enumerate() {
+            let conflict_record = rfc012c_record(4, 5, 14 + index as i64);
+            let mut conflict_batch =
+                FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+            let mut conflict = fact_for(
+                &conflict_batch,
+                &fixture.native_call_id,
+                &fixture.correlated_call,
+            );
+            conflict.completeness = ContractCompleteness::Unknown;
+            match *mutate {
+                "correlation" => {
+                    conflict.correlated_native_id = Some("different-result".to_owned())
+                }
+                "kind" => conflict.kind = ToolRevisionKind::Result,
+                "tool-name" => conflict.tool_name = "different-tool".to_owned(),
+                _ => unreachable!(),
+            }
+            conflict_batch
+                .push_native(
+                    &conflict_record,
+                    fixture.native_call_id.as_bytes(),
+                    Fact::ToolRevision(conflict),
+                )
+                .unwrap();
+            let conflict_envelope = conflict_batch.facts()[0].clone();
+            let before = durable_tool_digest(&durable);
+            assert_eq!(
+                reduce_durable_tool(
+                    &mut durable,
+                    rfc012c_source_identity(),
+                    conflict_record.clone(),
+                    conflict_envelope,
+                ),
+                Err(RuntimeSemanticReductionError::InvalidRevision)
+            );
+            assert_eq!(durable_tool_digest(&durable), before);
+            assert_eq!(
+                projection.project(&rfc012c_decoded_frame(
+                    5 + index as u64,
+                    ScopedAppendDeliveryPhase::Live,
+                    &conflict_record,
+                    conflict_batch,
+                )),
+                Err(ScopedProjectionError::InvalidSemanticRevision)
+            );
+            assert_tool_topology_parity(&durable, &projection);
+        }
+
         let retract_record = rfc012c_record(4, 5, 14);
         let mut retract_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
@@ -31326,6 +31493,17 @@ mod projection_tests {
                 )),
             )
             .unwrap();
+        let retract_envelope = retract_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                retract_record.clone(),
+                retract_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Retract
+        );
         assert_eq!(
             projection
                 .project(&rfc012c_decoded_frame(
@@ -31339,6 +31517,7 @@ mod projection_tests {
             1
         );
         assert_eq!(projection.tools.len(), 1);
+        assert_tool_topology_parity(&durable, &projection);
         assert_eq!(
             projection.tools.values().next().unwrap().revision.kind,
             ToolRevisionKind::Result
@@ -31354,6 +31533,17 @@ mod projection_tests {
                 Fact::ToolRevision(call),
             )
             .unwrap();
+        let restored_envelope = restored_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                restored_record.clone(),
+                restored_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 6,
@@ -31373,26 +31563,36 @@ mod projection_tests {
             &fixture.native_call_id,
             &fixture.correlated_call,
         );
+        let correlated_again_record = rfc012c_record(6, 7, 16);
+        let mut correlated_again_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        correlated_again_batch
+            .push_native(
+                &correlated_again_record,
+                fixture.native_call_id.as_bytes(),
+                Fact::ToolRevision(correlated_again),
+            )
+            .unwrap();
+        let correlated_again_envelope = correlated_again_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                correlated_again_record.clone(),
+                correlated_again_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 7,
                 ScopedAppendDeliveryPhase::Live,
-                &rfc012c_record(6, 7, 16),
-                {
-                    let mut batch =
-                        FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context())
-                            .unwrap();
-                    batch
-                        .push_native(
-                            &rfc012c_record(6, 7, 16),
-                            fixture.native_call_id.as_bytes(),
-                            Fact::ToolRevision(correlated_again),
-                        )
-                        .unwrap();
-                    batch
-                },
+                &correlated_again_record,
+                correlated_again_batch,
             ))
             .unwrap();
+        assert_tool_topology_parity(&durable, &projection);
         let partial_record = rfc012c_record(7, 8, 17);
         let mut partial_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
@@ -31403,6 +31603,17 @@ mod projection_tests {
                 Fact::ToolRevision(partial),
             )
             .unwrap();
+        let partial_envelope = partial_batch.facts()[0].clone();
+        assert_eq!(
+            reduce_durable_tool(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_record.clone(),
+                partial_envelope,
+            )
+            .unwrap(),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 8,
@@ -31421,6 +31632,7 @@ mod projection_tests {
             Some(fixture.native_result_id.as_str())
         );
         assert_eq!(projection.tools.len(), 2);
+        assert_tool_topology_parity(&durable, &projection);
         let partial_snapshot = projection
             .tool_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .unwrap();

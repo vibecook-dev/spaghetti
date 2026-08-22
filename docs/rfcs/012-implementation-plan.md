@@ -1120,6 +1120,14 @@ selected scoped projection share the exact reduced lifecycle and path-free
 digest through creation, updates, terminal completion, partial observations,
 retraction, restoration, and owned-set omission. Its portable selected event
 specialist remains open.
+The topology-neutral correlated-lifecycle boundary now also owns
+`runtime.tool`. Native tool identity, call/result kind, and tool name are
+stable. Incomplete evidence may add a missing correlation, but cannot remove
+or retarget one or retract the entity; complete corrections retain explicit
+unmatched results and may revise correlation. Durable `FactBatch` reduction
+and selected scoped projection share the exact reduced entities and path-free
+digest through unmatched, correlated, retracted, restored, and incomplete
+states. Its portable selected event specialist remains open.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,
@@ -3037,8 +3045,10 @@ projects C1 `runtime.tool` as `CorrelatedLifecycleCurrent`: call and unmatched
 result are separate entities, later correlation updates the relationship
 without changing either fact identity, complete retract removes only the
 named entity, and a partial upsert cannot drop a previously known
-correlation. Bootstrap/correction replacement digests match at the same
-current set. D3 remains In progress; this slice does not stamp Gate met. Native-derived
+correlation. Incomplete correlation retargeting and native-ID kind/tool-name
+reuse fail closed, and durable/scoped reduced-state digests match after every
+transition. Bootstrap/correction replacement digests match at the same current
+set. D3 remains In progress; this slice does not stamp Gate met. Native-derived
 usage-v2 upsert/retraction IDs are deterministic and include the selected event
 and semantic-reference contract versions, typed semantic revision and stable
 source occurrence. Source create/delete and reset controls now also have

@@ -13,8 +13,8 @@ use crate::adapter::{
     NativeCompactionPhase, NativeProgressState, NativeQueueOperation,
     NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PlanRevisionFact,
     QualifiedUnknownReason, QualifiedValueQuality, SourceRecordId, TaskLifecycleState,
-    TaskRevisionFact, UserInputKind, UserInputLifecycleState, UserInputOperation,
-    UserInputQuestion, UserInputRequestRevisionFact,
+    TaskRevisionFact, ToolRevisionFact, ToolRevisionKind, UserInputKind, UserInputLifecycleState,
+    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
 };
 use crate::source::SourceRecordState;
 
@@ -185,6 +185,27 @@ fn validate_task_entity(
     if revision.completeness != ContractCompleteness::Complete && revision.owned_set.is_some() {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    Ok(())
+}
+
+fn validate_tool_entity(
+    semantic: &FactSemanticRevision,
+    revision: &ToolRevisionFact,
+) -> Result<(), RuntimeSemanticReductionError> {
+    revision
+        .validate()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
     if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -563,6 +584,82 @@ pub(crate) fn reduce_task_revision(
     }
 }
 
+/// Reduce one tool call/result entity with topology-independent correlation
+/// semantics. Kind and tool name are stable for a native identity. Incomplete
+/// evidence may add a previously unknown correlation, but cannot remove or
+/// retarget a known one or retract the entity.
+pub(crate) fn reduce_tool_revision(
+    current: Option<(&FactSemanticRevision, &ToolRevisionFact)>,
+    incoming: (&FactSemanticRevision, &ToolRevisionFact),
+) -> Result<RevisionedEntityValueReduction<ToolRevisionFact>, RuntimeSemanticReductionError> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    validate_tool_entity(incoming_semantic, incoming_revision)?;
+    let current = match current {
+        Some((current_semantic, current_revision)) => {
+            validate_tool_entity(current_semantic, current_revision)?;
+            if current_semantic.fact_id != incoming_semantic.fact_id
+                || current_revision.session != incoming_revision.session
+                || current_revision.actor_run != incoming_revision.actor_run
+                || current_revision.native_tool_id != incoming_revision.native_tool_id
+                || current_revision.kind != incoming_revision.kind
+                || current_revision.tool_name != incoming_revision.tool_name
+            {
+                return Err(RuntimeSemanticReductionError::InvalidRevision);
+            }
+            if current_semantic.fact_revision_id == incoming_semantic.fact_revision_id {
+                return Ok(RevisionedEntityValueReduction::Unchanged);
+            }
+            Some((current_semantic, current_revision))
+        }
+        None => None,
+    };
+
+    match incoming_revision.operation {
+        UserInputOperation::Retract
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
+        {
+            Ok(RevisionedEntityValueReduction::Unchanged)
+        }
+        UserInputOperation::Retract => Ok(RevisionedEntityValueReduction::Retract),
+        UserInputOperation::Upsert
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
+        {
+            let Some((current_semantic, current_revision)) = current else {
+                return Ok(RevisionedEntityValueReduction::Upsert(
+                    incoming_revision.clone(),
+                ));
+            };
+            if current_revision.correlated_native_id.is_some()
+                && incoming_revision.correlated_native_id.is_some()
+                && current_revision.correlated_native_id != incoming_revision.correlated_native_id
+            {
+                return Err(RuntimeSemanticReductionError::InvalidRevision);
+            }
+            let mut merged = incoming_revision.clone();
+            if merged.correlated_native_id.is_none() {
+                merged.correlated_native_id = current_revision.correlated_native_id.clone();
+            }
+            merged
+                .validate()
+                .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            let merged_key = merged
+                .semantic_revision_key()
+                .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            let merged_revision_id =
+                FactRevisionId::derive(&incoming_semantic.fact_id, 1, &merged_key)
+                    .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            if merged_revision_id == current_semantic.fact_revision_id {
+                Ok(RevisionedEntityValueReduction::Unchanged)
+            } else {
+                Ok(RevisionedEntityValueReduction::Upsert(merged))
+            }
+        }
+        UserInputOperation::Upsert => Ok(RevisionedEntityValueReduction::Upsert(
+            incoming_revision.clone(),
+        )),
+    }
+}
+
 /// Decide one effective-state revision using the RFC 012C
 /// `RevisionedEntityCurrent` law.
 ///
@@ -727,6 +824,13 @@ pub(crate) struct TaskReducedDigestEntity<'a> {
     pub semantic: &'a FactSemanticRevision,
     pub source: RuntimeSemanticSourceRef<'a>,
     pub revision: &'a TaskRevisionFact,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ToolReducedDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub source: RuntimeSemanticSourceRef<'a>,
+    pub revision: &'a ToolRevisionFact,
 }
 
 fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
@@ -1034,6 +1138,58 @@ pub(crate) fn task_reduced_state_digest<'a>(
                 hasher.update(&[0]);
             }
         }
+    }
+    Ok(*hasher.finalize().as_bytes())
+}
+
+/// Compute the canonical current-state digest for `runtime.tool`.
+pub(crate) fn tool_reduced_state_digest<'a>(
+    entities: impl IntoIterator<Item = ToolReducedDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.semantic.fact_id);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].semantic.fact_id == pair[1].semantic.fact_id)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, b"runtime.tool");
+    hasher.update(&1_u32.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in &entities {
+        validate_tool_entity(entity.semantic, entity.revision)?;
+        validate_and_hash_semantic_source(&mut hasher, entity.semantic, entity.source)?;
+        hash_component(&mut hasher, entity.revision.session.as_bytes());
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_component(&mut hasher, entity.revision.native_tool_id.as_bytes());
+        hasher.update(&[match entity.revision.kind {
+            ToolRevisionKind::Call => 1,
+            ToolRevisionKind::Result => 2,
+        }]);
+        hash_component(&mut hasher, entity.revision.tool_name.as_bytes());
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .correlated_native_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hasher.update(&[match entity.revision.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        }]);
+        hasher.update(&[match entity.revision.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        }]);
     }
     Ok(*hasher.finalize().as_bytes())
 }
