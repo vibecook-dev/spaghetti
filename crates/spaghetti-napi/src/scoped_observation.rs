@@ -25,12 +25,12 @@ use crate::adapter::{
     FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision,
     MessageRevisionFact, NativeArtifactProbe, NativeIdentityClaim, NativeRuntimeMarkerRevisionFact,
     PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy,
-    RecordMappingDisposition, ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest,
-    SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceObjectList,
-    SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
-    SupportOperation, TaskRevisionFact, ToolRevisionFact, TypedAccessAuthorization,
-    UsageRevisionV2Fact, UserInputOperation, UserInputRequestRevisionFact,
-    EXTERNAL_ENTITY_REFERENCE_VERSION,
+    RecordMappingDisposition, ScopeJoinEvidence, ScopeJoinParameterSet, ScopeJoinUpdate,
+    ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint,
+    SourceCoverageSet, SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery,
+    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TaskRevisionFact,
+    ToolRevisionFact, TypedAccessAuthorization, UsageRevisionV2Fact, UserInputOperation,
+    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -963,6 +963,7 @@ pub enum ScopedDecodedAppendItem {
         disposition: DecodeDisposition,
         mapping_disposition: Box<RecordMappingDisposition>,
         batch: Box<FactBatch>,
+        scope_join_updates: Vec<ScopeJoinUpdate>,
         quarantined: bool,
     },
     DriverQuarantine(DriverQuarantine),
@@ -1816,6 +1817,7 @@ impl ScopedObservationAdmissionLane {
                     disposition,
                     mapping_disposition,
                     batch,
+                    scope_join_updates,
                     next_decoder_state,
                     quarantined,
                 } = (*snapshot).into_admission_parts();
@@ -1824,6 +1826,7 @@ impl ScopedObservationAdmissionLane {
                     disposition,
                     mapping_disposition: Box::new(mapping_disposition),
                     batch: Box::new(batch),
+                    scope_join_updates,
                     quarantined,
                 };
                 let lane_ordinal = self.next_lane_ordinal;
@@ -11678,6 +11681,8 @@ pub enum ScopedProjectionError {
     EffectiveStateCapacityFull,
     #[error("scoped artifact evidence capacity is full")]
     ArtifactEvidenceCapacityFull,
+    #[error("scoped relation-join projection capacity is full")]
+    ScopeJoinCapacityFull,
     #[error("scoped usage-v2 fact is missing its canonical semantic revision")]
     MissingSemanticRevision,
     #[error("scoped usage-v2 fact has an invalid canonical semantic revision")]
@@ -11694,6 +11699,8 @@ pub enum ScopedProjectionError {
     InvalidActorContext,
     #[error("scoped artifact metadata does not provide valid root-bound canonical evidence")]
     InvalidArtifactEvidence,
+    #[error("scoped relation-join update is invalid")]
+    InvalidScopeJoinUpdate,
     #[error("scoped source reset does not match retained reducer generation")]
     InvalidResetState,
     #[error("scoped source presence change contradicts retained reducer state")]
@@ -11917,6 +11924,57 @@ struct ScopedEffectiveStateProjectionState {
     revision: EffectiveStateRevisionFact,
 }
 
+const MAX_SCOPED_JOIN_RETAINED_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ScopedJoinOwnerKey {
+    relation_id: String,
+    fact_ids: Vec<CanonicalFactId>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ScopedJoinProjectionState {
+    owner: ScopedJoinOwnerKey,
+    object_token: u64,
+    generation: u64,
+    source: ScopedSourceObjectIdentity,
+    evidence: Vec<ScopeJoinEvidence>,
+    parameters: Vec<ScopeJoinParameterSet>,
+}
+
+impl ScopedJoinProjectionState {
+    fn retained_bytes(&self) -> Option<usize> {
+        let mut retained = self.owner.relation_id.len().checked_add(
+            self.evidence
+                .len()
+                .checked_mul(std::mem::size_of::<ScopeJoinEvidence>())?,
+        )?;
+        for parameters in &self.parameters {
+            for input in parameters.identity_inputs() {
+                retained = retained
+                    .checked_add(input.name().len())?
+                    .checked_add(input.value().len())?;
+            }
+        }
+        Some(retained)
+    }
+}
+
+impl std::fmt::Debug for ScopedJoinProjectionState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedJoinProjectionState")
+            .field("relation_id", &self.owner.relation_id)
+            .field("fact_count", &self.owner.fact_ids.len())
+            .field("object_token", &self.object_token)
+            .field("generation", &self.generation)
+            .field("source", &self.source)
+            .field("evidence_count", &self.evidence.len())
+            .field("parameter_count", &self.parameters.len())
+            .finish_non_exhaustive()
+    }
+}
+
 const SCOPED_ACTOR_AFFILIATION_CONTEXT_MAX_REVISIONS: usize = 64;
 
 struct ScopedActorContextIndex {
@@ -12041,6 +12099,8 @@ fn apply_message_content_block_replacement(
 
 #[derive(Default)]
 struct ScopedProjectionMutation {
+    scope_join_upserts: BTreeMap<ScopedJoinOwnerKey, ScopedJoinProjectionState>,
+    scope_join_retractions: Vec<ScopedJoinOwnerKey>,
     usage_upserts: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
     usage_retractions: Vec<CanonicalFactId>,
     actor_upserts: BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
@@ -12111,6 +12171,7 @@ pub struct ScopedObservationProjectionSink {
     limits: ScopedObservationProjectionLimits,
     families: ScopedProjectionFamilies,
     lifecycle: ScopedProjectionLifecycle,
+    scope_joins: BTreeMap<ScopedJoinOwnerKey, ScopedJoinProjectionState>,
     usage_v2: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
     actor_runs: BTreeMap<CanonicalEntityKey, ScopedActorRunProjectionState>,
     actor_affiliations: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
@@ -12167,6 +12228,7 @@ impl ScopedObservationProjectionSink {
             limits,
             families,
             lifecycle: ScopedProjectionLifecycle::Active,
+            scope_joins: BTreeMap::new(),
             usage_v2: BTreeMap::new(),
             actor_runs: BTreeMap::new(),
             actor_affiliations: BTreeMap::new(),
@@ -12258,6 +12320,14 @@ impl ScopedObservationProjectionSink {
     }
 
     fn commit(&mut self, mutation: ScopedProjectionMutation) {
+        for owner in mutation.scope_join_retractions {
+            let removed = self.scope_joins.remove(&owner);
+            debug_assert!(
+                removed.is_some(),
+                "prepared scope-join retraction must exist"
+            );
+        }
+        self.scope_joins.extend(mutation.scope_join_upserts);
         for source_record_id in mutation.unknown_evidence_retractions {
             let removed = self.unknown_evidence.retract(&source_record_id);
             debug_assert!(removed, "prepared unknown-evidence retraction must exist");
@@ -12363,6 +12433,8 @@ impl ScopedObservationProjectionSink {
     fn rollback_replacement_object_prevalidated(&mut self, object_token: u64) {
         self.artifact_evidence
             .rollback_replacement_object(object_token);
+        self.scope_joins
+            .retain(|_, state| state.object_token != object_token);
         self.usage_v2
             .retain(|_, state| state.object_token != object_token);
         self.actor_runs
@@ -12401,6 +12473,11 @@ impl ScopedObservationProjectionSink {
 
     pub fn usage_v2_entity_count(&self) -> usize {
         self.usage_v2.len()
+    }
+
+    #[cfg(test)]
+    fn scope_join_states(&self) -> impl Iterator<Item = &ScopedJoinProjectionState> {
+        self.scope_joins.values()
     }
 
     fn artifact_evidence_snapshot(
@@ -12899,6 +12976,11 @@ impl ScopedObservationProjectionSink {
             reset.old_generation,
             ScopedProjectionError::InvalidResetState,
         )?;
+        let scope_join_retractions = self.prepare_scope_join_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
@@ -12931,6 +13013,7 @@ impl ScopedObservationProjectionSink {
         Ok(ScopedProjectionPlan {
             projected,
             mutation: ScopedProjectionMutation {
+                scope_join_retractions,
                 usage_retractions: fact_ids,
                 actor_retractions: context_retractions.actors,
                 affiliation_retractions: context_retractions.affiliations,
@@ -13008,6 +13091,10 @@ impl ScopedObservationProjectionSink {
                         .unknown_evidence_owners
                         .values()
                         .any(|owner| owner.object_token == object_token)
+                    || self
+                        .scope_joins
+                        .values()
+                        .any(|state| state.object_token == object_token)
                     || self.artifact_evidence.has_object(object_token)
                 {
                     return Err(ScopedProjectionError::InvalidPresenceState);
@@ -13172,6 +13259,15 @@ impl ScopedObservationProjectionSink {
                     ScopedProjectionError::InvalidPresenceState,
                 )?,
         };
+        let scope_join_retractions = match change {
+            ScopedAppendPresenceChange::Created { .. } => Vec::new(),
+            ScopedAppendPresenceChange::Deleted { generation } => self
+                .prepare_scope_join_retractions(
+                    object_token,
+                    generation,
+                    ScopedProjectionError::InvalidPresenceState,
+                )?,
+        };
         let mut projected = Vec::with_capacity(
             retracted
                 .len()
@@ -13204,6 +13300,7 @@ impl ScopedObservationProjectionSink {
         Ok(ScopedProjectionPlan {
             projected,
             mutation: ScopedProjectionMutation {
+                scope_join_retractions,
                 usage_retractions: fact_ids,
                 actor_retractions: context_retractions.actors,
                 affiliation_retractions: context_retractions.affiliations,
@@ -13220,6 +13317,145 @@ impl ScopedObservationProjectionSink {
                 ..ScopedProjectionMutation::default()
             },
         })
+    }
+
+    fn prepare_scope_join_retractions(
+        &self,
+        object_token: u64,
+        generation: u64,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<Vec<ScopedJoinOwnerKey>, ScopedProjectionError> {
+        if self
+            .scope_joins
+            .values()
+            .any(|state| state.object_token == object_token && state.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        Ok(self
+            .scope_joins
+            .iter()
+            .filter(|(_, state)| {
+                state.object_token == object_token && state.generation == generation
+            })
+            .map(|(owner, _)| owner.clone())
+            .collect())
+    }
+
+    fn prepare_scope_join_updates(
+        &self,
+        object_token: u64,
+        source: &ScopedSourceObjectIdentity,
+        record_evidence: &ScopedDecodedRecordEvidence,
+        batch: &FactBatch,
+        updates: &[ScopeJoinUpdate],
+        mutation: &mut ScopedProjectionMutation,
+    ) -> Result<(), ScopedProjectionError> {
+        for update in updates {
+            if update.evidence().iter().any(|evidence| {
+                !batch.facts().iter().any(|envelope| {
+                    fact_provenance_matches_evidence(&envelope.provenance, record_evidence)
+                        && envelope.semantic_revision.is_some_and(|semantic| {
+                            semantic.fact_id == evidence.fact_id()
+                                && semantic.semantic_revision_ref
+                                    == evidence.semantic_revision_ref()
+                        })
+                })
+            }) {
+                return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+            }
+
+            let owner = ScopedJoinOwnerKey {
+                relation_id: update.relation_id().to_string(),
+                fact_ids: update
+                    .evidence()
+                    .iter()
+                    .map(ScopeJoinEvidence::fact_id)
+                    .collect(),
+            };
+            if mutation.scope_join_upserts.contains_key(&owner)
+                || mutation.scope_join_retractions.contains(&owner)
+            {
+                return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+            }
+            let current = self.scope_joins.get(&owner);
+            if current.is_some_and(|current| {
+                current.object_token != object_token
+                    || current.generation != record_evidence.generation
+                    || current.source != *source
+            }) {
+                return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+            }
+            if let Some(current) = current {
+                if current.evidence == update.evidence() {
+                    if current.parameters == update.parameters() {
+                        continue;
+                    }
+                    return Err(ScopedProjectionError::InvalidScopeJoinUpdate);
+                }
+            }
+            if update.parameters().is_empty() {
+                if current.is_some() {
+                    mutation.scope_join_retractions.push(owner);
+                }
+                continue;
+            }
+            mutation.scope_join_upserts.insert(
+                owner.clone(),
+                ScopedJoinProjectionState {
+                    owner,
+                    object_token,
+                    generation: record_evidence.generation,
+                    source: source.clone(),
+                    evidence: update.evidence().to_vec(),
+                    parameters: update.parameters().to_vec(),
+                },
+            );
+        }
+
+        self.validate_scope_join_capacity(mutation)
+    }
+
+    fn validate_scope_join_capacity(
+        &self,
+        mutation: &ScopedProjectionMutation,
+    ) -> Result<(), ScopedProjectionError> {
+        let retained = self
+            .scope_joins
+            .iter()
+            .filter(|(owner, _)| {
+                !mutation.scope_join_upserts.contains_key(*owner)
+                    && !mutation.scope_join_retractions.contains(*owner)
+            })
+            .chain(mutation.scope_join_upserts.iter());
+        let mut owner_count = 0_usize;
+        let mut retained_bytes = 0_usize;
+        let mut relation_parameter_counts = BTreeMap::<String, usize>::new();
+        for (_, state) in retained {
+            owner_count = owner_count
+                .checked_add(1)
+                .ok_or(ScopedProjectionError::ScopeJoinCapacityFull)?;
+            retained_bytes = retained_bytes
+                .checked_add(
+                    state
+                        .retained_bytes()
+                        .ok_or(ScopedProjectionError::ScopeJoinCapacityFull)?,
+                )
+                .ok_or(ScopedProjectionError::ScopeJoinCapacityFull)?;
+            let parameter_count = relation_parameter_counts
+                .entry(state.owner.relation_id.clone())
+                .or_default();
+            *parameter_count = parameter_count
+                .checked_add(state.parameters.len())
+                .ok_or(ScopedProjectionError::ScopeJoinCapacityFull)?;
+            if owner_count > self.limits.max_usage_v2_entities
+                || *parameter_count > self.limits.max_usage_v2_entities
+                || retained_bytes > MAX_SCOPED_JOIN_RETAINED_BYTES
+            {
+                return Err(ScopedProjectionError::ScopeJoinCapacityFull);
+            }
+        }
+        Ok(())
     }
 
     fn prepare_actor_context_retractions(
@@ -13813,6 +14049,7 @@ impl ScopedObservationProjectionSink {
             evidence,
             mapping_disposition,
             batch,
+            scope_join_updates,
             ..
         } = item
         else {
@@ -13830,6 +14067,14 @@ impl ScopedObservationProjectionSink {
             )?,
             ..ScopedProjectionMutation::default()
         };
+        self.prepare_scope_join_updates(
+            object_token,
+            source,
+            evidence,
+            batch,
+            scope_join_updates,
+            &mut mutation,
+        )?;
         let mut user_input_events = Vec::new();
         let mut message_events = Vec::new();
         let mut plan_events = Vec::new();
@@ -23019,6 +23264,7 @@ impl ScopedKnownAppendObject {
                             disposition: decoded.disposition,
                             mapping_disposition: Box::new(decoded.mapping_disposition),
                             batch: Box::new(decoded.batch),
+                            scope_join_updates: decoded.scope_join_updates,
                             quarantined: decoded.quarantined,
                         });
                     }
@@ -24495,7 +24741,10 @@ fn decoded_item_measurement(item: &ScopedDecodedAppendItem) -> Option<(u64, u64)
     match item {
         ScopedDecodedAppendItem::DriverQuarantine(_) => Some((1, 0)),
         ScopedDecodedAppendItem::Record {
-            evidence, batch, ..
+            evidence,
+            batch,
+            scope_join_updates,
+            ..
         } => {
             let semantic_items = batch
                 .facts()
@@ -24512,6 +24761,10 @@ fn decoded_item_measurement(item: &ScopedDecodedAppendItem) -> Option<(u64, u64)
                     retained_native_bytes = retained_native_bytes
                         .checked_add(u64::try_from(raw_payload.len()).ok()?)?;
                 }
+            }
+            for update in scope_join_updates {
+                retained_native_bytes = retained_native_bytes
+                    .checked_add(u64::try_from(update.retained_bytes()).ok()?)?;
             }
             Some((data_events, retained_native_bytes))
         }
@@ -24725,9 +24978,9 @@ mod projection_tests {
         AdapterManifest, AdapterSupportBinding, ContractCompleteness, ContractVersionOffer,
         ContractVersionRequest, CoverageMembershipRevision, EffectiveStateDimension,
         EffectiveStateEvidenceKind, MessageRevisionRole, NativeIdentity, QualifiedTimestamp,
-        QualifiedValue, QualifiedValueQuality, TaskLifecycleState, TimestampQuality,
-        ToolRevisionKind, UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity,
-        UsageValueAuthority, UsageValueProvenance, UserInputLifecycleState,
+        QualifiedValue, QualifiedValueQuality, ScopeJoinIdentityInput, TaskLifecycleState,
+        TimestampQuality, ToolRevisionKind, UsageBucketsV2, UsageQualifiedValue,
+        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance, UserInputLifecycleState,
     };
     use crate::runtime_semantic_reducer::{
         content_block_reduced_state_digest, effective_state_reduced_state_digest,
@@ -25274,6 +25527,16 @@ mod projection_tests {
         record: &SourceRecord,
         batch: FactBatch,
     ) -> ScopedQueuedObservationFrame {
+        decoded_frame_with_join_updates(lane_ordinal, phase, record, batch, Vec::new())
+    }
+
+    fn decoded_frame_with_join_updates(
+        lane_ordinal: u64,
+        phase: ScopedAppendDeliveryPhase,
+        record: &SourceRecord,
+        batch: FactBatch,
+        scope_join_updates: Vec<ScopeJoinUpdate>,
+    ) -> ScopedQueuedObservationFrame {
         ScopedQueuedObservationFrame::Decoded {
             object_token: OBJECT_TOKEN,
             source: source_identity(),
@@ -25284,9 +25547,40 @@ mod projection_tests {
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&batch)),
                 batch: Box::new(batch),
+                scope_join_updates,
                 quarantined: false,
             }),
         }
+    }
+
+    fn scope_join_update(
+        batch: &FactBatch,
+        relation_id: &str,
+        identity_values: &[&[u8]],
+    ) -> ScopeJoinUpdate {
+        let semantic = batch.facts()[0]
+            .semantic_revision
+            .expect("fixture fact has canonical semantic identity");
+        let parameters = identity_values
+            .iter()
+            .map(|value| {
+                ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
+                    "native-id",
+                    (*value).to_vec(),
+                )
+                .unwrap()])
+                .unwrap()
+            })
+            .collect();
+        ScopeJoinUpdate::new(
+            relation_id,
+            vec![ScopeJoinEvidence::new(
+                semantic.fact_id,
+                semantic.semantic_revision_ref,
+            )],
+            parameters,
+        )
+        .unwrap()
     }
 
     fn unknown_mapping(record: &SourceRecord, family_hint: &str) -> RecordMappingDisposition {
@@ -25342,6 +25636,7 @@ mod projection_tests {
                 disposition: DecodeDisposition::PreservedUnknown,
                 mapping_disposition: Box::new(mapping_disposition),
                 batch: Box::new(batch),
+                scope_join_updates: Vec::new(),
                 quarantined: false,
             }),
         }
@@ -25362,6 +25657,237 @@ mod projection_tests {
             max_usage_v2_entities,
         })
         .unwrap()
+    }
+
+    #[test]
+    fn scope_join_updates_are_private_atomic_replaceable_and_retractable() {
+        let initial_record = record(1, 0, 10);
+        let initial_batch = usage_batch(&initial_record, "response-join", 1, None);
+        let initial_update = scope_join_update(
+            &initial_batch,
+            "related-object",
+            &[b"/Users/alice/private/session.jsonl"],
+        );
+        let expected_private_bytes = u64::try_from(initial_update.retained_bytes()).unwrap();
+        let initial_frame = decoded_frame_with_join_updates(
+            1,
+            ScopedAppendDeliveryPhase::Bootstrap,
+            &initial_record,
+            initial_batch,
+            vec![initial_update],
+        );
+        let ScopedQueuedObservationFrame::Decoded { item, .. } = &initial_frame else {
+            unreachable!()
+        };
+        assert_eq!(
+            decoded_item_measurement(item),
+            Some((1, expected_private_bytes))
+        );
+
+        let mut projection = sink(4);
+        assert_eq!(projection.project(&initial_frame).unwrap().len(), 1);
+        let retained = projection.scope_join_states().next().unwrap();
+        assert_eq!(retained.owner.relation_id, "related-object");
+        assert_eq!(retained.parameters.len(), 1);
+        assert_eq!(
+            retained.parameters[0].identity_inputs()[0].value(),
+            b"/Users/alice/private/session.jsonl"
+        );
+        let private_debug = format!("{retained:?}");
+        assert!(!private_debug.contains("/Users/"));
+        assert!(!private_debug.contains("alice"));
+        assert!(!private_debug.contains("session.jsonl"));
+
+        let repeat_batch = usage_batch(&initial_record, "response-join", 1, None);
+        let repeat_update = scope_join_update(
+            &repeat_batch,
+            "related-object",
+            &[b"/Users/alice/private/session.jsonl"],
+        );
+        assert!(projection
+            .project(&decoded_frame_with_join_updates(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &initial_record,
+                repeat_batch,
+                vec![repeat_update],
+            ))
+            .unwrap()
+            .is_empty());
+        let before_invalid = projection.scope_joins.clone();
+
+        let invalid_batch = usage_batch(&initial_record, "response-join", 1, None);
+        let invalid_update = scope_join_update(
+            &invalid_batch,
+            "related-object",
+            &[b"different-private-value"],
+        );
+        assert_eq!(
+            projection.project(&decoded_frame_with_join_updates(
+                3,
+                ScopedAppendDeliveryPhase::Live,
+                &initial_record,
+                invalid_batch,
+                vec![invalid_update],
+            )),
+            Err(ScopedProjectionError::InvalidScopeJoinUpdate)
+        );
+        assert_eq!(projection.scope_joins, before_invalid);
+
+        let corrected_record = record(1, 10, 20);
+        let corrected_batch = usage_batch(&corrected_record, "response-join", 9, None);
+        let corrected_update = scope_join_update(
+            &corrected_batch,
+            "related-object",
+            &[b"private-corrected-id"],
+        );
+        assert_eq!(
+            projection
+                .project(&decoded_frame_with_join_updates(
+                    4,
+                    ScopedAppendDeliveryPhase::Correction,
+                    &corrected_record,
+                    corrected_batch,
+                    vec![corrected_update],
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        let corrected = projection.scope_join_states().next().unwrap();
+        assert_eq!(
+            corrected.parameters[0].identity_inputs()[0].value(),
+            b"private-corrected-id"
+        );
+
+        let retract_record = record(1, 20, 30);
+        let retract_batch = usage_batch(&retract_record, "response-join", 10, None);
+        let retract_update = scope_join_update(&retract_batch, "related-object", &[]);
+        projection
+            .project(&decoded_frame_with_join_updates(
+                5,
+                ScopedAppendDeliveryPhase::Correction,
+                &retract_record,
+                retract_batch,
+                vec![retract_update],
+            ))
+            .unwrap();
+        assert_eq!(projection.scope_join_states().count(), 0);
+    }
+
+    #[test]
+    fn scope_join_lifecycle_and_capacity_fail_closed_atomically() {
+        let initial_record = record(1, 0, 10);
+        let initial_batch = usage_batch(&initial_record, "response-lifecycle", 1, None);
+        let initial_update =
+            scope_join_update(&initial_batch, "related-object", &[b"private-lifecycle-id"]);
+        let mut projection = sink(2);
+        projection
+            .project(&decoded_frame_with_join_updates(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &initial_record,
+                initial_batch,
+                vec![initial_update],
+            ))
+            .unwrap();
+
+        let invalid_reset = ScopedQueuedObservationFrame::Reset {
+            object_token: OBJECT_TOKEN,
+            source: source_identity(),
+            lane_ordinal: 2,
+            observed_at: 45,
+            phase: ScopedAppendDeliveryPhase::Correction,
+            reset: ScopedAppendReset {
+                old_generation: 2,
+                new_generation: 3,
+                reason: AppendTransition::Truncated,
+            },
+        };
+        assert_eq!(
+            projection.project(&invalid_reset),
+            Err(ScopedProjectionError::InvalidResetState)
+        );
+        assert_eq!(projection.scope_join_states().count(), 1);
+
+        projection
+            .project(&ScopedQueuedObservationFrame::Reset {
+                object_token: OBJECT_TOKEN,
+                source: source_identity(),
+                lane_ordinal: 3,
+                observed_at: 46,
+                phase: ScopedAppendDeliveryPhase::Correction,
+                reset: ScopedAppendReset {
+                    old_generation: 1,
+                    new_generation: 2,
+                    reason: AppendTransition::Truncated,
+                },
+            })
+            .unwrap();
+        assert_eq!(projection.scope_join_states().count(), 0);
+        assert_eq!(projection.usage_v2_entity_count(), 0);
+
+        let next_record = record(2, 0, 10);
+        let next_batch = usage_batch(&next_record, "response-lifecycle", 2, None);
+        let next_update = scope_join_update(
+            &next_batch,
+            "related-object",
+            &[b"private-next-generation-id"],
+        );
+        projection
+            .project(&decoded_frame_with_join_updates(
+                4,
+                ScopedAppendDeliveryPhase::Correction,
+                &next_record,
+                next_batch,
+                vec![next_update],
+            ))
+            .unwrap();
+        assert_eq!(projection.scope_join_states().count(), 1);
+        assert_eq!(
+            projection.project(&ScopedQueuedObservationFrame::Presence {
+                object_token: OBJECT_TOKEN,
+                source: source_identity(),
+                lane_ordinal: 5,
+                observed_at: 47,
+                phase: ScopedAppendDeliveryPhase::Live,
+                change: ScopedAppendPresenceChange::Created { generation: 2 },
+            }),
+            Err(ScopedProjectionError::InvalidPresenceState)
+        );
+        assert_eq!(projection.scope_join_states().count(), 1);
+        projection
+            .project(&ScopedQueuedObservationFrame::Presence {
+                object_token: OBJECT_TOKEN,
+                source: source_identity(),
+                lane_ordinal: 6,
+                observed_at: 48,
+                phase: ScopedAppendDeliveryPhase::Live,
+                change: ScopedAppendPresenceChange::Deleted { generation: 2 },
+            })
+            .unwrap();
+        assert_eq!(projection.scope_join_states().count(), 0);
+
+        let capacity_record = record(1, 0, 10);
+        let capacity_batch = usage_batch(&capacity_record, "response-capacity", 1, None);
+        let capacity_update = scope_join_update(
+            &capacity_batch,
+            "related-object",
+            &[b"private-one", b"private-two"],
+        );
+        let mut bounded = sink(1);
+        assert_eq!(
+            bounded.project(&decoded_frame_with_join_updates(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &capacity_record,
+                capacity_batch,
+                vec![capacity_update],
+            )),
+            Err(ScopedProjectionError::ScopeJoinCapacityFull)
+        );
+        assert_eq!(bounded.scope_join_states().count(), 0);
+        assert_eq!(bounded.usage_v2_entity_count(), 0);
     }
 
     #[test]
@@ -27875,6 +28401,7 @@ mod projection_tests {
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&batch)),
                 batch: Box::new(batch),
+                scope_join_updates: Vec::new(),
                 quarantined: false,
             }),
         }
@@ -34269,6 +34796,7 @@ mod projection_tests {
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&batch)),
                 batch: Box::new(batch),
+                scope_join_updates: Vec::new(),
                 quarantined: false,
             }),
         };
@@ -36646,6 +37174,7 @@ mod projection_tests {
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&first_batch)),
                 batch: Box::new(first_batch),
+                scope_join_updates: Vec::new(),
                 quarantined: false,
             }),
         };
@@ -36666,6 +37195,7 @@ mod projection_tests {
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&sibling_batch)),
                 batch: Box::new(sibling_batch),
+                scope_join_updates: Vec::new(),
                 quarantined: false,
             }),
         };

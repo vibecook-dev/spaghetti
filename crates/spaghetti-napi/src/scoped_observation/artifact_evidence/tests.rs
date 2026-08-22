@@ -480,6 +480,7 @@ fn projection_commit_and_source_reset_move_artifact_evidence_atomically() {
                     crate::scoped_observation::mapped_record_disposition(&batch),
                 ),
                 batch: Box::new(batch),
+                scope_join_updates: Vec::new(),
                 quarantined: false,
             }),
         })

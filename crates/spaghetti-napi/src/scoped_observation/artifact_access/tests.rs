@@ -249,6 +249,7 @@ fn active_with_content_evidence(
                 &batch,
             )),
             batch: Box::new(batch),
+            scope_join_updates: Vec::new(),
             quarantined: false,
         }),
     };

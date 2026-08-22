@@ -16,9 +16,9 @@ use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AgentAdapter,
     CanonicalSourceInstanceKey, CoverageAbsenceKind, CoverageObjectKey, CoverageStreamKey,
     DecodeDisposition, DriverSpec, Fact, FactBatch, FactSemanticContext, RawRetentionPolicy,
-    RecordMappingDisposition, ScopeRelationPrimitive, SourceAccess, SourceInstance,
-    SourceInstanceKey, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest,
-    SourceQuery, SourceRows, SourceSnapshot, StreamSpec,
+    RecordMappingDisposition, ScopeJoinUpdate, ScopeRelationPrimitive, SourceAccess,
+    SourceInstance, SourceInstanceKey, SourceObjectDescriptor, SourceObjectList,
+    SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot, StreamSpec,
 };
 use crate::decode_runtime::{
     bootstrap_object_without_source_access, decode_record, diagnostic_excerpt, DecodeRuntimeLimits,
@@ -398,6 +398,7 @@ pub(crate) struct ScopedObservationDirectoryMemberDecodedSnapshot {
     disposition: DecodeDisposition,
     mapping_disposition: RecordMappingDisposition,
     batch: FactBatch,
+    scope_join_updates: Vec<ScopeJoinUpdate>,
     next_decoder_state: Option<Vec<u8>>,
     quarantined: bool,
 }
@@ -410,6 +411,7 @@ pub(super) struct ScopedObservationDirectoryMemberAdmissionParts {
     pub disposition: DecodeDisposition,
     pub mapping_disposition: RecordMappingDisposition,
     pub batch: FactBatch,
+    pub scope_join_updates: Vec<ScopeJoinUpdate>,
     pub next_decoder_state: Option<Vec<u8>>,
     pub quarantined: bool,
 }
@@ -1565,6 +1567,7 @@ impl ScopedObservationDirectoryMemberDecodeInput {
                 disposition: decoded.disposition,
                 mapping_disposition: decoded.mapping_disposition,
                 batch: decoded.batch,
+                scope_join_updates: decoded.scope_join_updates,
                 next_decoder_state: decoded.next_decoder_state,
                 quarantined: decoded.quarantined,
             }),
@@ -1703,6 +1706,10 @@ impl ScopedObservationDirectoryMemberDecodedSnapshot {
                     retained_native_bytes.checked_add(u64::try_from(raw_payload.len()).ok()?)?;
             }
         }
+        for update in &self.scope_join_updates {
+            retained_native_bytes =
+                retained_native_bytes.checked_add(u64::try_from(update.retained_bytes()).ok()?)?;
+        }
         Some((data_events, retained_native_bytes))
     }
 
@@ -1715,6 +1722,7 @@ impl ScopedObservationDirectoryMemberDecodedSnapshot {
             disposition: self.disposition,
             mapping_disposition: self.mapping_disposition,
             batch: self.batch,
+            scope_join_updates: self.scope_join_updates,
             next_decoder_state: self.next_decoder_state,
             quarantined: self.quarantined,
         }
