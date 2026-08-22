@@ -13,11 +13,11 @@ use crate::adapter::{
     compare_coverage, ActorAffiliationDimension, ActorAffiliationRevisionFact,
     ActorAffiliationState, ActorRunRevisionFact, ActorRunRole, AdapterError, CanonicalEntityKey,
     CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness, CoverageComparison,
-    EffectiveStateRevisionFact, ExternalEntityRef, FactRevisionId, MessageRevisionFact,
-    NativeIdentityClaim, PlanRevisionFact, QualifiedTimestamp, QualifiedValue, SemanticRevisionRef,
-    SourceCoverageSet, SourceRecordId, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
-    UsageBucketsV2, UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority,
-    UsageValueProvenance, UserInputRequestRevisionFact,
+    EffectiveStateQualifiedValue, EffectiveStateRevisionFact, ExternalEntityRef, FactRevisionId,
+    MessageRevisionFact, NativeIdentityClaim, PlanRevisionFact, QualifiedTimestamp, QualifiedValue,
+    SemanticRevisionRef, SourceCoverageSet, SourceRecordId, TaskRevisionFact, TimestampQuality,
+    ToolRevisionFact, UsageBucketsV2, UsageResponseIdentity, UsageRevisionV2Fact,
+    UsageValueAuthority, UsageValueProvenance, UserInputRequestRevisionFact,
 };
 
 pub(crate) const MAX_SEMANTIC_FIXTURE_JSON_BYTES: usize = 1024 * 1024;
@@ -223,7 +223,7 @@ pub(crate) struct EffectiveStateSlotWire {
     pub operation: EffectiveStateOperation,
     pub semantic_revision_key_hex: String,
     pub semantic_revision_ref: SemanticRevisionRef,
-    pub value: String,
+    pub value: EffectiveStateQualifiedValue<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1347,7 +1347,6 @@ fn validate_effective_state_slot(
             "effective-state {slot_name} must be a complete replacement slot"
         )));
     }
-    validate_canonical_runtime_text("effective-state value", &slot.value)?;
     verify_fact_revision_identity(
         EFFECTIVE_STATE_FAMILY,
         &fixture.fact_id,
@@ -2683,6 +2682,14 @@ mod tests {
             EffectiveStateEvidenceKind::ConfiguredIntent
         );
         assert_eq!(
+            fixture.configured.value.authority,
+            crate::adapter::EffectiveStateValueAuthority::NativeConfiguration
+        );
+        assert_eq!(
+            fixture.configured.value.value.as_deref(),
+            Some("claude-sonnet")
+        );
+        assert_eq!(
             fixture.observed.evidence_kind,
             EffectiveStateEvidenceKind::ResponseObserved
         );
@@ -2910,7 +2917,7 @@ mod tests {
     fn rfc012c_c1_fixtures_reject_semantic_mutation_with_stale_identity() {
         let mut effective: serde_json::Value =
             serde_json::from_str(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
-        effective["configured"]["value"] = serde_json::json!("claude-opus");
+        effective["configured"]["value"]["value"] = serde_json::json!("claude-opus");
         assert!(parse_rfc012c_effective_state_v1_json(&effective.to_string()).is_err());
 
         let mut interaction: serde_json::Value =

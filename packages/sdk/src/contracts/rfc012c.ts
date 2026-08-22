@@ -343,11 +343,19 @@ function parseHexDigest(value: unknown, label: string): string {
   return value;
 }
 
+function parseNativeField(value: unknown, label: string): string {
+  const field = boundedText(value, label, MAX_USAGE_PROVENANCE_FIELD_BYTES);
+  if (!/^[a-z][a-z0-9._-]*$/.test(field)) {
+    throw new ContractValidationError(`${label} must be a closed machine field identifier`);
+  }
+  return field;
+}
+
 function parseUsageProvenance(value: unknown): UsageValueProvenance {
   const input = record(value, 'usage provenance');
   assertKnownFields(input, ['native_field', 'normalization_contract_version'], 'usage provenance');
   return {
-    native_field: boundedText(input.native_field, 'usage provenance native_field', MAX_USAGE_PROVENANCE_FIELD_BYTES),
+    native_field: parseNativeField(input.native_field, 'usage provenance native_field'),
     normalization_contract_version: positiveU32(
       input.normalization_contract_version,
       'usage provenance normalization_contract_version',
@@ -943,6 +951,16 @@ export function parseRfc012cRuntimeV1Json(json: string, expectedContextInput: un
 export type EffectiveStateDimension = 'model' | 'effort' | 'session_mode' | 'permission_mode';
 export type EffectiveStateEvidenceKind = 'configured_intent' | 'response_observed' | 'native_transition';
 export type EffectiveStateOperation = 'upsert' | 'retract';
+export type EffectiveStateValueAuthority = 'native_configuration' | 'native_response' | 'native_transition';
+export interface EffectiveStateValueProvenance {
+  native_field: string;
+  normalization_contract_version: number;
+}
+export type EffectiveStateQualifiedValue<T> = QualifiedValue<
+  T,
+  EffectiveStateValueAuthority,
+  EffectiveStateValueProvenance
+>;
 export type UserInputKind = 'choice' | 'multi_choice' | 'free_text' | 'mixed';
 export type UserInputLifecycleState = 'pending' | 'resolved' | 'failed' | 'cancelled';
 export type UserInputOperation = 'upsert' | 'retract';
@@ -953,7 +971,7 @@ export interface EffectiveStateSlot {
   operation: EffectiveStateOperation;
   semantic_revision_key_hex: string;
   semantic_revision_ref: SemanticRevisionRef;
-  value: string;
+  value: EffectiveStateQualifiedValue<string>;
 }
 
 export interface EffectiveStateFixture {
@@ -1045,6 +1063,33 @@ function bindFixtureSemanticContext(label: string, parsed: unknown, expected: un
   }
 }
 
+function parseEffectiveStateProvenance(value: unknown): EffectiveStateValueProvenance {
+  const input = record(value, 'effective-state provenance');
+  assertKnownFields(input, ['native_field', 'normalization_contract_version'], 'effective-state provenance');
+  return {
+    native_field: parseNativeField(input.native_field, 'effective-state provenance native_field'),
+    normalization_contract_version: positiveU32(
+      input.normalization_contract_version,
+      'effective-state provenance normalization_contract_version',
+    ),
+  };
+}
+
+function parseEffectiveStateAuthority(value: unknown, label: string): EffectiveStateValueAuthority {
+  if (value !== 'native_configuration' && value !== 'native_response' && value !== 'native_transition') {
+    throw new ContractValidationError(`${label} must be native_configuration, native_response, or native_transition`);
+  }
+  return value;
+}
+
+function parseEffectiveStateQualifiedValue(value: unknown): EffectiveStateQualifiedValue<string> {
+  return parseQualifiedValue<string, EffectiveStateValueAuthority, EffectiveStateValueProvenance>(value, {
+    parseKnownValue: (raw, label) => boundedText(raw, label, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    parseAuthority: parseEffectiveStateAuthority,
+    parseProvenance: parseEffectiveStateProvenance,
+  });
+}
+
 function parseEffectiveStateSlot(value: unknown, label: string): EffectiveStateSlot {
   const input = record(value, label);
   assertKnownFields(
@@ -1060,13 +1105,27 @@ function parseEffectiveStateSlot(value: unknown, label: string): EffectiveStateS
   if (operation !== 'upsert' && operation !== 'retract') {
     throw new ContractValidationError(`${label} operation is unsupported`);
   }
+  const completeness = parseContractCompleteness(input.completeness, `${label} completeness`);
+  const qualifiedValue = parseEffectiveStateQualifiedValue(input.value);
+  if (qualifiedValue.completeness !== completeness) {
+    throw new ContractValidationError(`${label} value and revision completeness must match`);
+  }
+  const expectedAuthority: EffectiveStateValueAuthority =
+    evidence === 'configured_intent'
+      ? 'native_configuration'
+      : evidence === 'response_observed'
+        ? 'native_response'
+        : 'native_transition';
+  if (qualifiedValue.authority !== expectedAuthority) {
+    throw new ContractValidationError(`${label} value authority does not match its evidence kind`);
+  }
   return {
-    completeness: parseContractCompleteness(input.completeness, `${label} completeness`),
+    completeness,
     evidence_kind: evidence,
     operation,
     semantic_revision_key_hex: parseHexDigest(input.semantic_revision_key_hex, `${label} semantic_revision_key_hex`),
     semantic_revision_ref: parseSemanticRevisionRef(input.semantic_revision_ref),
-    value: boundedText(input.value, `${label} value`, MAX_RUNTIME_SEMANTIC_TEXT_BYTES),
+    value: qualifiedValue,
   };
 }
 

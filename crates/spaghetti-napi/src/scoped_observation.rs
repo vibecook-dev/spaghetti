@@ -22,16 +22,17 @@ use crate::adapter::{
     CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
     CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId,
     EffectiveStateDimension, EffectiveStateEvidenceKind, EffectiveStateRevisionFact,
-    ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance, FactRevisionId,
-    FactSemanticContext, FactSemanticRevision, MessageRevisionFact, MessageRevisionRole,
-    NativeArtifactProbe, NativeIdentityClaim, PlanRevisionFact, QualifiedTimestamp,
-    QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef,
-    Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
-    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
-    SourceSnapshot, SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality,
-    ToolRevisionFact, ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact,
-    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
-    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    EffectiveStateValueAuthority, ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance,
+    FactRevisionId, FactSemanticContext, FactSemanticRevision, MessageRevisionFact,
+    MessageRevisionRole, NativeArtifactProbe, NativeIdentityClaim, PlanRevisionFact,
+    QualifiedTimestamp, QualifiedUnknownReason, QualifiedValueQuality, RawRetentionPolicy,
+    ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint,
+    SourceCoverageSet, SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery,
+    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TaskLifecycleState,
+    TaskRevisionFact, TimestampQuality, ToolRevisionFact, ToolRevisionKind,
+    TypedAccessAuthorization, UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState,
+    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
+    EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -15960,7 +15961,62 @@ fn effective_state_replacement_digest(
             EffectiveStateDimension::SessionMode => 3,
             EffectiveStateDimension::PermissionMode => 4,
         }]);
-        hash_event_component(&mut hasher, entity.revision.value.as_bytes());
+        match entity.revision.value.value.as_ref() {
+            Some(value) => {
+                hasher.update(&[1]);
+                hash_event_component(&mut hasher, value.as_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hasher.update(&[match entity.revision.value.quality {
+            QualifiedValueQuality::Exact => 1,
+            QualifiedValueQuality::NativeClaimed => 2,
+            QualifiedValueQuality::Derived => 3,
+            QualifiedValueQuality::Estimated => 4,
+            QualifiedValueQuality::Unknown => 5,
+        }]);
+        hasher.update(&[match entity.revision.value.authority {
+            EffectiveStateValueAuthority::NativeConfiguration => 1,
+            EffectiveStateValueAuthority::NativeResponse => 2,
+            EffectiveStateValueAuthority::NativeTransition => 3,
+        }]);
+        hasher.update(&[match entity.revision.value.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        }]);
+        hasher.update(&[match entity.revision.value.unknown_reason {
+            None => 0,
+            Some(QualifiedUnknownReason::Missing) => 1,
+            Some(QualifiedUnknownReason::Unsupported) => 2,
+            Some(QualifiedUnknownReason::Withheld) => 3,
+            Some(QualifiedUnknownReason::NotYetObserved) => 4,
+            Some(QualifiedUnknownReason::Ambiguous) => 5,
+            Some(QualifiedUnknownReason::Malformed) => 6,
+        }]);
+        match entity.revision.value.effective_at {
+            Some(effective_at) => {
+                hasher.update(&[1]);
+                hasher.update(&effective_at.to_be_bytes());
+            }
+            None => {
+                hasher.update(&[0]);
+            }
+        }
+        hash_event_component(
+            &mut hasher,
+            entity.revision.value.provenance.native_field.as_bytes(),
+        );
+        hasher.update(
+            &entity
+                .revision
+                .value
+                .provenance
+                .normalization_contract_version
+                .to_be_bytes(),
+        );
         hasher.update(&[match entity.revision.evidence_kind {
             EffectiveStateEvidenceKind::ConfiguredIntent => 1,
             EffectiveStateEvidenceKind::ResponseObserved => 2,
@@ -27837,6 +27893,7 @@ mod projection_tests {
             &fixture.retract,
         );
         partial_retract.completeness = ContractCompleteness::Partial;
+        partial_retract.value.completeness = ContractCompleteness::Partial;
         let partial_record = rfc012c_record(4, 5, 14);
         let mut partial_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();

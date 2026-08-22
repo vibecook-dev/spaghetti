@@ -14,8 +14,9 @@ use serde_json::Value as JsonValue;
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
     CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
-    ExternalEntityRef, MessageRevisionRole, NativeIdentityClaim, TaskLifecycleState,
-    ToolRevisionKind, UserInputKind, UserInputLifecycleState, UserInputQuestion,
+    EffectiveStateQualifiedValue, ExternalEntityRef, MessageRevisionRole, NativeIdentityClaim,
+    TaskLifecycleState, ToolRevisionKind, UserInputKind, UserInputLifecycleState,
+    UserInputQuestion,
 };
 use crate::observation_contract::unknown_wire::ObservationUnknownWireContractSelection;
 use crate::observation_contract::ObservationContractSelection;
@@ -113,7 +114,7 @@ struct EffectiveStateEnvelopeWire {
     fact_id: CanonicalFactId,
     operation: &'static str,
     dimension: EffectiveStateDimension,
-    value: String,
+    value: EffectiveStateQualifiedValue<String>,
     evidence_kind: EffectiveStateEvidenceKind,
     completeness: ContractCompleteness,
 }

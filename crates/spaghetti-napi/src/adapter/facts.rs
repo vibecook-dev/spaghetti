@@ -19,6 +19,7 @@ const FACT_HASH_BYTES: usize = 32;
 const MAX_ENTITY_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_RESPONSE_KEY_BYTES: usize = 8 * 1024;
 const MAX_USAGE_PROVENANCE_FIELD_BYTES: usize = 256;
+const MAX_EFFECTIVE_STATE_PROVENANCE_FIELD_BYTES: usize = 256;
 const JS_SAFE_INTEGER_MAX_U64: u64 = 9_007_199_254_740_991;
 const JS_SAFE_INTEGER_MAX_I64: i64 = 9_007_199_254_740_991;
 const MAX_RUNTIME_SEMANTIC_TEXT_BYTES: usize = 8 * 1024;
@@ -1235,6 +1236,25 @@ pub enum EffectiveStateEvidenceKind {
     NativeTransition,
 }
 
+/// Authority that proves one qualified effective-state value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectiveStateValueAuthority {
+    NativeConfiguration,
+    NativeResponse,
+    NativeTransition,
+}
+
+/// Bounded native coordinate used to normalize an effective-state value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveStateValueProvenance {
+    pub native_field: String,
+    pub normalization_contract_version: u32,
+}
+
+pub type EffectiveStateQualifiedValue<T> =
+    QualifiedValue<T, EffectiveStateValueAuthority, EffectiveStateValueProvenance>;
+
 /// RFC 012C effective runtime state. One revisioned entity per actor/dimension;
 /// absence is unknown, not an inherited default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1242,7 +1262,7 @@ pub struct EffectiveStateRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
     pub dimension: EffectiveStateDimension,
-    pub value: String,
+    pub value: EffectiveStateQualifiedValue<String>,
     pub evidence_kind: EffectiveStateEvidenceKind,
     pub completeness: ContractCompleteness,
     pub operation: UserInputOperation,
@@ -1250,7 +1270,31 @@ pub struct EffectiveStateRevisionFact {
 
 impl EffectiveStateRevisionFact {
     pub(crate) fn validate(&self) -> Result<(), AdapterError> {
-        validate_runtime_semantic_text("effective-state value", Some(self.value.as_str()))
+        validate_effective_state_qualified_value(&self.value)?;
+        if self.value.completeness != self.completeness {
+            return Err(AdapterError::invalid_contract(
+                "effective-state value and revision completeness must match",
+            ));
+        }
+        let authority_matches_evidence = matches!(
+            (self.value.authority, self.evidence_kind),
+            (
+                EffectiveStateValueAuthority::NativeConfiguration,
+                EffectiveStateEvidenceKind::ConfiguredIntent
+            ) | (
+                EffectiveStateValueAuthority::NativeResponse,
+                EffectiveStateEvidenceKind::ResponseObserved
+            ) | (
+                EffectiveStateValueAuthority::NativeTransition,
+                EffectiveStateEvidenceKind::NativeTransition
+            )
+        );
+        if !authority_matches_evidence {
+            return Err(AdapterError::invalid_contract(
+                "effective-state value authority does not match its evidence kind",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
@@ -1266,7 +1310,7 @@ impl EffectiveStateRevisionFact {
             EffectiveStateDimension::SessionMode => 3,
             EffectiveStateDimension::PermissionMode => 4,
         });
-        push_component(&mut encoded, self.value.as_bytes());
+        push_effective_state_qualified_value(&mut encoded, &self.value);
         encoded.push(match self.evidence_kind {
             EffectiveStateEvidenceKind::ConfiguredIntent => 1,
             EffectiveStateEvidenceKind::ResponseObserved => 2,
@@ -1283,6 +1327,81 @@ impl EffectiveStateRevisionFact {
         });
         Ok(*blake3::hash(&encoded).as_bytes())
     }
+}
+
+fn validate_effective_state_qualified_value(
+    value: &EffectiveStateQualifiedValue<String>,
+) -> Result<(), AdapterError> {
+    let unknown = value.quality == QualifiedValueQuality::Unknown;
+    if unknown != value.value.is_none() || unknown != value.unknown_reason.is_some() {
+        return Err(AdapterError::invalid_contract(
+            "effective-state qualified value must pair unknown quality with an absent value and reason",
+        ));
+    }
+    validate_runtime_semantic_text("effective-state value", value.value.as_deref())?;
+    if !is_bounded_native_field(
+        &value.provenance.native_field,
+        MAX_EFFECTIVE_STATE_PROVENANCE_FIELD_BYTES,
+    ) || value.provenance.normalization_contract_version == 0
+    {
+        return Err(AdapterError::invalid_contract(
+            "effective-state provenance is empty, oversized, uncanonical, or unversioned",
+        ));
+    }
+    if value.effective_at.is_some_and(|effective_at| {
+        !(-JS_SAFE_INTEGER_MAX_I64..=JS_SAFE_INTEGER_MAX_I64).contains(&effective_at)
+    }) {
+        return Err(AdapterError::invalid_contract(
+            "effective-state effective_at exceeds the portable safe-integer range",
+        ));
+    }
+    Ok(())
+}
+
+fn is_bounded_native_field(value: &str, max_bytes: usize) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z'))
+        && value.len() <= max_bytes
+        && bytes.all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
+}
+
+fn push_effective_state_qualified_value(
+    output: &mut Vec<u8>,
+    value: &EffectiveStateQualifiedValue<String>,
+) {
+    match value.value.as_ref() {
+        Some(value) => {
+            output.push(1);
+            push_component(output, value.as_bytes());
+        }
+        None => output.push(0),
+    }
+    output.push(qualified_value_quality_revision_tag(value.quality));
+    output.push(match value.authority {
+        EffectiveStateValueAuthority::NativeConfiguration => 1,
+        EffectiveStateValueAuthority::NativeResponse => 2,
+        EffectiveStateValueAuthority::NativeTransition => 3,
+    });
+    output.push(match value.completeness {
+        ContractCompleteness::Complete => 1,
+        ContractCompleteness::Partial => 2,
+        ContractCompleteness::Unknown => 3,
+    });
+    output.push(qualified_unknown_reason_revision_tag(value.unknown_reason));
+    match value.effective_at {
+        Some(effective_at) => {
+            output.push(1);
+            output.extend_from_slice(&effective_at.to_be_bytes());
+        }
+        None => output.push(0),
+    }
+    push_component(output, value.provenance.native_field.as_bytes());
+    output.extend_from_slice(
+        &value
+            .provenance
+            .normalization_contract_version
+            .to_be_bytes(),
+    );
 }
 
 fn validate_runtime_semantic_text(field: &str, value: Option<&str>) -> Result<(), AdapterError> {
@@ -2117,7 +2236,7 @@ fn push_usage_qualified_value<T>(
         }
         None => output.push(0),
     }
-    output.push(usage_quality_revision_tag(value.quality));
+    output.push(qualified_value_quality_revision_tag(value.quality));
     output.push(match value.authority {
         UsageValueAuthority::NativeResponse => 1,
         UsageValueAuthority::AdapterDerived => 2,
@@ -2127,15 +2246,7 @@ fn push_usage_qualified_value<T>(
         ContractCompleteness::Partial => 2,
         ContractCompleteness::Unknown => 3,
     });
-    output.push(match value.unknown_reason {
-        None => 0,
-        Some(QualifiedUnknownReason::Missing) => 1,
-        Some(QualifiedUnknownReason::Unsupported) => 2,
-        Some(QualifiedUnknownReason::Withheld) => 3,
-        Some(QualifiedUnknownReason::NotYetObserved) => 4,
-        Some(QualifiedUnknownReason::Ambiguous) => 5,
-        Some(QualifiedUnknownReason::Malformed) => 6,
-    });
+    output.push(qualified_unknown_reason_revision_tag(value.unknown_reason));
     match value.effective_at {
         Some(effective_at) => {
             output.push(1);
@@ -2152,13 +2263,25 @@ fn push_usage_qualified_value<T>(
     );
 }
 
-fn usage_quality_revision_tag(quality: QualifiedValueQuality) -> u8 {
+fn qualified_value_quality_revision_tag(quality: QualifiedValueQuality) -> u8 {
     match quality {
         QualifiedValueQuality::Exact => 1,
         QualifiedValueQuality::NativeClaimed => 2,
         QualifiedValueQuality::Derived => 3,
         QualifiedValueQuality::Estimated => 4,
         QualifiedValueQuality::Unknown => 5,
+    }
+}
+
+fn qualified_unknown_reason_revision_tag(reason: Option<QualifiedUnknownReason>) -> u8 {
+    match reason {
+        None => 0,
+        Some(QualifiedUnknownReason::Missing) => 1,
+        Some(QualifiedUnknownReason::Unsupported) => 2,
+        Some(QualifiedUnknownReason::Withheld) => 3,
+        Some(QualifiedUnknownReason::NotYetObserved) => 4,
+        Some(QualifiedUnknownReason::Ambiguous) => 5,
+        Some(QualifiedUnknownReason::Malformed) => 6,
     }
 }
 
@@ -2183,10 +2306,10 @@ fn validate_usage_qualified_value<T>(value: &UsageQualifiedValue<T>) -> Result<(
             "unknown usage-v2 value cannot claim complete coverage",
         ));
     }
-    if value.provenance.native_field.is_empty()
-        || value.provenance.native_field.len() > MAX_USAGE_PROVENANCE_FIELD_BYTES
-        || value.provenance.native_field.trim() != value.provenance.native_field
-        || value.provenance.normalization_contract_version == 0
+    if !is_bounded_native_field(
+        &value.provenance.native_field,
+        MAX_USAGE_PROVENANCE_FIELD_BYTES,
+    ) || value.provenance.normalization_contract_version == 0
     {
         return Err(AdapterError::invalid_contract(
             "usage-v2 value provenance is empty, oversized, uncanonical, or unversioned",
@@ -3091,6 +3214,32 @@ mod tests {
         .unwrap()
     }
 
+    fn effective_state_fact(batch: &FactBatch, value: &str) -> EffectiveStateRevisionFact {
+        EffectiveStateRevisionFact {
+            session: batch
+                .canonical_entity_key("session", b"native-session")
+                .unwrap(),
+            actor_run: batch.canonical_entity_key("run", b"native-run").unwrap(),
+            dimension: EffectiveStateDimension::Model,
+            value: QualifiedValue::from_parts(
+                Some(value.to_string()),
+                QualifiedValueQuality::Exact,
+                EffectiveStateValueAuthority::NativeResponse,
+                ContractCompleteness::Complete,
+                None,
+                Some(42),
+                EffectiveStateValueProvenance {
+                    native_field: "response.model".to_string(),
+                    normalization_contract_version: 1,
+                },
+            )
+            .unwrap(),
+            evidence_kind: EffectiveStateEvidenceKind::ResponseObserved,
+            completeness: ContractCompleteness::Complete,
+            operation: UserInputOperation::Upsert,
+        }
+    }
+
     fn usage_v2_fact(batch: &FactBatch, input_tokens: u64) -> UsageRevisionV2Fact {
         UsageRevisionV2Fact {
             session: batch
@@ -3539,6 +3688,49 @@ mod tests {
                 .unwrap()
                 .fact_id
         );
+    }
+
+    #[test]
+    fn effective_state_semantic_revision_covers_qualified_evidence() {
+        let batch = FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap();
+        let original = effective_state_fact(&batch, "model-a");
+        let original_revision = original.semantic_revision_key().unwrap();
+
+        let mut value = original.clone();
+        value.value.value = Some("model-b".to_string());
+        assert_ne!(value.semantic_revision_key().unwrap(), original_revision);
+
+        let mut provenance = original.clone();
+        provenance.value.provenance.native_field = "response.model_alias".to_string();
+        assert_ne!(
+            provenance.semantic_revision_key().unwrap(),
+            original_revision
+        );
+
+        let mut path_provenance = original.clone();
+        path_provenance.value.provenance.native_field = "/Users/alice/model".to_string();
+        assert!(path_provenance.semantic_revision_key().is_err());
+
+        let mut effective_at = original.clone();
+        effective_at.value.effective_at = Some(43);
+        assert_ne!(
+            effective_at.semantic_revision_key().unwrap(),
+            original_revision
+        );
+
+        let mut authority = original.clone();
+        authority.value.authority = EffectiveStateValueAuthority::NativeTransition;
+        assert!(authority.semantic_revision_key().is_err());
+
+        let mut completeness = original.clone();
+        completeness.value.completeness = ContractCompleteness::Partial;
+        assert!(completeness.semantic_revision_key().is_err());
+
+        let mut explicit_unknown = original;
+        explicit_unknown.value.value = None;
+        explicit_unknown.value.quality = QualifiedValueQuality::Unknown;
+        explicit_unknown.value.unknown_reason = Some(QualifiedUnknownReason::NotYetObserved);
+        assert!(explicit_unknown.semantic_revision_key().is_ok());
     }
 
     #[test]

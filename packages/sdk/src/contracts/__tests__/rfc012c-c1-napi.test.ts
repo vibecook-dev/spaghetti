@@ -59,6 +59,12 @@ test('native RFC 012C effective-state helper preserves portable identities', () 
     nativeFixture.configured.semantic_revision_ref.fact_revision_id,
     nativeFixture.observed.semantic_revision_ref.fact_revision_id,
   );
+  const pathProvenance = structuredClone(committed) as {
+    configured: { value: { provenance: { native_field: string } } };
+  };
+  pathProvenance.configured.value.provenance.native_field = '/Users/alice/model';
+  assert.throws(() => native.parseRfc012cEffectiveStateV1Json(JSON.stringify(pathProvenance)));
+  assert.throws(() => parseEffectiveStateFixture(pathProvenance, pathProvenance));
 });
 
 test('native RFC 012C interaction helper preserves RFC 012C §11 lifecycle identities', () => {
@@ -109,7 +115,8 @@ test('native and portable RFC 012C C1 helpers reject semantic mutation with stal
       nativeParse: native.parseRfc012cEffectiveStateV1Json,
       portableParse: parseEffectiveStateFixture,
       mutate: (value) => {
-        (value.configured as Record<string, unknown>).value = 'claude-opus';
+        const configured = value.configured as Record<string, unknown>;
+        (configured.value as Record<string, unknown>).value = 'claude-opus';
       },
     },
     {

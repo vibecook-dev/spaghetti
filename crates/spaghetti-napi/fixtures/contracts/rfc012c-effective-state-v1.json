@@ -14,33 +14,62 @@
     "completeness": "complete",
     "evidence_kind": "configured_intent",
     "operation": "upsert",
-    "semantic_revision_key_hex": "802bcff698fb82a060275714a4b1db6e1fd7f92aa28ae001b7697e68bc28b0a3",
+    "semantic_revision_key_hex": "be9e689f75df549fd9af2ecf2bdc0862adb2f49584607e45f733607dc690fde8",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:hPnXVQtlqopo2s9oK1o3PlvjTydlWwLF08lVJvuKJw4"
+      "fact_revision_id": "v1:XNZUWTDi8RdL0WVYlBR6bc_-fM9-nAeEC0qTCg551ts"
     },
-    "value": "claude-sonnet"
+    "value": {
+      "value": "claude-sonnet",
+      "quality": "native_claimed",
+      "authority": "native_configuration",
+      "completeness": "complete",
+      "provenance": {
+        "native_field": "launch.model",
+        "normalization_contract_version": 1
+      }
+    }
   },
   "observed": {
     "completeness": "complete",
     "evidence_kind": "response_observed",
     "operation": "upsert",
-    "semantic_revision_key_hex": "bace6350271ce1bf410696b4598b419c39629f1342677655ff4fdbca7a997837",
+    "semantic_revision_key_hex": "5b0dc5cd81f88df413b52cb3c83985dc49456078256b68586b85d21556523d39",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:D0rhXb-cUiPd2ELtotfJyWfQaj43UXs9YH7dyfxbfeA"
+      "fact_revision_id": "v1:cykGUlInYgpGJCpzVnRku2Hs2WBwgQ2Wy-AiGlnVDmk"
     },
-    "value": "claude-sonnet"
+    "value": {
+      "value": "claude-sonnet",
+      "quality": "exact",
+      "authority": "native_response",
+      "completeness": "complete",
+      "effective_at": 1776211200000,
+      "provenance": {
+        "native_field": "response.model",
+        "normalization_contract_version": 1
+      }
+    }
   },
   "retract": {
     "completeness": "complete",
     "evidence_kind": "native_transition",
     "operation": "retract",
-    "semantic_revision_key_hex": "3e6ee47884f34ed691f51d2cc957cbb2ab5d218acd96f8f2325199d6849ab383",
+    "semantic_revision_key_hex": "6b9726e36ff7627f90385b5fd8257a698ad00d2d1a5aee3b4e5bd205e88b09e9",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:7H6Sp5_QU-usTk6XKeRUpogIxDLDlFk7yZ2okgc17XM"
+      "fact_revision_id": "v1:ob3Kl_bBD1QVWfnnBAvEsLhWT1BzQjZ-F55Mvgxoc2k"
     },
-    "value": "claude-sonnet"
+    "value": {
+      "value": "claude-sonnet",
+      "quality": "exact",
+      "authority": "native_transition",
+      "completeness": "complete",
+      "effective_at": 1776211201000,
+      "provenance": {
+        "native_field": "runtime.model.transition",
+        "normalization_contract_version": 1
+      }
+    }
   }
 }

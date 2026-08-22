@@ -25,6 +25,8 @@ test('RFC 012C effective-state fixture validates configured, observed, and retra
   assert.equal(fixture.family, 'runtime.effective-state');
   assert.equal(fixture.dimension, 'model');
   assert.equal(fixture.configured.evidence_kind, 'configured_intent');
+  assert.equal(fixture.configured.value.authority, 'native_configuration');
+  assert.equal(fixture.configured.value.value, 'claude-sonnet');
   assert.equal(fixture.observed.evidence_kind, 'response_observed');
   assert.equal(fixture.retract.operation, 'retract');
   assert.notEqual(
@@ -54,10 +56,19 @@ test('RFC 012C interaction fixture validates RFC 012C §11 lifecycle slots', () 
 });
 
 test('effective-state and interaction fixtures reject identity and lifecycle drift', () => {
-  const semanticStateDrift = clone(effectiveStateContext) as { configured: { value: string } };
-  semanticStateDrift.configured.value = 'claude-opus';
+  const semanticStateDrift = clone(effectiveStateContext) as { configured: { value: { value: string } } };
+  semanticStateDrift.configured.value.value = 'claude-opus';
   assert.throws(
     () => parseRfc012cEffectiveStateV1Json(JSON.stringify(semanticStateDrift), effectiveStateContext),
+    ContractValidationError,
+  );
+
+  const pathProvenance = clone(effectiveStateContext) as {
+    configured: { value: { provenance: { native_field: string } } };
+  };
+  pathProvenance.configured.value.provenance.native_field = '/Users/alice/model';
+  assert.throws(
+    () => parseRfc012cEffectiveStateV1Json(JSON.stringify(pathProvenance), pathProvenance),
     ContractValidationError,
   );
 
