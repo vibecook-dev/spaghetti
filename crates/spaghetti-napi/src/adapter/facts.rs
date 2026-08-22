@@ -2943,6 +2943,10 @@ pub enum Fact {
     },
 }
 
+pub(crate) const MAX_UNKNOWN_NATIVE_KIND_BYTES: usize = 128;
+pub(crate) const MAX_UNKNOWN_REASON_BYTES: usize = 4 * 1024;
+pub(crate) const MAX_UNKNOWN_RAW_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
+
 impl Fact {
     pub fn kind(&self) -> &'static str {
         match self {
@@ -2980,6 +2984,42 @@ impl Fact {
             Self::UsageRevisionV2(_) => "runtime.usage-v2",
             Self::UnknownRecord { .. } => "unknown_record",
         }
+    }
+
+    fn validate_batch_shape(&self) -> Result<(), AdapterError> {
+        let Self::UnknownRecord {
+            native_kind,
+            raw_payload,
+            reason,
+        } = self
+        else {
+            return Ok(());
+        };
+        if native_kind.as_ref().is_some_and(|native_kind| {
+            native_kind.is_empty()
+                || native_kind.len() > MAX_UNKNOWN_NATIVE_KIND_BYTES
+                || native_kind.trim() != native_kind
+                || native_kind.chars().any(char::is_control)
+        }) {
+            return Err(AdapterError::invalid_contract(
+                "unknown-record native kind is empty, oversized, or noncanonical",
+            ));
+        }
+        if reason.is_empty()
+            || reason.len() > MAX_UNKNOWN_REASON_BYTES
+            || reason.trim() != reason
+            || reason.chars().any(char::is_control)
+        {
+            return Err(AdapterError::invalid_contract(
+                "unknown-record reason is empty, oversized, or noncanonical",
+            ));
+        }
+        if raw_payload.len() > MAX_UNKNOWN_RAW_PAYLOAD_BYTES {
+            return Err(AdapterError::invalid_contract(
+                "unknown-record retained payload exceeds the common evidence bound",
+            ));
+        }
+        Ok(())
     }
 
     pub fn entity_key(&self) -> Option<&EntityKey> {
@@ -3393,6 +3433,7 @@ impl FactBatch {
     ) -> Result<FactId, AdapterError> {
         let started = Instant::now();
         let result = (|| {
+            value.validate_batch_shape()?;
             if self.facts.len() == self.max_facts {
                 return Err(AdapterError::invalid_contract(format!(
                     "fact batch exceeds {} facts",
@@ -5105,5 +5146,62 @@ mod tests {
             panic!("expected unknown record");
         };
         assert!(raw_payload.is_empty());
+    }
+
+    #[test]
+    fn unknown_record_evidence_bounds_fail_before_batch_mutation() {
+        let record = record();
+        let unknown = |native_kind: Option<String>, raw_payload: Vec<u8>, reason: String| {
+            Fact::UnknownRecord {
+                native_kind,
+                raw_payload,
+                reason,
+            }
+        };
+
+        let mut exact = FactBatch::new(1, 1).unwrap();
+        exact
+            .push(
+                &record,
+                unknown(
+                    Some("k".repeat(MAX_UNKNOWN_NATIVE_KIND_BYTES)),
+                    vec![0; MAX_UNKNOWN_RAW_PAYLOAD_BYTES],
+                    "r".repeat(MAX_UNKNOWN_REASON_BYTES),
+                ),
+            )
+            .unwrap();
+        assert_eq!(exact.facts().len(), 1);
+
+        for invalid in [
+            unknown(Some(String::new()), Vec::new(), "reason".to_string()),
+            unknown(
+                Some("k".repeat(MAX_UNKNOWN_NATIVE_KIND_BYTES + 1)),
+                Vec::new(),
+                "reason".to_string(),
+            ),
+            unknown(
+                Some("kind".to_string()),
+                Vec::new(),
+                "r".repeat(MAX_UNKNOWN_REASON_BYTES + 1),
+            ),
+            unknown(
+                Some("kind".to_string()),
+                vec![0; MAX_UNKNOWN_RAW_PAYLOAD_BYTES + 1],
+                "reason".to_string(),
+            ),
+            unknown(Some(" kind".to_string()), Vec::new(), "reason".to_string()),
+            unknown(Some("kind".to_string()), Vec::new(), "reason\n".to_string()),
+        ] {
+            let mut batch = FactBatch::new(1, 1).unwrap();
+            assert!(batch.push(&record, invalid).is_err());
+            assert!(batch.facts().is_empty());
+            assert!(batch
+                .push(
+                    &record,
+                    unknown(Some("kind".to_string()), Vec::new(), "reason".to_string()),
+                )
+                .is_ok());
+            assert_eq!(batch.facts()[0].provenance.local_fact_ordinal, 0);
+        }
     }
 }
