@@ -5010,6 +5010,7 @@ pub struct ScopedObservationAsyncSourceOwner {
     handle: ScopedObservationAsyncHandle,
     active: ScopedObservationEpochState,
     bindings: Vec<ScopedObservationAppendPassBinding>,
+    directory_bindings: Vec<ScopedObservationDirectoryPassBinding>,
     policy: ScopedObservationSourceOwnerRetryPolicy,
     retry_deadlines: BTreeMap<String, tokio::time::Instant>,
     operation: ScopedObservationOperationGuard,
@@ -5021,6 +5022,7 @@ impl std::fmt::Debug for ScopedObservationAsyncSourceOwner {
             .debug_struct("ScopedObservationAsyncSourceOwner")
             .field("scope_epoch", &self.active.scope_epoch)
             .field("bindings", &self.bindings)
+            .field("directory_bindings", &self.directory_bindings)
             .field("policy", &self.policy)
             .field("object_error_count", &self.active.object_errors.len())
             .field("scheduled_retry_count", &self.retry_deadlines.len())
@@ -5552,17 +5554,32 @@ impl ScopedObservationAsyncHandle {
         bindings: Vec<ScopedObservationAppendPassBinding>,
         policy: ScopedObservationSourceOwnerRetryPolicy,
     ) -> Result<ScopedObservationAsyncSourceOwner, ScopedObservationSourceOwnerBindFailure> {
+        self.bind_epoch_source_owner_with_directories(active, bindings, Vec::new(), policy)
+    }
+
+    pub(crate) fn bind_epoch_source_owner_with_directories(
+        &self,
+        active: ScopedObservationEpochState,
+        bindings: Vec<ScopedObservationAppendPassBinding>,
+        directory_bindings: Vec<ScopedObservationDirectoryPassBinding>,
+        policy: ScopedObservationSourceOwnerRetryPolicy,
+    ) -> Result<ScopedObservationAsyncSourceOwner, ScopedObservationSourceOwnerBindFailure> {
         let validation = {
             let drain = self.shared.lock_drain();
-            self.shared
-                .host
-                .validate_epoch_source_owner_binding(&active, &drain, &bindings, policy)
+            self.shared.host.validate_epoch_source_owner_binding(
+                &active,
+                &drain,
+                &bindings,
+                &directory_bindings,
+                policy,
+            )
         };
         if let Err(error) = validation {
             return Err(ScopedObservationSourceOwnerBindFailure {
                 error,
                 active: Box::new(active),
                 bindings,
+                directory_bindings,
             });
         }
         let operation = match self
@@ -5585,6 +5602,7 @@ impl ScopedObservationAsyncHandle {
                     error,
                     active: Box::new(active),
                     bindings,
+                    directory_bindings,
                 });
             }
         };
@@ -5604,6 +5622,7 @@ impl ScopedObservationAsyncHandle {
             handle: self.clone(),
             active,
             bindings,
+            directory_bindings,
             policy,
             retry_deadlines,
             operation,
@@ -5650,17 +5669,19 @@ impl ScopedObservationAsyncSourceOwner {
     ) -> (
         ScopedObservationEpochState,
         Vec<ScopedObservationAppendPassBinding>,
+        Vec<ScopedObservationDirectoryPassBinding>,
     ) {
         let Self {
             handle: _,
             active,
             bindings,
+            directory_bindings,
             policy: _,
             retry_deadlines: _,
             operation,
         } = self;
         drop(operation);
-        (active, bindings)
+        (active, bindings, directory_bindings)
     }
 
     /// Run until attachment cancellation, continuity invalidation, or an
@@ -5697,6 +5718,7 @@ impl ScopedObservationAsyncSourceOwner {
             handle: _,
             active,
             bindings,
+            directory_bindings,
             policy,
             retry_deadlines: _,
             operation,
@@ -5707,6 +5729,7 @@ impl ScopedObservationAsyncSourceOwner {
         ScopedObservationStoppedSourceOwner {
             active,
             bindings,
+            directory_bindings,
             policy,
             exit,
         }
@@ -7620,7 +7643,8 @@ impl ScopedObservationAsyncResyncHandoff {
             watcher_policy,
         } = self;
         let handle = watcher.handle.clone();
-        let (mut active, mut bindings, source_policy, exit) = source.into_rebind_parts();
+        let (mut active, mut bindings, mut directory_bindings, source_policy, exit) =
+            source.into_rebind_parts();
         if !matches!(
             exit,
             ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(_)
@@ -7684,10 +7708,16 @@ impl ScopedObservationAsyncResyncHandoff {
                 binding.force_contract_replay = false;
             }
             before_source_binding(&handle);
-            let source = match handle.bind_epoch_source_owner(active, bindings, source_policy) {
+            let source = match handle.bind_epoch_source_owner_with_directories(
+                active,
+                bindings,
+                directory_bindings,
+                source_policy,
+            ) {
                 Ok(source) => source,
                 Err(failure) => {
-                    let (error, returned_active, returned_bindings) = failure.into_parts();
+                    let (error, returned_active, returned_bindings, returned_directory_bindings) =
+                        failure.into_parts();
                     let reoverflow = error
                         == ScopedObservationSourceOwnerBindingError::InvalidEpochState
                         && scoped_automatic_resync_is_exact_reoverflow(
@@ -7698,6 +7728,7 @@ impl ScopedObservationAsyncResyncHandoff {
                     if reoverflow {
                         active = returned_active;
                         bindings = returned_bindings;
+                        directory_bindings = returned_directory_bindings;
                         continue;
                     }
                     return Err(scoped_finish_automatic_resync_failure(
@@ -7720,11 +7751,12 @@ impl ScopedObservationAsyncResyncHandoff {
                             returned_source.active.scope_epoch,
                         );
                     if reoverflow {
-                        let (returned_active, returned_bindings) =
+                        let (returned_active, returned_bindings, returned_directory_bindings) =
                             returned_source.into_automatic_rebind_parts();
                         watcher = returned_watcher;
                         active = returned_active;
                         bindings = returned_bindings;
+                        directory_bindings = returned_directory_bindings;
                         continue;
                     }
                     let mut returned_watcher = returned_watcher;
@@ -8479,6 +8511,10 @@ impl std::fmt::Debug for ScopedObservationAsyncResyncHandoff {
             .field("watcher_state", &self.watcher.state())
             .field("source_exit", &self.source.exit())
             .field("source_binding_count", &self.source.binding_count())
+            .field(
+                "source_directory_binding_count",
+                &self.source.directory_binding_count(),
+            )
             .field("watcher_policy", &self.watcher_policy)
             .finish_non_exhaustive()
     }
@@ -8522,6 +8558,10 @@ impl std::fmt::Debug for ScopedObservationAsyncStoppedOwners {
             .debug_struct("ScopedObservationAsyncStoppedOwners")
             .field("source_exit", &self.source.exit())
             .field("source_binding_count", &self.source.binding_count())
+            .field(
+                "source_directory_binding_count",
+                &self.source.directory_binding_count(),
+            )
             .field("first_exit", &self.first_exit)
             .field("terminal_failure", &self.terminal_failure)
             .field("supervision_error", &self.supervision_error)
@@ -18446,6 +18486,7 @@ pub struct ScopedObservationSourceOwnerBindFailure {
     error: ScopedObservationSourceOwnerBindingError,
     active: Box<ScopedObservationEpochState>,
     bindings: Vec<ScopedObservationAppendPassBinding>,
+    directory_bindings: Vec<ScopedObservationDirectoryPassBinding>,
 }
 
 impl ScopedObservationSourceOwnerBindFailure {
@@ -18459,8 +18500,14 @@ impl ScopedObservationSourceOwnerBindFailure {
         ScopedObservationSourceOwnerBindingError,
         ScopedObservationEpochState,
         Vec<ScopedObservationAppendPassBinding>,
+        Vec<ScopedObservationDirectoryPassBinding>,
     ) {
-        (self.error, *self.active, self.bindings)
+        (
+            self.error,
+            *self.active,
+            self.bindings,
+            self.directory_bindings,
+        )
     }
 }
 
@@ -18471,6 +18518,7 @@ impl std::fmt::Debug for ScopedObservationSourceOwnerBindFailure {
             .field("error", &self.error)
             .field("scope_epoch", &self.active.scope_epoch)
             .field("bindings", &self.bindings)
+            .field("directory_bindings", &self.directory_bindings)
             .finish()
     }
 }
@@ -18595,6 +18643,69 @@ impl std::fmt::Debug for ScopedObservationAppendPassBinding {
                 &self.origin.source_timestamp_hint.is_some(),
             )
             .field("force_contract_replay", &self.force_contract_replay)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Long-lived path-free identity binding for one exact dynamic directory
+/// relation. It carries only declaration-ordered identity inputs; every scan
+/// must still mint fresh pass-local source and listing authority.
+#[derive(Clone)]
+pub struct ScopedObservationDirectoryPassBinding {
+    relation_id: String,
+    identity_inputs: Vec<ScopedObservationOwnedIdentityInput>,
+}
+
+impl ScopedObservationDirectoryPassBinding {
+    pub fn new(
+        relation_id: impl Into<String>,
+        identity_inputs: Vec<ScopedObservationOwnedIdentityInput>,
+    ) -> Result<Self, ScopedObservationSourceOwnerBindingError> {
+        let relation_id = relation_id.into();
+        if relation_id.trim().is_empty() || identity_inputs.is_empty() {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
+        }
+        if identity_inputs.iter().enumerate().any(|(index, input)| {
+            identity_inputs[..index]
+                .iter()
+                .any(|prior| prior.name == input.name)
+        }) {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidIdentityInput);
+        }
+        Ok(Self {
+            relation_id,
+            identity_inputs,
+        })
+    }
+
+    pub fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    fn borrowed_identity_inputs(&self) -> Vec<ScopeIdentityInput<'_>> {
+        self.identity_inputs
+            .iter()
+            .map(|input| ScopeIdentityInput {
+                name: &input.name,
+                value: &input.value,
+            })
+            .collect()
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationDirectoryPassBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationDirectoryPassBinding")
+            .field("relation_id", &self.relation_id)
+            .field(
+                "identity_input_names",
+                &self
+                    .identity_inputs
+                    .iter()
+                    .map(ScopedObservationOwnedIdentityInput::name)
+                    .collect::<Vec<_>>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -18791,6 +18902,7 @@ struct ScopedObservationSourceOwnerWaitContext {
 pub struct ScopedObservationStoppedSourceOwner {
     active: ScopedObservationEpochState,
     bindings: Vec<ScopedObservationAppendPassBinding>,
+    directory_bindings: Vec<ScopedObservationDirectoryPassBinding>,
     policy: ScopedObservationSourceOwnerRetryPolicy,
     exit: ScopedObservationSourceOwnerRunExit,
 }
@@ -18802,6 +18914,10 @@ impl ScopedObservationStoppedSourceOwner {
 
     pub fn binding_count(&self) -> usize {
         self.bindings.len()
+    }
+
+    pub fn directory_binding_count(&self) -> usize {
+        self.directory_bindings.len()
     }
 
     pub fn retry_policy(&self) -> ScopedObservationSourceOwnerRetryPolicy {
@@ -18824,10 +18940,17 @@ impl ScopedObservationStoppedSourceOwner {
     ) -> (
         ScopedObservationEpochState,
         Vec<ScopedObservationAppendPassBinding>,
+        Vec<ScopedObservationDirectoryPassBinding>,
         ScopedObservationSourceOwnerRetryPolicy,
         ScopedObservationSourceOwnerRunExit,
     ) {
-        (self.active, self.bindings, self.policy, self.exit)
+        (
+            self.active,
+            self.bindings,
+            self.directory_bindings,
+            self.policy,
+            self.exit,
+        )
     }
 }
 
@@ -20380,6 +20503,7 @@ impl ScopedObservationAccessHost {
         active: &ScopedObservationEpochState,
         drain: &ScopedObservationConsumerDrain,
         bindings: &[ScopedObservationAppendPassBinding],
+        directory_bindings: &[ScopedObservationDirectoryPassBinding],
         policy: ScopedObservationSourceOwnerRetryPolicy,
     ) -> Result<(), ScopedObservationSourceOwnerBindingError> {
         if !self.owns_consumer_drain(drain)
@@ -20477,6 +20601,51 @@ impl ScopedObservationAccessHost {
             .append_objects
             .keys()
             .any(|relation_id| !relation_ids.contains_key(relation_id.as_str()))
+        {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
+        }
+        if directory_bindings.len() != self.dynamic_observation_relations.len()
+            || directory_bindings.len() != active.admission.dynamic_relation_members.len()
+        {
+            return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
+        }
+        let mut directory_relation_ids = BTreeSet::new();
+        for binding in directory_bindings {
+            if !directory_relation_ids.insert(binding.relation_id.as_str())
+                || !self
+                    .dynamic_observation_relations
+                    .contains(binding.relation_id.as_str())
+                || !active
+                    .admission
+                    .dynamic_relation_members
+                    .contains_key(binding.relation_id.as_str())
+                || active
+                    .admission
+                    .directory_relation_listing(binding.relation_id.as_str())
+                    .is_none_or(|listing| listing.relation_id() != binding.relation_id)
+            {
+                return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
+            }
+            let declaration = plan
+                .relation(&binding.relation_id)
+                .filter(|declaration| {
+                    declaration.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                })
+                .ok_or(ScopedObservationSourceOwnerBindingError::InvalidRelationSet)?;
+            if declaration.identity_inputs.len() != binding.identity_inputs.len()
+                || declaration
+                    .identity_inputs
+                    .iter()
+                    .zip(&binding.identity_inputs)
+                    .any(|(expected, actual)| expected != &actual.name)
+            {
+                return Err(ScopedObservationSourceOwnerBindingError::InvalidIdentityInput);
+            }
+        }
+        if self
+            .dynamic_observation_relations
+            .iter()
+            .any(|relation_id| !directory_relation_ids.contains(relation_id.as_ref()))
         {
             return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
         }

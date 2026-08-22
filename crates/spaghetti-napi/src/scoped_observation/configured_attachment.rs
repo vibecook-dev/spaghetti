@@ -41,16 +41,16 @@ use super::{
     ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncResyncFailure,
     ScopedObservationAsyncRuntime, ScopedObservationAsyncStoppedOwners,
     ScopedObservationConsumerOfferError, ScopedObservationDeliveryLimits,
-    ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
-    ScopedObservationNativeWatcher, ScopedObservationNativeWatcherRecoveryPolicy,
-    ScopedObservationOpenDrainError, ScopedObservationOwnedIdentityInput,
-    ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
-    ScopedObservationQueueLimits, ScopedObservationSourceOwnerRetryPolicy,
-    ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
-    ScopedObservationTrustedAccessRequest, ScopedObservationUnknownWireNegotiation,
-    ScopedObserverFailureReason, ScopedProjectionDeliveryError,
-    ScopedRelationMembershipObservation, ScopedRootIdentityRequest, ScopedSourceObjectErrorRuntime,
-    ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
+    ScopedObservationDirectoryPassBinding, ScopedObservationNativeWatchBackend,
+    ScopedObservationNativeWatchCallback, ScopedObservationNativeWatcher,
+    ScopedObservationNativeWatcherRecoveryPolicy, ScopedObservationOpenDrainError,
+    ScopedObservationOwnedIdentityInput, ScopedObservationProjectionLimits,
+    ScopedObservationProjectionSink, ScopedObservationQueueLimits,
+    ScopedObservationSourceOwnerRetryPolicy, ScopedObservationStartupError,
+    ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
+    ScopedObservationUnknownWireNegotiation, ScopedObserverFailureReason,
+    ScopedProjectionDeliveryError, ScopedRelationMembershipObservation, ScopedRootIdentityRequest,
+    ScopedSourceObjectErrorRuntime, ScopedSourceObjectFailureCode, SCOPED_INITIAL_SCOPE_EPOCH,
 };
 
 const MAX_CONFIGURED_ROOTS: usize = 16;
@@ -407,6 +407,17 @@ impl PreparedScopedDirectoryRelationBinding {
                 value: &input.value,
             })
             .collect()
+    }
+
+    fn owner_binding(
+        &self,
+    ) -> Result<ScopedObservationDirectoryPassBinding, ConfiguredScopedObservationRuntimeError>
+    {
+        ScopedObservationDirectoryPassBinding::new(
+            self.relation_id.clone(),
+            self.identity_inputs.clone(),
+        )
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
     }
 }
 
@@ -804,7 +815,7 @@ impl ConfiguredScopedObservationSupervisor {
             mut watcher,
             objects,
             bindings,
-            directory_bindings: _,
+            directory_bindings,
             admission,
             projection,
             bootstrap_object_errors,
@@ -827,11 +838,27 @@ impl ConfiguredScopedObservationSupervisor {
                 );
             }
         };
-        let source = match handle.bind_epoch_source_owner(active, bindings, options.source_retry) {
+        let owner_directory_bindings = match directory_bindings
+            .iter()
+            .map(PreparedScopedDirectoryRelationBinding::owner_binding)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                configured_fail_watcher(&mut watcher);
+                return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(error);
+            }
+        };
+        let source = match handle.bind_epoch_source_owner_with_directories(
+            active,
+            bindings,
+            owner_directory_bindings,
+            options.source_retry,
+        ) {
             Ok(source) => source,
             Err(failure) => {
-                let (_error, active, bindings) = failure.into_parts();
-                drop((active, bindings));
+                let (_error, active, bindings, directory_bindings) = failure.into_parts();
+                drop((active, bindings, directory_bindings));
                 configured_fail_watcher(&mut watcher);
                 return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(
                     ConfiguredScopedObservationRuntimeError::SourceBinding,

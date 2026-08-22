@@ -2658,10 +2658,11 @@ pub(crate) mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(matches!(
-            stopped,
-            ConfiguredScopedObservationSupervisorRunResult::Stopped(_)
-        ));
+        let ConfiguredScopedObservationSupervisorRunResult::Stopped(owners) = stopped else {
+            panic!("configured dynamic owner must close structurally");
+        };
+        assert_eq!(owners.source().binding_count(), 1);
+        assert_eq!(owners.source().directory_binding_count(), 1);
         assert!(close.wait_async().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
         assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -7034,7 +7035,8 @@ pub(crate) mod tests {
         assert!(failed_debug.contains("native-session-id"));
         assert!(!failed_debug.contains("wrong-session"));
         assert!(!failed_debug.contains("async-runtime-session"));
-        let (_, active, _) = failed_binding.into_parts();
+        let (_, active, _, directory_bindings) = failed_binding.into_parts();
+        assert!(directory_bindings.is_empty());
 
         let mut wrong_origin = origin.clone();
         wrong_origin.object_id = 999;
@@ -7063,7 +7065,8 @@ pub(crate) mod tests {
             failed_origin.error(),
             ScopedObservationSourceOwnerBindingError::AccessIdentityMismatch
         );
-        let (_, active, _) = failed_origin.into_parts();
+        let (_, active, _, directory_bindings) = failed_origin.into_parts();
+        assert!(directory_bindings.is_empty());
 
         let binding = ScopedObservationAppendPassBinding::new(
             "root-object",
@@ -7194,7 +7197,8 @@ pub(crate) mod tests {
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         assert_eq!(attempts.load(Ordering::SeqCst), attempts_before_resync);
-        let (mut active, bindings, policy, exit) = stopped.into_rebind_parts();
+        let (mut active, bindings, directory_bindings, policy, exit) = stopped.into_rebind_parts();
+        assert!(directory_bindings.is_empty());
         assert!(matches!(
             exit,
             ScopedObservationSourceOwnerRunExit::ContinuityInvalidated(_)
@@ -7214,7 +7218,9 @@ pub(crate) mod tests {
             failed_rebind.error(),
             ScopedObservationSourceOwnerBindingError::InvalidEpochState
         );
-        let (_, returned_active, returned_bindings) = failed_rebind.into_parts();
+        let (_, returned_active, returned_bindings, directory_bindings) =
+            failed_rebind.into_parts();
+        assert!(directory_bindings.is_empty());
         active = returned_active;
         assert_eq!(returned_bindings.len(), 1);
 
