@@ -367,6 +367,7 @@ pub(crate) struct PreparedConfiguredAppendRuntime {
     objects: Vec<ScopedKnownAppendObject>,
     bindings: Vec<ScopedObservationAppendPassBinding>,
     directory_bindings: Vec<PreparedScopedDirectoryRelationBinding>,
+    related_relation_bindings: Vec<PreparedScopedRelatedRelationBinding>,
     required_coverage_objects: usize,
 }
 
@@ -426,6 +427,50 @@ impl std::fmt::Debug for PreparedScopedDirectoryRelationBinding {
                 "identity_input_names",
                 &self.identity_input_names().collect::<Vec<_>>(),
             )
+            .field("bounds", &self.bounds)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Declaration-owned shape for one evidence-derived exact-object relation.
+///
+/// Unlike known objects and configured child directories, the identity values
+/// for these relations must come from retained adapter join evidence. This
+/// value therefore carries only the exact declared input names and bounds; it
+/// cannot render a locator or reserve native access by itself.
+#[derive(Clone)]
+pub(crate) struct PreparedScopedRelatedRelationBinding {
+    relation_id: String,
+    primitive: ScopeRelationPrimitive,
+    identity_input_names: Vec<String>,
+    bounds: ScopeRelationBounds,
+}
+
+impl PreparedScopedRelatedRelationBinding {
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub(crate) fn primitive(&self) -> ScopeRelationPrimitive {
+        self.primitive
+    }
+
+    pub(crate) fn identity_input_names(&self) -> impl Iterator<Item = &str> {
+        self.identity_input_names.iter().map(String::as_str)
+    }
+
+    pub(crate) fn bounds(&self) -> ScopeRelationBounds {
+        self.bounds
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedRelationBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedRelatedRelationBinding")
+            .field("relation_id", &self.relation_id)
+            .field("primitive", &self.primitive)
+            .field("identity_input_names", &self.identity_input_names)
             .field("bounds", &self.bounds)
             .finish_non_exhaustive()
     }
@@ -644,6 +689,10 @@ impl PreparedConfiguredAppendRuntime {
         &self.directory_bindings
     }
 
+    pub(crate) fn related_relation_bindings(&self) -> &[PreparedScopedRelatedRelationBinding] {
+        &self.related_relation_bindings
+    }
+
     pub(crate) fn required_coverage_objects(&self) -> usize {
         self.required_coverage_objects
     }
@@ -655,12 +704,14 @@ impl PreparedConfiguredAppendRuntime {
         Vec<ScopedKnownAppendObject>,
         Vec<ScopedObservationAppendPassBinding>,
         Vec<PreparedScopedDirectoryRelationBinding>,
+        Vec<PreparedScopedRelatedRelationBinding>,
     ) {
         (
             self.host,
             self.objects,
             self.bindings,
             self.directory_bindings,
+            self.related_relation_bindings,
         )
     }
 
@@ -687,6 +738,13 @@ impl PreparedConfiguredAppendRuntime {
             ScopedObservationNativeWatchCallback,
         ) -> Result<Box<dyn ScopedObservationNativeWatchBackend>, ()>,
     {
+        // Related-object relations need a retained join snapshot and a fresh
+        // pass-local reservation for every rendered locator. Do not let a
+        // partially composed runtime silently omit them while that owner is
+        // being installed.
+        if !self.related_relation_bindings.is_empty() {
+            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+        }
         let options = options.validate(self.objects.len(), self.required_coverage_objects)?;
         let admission = ScopedObservationAdmissionLane::new(options.admission)
             .map_err(|_| ConfiguredScopedObservationRuntimeError::AdmissionOpen)?;
@@ -766,6 +824,14 @@ impl std::fmt::Debug for PreparedConfiguredAppendRuntime {
                     .directory_bindings
                     .iter()
                     .map(PreparedScopedDirectoryRelationBinding::relation_id)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "related_relation_ids",
+                &self
+                    .related_relation_bindings
+                    .iter()
+                    .map(PreparedScopedRelatedRelationBinding::relation_id)
                     .collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()
@@ -1347,6 +1413,7 @@ pub(crate) struct PreparedScopedObservationAttachment {
     root_relation_id: String,
     known_object_sources: BTreeMap<String, PreparedScopedKnownObjectSource>,
     directory_relation_bounds: BTreeMap<String, ScopeRelationBounds>,
+    related_relation_bindings: BTreeMap<String, PreparedScopedRelatedRelationBinding>,
     unsupported_observation_relations: BTreeSet<String>,
     relation_identity_inputs: BTreeMap<String, Vec<ScopedObservationOwnedIdentityInput>>,
 }
@@ -1377,6 +1444,12 @@ impl PreparedScopedObservationAttachment {
             .map(Vec::as_slice)
     }
 
+    pub(crate) fn related_relation_bindings(
+        &self,
+    ) -> impl Iterator<Item = &PreparedScopedRelatedRelationBinding> {
+        self.related_relation_bindings.values()
+    }
+
     /// Bind every exact known object to the common append driver and decoder
     /// before the observer installs a watcher. A non-append stream, adapter
     /// bootstrap failure, or identity inconsistency fails closed without
@@ -1394,6 +1467,7 @@ impl PreparedScopedObservationAttachment {
             root_relation_id: _,
             known_object_sources,
             directory_relation_bounds,
+            related_relation_bindings,
             unsupported_observation_relations,
             relation_identity_inputs,
         } = self;
@@ -1405,7 +1479,10 @@ impl PreparedScopedObservationAttachment {
         {
             return Err(unsupported_configured_runtime());
         }
-        if directory_relation_bounds
+        if directory_relation_bounds.keys().any(|relation_id| {
+            known_object_sources.contains_key(relation_id)
+                || related_relation_bindings.contains_key(relation_id)
+        }) || related_relation_bindings
             .keys()
             .any(|relation_id| known_object_sources.contains_key(relation_id))
         {
@@ -1520,11 +1597,21 @@ impl PreparedScopedObservationAttachment {
                 bounds,
             });
         }
+        let mut prepared_related_bindings = Vec::with_capacity(related_relation_bindings.len());
+        for (_, binding) in related_relation_bindings {
+            let max_objects = usize::try_from(binding.bounds.max_objects)
+                .map_err(|_| invalid_configured_runtime())?;
+            required_coverage_objects = required_coverage_objects
+                .checked_add(max_objects)
+                .ok_or_else(invalid_configured_runtime)?;
+            prepared_related_bindings.push(binding);
+        }
         Ok(PreparedConfiguredAppendRuntime {
             host,
             objects,
             bindings,
             directory_bindings,
+            related_relation_bindings: prepared_related_bindings,
             required_coverage_objects,
         })
     }
@@ -1559,6 +1646,14 @@ impl std::fmt::Debug for PreparedScopedObservationAttachment {
                 "directory_relation_ids",
                 &self
                     .directory_relation_bounds
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "related_relation_ids",
+                &self
+                    .related_relation_bindings
                     .keys()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
@@ -1635,6 +1730,27 @@ fn compose_prepared_attachment(
         .filter(|relation| relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId)
         .map(|relation| (relation.relation_id.clone(), relation.bounds))
         .collect::<BTreeMap<_, _>>();
+    let related_relation_bindings = observation_relations
+        .iter()
+        .filter(|relation| {
+            matches!(
+                relation.primitive,
+                ScopeRelationPrimitive::SiblingObject
+                    | ScopeRelationPrimitive::ReferencedObjectFromField
+            )
+        })
+        .map(|relation| {
+            (
+                relation.relation_id.clone(),
+                PreparedScopedRelatedRelationBinding {
+                    relation_id: relation.relation_id.clone(),
+                    primitive: relation.primitive,
+                    identity_input_names: relation.identity_inputs.clone(),
+                    bounds: relation.bounds,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let unsupported_observation_relations = observation_relations
         .iter()
         .filter(|relation| {
@@ -1642,12 +1758,21 @@ fn compose_prepared_attachment(
                 relation.primitive,
                 ScopeRelationPrimitive::KnownObject
                     | ScopeRelationPrimitive::ChildDirectoryByNativeId
+                    | ScopeRelationPrimitive::SiblingObject
+                    | ScopeRelationPrimitive::ReferencedObjectFromField
             )
         })
         .map(|relation| relation.relation_id.clone())
         .collect::<BTreeSet<_>>();
     let expected_identity_names = observation_relations
         .iter()
+        .filter(|relation| {
+            matches!(
+                relation.primitive,
+                ScopeRelationPrimitive::KnownObject
+                    | ScopeRelationPrimitive::ChildDirectoryByNativeId
+            )
+        })
         .flat_map(|relation| relation.identity_inputs.iter().cloned())
         .collect::<BTreeSet<_>>();
     if request
@@ -1662,6 +1787,13 @@ fn compose_prepared_attachment(
     }
     let relation_identity_inputs = observation_relations
         .iter()
+        .filter(|relation| {
+            matches!(
+                relation.primitive,
+                ScopeRelationPrimitive::KnownObject
+                    | ScopeRelationPrimitive::ChildDirectoryByNativeId
+            )
+        })
         .map(|relation| {
             Ok((
                 relation.relation_id.clone(),
@@ -1791,6 +1923,7 @@ fn compose_prepared_attachment(
         root_relation_id,
         known_object_sources,
         directory_relation_bounds,
+        related_relation_bindings,
         unsupported_observation_relations,
         relation_identity_inputs,
     })

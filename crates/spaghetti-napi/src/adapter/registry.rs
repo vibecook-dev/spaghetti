@@ -635,6 +635,8 @@ pub(crate) mod tests {
 
     const COMPOSED_ROOT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
+    const COMPOSED_RELATED_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"team-config-from-evidence","primitive":"ReferencedObjectFromField","access_root":"root","locator":"teams/{team-name}/config.json","identity_inputs":["team-name"],"bounds":{"max_fan_out":4,"max_depth":1,"max_objects":4,"max_bytes":4096,"max_rows":0},"observation_binding":{"stream_id":"team-config-stream","source_pattern":"teams/*/config.json"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
     const COMPOSED_TWO_APPEND_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"sibling-stream","source_pattern":"siblings/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     fn promoted_fixture_catalog_with_scope(
@@ -646,6 +648,8 @@ pub(crate) mod tests {
     ) {
         let source_document = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"},{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"decoder_id":"fixture-descendant","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
+        } else if scope_document == COMPOSED_RELATED_SCOPE_DOCUMENT {
+            br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"},{"stream_id":"team-config-stream","root_id":"root","relative_patterns":["teams/*/config.json"],"decoder_id":"fixture-related","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":4096},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
         } else if scope_document == COMPOSED_TWO_APPEND_SCOPE_DOCUMENT {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"},{"stream_id":"sibling-stream","root_id":"root","relative_patterns":["siblings/*.jsonl"],"decoder_id":"fixture-sibling","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"}]}"#.as_slice()
         } else if scope_document == COMPOSED_ROOT_SCOPE_DOCUMENT {
@@ -778,6 +782,28 @@ pub(crate) mod tests {
                 exclude: Vec::new(),
             },
             decoder: DecoderId::new("fixture-descendant").unwrap(),
+            authority: StreamAuthority::Canonical,
+            entity_scope: EntityScope::Session,
+            priority: IngestPriority::Interactive,
+            consistency: ConsistencyPolicy::SnapshotReplace,
+            deletion: DeletionPolicy::MirrorSource,
+            retention: RawRetentionPolicy::HashOnly,
+            capabilities: Vec::new(),
+        }
+    }
+
+    fn fixture_related_runtime_stream() -> StreamSpec {
+        StreamSpec {
+            id: StreamId::new("team-config-stream").unwrap(),
+            driver: DriverSpec::ReplaceDocument(ReplaceDocumentConfig {
+                max_document_bytes: 4_096,
+            }),
+            selector: ObjectSelector {
+                root_name: "root".to_string(),
+                include: vec!["teams/*/config.json".to_string()],
+                exclude: Vec::new(),
+            },
+            decoder: DecoderId::new("fixture-related").unwrap(),
             authority: StreamAuthority::Canonical,
             entity_scope: EntityScope::Session,
             priority: IngestPriority::Interactive,
@@ -944,6 +970,36 @@ pub(crate) mod tests {
                     .with_streams(vec![
                         fixture_root_runtime_stream(),
                         fixture_descendant_runtime_stream(),
+                    ])
+                    .with_configured_root_discovery(discover_calls),
+            )
+            .register_native_support_probe("fixture", move |_| {
+                probe_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap()
+    }
+
+    fn configured_related_object_registry(
+        probe_calls: Arc<AtomicUsize>,
+        discover_calls: Arc<AtomicUsize>,
+    ) -> AdapterRegistry {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(COMPOSED_RELATED_SCOPE_DOCUMENT);
+        AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![
+                        fixture_root_runtime_stream(),
+                        fixture_related_runtime_stream(),
                     ])
                     .with_configured_root_discovery(discover_calls),
             )
@@ -2522,11 +2578,110 @@ pub(crate) mod tests {
             ScopedObjectRead::Available { .. }
         ));
         drop(pass);
-        let (host, objects, bindings, directory_bindings) = prepared_runtime.into_parts();
+        let (host, objects, bindings, directory_bindings, related_relation_bindings) =
+            prepared_runtime.into_parts();
         assert_eq!(objects.len(), 1);
         assert_eq!(bindings.len(), 1);
         assert!(directory_bindings.is_empty());
+        assert!(related_relation_bindings.is_empty());
         drop(host);
+    }
+
+    #[test]
+    fn configured_related_object_identity_stays_evidence_derived_and_non_authorizing() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_related_object_registry(
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-related-private-root");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::write(root.join("sessions/session.jsonl"), b"fixture\n").unwrap();
+
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![root.clone()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(attachment
+            .relation_identity_inputs("team-config-from-evidence")
+            .is_none());
+        let related = attachment.related_relation_bindings().collect::<Vec<_>>();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].relation_id(), "team-config-from-evidence");
+        assert_eq!(
+            related[0].primitive(),
+            ScopeRelationPrimitive::ReferencedObjectFromField
+        );
+        assert_eq!(
+            related[0].identity_input_names().collect::<Vec<_>>(),
+            vec!["team-name"]
+        );
+        assert_eq!(related[0].bounds().max_objects, 4);
+
+        let prepared = attachment.prepare_append_runtime(16, 16).unwrap();
+        assert_eq!(prepared.objects().len(), 1);
+        assert!(prepared.directory_bindings().is_empty());
+        assert_eq!(prepared.related_relation_bindings().len(), 1);
+        assert_eq!(prepared.required_coverage_objects(), 5);
+
+        let factory_called = Arc::new(AtomicBool::new(false));
+        let error = prepared
+            .open_with_watcher_factory(ConfiguredScopedObservationRuntimeOptions::default(), {
+                let factory_called = Arc::clone(&factory_called);
+                move |_| {
+                    factory_called.store(true, Ordering::Release);
+                    unreachable!("related-object runtime must fail before watcher installation")
+                }
+            })
+            .unwrap_err();
+        assert_eq!(
+            error,
+            crate::scoped_observation::configured_attachment::ConfiguredScopedObservationRuntimeError::SourceBinding
+        );
+        assert!(!factory_called.load(Ordering::Acquire));
+
+        let injected_identity = ScopedConfiguredRootIdentity::new(
+            b"fixture-session".as_slice(),
+            BTreeMap::from([
+                (
+                    "native-session-id".to_string(),
+                    Arc::<[u8]>::from(b"fixture-session".as_slice()),
+                ),
+                (
+                    "team-name".to_string(),
+                    Arc::<[u8]>::from(b"caller-injected-private-team".as_slice()),
+                ),
+            ]),
+        )
+        .unwrap()
+        .with_root_run_identity_key(Arc::from(b"fixture-root-run".as_slice()));
+        let template = scoped_access_request(root.clone());
+        let injected_request = ScopedConfiguredAttachmentRequest::new(
+            "fixture",
+            vec![root],
+            "observe-session",
+            BTreeMap::from([(
+                "root-object".to_string(),
+                PathBuf::from("sessions/session.jsonl"),
+            )]),
+            injected_identity,
+            template.observation_contract_request,
+            template.observation_contract_offer,
+        )
+        .unwrap()
+        .with_unknown_wire_contract(template.unknown_wire_contract.unwrap());
+        let error = prepare_configured_scoped_observation_attachment(&registry, injected_request)
+            .unwrap_err();
+        assert!(!error.to_string().contains("caller-injected-private-team"));
+        assert_eq!(probe_calls.load(Ordering::Acquire), 2);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
     }
 
     #[test]
