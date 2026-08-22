@@ -25,22 +25,22 @@ use crate::codex::CodexAdapter;
 use crate::engine::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, CatalogPageQueryRequest,
     CatalogReadinessQueryRequest, CatalogResolutionQueryRequest, ChangeCursor, ChangeReplay,
-    ChangeReplayRequest, CheckpointPerformanceSnapshot, CommitWaitResult, DelegationPage,
-    DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
-    EngineOptions, EngineOverview, EngineStatusSnapshot, FactFamilyCoverageItem,
-    FactFamilyCoveragePage, FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary,
-    FactFamilyReplayCommand, FactFamilyReplayResult, HistoryProjectIndexSummary,
-    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
-    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
-    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
-    MessageDetail, MessagePage, MessagePageRequest, NamedCount, NamedLatencySnapshot,
-    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
-    PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
-    ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket,
-    RuntimeUsageCompatibilityReport, RuntimeUsageCompatibilityRequest,
-    RuntimeUsageCompatibilityTelemetrySnapshot, RuntimeUsageLegacyTotals,
-    RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
+    ChangeReplayRequest, CheckpointPerformanceSnapshot, CommitWaitResult,
+    ConfiguredObservationSource, DelegationPage, DelegationPageRequest, DelegationSummary,
+    DurableChange, EngineError, EngineHealthSnapshot, EngineOptions, EngineOverview,
+    EngineStatusSnapshot, FactFamilyCoverageItem, FactFamilyCoveragePage,
+    FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary, FactFamilyReplayCommand,
+    FactFamilyReplayResult, HistoryProjectIndexSummary, HistoryProjectPage,
+    HistoryProjectPageRequest, HistoryProjectSummary, HistorySessionIndexSummary,
+    HistorySessionPage, HistorySessionPageRequest, HistorySessionSummary, MemoryDocument,
+    MemoryDocumentPage, MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest,
+    NamedCount, NamedLatencySnapshot, ObservationStatusSnapshot, ObservationSupervisorOptions,
+    OwnerMetadata, PlanDetail, PlanPage, PlanPageRequest, QueryCancellationToken,
+    QueryPerformanceSnapshot, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
+    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
+    RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket, RuntimeUsageCompatibilityReport,
+    RuntimeUsageCompatibilityRequest, RuntimeUsageCompatibilityTelemetrySnapshot,
+    RuntimeUsageLegacyTotals, RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
     RuntimeUsageQuerySelectionResult, RuntimeUsageQuerySelectionValue, RuntimeUsageTotalsReport,
     RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, RuntimeUsageV2ActorContext,
     RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
@@ -4212,6 +4212,25 @@ pub struct EngineAdapterObservationOptions {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
+pub struct EngineConfiguredObservationSourceOptions {
+    /// Open adapter identifier registered by the native composition root.
+    pub adapter_id: String,
+    /// Configured native data roots understood by that adapter.
+    pub roots: Vec<String>,
+    /// Durable ingest reason prefix. Defaults to `production_observation`.
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineConfiguredObservationOptions {
+    /// Complete configured source set. The engine validates and plans this
+    /// set as one startup unit before any history scan begins.
+    pub sources: Vec<EngineConfiguredObservationSourceOptions>,
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
 pub struct EngineReconcileResult {
     pub instances_discovered: u32,
     pub streams_reconciled: u32,
@@ -5110,6 +5129,25 @@ impl SpaghettiEngine {
         )
     }
 
+    /// Start the complete configured source set behind one global catalog,
+    /// watcher, and history-scan planning barrier.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn start_configured_observation(
+        &self,
+        options: EngineConfiguredObservationOptions,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<StartConfiguredObservationTask> {
+        let cancellation = cancellation_for_signal(signal.as_ref());
+        AsyncTask::with_optional_signal(
+            StartConfiguredObservationTask {
+                engine: Arc::clone(&self.inner),
+                options,
+                cancellation,
+            },
+            signal,
+        )
+    }
+
     /// Force one running adapter supervisor through common reconciliation.
     #[napi(ts_return_type = "Promise<EngineStatus>")]
     pub fn refresh_observation(
@@ -5552,6 +5590,12 @@ pub struct StartClaudeObservationTask {
     cancellation: QueryCancellationToken,
 }
 
+pub struct StartConfiguredObservationTask {
+    engine: Arc<SpaghettiEngineCore>,
+    options: EngineConfiguredObservationOptions,
+    cancellation: QueryCancellationToken,
+}
+
 pub struct RefreshClaudeObservationTask {
     engine: Arc<SpaghettiEngineCore>,
     adapter_id: String,
@@ -5606,6 +5650,34 @@ impl Task for StartClaudeObservationTask {
                 options,
                 self.cancellation.clone(),
             )
+            .map_err(napi_error)?;
+        Ok(self.engine.status().into())
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+impl Task for StartConfiguredObservationTask {
+    type Output = EngineStatus;
+    type JsValue = EngineStatus;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let mut configured = Vec::with_capacity(self.options.sources.len());
+        for source in &self.options.sources {
+            validate_roots(&source.roots, "startConfiguredObservation")?;
+            configured.push(ConfiguredObservationSource::new(
+                source.adapter_id.clone(),
+                source.roots.iter().map(PathBuf::from).collect(),
+                source
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "production_observation".to_string()),
+            ));
+        }
+        self.engine
+            .start_configured_observation_cancellable(configured, self.cancellation.clone())
             .map_err(napi_error)?;
         Ok(self.engine.status().into())
     }

@@ -179,6 +179,11 @@ export declare class SpaghettiEngine {
   reconcileAdapter(options: EngineAdapterReconcileOptions, signal?: AbortSignal | undefined | null): Promise<EngineReconcileResult>
   /** Register consolidated roots and supervise any registered adapter. */
   startObservation(options: EngineAdapterObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /**
+   * Start the complete configured source set behind one global catalog,
+   * watcher, and history-scan planning barrier.
+   */
+  startConfiguredObservation(options: EngineConfiguredObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
   /** Force one running adapter supervisor through common reconciliation. */
   refreshObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
   /** Stop one adapter supervisor without disposing the engine. */
@@ -359,6 +364,23 @@ export interface EngineCommitWaitResult {
   /** `commit` or `timeout`. */
   reason: string
   waitedMs: number
+}
+
+export interface EngineConfiguredObservationOptions {
+  /**
+   * Complete configured source set. The engine validates and plans this
+   * set as one startup unit before any history scan begins.
+   */
+  sources: Array<EngineConfiguredObservationSourceOptions>
+}
+
+export interface EngineConfiguredObservationSourceOptions {
+  /** Open adapter identifier registered by the native composition root. */
+  adapterId: string
+  /** Configured native data roots understood by that adapter. */
+  roots: Array<string>
+  /** Durable ingest reason prefix. Defaults to `production_observation`. */
+  reason?: string
 }
 
 export interface EngineDelegationPage {

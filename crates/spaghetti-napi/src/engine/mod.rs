@@ -123,6 +123,7 @@ pub use performance::{
     StoragePerformanceSnapshot, WriterPerformanceSnapshot,
 };
 use performance::{SourcePerformanceRecorder, SourceTelemetry};
+pub(crate) use progressive_startup::ConfiguredObservationSource;
 pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, HistoryProjectIndexSummary,
     HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,

@@ -128,33 +128,31 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
   let client: SpaghettiClient | undefined;
   try {
     for (const [index, source] of sources.entries()) {
-      options.signal?.throwIfAborted();
-      const report = (stage: ObservationHostProgress['stage']): void =>
-        emitHostProgress(options, {
-          stage,
-          adapterId: source.adapterId,
-          sourceIndex: index + 1,
-          sourceCount: sources.length,
-          elapsedMs: Date.now() - startedAt,
-          status: engine.status,
-        });
-      report('adapter-scanning');
-      const heartbeat = setInterval(() => {
-        if (!options.signal?.aborted) report('adapter-scanning');
-      }, 1_000);
-      try {
-        await engine.startObservation(
-          {
+      emitAdapterProgress(options, engine, sources.length, startedAt, source, index, 'adapter-scanning');
+    }
+    let heartbeatIndex = 0;
+    const heartbeat = setInterval(() => {
+      if (options.signal?.aborted) return;
+      const index = heartbeatIndex % sources.length;
+      emitAdapterProgress(options, engine, sources.length, startedAt, sources[index]!, index, 'adapter-scanning');
+      heartbeatIndex += 1;
+    }, 1_000);
+    try {
+      await engine.startConfiguredObservation(
+        {
+          sources: sources.map((source) => ({
             adapterId: source.adapterId,
             roots: [...source.roots],
             reason: 'production_observation',
-          },
-          options.signal,
-        );
-      } finally {
-        clearInterval(heartbeat);
-      }
-      report('adapter-ready');
+          })),
+        },
+        options.signal,
+      );
+    } finally {
+      clearInterval(heartbeat);
+    }
+    for (const [index, source] of sources.entries()) {
+      emitAdapterProgress(options, engine, sources.length, startedAt, source, index, 'adapter-ready');
     }
     // Catalog-first: admit the query client without waiting for FTS.
     // Search stays unavailable until completeQueryBootstrap finishes.
@@ -183,6 +181,25 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
     await engine.dispose();
     throw error;
   }
+}
+
+function emitAdapterProgress(
+  options: ObservationHostOptions,
+  engine: SpaghettiEngine,
+  sourceCount: number,
+  startedAt: number,
+  source: { adapterId: string },
+  index: number,
+  stage: 'adapter-scanning' | 'adapter-ready',
+): void {
+  emitHostProgress(options, {
+    stage,
+    adapterId: source.adapterId,
+    sourceIndex: index + 1,
+    sourceCount,
+    elapsedMs: Date.now() - startedAt,
+    status: engine.status,
+  });
 }
 
 export function observationHostProgressiveView(

@@ -2011,6 +2011,13 @@ export interface SpaghettiEngineAdapterObservationOptions extends SpaghettiEngin
   adapterId: string;
 }
 
+export interface SpaghettiEngineConfiguredObservationSourceOptions extends SpaghettiEngineAdapterObservationOptions {}
+
+export interface SpaghettiEngineConfiguredObservationOptions {
+  /** Complete source set planned as one startup unit before history scans begin. */
+  sources: SpaghettiEngineConfiguredObservationSourceOptions[];
+}
+
 export interface SpaghettiEngineReconcileResult {
   instancesDiscovered: number;
   streamsReconciled: number;
@@ -2154,6 +2161,11 @@ export interface SpaghettiEngine {
   /** Start one registered adapter's native observation supervisor. */
   startObservation(
     options: SpaghettiEngineAdapterObservationOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiEngineStatus>;
+  /** Start all configured sources behind one global catalog and watcher barrier. */
+  startConfiguredObservation(
+    options: SpaghettiEngineConfiguredObservationOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineStatus>;
   /** Force one running adapter supervisor through reconciliation. */
