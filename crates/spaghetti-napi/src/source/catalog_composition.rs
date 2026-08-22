@@ -1305,6 +1305,17 @@ impl<'a, 'composition, 'authorization> CatalogBoundSourceAccess<'a, 'composition
         canonical_source_instance_key(self.instance)
     }
 
+    /// Derive the exact frozen Library-plan source before any native object is
+    /// read. The opaque policy digest is equality-only; this method grants no
+    /// disclosure or filesystem authority beyond the existing typed borrow.
+    pub(crate) fn library_plan_source(
+        &self,
+        access_policy_digest: CatalogAccessPolicyDigest,
+    ) -> Result<CatalogCoveragePlanSource, CatalogCompositionError> {
+        self.executable
+            .library_plan_source(self.source_instance_key()?, access_policy_digest)
+    }
+
     pub(crate) fn root(&self, root_id: &str) -> Result<&'a Path, CatalogCompositionError> {
         if !self
             .executable

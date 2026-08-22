@@ -1095,6 +1095,15 @@ fn executable_composition_binds_source_instance_roots_before_io() {
         ("sessions", &format!("{leaked}/sessions")),
     ]);
     let access = executable.bind_source_instance(&bound_instance).unwrap();
+    let policy = catalog_coverage_policy(b"fixture-plan-before-source-read");
+    let plan_source = access.library_plan_source(policy).unwrap();
+    assert_eq!(plan_source.adapter_id, ADAPTER_ID);
+    assert_eq!(plan_source.support_release_id, SUPPORT_RELEASE_ID);
+    assert_eq!(plan_source.access_policy_digest, policy);
+    assert_eq!(
+        plan_source.source_instance_key,
+        access.source_instance_key().unwrap()
+    );
     assert_eq!(
         access.root("projects").unwrap(),
         Path::new(&format!("{leaked}/projects"))
