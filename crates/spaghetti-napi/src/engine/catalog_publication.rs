@@ -1940,10 +1940,10 @@ fn load_ready_publication_at_depth(
         } => {
             if predecessor_snapshot.coverage_plan_id != snapshot_id.coverage_plan_id
                 || predecessor_snapshot.pack_contract_version != snapshot_id.pack_contract_version
-                || predecessor_snapshot.readiness_epoch != snapshot_id.readiness_epoch
+                || predecessor_snapshot.readiness_epoch > snapshot_id.readiness_epoch
             {
                 return Err(catalog_state::corrupt_catalog_state(
-                    "catalog refresh predecessor is outside the current plan/pack/epoch lineage",
+                    "catalog refresh predecessor is outside its exact plan/build lineage",
                 ));
             }
             if refresh_depth >= MAX_RETAINED_REFRESH_LINEAGE_DEPTH {
@@ -2510,6 +2510,7 @@ fn validate_snapshot_lineage(
                     catalog_state::REFRESH_SOURCE_RETRYING_REASON,
                     catalog_state::REFRESH_RECOVERY_STARTED_REASON,
                     catalog_state::PARTIAL_REASON,
+                    catalog_state::SOURCE_GENERATION_INVALIDATED_REASON,
                 ],
                 None,
             )?;
@@ -2519,11 +2520,49 @@ fn validate_snapshot_lineage(
                 catalog_state::REFRESH_PUBLICATION_REASON,
                 Some(published_at),
             )?;
+            let (predecessor_pack, predecessor_plan, predecessor_epoch): (
+                i64,
+                Option<Vec<u8>>,
+                i64,
+            ) = connection
+                .query_row(
+                    r#"
+                    SELECT pack_contract_version,
+                           CASE WHEN typeof(coverage_plan_id) = 'blob'
+                                          AND length(coverage_plan_id) = 32
+                                THEN coverage_plan_id END,
+                           readiness_epoch
+                    FROM catalog_snapshots WHERE snapshot_commit_seq = ?1
+                    "#,
+                    [catalog_state::to_i64(
+                        predecessor_commit,
+                        "catalog refresh predecessor commit",
+                    )?],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|error| {
+                    catalog_state::sqlite_error("load catalog predecessor identity", error)
+                })?;
+            let predecessor_pack =
+                catalog_state::positive_u32(predecessor_pack, "catalog predecessor pack version")?;
+            let predecessor_epoch = catalog_state::positive_u64(
+                predecessor_epoch,
+                "catalog predecessor readiness epoch",
+            )?;
+            if predecessor_pack != snapshot_id.pack_contract_version
+                || predecessor_plan.as_deref()
+                    != Some(snapshot_id.coverage_plan_id.storage_bytes().as_slice())
+                || predecessor_epoch > snapshot_id.readiness_epoch
+            {
+                return Err(catalog_state::corrupt_catalog_state(
+                    "catalog refresh predecessor is outside its exact plan/build lineage",
+                ));
+            }
             Ok(CatalogSnapshotLineage::Refresh {
                 predecessor_snapshot: CatalogSnapshotId::new(
-                    snapshot_id.pack_contract_version,
+                    predecessor_pack,
                     snapshot_id.coverage_plan_id,
-                    snapshot_id.readiness_epoch,
+                    predecessor_epoch,
                     predecessor_commit,
                 )
                 .map_err(catalog_state::catalog_contract_error)?,

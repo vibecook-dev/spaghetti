@@ -465,7 +465,7 @@ impl CatalogCoveragePlan {
         })
     }
 
-    fn required_coverage_present(&self, coverage: &[SourceCoverageSet]) -> bool {
+    pub(crate) fn required_coverage_present(&self, coverage: &[SourceCoverageSet]) -> bool {
         self.required_sources
             .iter()
             .all(|required| coverage.iter().any(|set| required.matches_coverage(set)))

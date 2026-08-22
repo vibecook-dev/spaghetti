@@ -2427,7 +2427,8 @@ fn validate_refresh_build(
             readiness.reason.as_ref(),
             None | Some(CatalogReadinessReason::SourceRetrying { .. })
         )
-        && readiness.attempt > 1;
+        && ((snapshot.readiness_epoch == readiness.epoch && readiness.attempt > 1)
+            || snapshot.readiness_epoch < readiness.epoch);
     if plan.scope != CatalogCoverageScope::Library
         || (!active_ready && !recovery_building)
         || readiness.coverage_plan_id != plan.coverage_plan_id
@@ -2439,7 +2440,7 @@ fn validate_refresh_build(
         || selection.query_pack_version != Some(readiness.desired_contract_version)
         || snapshot.coverage_plan_id != plan.coverage_plan_id
         || snapshot.pack_contract_version != readiness.desired_contract_version
-        || snapshot.readiness_epoch != readiness.epoch
+        || snapshot.readiness_epoch > readiness.epoch
     {
         return Err(CatalogContractError::invalid(
             "catalog refresh publication requires one exact active or degraded-recovery lineage",

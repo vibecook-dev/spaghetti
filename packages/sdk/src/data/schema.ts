@@ -147,7 +147,8 @@ import type { SqliteService } from '../io/index.js';
 // no-snapshot Error readiness.
 // v59: append-only RFC 012B Partial coverage milestones with exact
 // predecessor ownership and restart validation.
-export const SCHEMA_VERSION = 59;
+// v60: immutable RFC 012B source-generation epoch invalidation lineage.
+export const SCHEMA_VERSION = 60;
 
 export const TOKEN_ACTIVITY_TRIGGER_NAMES = [
   'token_activity_messages_ai',
@@ -610,6 +611,7 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.plan.registered',
         'catalog.library.build.scheduled',
         'catalog.library.build.partial',
+        'catalog.library.source_generation.invalidated',
         'catalog.library.initial_snapshot.published',
         'catalog.library.build.integrity_failed',
         'catalog.library.refresh.started',
@@ -868,6 +870,32 @@ BEFORE DELETE ON catalog_partial_sources BEGIN
   SELECT RAISE(ABORT, 'catalog partial-source evidence is immutable');
 END;
 
+CREATE TABLE IF NOT EXISTS catalog_epoch_invalidations (
+  invalidation_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  predecessor_state_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
+  previous_epoch INTEGER NOT NULL CHECK (previous_epoch > 0),
+  epoch INTEGER NOT NULL CHECK (epoch > 1),
+  previous_attempt INTEGER NOT NULL CHECK (previous_attempt > 0),
+  previous_state TEXT NOT NULL CHECK (previous_state IN ('pending', 'building', 'partial', 'ready', 'degraded')),
+  retained_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
+  committed_at INTEGER NOT NULL,
+  CHECK (epoch = previous_epoch + 1),
+  CHECK (predecessor_state_commit_seq < invalidation_commit_seq),
+  CHECK (retained_snapshot_commit_seq IS NULL OR retained_snapshot_commit_seq <= predecessor_state_commit_seq),
+  UNIQUE (coverage_plan_id, epoch)
+);
+
+CREATE TRIGGER IF NOT EXISTS catalog_epoch_invalidations_no_update
+BEFORE UPDATE ON catalog_epoch_invalidations BEGIN
+  SELECT RAISE(ABORT, 'catalog epoch-invalidation evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_epoch_invalidations_no_delete
+BEFORE DELETE ON catalog_epoch_invalidations BEGIN
+  SELECT RAISE(ABORT, 'catalog epoch-invalidation evidence is immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS catalog_build_state (
   scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
   coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT,
@@ -946,7 +974,7 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
         OR
         (
           refreshing_from_snapshot_commit = last_complete_snapshot_commit
-          AND last_commit_seq > complete_through_commit
+          AND last_commit_seq > last_complete_snapshot_commit
         )
       )
     )
@@ -969,11 +997,10 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
       AND (
         (
           completed_contract_version IS NOT NULL
-          AND complete_through_commit IS NOT NULL
           AND last_complete_snapshot_commit IS NOT NULL
           AND completed_contract_version = desired_contract_version
-          AND complete_through_commit = last_complete_snapshot_commit
-          AND last_commit_seq > complete_through_commit
+          AND (complete_through_commit IS NULL OR complete_through_commit = last_complete_snapshot_commit)
+          AND last_commit_seq > last_complete_snapshot_commit
         )
         OR
         (
@@ -2696,6 +2723,7 @@ const CURRENT_TABLES = [
   'catalog_snapshot_entries',
   'catalog_partial_sources',
   'catalog_partial_builds',
+  'catalog_epoch_invalidations',
   'catalog_build_state',
   'catalog_snapshots',
   'catalog_coverage_plans',

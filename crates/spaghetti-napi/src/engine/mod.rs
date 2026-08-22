@@ -605,6 +605,22 @@ impl std::fmt::Debug for CatalogInitialBuildContext {
     }
 }
 
+/// Caller-held, non-serializable compare-and-swap command for one detected
+/// source-generation reset. Keeping the timestamps with the authority makes a
+/// post-commit lost acknowledgement exactly replayable.
+#[derive(Clone)]
+pub(crate) struct CatalogSourceGenerationInvalidationContext {
+    command: CatalogBuildStateCommand,
+}
+
+impl std::fmt::Debug for CatalogSourceGenerationInvalidationContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogSourceGenerationInvalidationContext")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Restart-safe handle for one exact ordinary refresh. It retains the
 /// authenticated predecessor reducer and member history in non-serializable
 /// authority, while exposing only the frozen plan and prior source coverage
@@ -1661,6 +1677,44 @@ impl SpaghettiEngineCore {
         } else {
             Ok(None)
         }
+    }
+
+    /// Freeze the exact non-error Library lineage before a source pass that
+    /// may discover a generation reset. The returned authority is private,
+    /// non-serializable, and compare-and-swap bound to the current state.
+    pub(crate) fn prepare_catalog_source_generation_invalidation(
+        &self,
+        plan: &CatalogCoveragePlan,
+    ) -> Result<CatalogSourceGenerationInvalidationContext, EngineError> {
+        let state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog source-generation invalidation requires durable readiness".to_string(),
+            )
+        })?;
+        if &state.plan != plan {
+            return Err(EngineError::InvalidCommit(
+                "catalog source-generation invalidation resumed a different frozen plan"
+                    .to_string(),
+            ));
+        }
+        let now = engine_now_unix_ms()?;
+        Ok(CatalogSourceGenerationInvalidationContext {
+            command: CatalogBuildStateCommand::invalidate_source_generation(
+                state.source_generation_invalidation_expectation()?,
+                now,
+                now,
+            ),
+        })
+    }
+
+    /// Commit one source-generation reset against its caller-held durable
+    /// lineage. Exact lost-ack replay is suppressed by the writer; a stale or
+    /// foreign authority fails closed instead of opening another epoch.
+    pub(crate) fn invalidate_catalog_source_generation(
+        &self,
+        context: CatalogSourceGenerationInvalidationContext,
+    ) -> Result<Option<u64>, EngineError> {
+        self.commit_catalog_build_state(context.command)
     }
 
     /// Freeze and schedule the exact initial Library plan before any producer
@@ -3298,6 +3352,175 @@ mod tests {
             .unwrap()
             .is_none());
         engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn catalog_source_generation_reset_replaces_epoch_and_retains_history() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("catalog-source-generation.db");
+        let engine = SpaghettiEngineCore::open(options(database.clone())).unwrap();
+        let plan = CatalogCoveragePlan::new(
+            crate::catalog_contract::CatalogCoverageScope::Library,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let initial_context = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        let initial_batch = CatalogInitialProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            initial_context.observation_commit(),
+        )
+        .unwrap();
+        let initial = engine
+            .commit_initial_catalog_projection(initial_context, initial_batch)
+            .unwrap()
+            .unwrap();
+
+        let invalidation = engine
+            .prepare_catalog_source_generation_invalidation(&plan)
+            .unwrap();
+        let invalidation_commit = engine
+            .invalidate_catalog_source_generation(invalidation.clone())
+            .unwrap()
+            .unwrap();
+        assert!(engine
+            .invalidate_catalog_source_generation(invalidation)
+            .unwrap()
+            .is_none());
+        let replacement = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(replacement.readiness.state, CatalogReadinessPhase::Building);
+        assert_eq!(replacement.readiness.epoch, 2);
+        assert_eq!(replacement.readiness.attempt, 1);
+        assert_eq!(replacement.readiness.complete_through_commit, None);
+        assert_eq!(
+            replacement.readiness.last_complete_snapshot,
+            Some(initial.snapshot_id)
+        );
+        assert!(replacement.ready_read_authority().is_ok());
+        assert!(engine.status().catalog_query_ready);
+
+        let context = engine.begin_catalog_refresh(plan.clone()).unwrap();
+        assert_eq!(context.observation_commit(), invalidation_commit);
+        let batch = CatalogRefreshProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            context.observation_commit(),
+            context.prior_reducer(),
+        )
+        .unwrap();
+        let successor = engine
+            .commit_catalog_refresh_projection(context, batch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(successor.predecessor_snapshot, initial.snapshot_id);
+        assert_eq!(successor.snapshot_id.readiness_epoch, 2);
+        assert!(engine.status().catalog_query_ready);
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let connection = rusqlite::Connection::open(database).unwrap();
+        crate::core::schema::initialize_schema(&connection).unwrap();
+        let restarted = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restarted.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(restarted.readiness.epoch, 2);
+        let authority = restarted.ready_read_authority().unwrap();
+        assert!(authority
+            .for_historical_snapshot(&connection, initial.snapshot_id, 0)
+            .is_ok());
+    }
+
+    #[test]
+    fn catalog_epoch_replacement_terminal_failures_restart_and_recover() {
+        for integrity_failure in [false, true] {
+            let dir = tempdir().unwrap();
+            let database = dir.path().join(if integrity_failure {
+                "catalog-epoch-integrity.db"
+            } else {
+                "catalog-epoch-source.db"
+            });
+            let plan = CatalogCoveragePlan::new(
+                crate::catalog_contract::CatalogCoverageScope::Library,
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+            let engine = SpaghettiEngineCore::open(options(database.clone())).unwrap();
+            let initial_context = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+            let initial_batch = CatalogInitialProjectionBatch::assemble(
+                Vec::new(),
+                catalog_selection(),
+                initial_context.observation_commit(),
+            )
+            .unwrap();
+            let initial = engine
+                .commit_initial_catalog_projection(initial_context, initial_batch)
+                .unwrap()
+                .unwrap();
+            let invalidation = engine
+                .prepare_catalog_source_generation_invalidation(&plan)
+                .unwrap();
+            engine
+                .invalidate_catalog_source_generation(invalidation)
+                .unwrap()
+                .unwrap();
+            if integrity_failure {
+                engine
+                    .fail_active_catalog_refresh_integrity("replacement_integrity_failed")
+                    .unwrap()
+                    .unwrap();
+            } else {
+                engine
+                    .degrade_active_catalog_refresh("replacement_source_unavailable")
+                    .unwrap()
+                    .unwrap();
+            }
+            let terminal = engine.load_catalog_build_state().unwrap().unwrap();
+            assert_eq!(terminal.readiness.epoch, 2);
+            assert_eq!(terminal.readiness.attempt, 1);
+            assert_eq!(terminal.readiness.complete_through_commit, None);
+            assert_eq!(
+                terminal.readiness.last_complete_snapshot,
+                Some(initial.snapshot_id)
+            );
+            assert_eq!(
+                terminal.readiness.state,
+                if integrity_failure {
+                    CatalogReadinessPhase::Error
+                } else {
+                    CatalogReadinessPhase::Degraded
+                }
+            );
+            assert!(terminal.ready_read_authority().is_ok());
+            assert!(engine.status().catalog_query_ready);
+            engine.shutdown().unwrap();
+            drop(engine);
+
+            let engine = SpaghettiEngineCore::open(options(database)).unwrap();
+            let terminal = engine.load_catalog_build_state().unwrap().unwrap();
+            assert!(terminal.ready_read_authority().is_ok());
+            let context = engine.begin_catalog_refresh(plan.clone()).unwrap();
+            assert_eq!(context.readiness.epoch, 2);
+            assert_eq!(context.readiness.attempt, 2);
+            assert_eq!(context.readiness.state, CatalogReadinessPhase::Building);
+            let batch = CatalogRefreshProjectionBatch::assemble(
+                Vec::new(),
+                catalog_selection(),
+                context.observation_commit(),
+                context.prior_reducer(),
+            )
+            .unwrap();
+            let recovered = engine
+                .commit_catalog_refresh_projection(context, batch)
+                .unwrap()
+                .unwrap();
+            assert_eq!(recovered.predecessor_snapshot, initial.snapshot_id);
+            assert_eq!(recovered.snapshot_id.readiness_epoch, 2);
+            assert_eq!(recovered.readiness.attempt, 2);
+            engine.shutdown().unwrap();
+        }
     }
 
     #[test]
