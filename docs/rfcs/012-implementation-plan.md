@@ -1185,7 +1185,25 @@ malformed historical rows, rollback behind a newer failure, ambiguous source
 versus integrity recovery, and forged lost-ack origin. Every recovery
 precommit seam rolls back, post-commit replay is idempotent, historical reads
 remain authenticated, and successful recovery does not erase either failure
-ledger. Initial/no-snapshot `Discarded` error publication remains open.
+ledger. At that checkpoint, initial/no-snapshot `Discarded` error publication
+remained open.
+
+The thirteenth bounded B3 slice (`aea79a7`) adds schema-v58 and closes
+initial/no-snapshot `Discarded` integrity publication and recovery. A
+classified first-publication invariant failure atomically appends a
+source-neutral, zero-fact failure commit and immutable `discarded` evidence
+with no retained snapshot or publication/content digests, advances readiness
+from `Building` to `Error`, emits path-free v7 invalidation, and never grants
+query authority. Restart validates the closed evidence shape and exact
+scheduled or recovery execution owner. The next startup enters `Building`
+with `attempt + 1` and empty coverage; a valid retry may publish the initial
+snapshot, while repeated failures append one row per attempt. Retried initial
+publication is authenticated against the immediately preceding discarded
+failure. Exact replay, every precommit seam, hybrid-row corruption, forged
+recovery origin, repeated failure, real-engine restart, and production failure
+classification are executable. `Partial` publication, changed-plan/epoch
+replacement, physical compaction, caller-authorized local policy, richer
+queries, and promotion evidence remain open.
 
 ### B4. Progressive host and UX
 
