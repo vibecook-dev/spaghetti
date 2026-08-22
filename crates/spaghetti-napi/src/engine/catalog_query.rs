@@ -258,7 +258,6 @@ pub(crate) fn execute_catalog_page_query(
     let state = catalog_state::load_catalog_build_state(connection)?.ok_or_else(|| {
         EngineError::InvalidQuery("catalog readiness is not available".to_string())
     })?;
-    require_expected_plan(&state, request.expected_coverage_plan_id)?;
     let current_authority = state.ready_read_authority()?;
     let selection = negotiate_durable_query(&request.contract_request, &current_authority)?;
     let continuation = request
@@ -269,6 +268,17 @@ pub(crate) fn execute_catalog_page_query(
                 .map_err(|_| invalid_catalog_query_input("continuation is invalid"))
         })
         .transpose()?;
+    match continuation.as_ref() {
+        Some(continuation)
+            if continuation.snapshot_id.coverage_plan_id != request.expected_coverage_plan_id =>
+        {
+            return Err(invalid_catalog_query_input(
+                "continuation differs from the caller-held coverage plan",
+            ));
+        }
+        Some(_) => {}
+        None => require_expected_plan(&state, request.expected_coverage_plan_id)?,
+    }
     if continuation
         .as_ref()
         .is_some_and(|continuation| continuation.page_size != request.page_size)
