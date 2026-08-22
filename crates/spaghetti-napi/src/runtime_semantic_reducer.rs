@@ -12,7 +12,8 @@ use crate::adapter::{
     FactProvenance, FactRevisionId, FactSemanticRevision, NativeCompactionPhase,
     NativeProgressState, NativeQueueOperation, NativeRuntimeMarkerRevisionFact,
     NativeRuntimeMarkerValue, QualifiedUnknownReason, QualifiedValueQuality, SourceRecordId,
-    UserInputOperation,
+    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
+    UserInputRequestRevisionFact,
 };
 use crate::source::SourceRecordState;
 
@@ -22,6 +23,13 @@ pub(crate) const RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION: u32 = 1;
 pub(crate) enum RevisionedEntityReduction {
     Unchanged,
     Upsert,
+    Retract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RevisionedEntityValueReduction<T> {
+    Unchanged,
+    Upsert(T),
     Retract,
 }
 
@@ -98,6 +106,149 @@ fn validate_native_marker_entity(
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
     Ok(())
+}
+
+fn validate_user_input_entity(
+    semantic: &FactSemanticRevision,
+    revision: &UserInputRequestRevisionFact,
+) -> Result<(), RuntimeSemanticReductionError> {
+    revision
+        .validate()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if semantic.semantic_revision_ref.fact_revision_id != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    if expected != semantic.fact_revision_id {
+        return Err(RuntimeSemanticReductionError::InvalidRevision);
+    }
+    Ok(())
+}
+
+fn merge_user_input_questions(
+    current: &[UserInputQuestion],
+    incoming: &[UserInputQuestion],
+) -> Vec<UserInputQuestion> {
+    let mut merged = current.to_vec();
+    for question in incoming {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|known| known.prompt == question.prompt)
+        {
+            if existing.header.is_none() {
+                existing.header = question.header.clone();
+            }
+            existing.multi_select |= question.multi_select;
+            for option in &question.options {
+                if let Some(existing_option) = existing
+                    .options
+                    .iter_mut()
+                    .find(|known| known.label == option.label)
+                {
+                    if existing_option.description.is_none() {
+                        existing_option.description = option.description.clone();
+                    }
+                    if existing_option.preview.is_none() {
+                        existing_option.preview = option.preview.clone();
+                    }
+                } else {
+                    existing.options.push(option.clone());
+                }
+            }
+        } else {
+            merged.push(question.clone());
+        }
+    }
+    merged
+}
+
+/// Reduce one correlated user-input lifecycle revision without depending on
+/// durable-store or scoped-observer coordinates.
+///
+/// Partial evidence may add typed question detail, but cannot change a known
+/// lifecycle state, result, correlation identity, or interaction kind. A
+/// partial terminal observation without a current entity is therefore not
+/// sufficient to create terminal state.
+pub(crate) fn reduce_user_input_revision(
+    current: Option<(&FactSemanticRevision, &UserInputRequestRevisionFact)>,
+    incoming: (&FactSemanticRevision, &UserInputRequestRevisionFact),
+) -> Result<
+    RevisionedEntityValueReduction<UserInputRequestRevisionFact>,
+    RuntimeSemanticReductionError,
+> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    validate_user_input_entity(incoming_semantic, incoming_revision)?;
+    let current = match current {
+        Some((current_semantic, current_revision)) => {
+            validate_user_input_entity(current_semantic, current_revision)?;
+            if current_semantic.fact_id != incoming_semantic.fact_id
+                || current_revision.session != incoming_revision.session
+                || current_revision.actor_run != incoming_revision.actor_run
+                || current_revision.native_tool_use_id != incoming_revision.native_tool_use_id
+            {
+                return Err(RuntimeSemanticReductionError::InvalidRevision);
+            }
+            if current_semantic.fact_revision_id == incoming_semantic.fact_revision_id {
+                return Ok(RevisionedEntityValueReduction::Unchanged);
+            }
+            Some((current_semantic, current_revision))
+        }
+        None => None,
+    };
+
+    match incoming_revision.operation {
+        UserInputOperation::Retract
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
+        {
+            Ok(RevisionedEntityValueReduction::Unchanged)
+        }
+        UserInputOperation::Retract => Ok(RevisionedEntityValueReduction::Retract),
+        UserInputOperation::Upsert
+            if incoming_revision.completeness == ContractCompleteness::Partial =>
+        {
+            let Some((current_semantic, current_revision)) = current else {
+                if incoming_revision.state != UserInputLifecycleState::Pending
+                    || incoming_revision.result_reference.is_some()
+                {
+                    return Err(RuntimeSemanticReductionError::InvalidRevision);
+                }
+                return Ok(RevisionedEntityValueReduction::Upsert(
+                    incoming_revision.clone(),
+                ));
+            };
+            if current_revision.kind != incoming_revision.kind {
+                return Err(RuntimeSemanticReductionError::InvalidRevision);
+            }
+            let mut merged = incoming_revision.clone();
+            merged.questions = merge_user_input_questions(
+                &current_revision.questions,
+                &incoming_revision.questions,
+            );
+            merged.state = current_revision.state;
+            merged.result_reference = current_revision.result_reference.clone();
+            merged
+                .validate()
+                .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            let merged_key = merged
+                .semantic_revision_key()
+                .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            let merged_revision_id =
+                FactRevisionId::derive(&incoming_semantic.fact_id, 1, &merged_key)
+                    .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+            if merged_revision_id == current_semantic.fact_revision_id {
+                Ok(RevisionedEntityValueReduction::Unchanged)
+            } else {
+                Ok(RevisionedEntityValueReduction::Upsert(merged))
+            }
+        }
+        UserInputOperation::Upsert => Ok(RevisionedEntityValueReduction::Upsert(
+            incoming_revision.clone(),
+        )),
+    }
 }
 
 /// Decide one effective-state revision using the RFC 012C
@@ -238,6 +389,13 @@ pub(crate) struct NativeMarkerReducedDigestEntity<'a> {
     pub revision: &'a NativeRuntimeMarkerRevisionFact,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct UserInputReducedDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub source: RuntimeSemanticSourceRef<'a>,
+    pub revision: &'a UserInputRequestRevisionFact,
+}
+
 fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value);
@@ -304,6 +462,83 @@ fn validate_and_hash_semantic_source(
         SourceRecordState::Absent => 2,
     }]);
     Ok(())
+}
+
+/// Compute the canonical current-state digest for
+/// `runtime.user-input-request`. Input order is irrelevant; duplicate fact
+/// identities fail closed. The digest binds the fully reduced lifecycle value
+/// and its path-free source occurrence.
+pub(crate) fn user_input_reduced_state_digest<'a>(
+    entities: impl IntoIterator<Item = UserInputReducedDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.semantic.fact_id);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].semantic.fact_id == pair[1].semantic.fact_id)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, b"runtime.user-input-request");
+    hasher.update(&1_u32.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in &entities {
+        validate_user_input_entity(entity.semantic, entity.revision)?;
+        validate_and_hash_semantic_source(&mut hasher, entity.semantic, entity.source)?;
+        hash_component(&mut hasher, entity.revision.session.as_bytes());
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_component(&mut hasher, entity.revision.native_tool_use_id.as_bytes());
+        hasher.update(&[match entity.revision.kind {
+            UserInputKind::Choice => 1,
+            UserInputKind::MultiChoice => 2,
+            UserInputKind::FreeText => 3,
+            UserInputKind::Mixed => 4,
+        }]);
+        hasher.update(&(entity.revision.questions.len() as u64).to_be_bytes());
+        for question in &entity.revision.questions {
+            hash_optional_component(&mut hasher, question.header.as_deref().map(str::as_bytes));
+            hash_component(&mut hasher, question.prompt.as_bytes());
+            hasher.update(&[u8::from(question.multi_select)]);
+            hasher.update(&(question.options.len() as u64).to_be_bytes());
+            for option in &question.options {
+                hash_component(&mut hasher, option.label.as_bytes());
+                hash_optional_component(
+                    &mut hasher,
+                    option.description.as_deref().map(str::as_bytes),
+                );
+                hash_optional_component(&mut hasher, option.preview.as_deref().map(str::as_bytes));
+            }
+        }
+        hasher.update(&[match entity.revision.state {
+            UserInputLifecycleState::Pending => 1,
+            UserInputLifecycleState::Resolved => 2,
+            UserInputLifecycleState::Failed => 3,
+            UserInputLifecycleState::Cancelled => 4,
+        }]);
+        hasher.update(&[match entity.revision.operation {
+            UserInputOperation::Upsert => 1,
+            UserInputOperation::Retract => 2,
+        }]);
+        hasher.update(&[match entity.revision.completeness {
+            ContractCompleteness::Complete => 1,
+            ContractCompleteness::Partial => 2,
+            ContractCompleteness::Unknown => 3,
+        }]);
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .result_reference
+                .as_deref()
+                .map(str::as_bytes),
+        );
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Compute the canonical current-state digest for `runtime.effective-state`.

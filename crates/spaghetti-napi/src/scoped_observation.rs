@@ -30,8 +30,7 @@ use crate::adapter::{
     SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
     SourceSnapshot, SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality,
     ToolRevisionFact, ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact,
-    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
-    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    UserInputOperation, UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -52,9 +51,10 @@ use crate::observation_contract::{
 };
 use crate::runtime_semantic_reducer::{
     effective_state_reduced_state_digest, reduce_content_block_revision,
-    reduce_effective_state_revision, reduce_native_marker_revision,
-    EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticReductionError,
-    RuntimeSemanticSourceRef, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    reduce_effective_state_revision, reduce_native_marker_revision, reduce_user_input_revision,
+    EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RevisionedEntityValueReduction,
+    RuntimeSemanticReductionError, RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
+    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -13393,21 +13393,50 @@ impl ScopedObservationProjectionSink {
                                 &state.revision,
                             ),
                         )?;
-                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
-                            continue;
-                        }
-                        if state.revision.operation == UserInputOperation::Retract
-                            && state.revision.completeness != ContractCompleteness::Complete
-                        {
-                            continue;
-                        }
-                        if state.revision.completeness == ContractCompleteness::Partial
-                            && state.revision.operation == UserInputOperation::Upsert
-                        {
-                            state.revision.questions = merge_user_input_questions(
-                                &current.revision.questions,
-                                &state.revision.questions,
+                    }
+                    match reduce_user_input_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(runtime_semantic_projection_error)?
+                    {
+                        RevisionedEntityValueReduction::Unchanged => continue,
+                        RevisionedEntityValueReduction::Retract => {
+                            queue_projection_retraction(
+                                &self.user_input_requests,
+                                &mut mutation.user_input_upserts,
+                                &mut mutation.user_input_retractions,
+                                key,
                             );
+                            if self.families.user_input_request {
+                                user_input_events.push(
+                                    ScopedProjectedObservation::UserInputRequest {
+                                        lane_ordinal,
+                                        event: Box::new(ScopedUserInputRequestEvent {
+                                            event_id: revisioned_entity_event_id(
+                                                b"runtime.user-input-request",
+                                                ScopedRevisionedEntityOperation::Retract,
+                                                &state.semantic,
+                                                None,
+                                            ),
+                                            semantic_revision_ref: state
+                                                .semantic
+                                                .semantic_revision_ref,
+                                            fact_id: state.semantic.fact_id,
+                                            operation: ScopedRevisionedEntityOperation::Retract,
+                                            phase,
+                                            observed_at: state.source.provenance.observed_at,
+                                            source: state.source.clone(),
+                                            retraction: None,
+                                            revision: state.revision.clone(),
+                                        }),
+                                    },
+                                );
+                            }
+                            continue;
+                        }
+                        RevisionedEntityValueReduction::Upsert(reduced) => {
+                            state.revision = reduced;
                             rebind_reduced_semantic_revision(
                                 &mut state.semantic,
                                 state
@@ -13415,45 +13444,7 @@ impl ScopedObservationProjectionSink {
                                     .semantic_revision_key()
                                     .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
                             )?;
-                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
-                            {
-                                continue;
-                            }
                         }
-                    } else if state.revision.operation == UserInputOperation::Retract
-                        && state.revision.completeness != ContractCompleteness::Complete
-                    {
-                        continue;
-                    }
-                    if state.revision.operation == UserInputOperation::Retract {
-                        queue_projection_retraction(
-                            &self.user_input_requests,
-                            &mut mutation.user_input_upserts,
-                            &mut mutation.user_input_retractions,
-                            key,
-                        );
-                        if self.families.user_input_request {
-                            user_input_events.push(ScopedProjectedObservation::UserInputRequest {
-                                lane_ordinal,
-                                event: Box::new(ScopedUserInputRequestEvent {
-                                    event_id: revisioned_entity_event_id(
-                                        b"runtime.user-input-request",
-                                        ScopedRevisionedEntityOperation::Retract,
-                                        &state.semantic,
-                                        None,
-                                    ),
-                                    semantic_revision_ref: state.semantic.semantic_revision_ref,
-                                    fact_id: state.semantic.fact_id,
-                                    operation: ScopedRevisionedEntityOperation::Retract,
-                                    phase,
-                                    observed_at: state.source.provenance.observed_at,
-                                    source: state.source.clone(),
-                                    retraction: None,
-                                    revision: state.revision.clone(),
-                                }),
-                            });
-                        }
-                        continue;
                     }
                     mutation.user_input_upserts.insert(key, state);
                 }
@@ -15826,110 +15817,18 @@ fn rebind_reduced_semantic_revision(
     Ok(())
 }
 
-fn merge_user_input_questions(
-    current: &[UserInputQuestion],
-    incoming: &[UserInputQuestion],
-) -> Vec<UserInputQuestion> {
-    let mut merged = current.to_vec();
-    for question in incoming {
-        if let Some(existing) = merged
-            .iter_mut()
-            .find(|known| known.prompt == question.prompt)
-        {
-            if existing.header.is_none() {
-                existing.header = question.header.clone();
-            }
-            existing.multi_select |= question.multi_select;
-            for option in &question.options {
-                if !existing
-                    .options
-                    .iter()
-                    .any(|known| known.label == option.label)
-                {
-                    existing.options.push(option.clone());
-                }
-            }
-        } else {
-            merged.push(question.clone());
-        }
-    }
-    merged
-}
-
 fn user_input_replacement_digest(
     entities: &[ScopedUserInputReplacementEntity],
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
-    let entity_count = u64::try_from(entities.len())
-        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = replacement_family_digest(
-        b"runtime.user-input-request",
-        RUNTIME_USER_INPUT_FACT_FAMILY_CONTRACT_VERSION,
-        entity_count,
-    );
-    for entity in entities {
-        validate_and_hash_replacement_source(
-            &mut hasher,
-            &entity.semantic,
-            entity.generation,
-            &entity.source,
-        )?;
-        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.native_tool_use_id.as_bytes());
-        hasher.update(&[match entity.revision.kind {
-            UserInputKind::Choice => 1,
-            UserInputKind::MultiChoice => 2,
-            UserInputKind::FreeText => 3,
-            UserInputKind::Mixed => 4,
-        }]);
-        hasher.update(&(entity.revision.questions.len() as u64).to_be_bytes());
-        for question in &entity.revision.questions {
-            hash_optional_event_component(
-                &mut hasher,
-                question.header.as_deref().map(str::as_bytes),
-            );
-            hash_event_component(&mut hasher, question.prompt.as_bytes());
-            hasher.update(&[u8::from(question.multi_select)]);
-            hasher.update(&(question.options.len() as u64).to_be_bytes());
-            for option in &question.options {
-                hash_event_component(&mut hasher, option.label.as_bytes());
-                hash_optional_event_component(
-                    &mut hasher,
-                    option.description.as_deref().map(str::as_bytes),
-                );
-                hash_optional_event_component(
-                    &mut hasher,
-                    option.preview.as_deref().map(str::as_bytes),
-                );
-            }
-        }
-        hasher.update(&[match entity.revision.state {
-            UserInputLifecycleState::Pending => 1,
-            UserInputLifecycleState::Resolved => 2,
-            UserInputLifecycleState::Failed => 3,
-            UserInputLifecycleState::Cancelled => 4,
-        }]);
-        hasher.update(&[match entity.revision.operation {
-            UserInputOperation::Upsert => 1,
-            UserInputOperation::Retract => 2,
-        }]);
-        hasher.update(&[match entity.revision.completeness {
-            ContractCompleteness::Complete => 1,
-            ContractCompleteness::Partial => 2,
-            ContractCompleteness::Unknown => 3,
-        }]);
-        hash_optional_event_component(
-            &mut hasher,
-            entity
-                .revision
-                .result_reference
-                .as_deref()
-                .map(str::as_bytes),
-        );
-    }
-    Ok(ScopedReplacementSemanticDigest(
-        *hasher.finalize().as_bytes(),
-    ))
+    let digest = crate::runtime_semantic_reducer::user_input_reduced_state_digest(
+        entities.iter().map(|entity| UserInputReducedDigestEntity {
+            semantic: &entity.semantic,
+            source: runtime_semantic_source_ref(entity.generation, &entity.source),
+            revision: &entity.revision,
+        }),
+    )
+    .map_err(runtime_semantic_projection_error)?;
+    Ok(ScopedReplacementSemanticDigest(digest))
 }
 
 fn user_input_replacement_snapshot_is_valid(
@@ -24046,14 +23945,15 @@ mod projection_tests {
         ContractVersionRequest, CoverageMembershipRevision, EffectiveStateDimension,
         EffectiveStateEvidenceKind, NativeIdentity, QualifiedTimestamp, QualifiedValue,
         QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
-        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
+        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance, UserInputLifecycleState,
     };
     use crate::runtime_semantic_reducer::{
         content_block_reduced_state_digest, effective_state_reduced_state_digest,
         native_marker_reduced_state_digest, reduce_content_block_revision,
         reduce_effective_state_revision, reduce_native_marker_revision,
-        ContentBlockReducedDigestEntity, EffectiveStateReducedDigestEntity,
-        NativeMarkerReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticSourceRef,
+        user_input_reduced_state_digest, ContentBlockReducedDigestEntity,
+        EffectiveStateReducedDigestEntity, NativeMarkerReducedDigestEntity,
+        RevisionedEntityReduction, RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
     };
     use crate::semantic_contract::{
         content_block_revision, effective_state_revision, native_marker_revision,
@@ -27197,6 +27097,124 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurableUserInputEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
+    fn reduce_durable_user_input(
+        current: &mut BTreeMap<CanonicalFactId, DurableUserInputEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        mut envelope: FactEnvelope,
+    ) -> RevisionedEntityReduction {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("user-input durable fact has semantic identity");
+        let Fact::UserInputRequestRevision(revision) = &envelope.value else {
+            panic!("durable user-input reducer received another family");
+        };
+        let decision = reduce_user_input_revision(
+            current.get(&semantic.fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::UserInputRequestRevision(current_revision) = &entity.envelope.value
+                else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )
+        .unwrap();
+        match decision {
+            RevisionedEntityValueReduction::Unchanged => RevisionedEntityReduction::Unchanged,
+            RevisionedEntityValueReduction::Retract => {
+                current.remove(&semantic.fact_id);
+                RevisionedEntityReduction::Retract
+            }
+            RevisionedEntityValueReduction::Upsert(reduced) => {
+                envelope.value = Fact::UserInputRequestRevision(reduced.clone());
+                let semantic = envelope.semantic_revision.as_mut().unwrap();
+                rebind_reduced_semantic_revision(
+                    semantic,
+                    reduced.semantic_revision_key().unwrap(),
+                )
+                .unwrap();
+                current.insert(
+                    semantic.fact_id,
+                    DurableUserInputEntity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+                RevisionedEntityReduction::Upsert
+            }
+        }
+    }
+
+    fn durable_user_input_digest(
+        current: &BTreeMap<CanonicalFactId, DurableUserInputEntity>,
+    ) -> [u8; 32] {
+        user_input_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::UserInputRequestRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            UserInputReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_user_input_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurableUserInputEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        let snapshot = scoped
+            .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(snapshot.entity_count as usize, durable.len());
+        assert_eq!(
+            snapshot.semantic_digest.as_bytes(),
+            &durable_user_input_digest(durable),
+            "durable and scoped user-input reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.user_input_requests.get(fact_id).unwrap();
+            let Fact::UserInputRequestRevision(durable_revision) = &durable_entity.envelope.value
+            else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
     fn content_block_batch(
         record: &SourceRecord,
         fixture: &MessageFixtureWire,
@@ -28305,6 +28323,7 @@ mod projection_tests {
             &selection.contract_versions,
         )
         .unwrap();
+        let mut durable = BTreeMap::new();
         let fact_for = |batch: &FactBatch,
                         operation: UserInputOperation,
                         state,
@@ -28327,6 +28346,34 @@ mod projection_tests {
             }
         };
 
+        let rejected_partial_record = rfc012c_record(0, 1, 9);
+        let mut rejected_partial_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let rejected_partial = fact_for(
+            &rejected_partial_batch,
+            UserInputOperation::Upsert,
+            UserInputLifecycleState::Resolved,
+            ContractCompleteness::Partial,
+            Some("partial-result-cannot-create-terminal-state"),
+        );
+        rejected_partial_batch
+            .push_native(
+                &rejected_partial_record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(rejected_partial),
+            )
+            .unwrap();
+        assert_eq!(
+            projection.project(&rfc012c_decoded_frame(
+                0,
+                ScopedAppendDeliveryPhase::Live,
+                &rejected_partial_record,
+                rejected_partial_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert!(projection.user_input_requests.is_empty());
+
         let pending_record = rfc012c_record(0, 1, 10);
         let mut pending_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
@@ -28344,6 +28391,15 @@ mod projection_tests {
                 Fact::UserInputRequestRevision(pending.clone()),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_user_input(
+                &mut durable,
+                rfc012c_source_identity(),
+                pending_record.clone(),
+                pending_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         let events = projection
             .project(&rfc012c_decoded_frame(
                 1,
@@ -28353,6 +28409,7 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(events.len(), 1);
+        assert_user_input_topology_parity(&durable, &projection);
         assert_eq!(projection.user_input_requests.len(), 1);
         assert_eq!(
             projection
@@ -28383,6 +28440,15 @@ mod projection_tests {
             )
             .unwrap();
         assert_eq!(
+            reduce_durable_user_input(
+                &mut durable,
+                rfc012c_source_identity(),
+                resolved_record.clone(),
+                resolved_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_eq!(
             projection
                 .project(&rfc012c_decoded_frame(
                     2,
@@ -28394,6 +28460,7 @@ mod projection_tests {
                 .len(),
             1
         );
+        assert_user_input_topology_parity(&durable, &projection);
         assert_eq!(projection.user_input_requests.len(), 1);
         assert_eq!(
             projection
@@ -28435,6 +28502,15 @@ mod projection_tests {
             )
             .unwrap();
         assert_eq!(
+            reduce_durable_user_input(
+                &mut durable,
+                rfc012c_source_identity(),
+                retract_record.clone(),
+                retract_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Retract
+        );
+        assert_eq!(
             projection
                 .project(&rfc012c_decoded_frame(
                     3,
@@ -28446,6 +28522,7 @@ mod projection_tests {
                 .len(),
             1
         );
+        assert_user_input_topology_parity(&durable, &projection);
         assert!(projection.user_input_requests.is_empty());
         assert_eq!(
             projection
@@ -28465,6 +28542,15 @@ mod projection_tests {
                 Fact::UserInputRequestRevision(pending.clone()),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_user_input(
+                &mut durable,
+                rfc012c_source_identity(),
+                restored_record.clone(),
+                restored_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 4,
@@ -28473,9 +28559,12 @@ mod projection_tests {
                 restored_batch,
             ))
             .unwrap();
+        assert_user_input_topology_parity(&durable, &projection);
 
         let mut partial_upsert = pending.clone();
         partial_upsert.completeness = ContractCompleteness::Partial;
+        partial_upsert.state = UserInputLifecycleState::Resolved;
+        partial_upsert.result_reference = Some("partial-result-must-not-resolve".to_owned());
         partial_upsert.questions[0].header = None;
         partial_upsert.questions[0].options.truncate(1);
         let partial_upsert_record = rfc012c_record(4, 5, 14);
@@ -28488,6 +28577,15 @@ mod projection_tests {
                 Fact::UserInputRequestRevision(partial_upsert),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_user_input(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_upsert_record.clone(),
+                partial_upsert_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         let partial_events = projection
             .project(&rfc012c_decoded_frame(
                 5,
@@ -28497,6 +28595,7 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(partial_events.len(), 1);
+        assert_user_input_topology_parity(&durable, &projection);
         let partial_snapshot = projection
             .user_input_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
             .unwrap();
@@ -28508,6 +28607,11 @@ mod projection_tests {
             partial_snapshot.entities[0].revision.questions,
             pending.questions
         );
+        assert_eq!(
+            partial_snapshot.entities[0].revision.state,
+            UserInputLifecycleState::Pending
+        );
+        assert_eq!(partial_snapshot.entities[0].revision.result_reference, None);
 
         let partial_record = rfc012c_record(5, 6, 15);
         let mut partial_batch =
@@ -28526,6 +28630,15 @@ mod projection_tests {
                 Fact::UserInputRequestRevision(partial),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_user_input(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_record.clone(),
+                partial_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
         assert!(projection
             .project(&rfc012c_decoded_frame(
                 6,
@@ -28536,6 +28649,7 @@ mod projection_tests {
             .unwrap()
             .is_empty());
         assert_eq!(projection.user_input_requests.len(), 1);
+        assert_user_input_topology_parity(&durable, &projection);
     }
 
     #[test]

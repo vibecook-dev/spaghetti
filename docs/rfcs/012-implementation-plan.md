@@ -1090,6 +1090,14 @@ A durable `FactBatch` view and the private scoped reducer produce the same
 canonical content-block digest after every transition and in either fact
 order. The observer family, event union, and replacement-manifest entry remain
 unexposed until their portable contracts are frozen.
+The topology-neutral `CorrelatedLifecycle` law now also owns structured
+user-input reduction. A partial observation may enrich typed questions and
+options, but cannot resolve, fail, cancel, retract, retarget, or change the
+interaction kind; a partial terminal observation without current state fails
+closed. The durable `FactBatch` view and selected scoped projection share the
+same reduced revision and path-free digest across pending, complete terminal
+correction, complete retraction, restoration, partial enrichment, and partial
+retraction. Its selected portable event specialist remains open.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,
