@@ -111,14 +111,30 @@ pub(crate) struct PreparedCatalogBuild {
     intent: CatalogBuildIntent,
 }
 
+#[cfg(test)]
+impl PreparedCatalogBuild {
+    pub(super) fn empty_for_test(
+        plan: CatalogCoveragePlan,
+        selection: ContractVersionSelection,
+        intent: CatalogBuildIntent,
+    ) -> Self {
+        Self {
+            plan,
+            selection,
+            sources: Vec::new(),
+            intent,
+        }
+    }
+}
+
 impl SpaghettiEngineCore {
     /// Register the complete configured source set, obtain catalog-only typed
     /// authority for every required source, freeze the normalized Library plan,
     /// and only then read bounded native catalog objects and publish atomically.
     ///
     /// `Startup` retains an already-safe warm publication. `Refresh` explicitly
-    /// starts (or resumes) an ordinary same-plan refresh. A changed plan remains
-    /// fail-closed until the durable plan-transition contract is implemented.
+    /// starts (or resumes) a refresh. A changed plan durably opens its replacement
+    /// lineage after the watcher barrier and before the first source read.
     pub(crate) fn reconcile_configured_catalog(
         self: &Arc<Self>,
         configured: Vec<CatalogConfiguredSource>,
@@ -236,16 +252,6 @@ impl SpaghettiEngineCore {
             CatalogCoveragePlan::new(CatalogCoverageScope::Library, plan_sources, Vec::new())
                 .map_err(|_| catalog_integrity_error("freeze catalog coverage plan"))?;
 
-        let durable_state = self.load_catalog_build_state()?;
-        if durable_state
-            .as_ref()
-            .is_some_and(|state| state.plan != plan)
-        {
-            return Err(EngineError::InvalidCommit(
-                "configured catalog source set does not match the durable frozen plan".to_string(),
-            ));
-        }
-
         Ok(CatalogBuildPreparation::Prepared(PreparedCatalogBuild {
             plan,
             selection,
@@ -269,15 +275,10 @@ impl SpaghettiEngineCore {
             sources,
             intent,
         } = prepared;
-        let durable_state = self.load_catalog_build_state()?;
-        if durable_state
-            .as_ref()
-            .is_some_and(|state| state.plan != plan)
-        {
-            return Err(EngineError::InvalidCommit(
-                "configured catalog source set does not match the durable frozen plan".to_string(),
-            ));
-        }
+        // This is deliberately after the watcher-installation barrier and
+        // before any producer/native reads. Startup must not silently retain a
+        // snapshot for a plan that is no longer configured.
+        let durable_state = self.replace_catalog_coverage_plan_if_changed(&plan)?;
         match durable_state.as_ref().map(|state| state.readiness.state) {
             None | Some(CatalogReadinessPhase::Pending) => {
                 publish_initial(self, plan, selection, &sources, &cancellation)
@@ -450,7 +451,7 @@ fn publish_refresh(
         let prior = context
             .prior_source_coverage(&plan_source)
             .map_err(|_| catalog_integrity_error("bind prior catalog source coverage"))?;
-        let projection = produce_projection(source, Some(prior))?;
+        let projection = produce_projection(source, prior)?;
         if context.is_recovery() && context.can_record_partial() && index + 1 < sources.len() {
             if let Some(progress) =
                 merge_partial_coverage(context.progress_coverage(), projection.source_coverage())?
@@ -462,13 +463,7 @@ fn publish_refresh(
         }
         projections.push(projection);
     }
-    let batch = CatalogRefreshProjectionBatch::assemble(
-        projections,
-        selection,
-        context.observation_commit(),
-        context.prior_reducer(),
-    )
-    .map_err(|_| catalog_integrity_error("assemble catalog refresh projection"))?;
+    let batch = assemble_refresh_projection_batch(&context, projections, selection)?;
     let source_count = batch.source_count();
     let member_count = batch.member_count();
     check_cancelled(cancellation)?;
@@ -479,6 +474,30 @@ fn publish_refresh(
         source_count,
         member_count,
     })
+}
+
+pub(super) fn assemble_refresh_projection_batch(
+    context: &super::CatalogRefreshBuildContext,
+    projections: Vec<CatalogSourceProjection>,
+    selection: ContractVersionSelection,
+) -> Result<CatalogRefreshProjectionBatch, EngineError> {
+    if let Some(previous_plan) = context.previous_plan() {
+        CatalogRefreshProjectionBatch::assemble_for_coverage_plan_replacement(
+            projections,
+            selection,
+            context.observation_commit(),
+            context.prior_reducer(),
+            previous_plan,
+        )
+    } else {
+        CatalogRefreshProjectionBatch::assemble(
+            projections,
+            selection,
+            context.observation_commit(),
+            context.prior_reducer(),
+        )
+    }
+    .map_err(|_| catalog_integrity_error("assemble catalog refresh projection"))
 }
 
 fn merge_partial_coverage(

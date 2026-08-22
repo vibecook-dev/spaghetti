@@ -11833,9 +11833,12 @@ mod tests {
             )
             .unwrap();
         let error = load_catalog_build_state(&connection).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("content digest exceeds its fixed durable bound"));
+        assert!(
+            error
+                .to_string()
+                .contains("catalog plan lineage digest exceeds its fixed bound"),
+            "{error}"
+        );
         connection
             .execute(
                 "UPDATE catalog_coverage_plans SET content_digest = ?1",
@@ -11865,9 +11868,12 @@ mod tests {
             )
             .unwrap();
         let error = load_catalog_build_state(&connection).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("plan commit reason is outside its closed vocabulary"));
+        assert!(
+            error
+                .to_string()
+                .contains("catalog plan lineage owner has an unsupported reason"),
+            "{error}"
+        );
         connection
             .execute(
                 "UPDATE ingest_commits SET reason = ?1 WHERE commit_seq = 1",
@@ -11881,9 +11887,12 @@ mod tests {
             )
             .unwrap();
         let error = load_catalog_build_state(&connection).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("state commit reason is outside its closed vocabulary"));
+        assert!(
+            error
+                .to_string()
+                .contains("state commit reason is outside its closed vocabulary"),
+            "{error}"
+        );
         connection
             .execute(
                 "UPDATE ingest_commits SET reason = ?1 WHERE commit_seq = 2",

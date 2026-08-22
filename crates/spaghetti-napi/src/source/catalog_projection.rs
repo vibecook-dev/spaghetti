@@ -844,29 +844,42 @@ impl CatalogRefreshProjectionBatch {
             reducer = projection.reduce_into(reducer, observation_commit)?;
         }
         for owner in prior_reducer.live_owners() {
-            let Some(projection) = projections.iter().find(|projection| {
+            let projection = projections.iter().find(|projection| {
                 let source = projection.source.plan_source();
                 source.adapter_id == owner.adapter_id
                     && source.source_instance_key == owner.source_instance_key
-            }) else {
-                let Some(previous_plan) = previous_plan else {
-                    return Err(CatalogCompositionError::invalid(
-                        "catalog refresh predecessor owner has no matching complete source",
-                    ));
-                };
-                let belonged_to_previous_plan = previous_plan
-                    .required_sources
+            });
+            let previous_source = previous_plan.and_then(|plan| {
+                plan.required_sources
                     .iter()
-                    .chain(&previous_plan.optional_sources)
-                    .any(|source| {
+                    .chain(&plan.optional_sources)
+                    .find(|source| {
                         source.adapter_id == owner.adapter_id
                             && source.source_instance_key == owner.source_instance_key
-                    });
-                if !belonged_to_previous_plan {
-                    return Err(CatalogCompositionError::invalid(
-                        "catalog plan replacement predecessor owner is outside its prior plan",
-                    ));
-                }
+                    })
+            });
+            if previous_plan.is_some() && previous_source.is_none() {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog plan replacement predecessor owner is outside its prior plan",
+                ));
+            }
+            let replaced_by_plan = previous_source.is_some_and(|previous_source| {
+                projection.is_none_or(|projection| {
+                    projection.source.plan_source() != previous_source
+                        && !projection
+                            .source
+                            .source_coverage()
+                            .points
+                            .iter()
+                            .any(|point| {
+                                point.stream_key == owner.stream_key
+                                    && point.object_key == owner.object_key
+                                    && point.generation == owner.generation
+                            })
+                })
+            });
+            if replaced_by_plan {
+                let previous_plan = previous_plan.expect("previous source requires its plan");
                 let evidence = CatalogRetractionEvidence::new(
                     owner.clone(),
                     CatalogRetractionCause::ConfirmedReplacement,
@@ -886,7 +899,7 @@ impl CatalogRefreshProjectionBatch {
                     .retract_owner(&evidence, observation_commit)
                     .map_err(|_| {
                         CatalogCompositionError::invalid(
-                            "catalog plan replacement could not retract removed source evidence",
+                            "catalog plan replacement could not retract replaced source evidence",
                         )
                     })?;
                 for entity_ref in retraction.orphaned_entities {
@@ -894,11 +907,21 @@ impl CatalogRefreshProjectionBatch {
                         .confirm_absent(entity_ref, &evidence, absence_commit)
                         .map_err(|_| {
                             CatalogCompositionError::invalid(
-                                "catalog plan replacement could not confirm removed source absence",
+                                "catalog plan replacement could not confirm replaced source absence",
                             )
                         })?;
                 }
                 continue;
+            }
+            let Some(projection) = projection else {
+                if previous_plan.is_some() {
+                    return Err(CatalogCompositionError::invalid(
+                        "catalog plan replacement did not classify a prior source owner",
+                    ));
+                }
+                return Err(CatalogCompositionError::invalid(
+                    "catalog refresh predecessor owner has no matching complete source",
+                ));
             };
             let coverage = projection.source.source_coverage();
             let Some(absence) = coverage
@@ -1444,6 +1467,46 @@ mod tests {
         CatalogSourceProjection::assemble(source, Vec::new()).unwrap()
     }
 
+    fn policy_replacement_without_members() -> CatalogSourceProjection {
+        let source_key = CanonicalSourceInstanceKey::derive(1, b"projection-source").unwrap();
+        let plan_source = CatalogCoveragePlanSource::new(
+            ADAPTER_ID,
+            source_key,
+            "fixture-support-v1",
+            CoverageDeclarationDigest::derive(b"fixture-declaration-v1").unwrap(),
+            CatalogAccessPolicyDigest::derive(1, b"replacement-withheld-policy-v1").unwrap(),
+        )
+        .unwrap();
+        let coverage = SourceCoverageSet::new(
+            CoverageDomain::ProjectionPack {
+                pack: CATALOG_PROJECTION_PACK_ID.to_owned(),
+                version: CATALOG_QUERY_PACK_CONTRACT_VERSION,
+            },
+            plan_source.coverage_scope(CatalogCoverageScope::Library),
+            CoverageMembershipRevision::derive(b"replacement-empty-membership").unwrap(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            CoverageSetCompleteness::Complete,
+        )
+        .unwrap();
+        let source = CatalogCompleteSourceAssembly::from_complete_library_coverage(
+            plan_source,
+            selection(),
+            MEMBER_CONTRACT,
+            CatalogSourceMembershipRevision::from_digest(
+                *blake3::hash(b"replacement-empty-membership").as_bytes(),
+            ),
+            CatalogSourceCompletionRevision::from_digest(
+                *blake3::hash(b"replacement-empty-completion").as_bytes(),
+            ),
+            Vec::new(),
+            coverage,
+        )
+        .unwrap();
+        CatalogSourceProjection::assemble(source, Vec::new()).unwrap()
+    }
+
     #[test]
     fn complete_membership_projects_to_bounded_reducer_and_exact_binding() {
         let (source, input) = fixture("object-a");
@@ -1696,6 +1759,41 @@ mod tests {
             replacement.plan().coverage_plan_id,
             previous_plan.coverage_plan_id
         );
+        let publication = replacement
+            .reducer
+            .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+            .unwrap();
+        assert_eq!(publication.project_row_count(), 0);
+        assert_eq!(publication.session_row_count(), 0);
+        assert_eq!(publication.tombstone_count(), 2);
+        assert!(publication.live_owners().is_empty());
+    }
+
+    #[test]
+    fn coverage_plan_replacement_retracts_uncovered_owners_when_source_policy_changes() {
+        let (initial_source, initial_member) = fixture("object-a");
+        let initial =
+            CatalogSourceProjection::assemble(initial_source, vec![initial_member]).unwrap();
+        let previous_plan = CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            vec![initial.source.plan_source().clone()],
+            Vec::new(),
+        )
+        .unwrap();
+        let prior = initial
+            .reduce_into(CatalogReducer::default(), 1)
+            .unwrap()
+            .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+            .unwrap();
+
+        let replacement = CatalogRefreshProjectionBatch::assemble_for_coverage_plan_replacement(
+            vec![policy_replacement_without_members()],
+            selection(),
+            3,
+            &prior,
+            &previous_plan,
+        )
+        .unwrap();
         let publication = replacement
             .reducer
             .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
