@@ -14,13 +14,14 @@ use sha2::{Digest as _, Sha256};
 
 use super::adapter::{normalize_session_meta, CodexAdapter};
 use crate::adapter::{
-    AdapterError, AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId,
-    ContractVersionOffer, ContractVersionRequest, DriverSpec, Fact, FactRevisionId,
-    FactSemanticContext, NativeArtifactProbe, SourceAccess, SourceInstance, SourceInstanceKey,
-    SourceInstanceSpec, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest,
-    SourceQuery, SourceRecordId, SourceRoot, SourceRows, SourceSnapshot, SupportReleaseStatus,
+    AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId, ContractVersionOffer,
+    ContractVersionRequest, DriverSpec, Fact, FactRevisionId, FactSemanticContext,
+    NativeArtifactProbe, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceRecordId, SourceRoot, SupportReleaseStatus,
 };
-use crate::decode_runtime::{decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest};
+use crate::decode_runtime::{
+    decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecoderDependenciesDenied,
+};
 use crate::source::{
     AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead, AppendTransition,
     DirectoryEntryKind, DirectoryScan, DirectorySelection, DirectorySnapshot,
@@ -452,7 +453,7 @@ fn full_decoder_identities(
                     adapter: &adapter,
                     decoder: &stream.decoder,
                     object_context: &object_context,
-                    source_access: &CatalogDecoderDependencyAccessDenied,
+                    source_access: &DecoderDependenciesDenied,
                     record: &record,
                     semantic_context: &semantic_context,
                     decoder_state: decoder_state.as_deref(),
@@ -484,36 +485,6 @@ fn full_decoder_identities(
         }
     }
     Ok(NativeCatalogIdentities { projects, sessions })
-}
-
-struct CatalogDecoderDependencyAccessDenied;
-
-impl SourceAccess for CatalogDecoderDependencyAccessDenied {
-    fn read_object(
-        &self,
-        _root_name: &str,
-        _relative_path: &Path,
-        _max_bytes: usize,
-    ) -> Result<SourceSnapshot, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Codex catalog decoder has no declared dependency read",
-        ))
-    }
-
-    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Codex catalog decoder has no declared dependency query",
-        ))
-    }
-
-    fn list_objects(
-        &self,
-        _request: &SourceObjectListRequest,
-    ) -> Result<SourceObjectList, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Codex catalog decoder has no declared dependency listing",
-        ))
-    }
 }
 
 fn identity_digest<T>(values: &BTreeSet<T>) -> String

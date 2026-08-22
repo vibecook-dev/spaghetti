@@ -333,6 +333,45 @@ fn json_value_kind(value: &serde_json::Value) -> &'static str {
     }
 }
 
+/// Test-only source-access policy for candidate conformance decoders that
+/// declare no secondary source dependencies. Keeping this policy beside the
+/// common decode boundary prevents individual vendor oracles from silently
+/// widening native I/O or diverging in privacy-safe failure behavior.
+#[cfg(test)]
+pub(crate) struct DecoderDependenciesDenied;
+
+#[cfg(test)]
+impl SourceAccess for DecoderDependenciesDenied {
+    fn read_object(
+        &self,
+        _root_name: &str,
+        _relative_path: &std::path::Path,
+        _max_bytes: usize,
+    ) -> Result<crate::adapter::SourceSnapshot, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "decoder has no declared dependency read",
+        ))
+    }
+
+    fn query_source_db(
+        &self,
+        _query: &crate::adapter::SourceQuery,
+    ) -> Result<crate::adapter::SourceRows, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "decoder has no declared dependency query",
+        ))
+    }
+
+    fn list_objects(
+        &self,
+        _request: &crate::adapter::SourceObjectListRequest,
+    ) -> Result<crate::adapter::SourceObjectList, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "decoder has no declared dependency listing",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::adapter::{

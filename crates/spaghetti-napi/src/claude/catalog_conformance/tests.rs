@@ -61,6 +61,16 @@ fn complete_membership_and_bounded_heads_match_census_and_durable_identity() {
 }
 
 #[test]
+fn candidate_catalog_oracles_use_the_common_decode_boundary() {
+    let source = include_str!("../catalog_conformance.rs");
+    let direct_decode = [".de", "code("].concat();
+    let direct_batch = ["FactBatch::", "new_with_semantic_context"].concat();
+    assert!(source.contains("decode_record(DecodeRuntimeRequest"));
+    assert!(!source.contains(&direct_decode));
+    assert!(!source.contains(&direct_batch));
+}
+
+#[test]
 fn candidate_identities_ignore_runtime_registration_ids() {
     let first = candidate_projection(&fixture_root(), 7).unwrap().report();
     let reordered = candidate_projection(&fixture_root(), 70_007)

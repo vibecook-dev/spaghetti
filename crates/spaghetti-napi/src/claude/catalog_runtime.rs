@@ -13,16 +13,16 @@ use sha2::{Digest as _, Sha256};
 
 use super::adapter::ClaudeCodeAdapter;
 use crate::adapter::{
-    AdapterError, AdapterId, AdapterObjectContext, AgentAdapter, CanonicalSourceInstanceKey,
-    DecodeDisposition, DriverSpec, Fact, FactSemanticContext, SessionFact, SourceAccess,
-    SourceInstance, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery,
-    SourceRows, SourceSnapshot, StreamSpec,
+    AdapterId, AdapterObjectContext, AgentAdapter, CanonicalSourceInstanceKey, DecodeDisposition,
+    DriverSpec, Fact, FactSemanticContext, SessionFact, SourceInstance, SourceObjectDescriptor,
+    StreamSpec,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::decode_runtime::{
     decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecodedFactBatch,
+    DecoderDependenciesDenied,
 };
 use crate::source::catalog_composition::{
     CatalogBoundSourceAccess, CatalogCompletedCoverageObject, CatalogComponentCoverageCompletion,
@@ -244,36 +244,6 @@ pub(crate) fn claude_catalog_source_instance(
     )
 }
 
-struct CatalogDecoderDependencyAccessDenied;
-
-impl SourceAccess for CatalogDecoderDependencyAccessDenied {
-    fn read_object(
-        &self,
-        _root_name: &str,
-        _relative_path: &Path,
-        _max_bytes: usize,
-    ) -> Result<SourceSnapshot, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Claude catalog decoder has no declared dependency read",
-        ))
-    }
-
-    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Claude catalog decoder has no declared dependency query",
-        ))
-    }
-
-    fn list_objects(
-        &self,
-        _request: &SourceObjectListRequest,
-    ) -> Result<SourceObjectList, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Claude catalog decoder has no declared dependency listing",
-        ))
-    }
-}
-
 fn decode_catalog_record(
     adapter: &ClaudeCodeAdapter,
     stream: &StreamSpec,
@@ -287,7 +257,7 @@ fn decode_catalog_record(
         adapter,
         decoder: &stream.decoder,
         object_context,
-        source_access: &CatalogDecoderDependencyAccessDenied,
+        source_access: &DecoderDependenciesDenied,
         record,
         semantic_context,
         decoder_state,

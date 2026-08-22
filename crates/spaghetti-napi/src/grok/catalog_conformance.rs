@@ -17,13 +17,14 @@ use super::adapter::{
     GrokCatalogCoordinates,
 };
 use crate::adapter::{
-    AdapterError, AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, DecodeDisposition, DriverSpec, Fact, FactRevisionId,
-    FactSemanticContext, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
-    SourceRoot, SourceRows, SourceSnapshot, StreamSpec,
+    AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
+    DecodeDisposition, DriverSpec, Fact, FactRevisionId, FactSemanticContext, SourceInstance,
+    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRecordId, SourceRoot,
+    StreamSpec,
 };
-use crate::decode_runtime::{decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest};
+use crate::decode_runtime::{
+    decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecoderDependenciesDenied,
+};
 use crate::source::{
     DirectoryEntryKind, DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySnapshot,
     RecordOrigin, ReplaceDocument, ReplaceRead, SourceMediaType,
@@ -520,7 +521,7 @@ fn enrich_summary(
         adapter,
         decoder: &summary_stream.decoder,
         object_context: &object_context,
-        source_access: &CatalogDecoderDependencyAccessDenied,
+        source_access: &DecoderDependenciesDenied,
         record: &record,
         semantic_context: &semantic_context,
         decoder_state: None,
@@ -580,36 +581,6 @@ fn enrich_summary(
         )?,
     ));
     Ok(())
-}
-
-struct CatalogDecoderDependencyAccessDenied;
-
-impl SourceAccess for CatalogDecoderDependencyAccessDenied {
-    fn read_object(
-        &self,
-        _root_name: &str,
-        _relative_path: &Path,
-        _max_bytes: usize,
-    ) -> Result<SourceSnapshot, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Grok summary catalog decoder has no declared dependency read",
-        ))
-    }
-
-    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Grok summary catalog decoder has no declared dependency query",
-        ))
-    }
-
-    fn list_objects(
-        &self,
-        _request: &SourceObjectListRequest,
-    ) -> Result<SourceObjectList, AdapterError> {
-        Err(AdapterError::invalid_contract(
-            "Grok summary catalog decoder has no declared dependency listing",
-        ))
-    }
 }
 
 fn pair_key(left: &[u8], right: &[u8]) -> Vec<u8> {

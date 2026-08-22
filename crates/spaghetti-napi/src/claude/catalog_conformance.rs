@@ -17,16 +17,20 @@ use super::adapter::{
     candidate_catalog_parent_coordinates, ClaudeCodeAdapter,
 };
 use crate::adapter::{
-    AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
-    DecodeContext, DecodeDisposition, DriverSpec, Fact, FactBatch, FactRevisionId,
+    AdapterId, AdapterObjectContext, AgentAdapter, CanonicalEntityKey, CanonicalFactId,
+    CanonicalSourceInstanceKey, DecodeDisposition, DriverSpec, Fact, FactRevisionId,
     FactSemanticContext, SessionFact, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
     SourceInstanceSpec, SourceObjectDescriptor, SourceRecordId, SourceRoot, StreamSpec,
+};
+use crate::decode_runtime::{
+    decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecodedFactBatch,
+    DecoderDependenciesDenied,
 };
 use crate::source::{
     AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead, AppendTransition,
     DirectoryCheckpoint, DirectoryEntryKind, DirectoryEntryState, DirectoryScan,
     DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, RecordOrigin, ReplaceDocument,
-    ReplaceRead, SourceDriverError, SourceMediaType,
+    ReplaceRead, SourceDriverError, SourceMediaType, SourceRecord,
 };
 
 const FIXTURE_CONTRACT_VERSION: u32 = 1;
@@ -690,20 +694,23 @@ fn add_index_document(
         relative_path,
     };
     let object_context = adapter.bootstrap_object(instance, &descriptor)?;
-    let mut batch = FactBatch::new_with_semantic_context(8, 8, semantic_context)?;
-    let disposition = adapter.decode(
-        DecodeContext {
-            decoder: &stream.decoder,
-            object_context: &object_context,
-            decoder_state: None,
-        },
+    let decoded = decode_catalog_record(
+        adapter,
+        stream,
+        &object_context,
+        &semantic_context,
         &record,
-        &mut batch,
+        None,
+        DecodeRuntimeLimits {
+            max_facts: 8,
+            max_diagnostics: 8,
+        },
     )?;
-    if disposition != DecodeDisposition::Applied {
+    if decoded.disposition != DecodeDisposition::Applied {
         return Err("Claude authoritative session index did not decode completely".into());
     }
-    let mut snapshots = batch
+    let mut snapshots = decoded
+        .batch
         .facts()
         .iter()
         .filter_map(|envelope| match &envelope.value {
@@ -923,23 +930,25 @@ fn enrich_transcript_head(
             .ok_or("Claude transcript-head payload accounting overflow")?;
         let source_record_id = semantic_context.source_record_id(&record)?;
         projection.source_records.insert(source_record_id);
-        let mut batch = FactBatch::new_with_semantic_context(256, 64, semantic_context.clone())?;
-        let disposition = adapter.decode(
-            DecodeContext {
-                decoder: &stream.decoder,
-                object_context: &object_context,
-                decoder_state: decoder_state.as_deref(),
-            },
+        let decoded = decode_catalog_record(
+            adapter,
+            stream,
+            &object_context,
+            &semantic_context,
             &record,
-            &mut batch,
+            decoder_state.as_deref(),
+            DecodeRuntimeLimits {
+                max_facts: 256,
+                max_diagnostics: 64,
+            },
         )?;
-        if disposition == DecodeDisposition::RetryTransient {
+        if decoded.disposition == DecodeDisposition::RetryTransient {
             return Err(
                 "Claude transcript decoder requested a retry for stable head evidence".into(),
             );
         }
-        decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
-        for envelope in batch.facts() {
+        decoder_state = decoded.next_decoder_state;
+        for envelope in decoded.batch.facts() {
             let Fact::Session(session) = &envelope.value else {
                 continue;
             };
@@ -1012,25 +1021,24 @@ fn durable_decoder_identities(
             object_key: entry.path_key.clone(),
             relative_path,
         };
-        let context = adapter.bootstrap_object(&instance, &descriptor)?;
-        let mut batch = FactBatch::new_with_semantic_context(
-            8,
-            8,
-            semantic_context(index_stream.id.as_str(), entry)?,
-        )?;
-        if adapter.decode(
-            DecodeContext {
-                decoder: &index_stream.decoder,
-                object_context: &context,
-                decoder_state: None,
-            },
+        let object_context = adapter.bootstrap_object(&instance, &descriptor)?;
+        let semantic_context = semantic_context(index_stream.id.as_str(), entry)?;
+        let decoded = decode_catalog_record(
+            &adapter,
+            &index_stream,
+            &object_context,
+            &semantic_context,
             &record,
-            &mut batch,
-        )? != DecodeDisposition::Applied
-        {
+            None,
+            DecodeRuntimeLimits {
+                max_facts: 8,
+                max_diagnostics: 8,
+            },
+        )?;
+        if decoded.disposition != DecodeDisposition::Applied {
             return Err("Claude durable index did not apply".into());
         }
-        for envelope in batch.facts() {
+        for envelope in decoded.batch.facts() {
             if let Fact::SessionIndexSnapshot(snapshot) = &envelope.value {
                 identities
                     .projects
@@ -1113,22 +1121,23 @@ fn decode_full_append_members<'a>(
                 let AppendItem::Record(record) = item else {
                     return Err("Claude durable fixture contains an oversized record".into());
                 };
-                let mut batch =
-                    FactBatch::new_with_semantic_context(256, 64, semantic_context.clone())?;
-                let disposition = adapter.decode(
-                    DecodeContext {
-                        decoder: &stream.decoder,
-                        object_context: &object_context,
-                        decoder_state: decoder_state.as_deref(),
-                    },
+                let decoded = decode_catalog_record(
+                    adapter,
+                    stream,
+                    &object_context,
+                    &semantic_context,
                     &record,
-                    &mut batch,
+                    decoder_state.as_deref(),
+                    DecodeRuntimeLimits {
+                        max_facts: 256,
+                        max_diagnostics: 64,
+                    },
                 )?;
-                if disposition == DecodeDisposition::RetryTransient {
+                if decoded.disposition == DecodeDisposition::RetryTransient {
                     return Err("Claude durable transcript decode requested retry".into());
                 }
-                decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
-                for envelope in batch.facts() {
+                decoder_state = decoded.next_decoder_state;
+                for envelope in decoded.batch.facts() {
                     if let Fact::Session(session) = &envelope.value {
                         identities
                             .projects
@@ -1148,6 +1157,30 @@ fn decode_full_append_members<'a>(
         }
     }
     Ok(())
+}
+
+fn decode_catalog_record(
+    adapter: &ClaudeCodeAdapter,
+    stream: &StreamSpec,
+    object_context: &AdapterObjectContext,
+    semantic_context: &FactSemanticContext,
+    record: &SourceRecord,
+    decoder_state: Option<&[u8]>,
+    limits: DecodeRuntimeLimits,
+) -> ConformanceResult<DecodedFactBatch> {
+    decode_record(DecodeRuntimeRequest {
+        adapter,
+        decoder: &stream.decoder,
+        object_context,
+        source_access: &DecoderDependenciesDenied,
+        record,
+        semantic_context,
+        decoder_state,
+        retention: stream.retention,
+        limits,
+    })
+    .result
+    .map_err(|_| "Claude catalog record failed at the common decode boundary".into())
 }
 
 fn semantic_context(
