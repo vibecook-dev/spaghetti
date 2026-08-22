@@ -267,6 +267,7 @@ pub(crate) struct PreparedScopedObservationSupport {
     adapter_id: AdapterId,
     artifact_probe: NativeArtifactProbe,
     observation_contract: ObservationContractSelection,
+    unknown_wire_contract: Option<ObservationUnknownWireContractSelection>,
     compatibility: CompatibilityDecision,
     authorization: TypedAccessAuthorization,
 }
@@ -282,6 +283,10 @@ impl PreparedScopedObservationSupport {
 
     pub(crate) fn observation_contract(&self) -> &ObservationContractSelection {
         &self.observation_contract
+    }
+
+    pub(crate) fn unknown_wire_contract(&self) -> Option<&ObservationUnknownWireContractSelection> {
+        self.unknown_wire_contract.as_ref()
     }
 
     pub(crate) fn compatibility(&self) -> &CompatibilityDecision {
@@ -300,6 +305,10 @@ impl std::fmt::Debug for PreparedScopedObservationSupport {
             .field("adapter_id", &self.adapter_id)
             .field("has_artifact_probe", &true)
             .field("observation_contract", &self.observation_contract)
+            .field(
+                "has_unknown_wire_contract",
+                &self.unknown_wire_contract.is_some(),
+            )
             .field(
                 "compatibility_class",
                 &self.compatibility.compatibility_class(),
@@ -322,8 +331,18 @@ pub(crate) fn prepare_scoped_observation_support(
     configured_roots: &[PathBuf],
     request: &ObservationContractRequest,
     offer: &ObservationContractOffer,
+    unknown_wire: Option<&ScopedObservationUnknownWireNegotiation>,
 ) -> Result<Option<PreparedScopedObservationSupport>, ScopedObservationAccessError> {
     let observation_contract = negotiate_observation_contract(request, offer)?;
+    let unknown_wire_contract = unknown_wire
+        .map(|sidecar| {
+            negotiate_observation_unknown_wire(
+                &sidecar.request,
+                &sidecar.offer,
+                &observation_contract,
+            )
+        })
+        .transpose()?;
     let adapter_id = AdapterId::new(adapter_id)
         .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
     let Some(artifact_probe) = registry
@@ -353,6 +372,7 @@ pub(crate) fn prepare_scoped_observation_support(
         adapter_id,
         artifact_probe,
         observation_contract,
+        unknown_wire_contract,
         compatibility,
         authorization,
     }))

@@ -2032,10 +2032,46 @@ pub(crate) mod tests {
                 &[temp.path().to_path_buf()],
                 &incompatible,
                 &request.observation_contract_offer,
+                request.unknown_wire_contract.as_ref(),
             ),
             Err(ScopedObservationAccessError::ObservationContract(
                 ObservationNegotiationError::IncompatibleObservationContract {
                     axis: ObservationCompatibilityAxis::EventContractVersion,
+                }
+            ))
+        ));
+        assert_eq!(probe_calls.load(Ordering::Acquire), 0);
+
+        let incompatible_unknown_offer = serde_json::from_value(serde_json::json!({
+            "observation_unknown_wire_negotiation_contract_version": 1,
+            "capability": {
+                "unknown_wire_event_contract_version": 1,
+                "preserves_type_tag": false,
+                "preserves_encoded_value": true,
+                "preserves_envelope_provenance": true,
+                "max_preserved_bytes": 4096
+            }
+        }))
+        .unwrap();
+        let incompatible_unknown = ScopedObservationUnknownWireNegotiation::new(
+            ObservationUnknownWireContractRequest::new(
+                ObservationUnknownWireCapability::preserving(8_192).unwrap(),
+            )
+            .unwrap(),
+            incompatible_unknown_offer,
+        );
+        assert!(matches!(
+            prepare_scoped_observation_support(
+                &registry,
+                "fixture",
+                &[temp.path().to_path_buf()],
+                &request.observation_contract_request,
+                &request.observation_contract_offer,
+                Some(&incompatible_unknown),
+            ),
+            Err(ScopedObservationAccessError::UnknownWireContract(
+                ObservationUnknownWireContractError::Incompatible {
+                    axis: ObservationUnknownWireCompatibilityAxis::TypeTagPreservation,
                 }
             ))
         ));
@@ -2047,6 +2083,7 @@ pub(crate) mod tests {
             &[temp.path().to_path_buf()],
             &request.observation_contract_request,
             &request.observation_contract_offer,
+            request.unknown_wire_contract.as_ref(),
         )
         .unwrap()
         .unwrap();
@@ -2057,6 +2094,7 @@ pub(crate) mod tests {
             prepared.observation_contract().contract_versions,
             *prepared.authorization().contracts()
         );
+        assert!(prepared.unknown_wire_contract().is_some());
         assert!(prepared.compatibility().permissions().scoped_observation);
 
         let (catalog, binding, scope_programs) = promoted_fixture_catalog();
@@ -2079,6 +2117,7 @@ pub(crate) mod tests {
             &[temp.path().to_path_buf()],
             &request.observation_contract_request,
             &request.observation_contract_offer,
+            request.unknown_wire_contract.as_ref(),
         )
         .unwrap()
         .is_none());
