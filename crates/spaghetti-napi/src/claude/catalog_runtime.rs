@@ -13,13 +13,17 @@ use sha2::{Digest as _, Sha256};
 
 use super::adapter::ClaudeCodeAdapter;
 use crate::adapter::{
-    AdapterId, AgentAdapter, CanonicalSourceInstanceKey, DecodeContext, DecodeDisposition,
-    DriverSpec, Fact, FactBatch, FactSemanticContext, SessionFact, SourceInstance,
-    SourceObjectDescriptor, StreamSpec,
+    AdapterError, AdapterId, AdapterObjectContext, AgentAdapter, CanonicalSourceInstanceKey,
+    DecodeDisposition, DriverSpec, Fact, FactSemanticContext, SessionFact, SourceAccess,
+    SourceInstance, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery,
+    SourceRows, SourceSnapshot, StreamSpec,
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
 use crate::catalog_contract::CatalogAccessPolicyDigest;
+use crate::decode_runtime::{
+    decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecodedFactBatch,
+};
 use crate::source::catalog_composition::{
     CatalogBoundSourceAccess, CatalogCompletedCoverageObject, CatalogComponentCoverageCompletion,
     CatalogCompositionError, CatalogContribution, CatalogDecoderStateBoundary,
@@ -34,7 +38,7 @@ use crate::source::{
     AppendTransition, DirectoryCheckpoint, DirectoryEntryKind, DirectoryEntryState, DirectoryScan,
     DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, RecordOrigin,
     ReplaceCheckpoint, ReplaceDocument, ReplaceDocumentConfig, ReplaceRead, SourceDriverError,
-    SourceMediaType,
+    SourceMediaType, SourceRecord,
 };
 
 const ADAPTER_ID: &str = "claude-code";
@@ -240,6 +244,64 @@ pub(crate) fn claude_catalog_source_instance(
     )
 }
 
+struct CatalogDecoderDependencyAccessDenied;
+
+impl SourceAccess for CatalogDecoderDependencyAccessDenied {
+    fn read_object(
+        &self,
+        _root_name: &str,
+        _relative_path: &Path,
+        _max_bytes: usize,
+    ) -> Result<SourceSnapshot, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Claude catalog decoder has no declared dependency read",
+        ))
+    }
+
+    fn query_source_db(&self, _query: &SourceQuery) -> Result<SourceRows, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Claude catalog decoder has no declared dependency query",
+        ))
+    }
+
+    fn list_objects(
+        &self,
+        _request: &SourceObjectListRequest,
+    ) -> Result<SourceObjectList, AdapterError> {
+        Err(AdapterError::invalid_contract(
+            "Claude catalog decoder has no declared dependency listing",
+        ))
+    }
+}
+
+fn decode_catalog_record(
+    adapter: &ClaudeCodeAdapter,
+    stream: &StreamSpec,
+    object_context: &AdapterObjectContext,
+    semantic_context: &FactSemanticContext,
+    record: &SourceRecord,
+    decoder_state: Option<&[u8]>,
+    limits: DecodeRuntimeLimits,
+) -> Result<DecodedFactBatch, CatalogCompositionError> {
+    decode_record(DecodeRuntimeRequest {
+        adapter,
+        decoder: &stream.decoder,
+        object_context,
+        source_access: &CatalogDecoderDependencyAccessDenied,
+        record,
+        semantic_context,
+        decoder_state,
+        retention: stream.retention,
+        limits,
+    })
+    .result
+    .map_err(|_| {
+        CatalogCompositionError::invalid(
+            "Claude catalog record failed at the common decode boundary",
+        )
+    })
+}
+
 fn produce_claude_library_coverage_after_heads(
     access: &CatalogBoundSourceAccess<'_, '_, '_>,
     access_policy_digest: CatalogAccessPolicyDigest,
@@ -369,35 +431,32 @@ fn produce_claude_library_coverage_after_heads(
                 )
             })?;
         let semantic_context = decode_context(&index_stream, entry, instance)?;
-        let mut batch =
-            FactBatch::new_with_semantic_context(8, 8, semantic_context).map_err(|_| {
-                CatalogCompositionError::invalid(
-                    "Claude catalog producer could not allocate an index decode batch",
-                )
-            })?;
-        let disposition = adapter
-            .decode(
-                DecodeContext {
-                    decoder: &index_stream.decoder,
-                    object_context: &object_context,
-                    decoder_state: None,
-                },
-                &record,
-                &mut batch,
-            )
-            .map_err(|_| CatalogCompositionError::invalid("Claude catalog index decode failed"))?;
-        if disposition != DecodeDisposition::Applied {
+        let decoded = decode_catalog_record(
+            &adapter,
+            &index_stream,
+            &object_context,
+            &semantic_context,
+            &record,
+            None,
+            DecodeRuntimeLimits {
+                max_facts: 8,
+                max_diagnostics: 8,
+            },
+        )?;
+        if decoded.disposition != DecodeDisposition::Applied {
             return Err(CatalogCompositionError::invalid(
                 "Claude catalog index did not decode completely",
             ));
         }
-        let mut snapshots = batch
-            .facts()
-            .iter()
-            .filter_map(|envelope| match &envelope.value {
-                Fact::SessionIndexSnapshot(snapshot) => Some(snapshot),
-                _ => None,
-            });
+        let mut snapshots =
+            decoded
+                .batch
+                .facts()
+                .iter()
+                .filter_map(|envelope| match &envelope.value {
+                    Fact::SessionIndexSnapshot(snapshot) => Some(snapshot),
+                    _ => None,
+                });
         let snapshot = snapshots.next().ok_or_else(|| {
             CatalogCompositionError::invalid("Claude catalog index emitted no snapshot")
         })?;
@@ -554,32 +613,25 @@ fn produce_claude_library_coverage_after_heads(
             let AppendItem::Record(record) = item else {
                 continue;
             };
-            let mut batch = FactBatch::new_with_semantic_context(256, 64, semantic_context.clone())
-                .map_err(|_| {
-                    CatalogCompositionError::invalid(
-                        "Claude catalog producer could not allocate a transcript decode batch",
-                    )
-                })?;
-            let disposition = adapter
-                .decode(
-                    DecodeContext {
-                        decoder: &parent_stream.decoder,
-                        object_context: &object_context,
-                        decoder_state: decoder_state.as_deref(),
-                    },
-                    &record,
-                    &mut batch,
-                )
-                .map_err(|_| {
-                    CatalogCompositionError::invalid("Claude catalog transcript-head decode failed")
-                })?;
-            if disposition == DecodeDisposition::RetryTransient {
+            let decoded = decode_catalog_record(
+                &adapter,
+                &parent_stream,
+                &object_context,
+                &semantic_context,
+                &record,
+                decoder_state.as_deref(),
+                DecodeRuntimeLimits {
+                    max_facts: 256,
+                    max_diagnostics: 64,
+                },
+            )?;
+            if decoded.disposition == DecodeDisposition::RetryTransient {
                 return Err(CatalogCompositionError::invalid(
                     "Claude catalog transcript decoder requested a retry for stable head evidence",
                 ));
             }
-            decoder_state = batch.next_decoder_state().map(ToOwned::to_owned);
-            for envelope in batch.facts() {
+            decoder_state = decoded.next_decoder_state;
+            for envelope in decoded.batch.facts() {
                 let Fact::Session(session) = &envelope.value else {
                     continue;
                 };
@@ -1461,6 +1513,16 @@ where
 mod limit_tests {
     use super::*;
     use crate::adapter::CoveragePositionKind;
+
+    #[test]
+    fn catalog_producer_cannot_bypass_the_common_decode_boundary() {
+        let source = include_str!("catalog_runtime.rs");
+        assert!(source.contains("decode_record(DecodeRuntimeRequest"));
+        let direct_decode = [".de", "code("].concat();
+        let direct_batch = ["FactBatch::new_with_", "semantic_context"].concat();
+        assert!(!source.contains(&direct_decode));
+        assert!(!source.contains(&direct_batch));
+    }
 
     #[test]
     fn admit_member_rejects_the_first_excess_item_before_session_project_mutation() {
