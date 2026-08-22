@@ -1250,6 +1250,25 @@ scheduler triggering, coverage-plan replacement, contract-version replacement,
 compaction beyond retained bounds, caller-authorized local policy, richer
 queries, and promotion evidence remain open.
 
+The sixteenth bounded B3 correction (`ba261f0`, `72218db`) closes the cold
+source-generation replacement path that the epoch ledger exposed. A Library
+build invalidated before any safe snapshot may now publish its first complete
+snapshot at epoch 2 or later; the store-independent assembly no longer
+mistakes `epoch == 1` for initial-publication authority, while the durable
+writer still requires the exact current Building/Partial commit. Restart binds
+every such initial snapshot back to its immutable no-snapshot invalidation and
+either that commit, its validated Partial chain, or a validated discarded
+integrity retry. Missing invalidation evidence fails closed. A cold replacement
+that terminates in `Error` now recognizes the source-invalidation owner rather
+than falsely requiring the epoch-1 scheduler, preserves the replacement epoch
+through `attempt + 1`, and can restart and publish Ready without manufacturing
+a predecessor snapshot. Full Rust and strict-Clippy matrices cover direct
+publication plus Error/retry/Ready recovery. Temporary/terminal source
+unavailability before any safe snapshot, automatic source-reset detection and
+scheduler triggering, coverage-plan replacement, contract-version replacement,
+compaction beyond retained bounds, caller-authorized local policy, richer
+queries, and promotion evidence remain open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
