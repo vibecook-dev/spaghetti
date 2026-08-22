@@ -119,14 +119,33 @@ impl fmt::Debug for CatalogRefreshCoverageGenerations {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub(crate) struct CatalogCompositionError {
+    class: CatalogCompositionFailureClass,
     message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CatalogCompositionFailureClass {
+    Integrity,
+    SourceUnavailable,
 }
 
 impl CatalogCompositionError {
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
+            class: CatalogCompositionFailureClass::Integrity,
             message: message.into(),
         }
+    }
+
+    pub(crate) fn source_unavailable(message: impl Into<String>) -> Self {
+        Self {
+            class: CatalogCompositionFailureClass::SourceUnavailable,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn class(&self) -> CatalogCompositionFailureClass {
+        self.class
     }
 }
 

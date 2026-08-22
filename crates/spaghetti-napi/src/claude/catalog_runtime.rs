@@ -1677,27 +1677,29 @@ fn object_origin(
 }
 
 fn map_driver_error(error: SourceDriverError) -> CatalogCompositionError {
-    CatalogCompositionError::invalid(match error {
-        SourceDriverError::InvalidConfig(_) => {
-            "Claude catalog producer received invalid driver configuration"
+    match error {
+        SourceDriverError::LimitExceeded(_) => CatalogCompositionError::source_unavailable(
+            "Claude catalog producer exceeded a declared source bound",
+        ),
+        SourceDriverError::Unstable(_) => CatalogCompositionError::source_unavailable(
+            "Claude catalog producer observed an unstable source snapshot",
+        ),
+        SourceDriverError::Io { .. } => CatalogCompositionError::source_unavailable(
+            "Claude catalog producer failed to read a declared source object",
+        ),
+        SourceDriverError::InvalidConfig(_) => CatalogCompositionError::invalid(
+            "Claude catalog producer received invalid driver configuration",
+        ),
+        SourceDriverError::InvalidCursor(_) => CatalogCompositionError::invalid(
+            "Claude catalog producer received an invalid driver cursor",
+        ),
+        SourceDriverError::PathEscape(_) => CatalogCompositionError::invalid(
+            "Claude catalog producer rejected a path that escaped its declared root",
+        ),
+        SourceDriverError::Database(_) => {
+            CatalogCompositionError::invalid("Claude catalog producer cannot use a database source")
         }
-        SourceDriverError::InvalidCursor(_) => {
-            "Claude catalog producer received an invalid driver cursor"
-        }
-        SourceDriverError::PathEscape(_) => {
-            "Claude catalog producer rejected a path that escaped its declared root"
-        }
-        SourceDriverError::LimitExceeded(_) => {
-            "Claude catalog producer exceeded a declared source bound"
-        }
-        SourceDriverError::Unstable(_) => {
-            "Claude catalog producer observed an unstable source snapshot"
-        }
-        SourceDriverError::Database(_) => "Claude catalog producer cannot use a database source",
-        SourceDriverError::Io { .. } => {
-            "Claude catalog producer failed to read a declared source object"
-        }
-    })
+    }
 }
 
 fn has_display_value(value: &Option<String>) -> bool {

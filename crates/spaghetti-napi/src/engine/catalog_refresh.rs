@@ -24,8 +24,17 @@ const MAX_AUTOMATIC_REFRESH_ATTEMPTS: usize = 3;
 
 type RefreshOperation =
     Box<dyn Fn(&QueryCancellationToken) -> Result<(), EngineError> + Send + 'static>;
-type RefreshFailureHandler =
-    Box<dyn Fn(&EngineError, bool) -> Result<(), EngineError> + Send + 'static>;
+type RefreshFailureHandler = Box<
+    dyn Fn(&EngineError, bool) -> Result<CatalogRefreshFailureControl, EngineError>
+        + Send
+        + 'static,
+>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CatalogRefreshFailureControl {
+    FollowRetryPolicy,
+    Stop,
+}
 
 #[derive(Debug, Clone, Copy)]
 struct CatalogRefreshRetryPolicy {
@@ -79,21 +88,26 @@ impl CatalogRefreshScheduler {
             CATALOG_REFRESH_COALESCE_WINDOW,
             CATALOG_REFRESH_RETRY_DELAY,
             MAX_AUTOMATIC_REFRESH_ATTEMPTS,
-            move |error, terminal| {
-                if !matches!(error, EngineError::Observation { .. }) {
-                    return Ok(());
+            move |error, terminal| match error {
+                EngineError::Observation { .. } if terminal => {
+                    let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
+                    engine.degrade_active_catalog_refresh("catalog_source_refresh_exhausted")?;
+                    Ok(CatalogRefreshFailureControl::Stop)
                 }
-                if terminal {
+                EngineError::Observation { .. } => {
                     let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
                     engine
-                        .degrade_active_catalog_refresh("catalog_source_refresh_exhausted")
-                        .map(|_| ())
-                } else {
-                    let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
-                    engine
-                        .mark_active_catalog_refresh_retrying("catalog_source_refresh_retrying")
-                        .map(|_| ())
+                        .mark_active_catalog_refresh_retrying("catalog_source_refresh_retrying")?;
+                    Ok(CatalogRefreshFailureControl::FollowRetryPolicy)
                 }
+                EngineError::CatalogIntegrity { .. } => {
+                    let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
+                    engine.fail_active_catalog_refresh_integrity(
+                        "catalog_refresh_integrity_failed",
+                    )?;
+                    Ok(CatalogRefreshFailureControl::Stop)
+                }
+                _ => Ok(CatalogRefreshFailureControl::FollowRetryPolicy),
             },
         )
     }
@@ -112,7 +126,7 @@ impl CatalogRefreshScheduler {
             coalesce_window,
             retry_delay,
             max_attempts,
-            |_, _| Ok(()),
+            |_, _| Ok(CatalogRefreshFailureControl::FollowRetryPolicy),
         )
     }
 
@@ -125,7 +139,9 @@ impl CatalogRefreshScheduler {
     ) -> Result<Self, EngineError>
     where
         F: Fn(&QueryCancellationToken) -> Result<(), EngineError> + Send + 'static,
-        H: Fn(&EngineError, bool) -> Result<(), EngineError> + Send + 'static,
+        H: Fn(&EngineError, bool) -> Result<CatalogRefreshFailureControl, EngineError>
+            + Send
+            + 'static,
     {
         if max_attempts == 0 {
             return Err(EngineError::InvalidConfig(
@@ -260,7 +276,11 @@ fn catalog_refresh_worker(
                 attempts = attempts.saturating_add(1);
                 let terminal = attempts >= retry_policy.max_attempts;
                 let transition = failure_handler(&error, terminal);
-                retry = !terminal || transition.is_err();
+                retry = match transition {
+                    Ok(CatalogRefreshFailureControl::FollowRetryPolicy) => !terminal,
+                    Ok(CatalogRefreshFailureControl::Stop) => false,
+                    Err(_) => true,
+                };
             }
         }
     }
@@ -478,7 +498,7 @@ mod tests {
                 if terminal {
                     worker_terminal_calls.fetch_add(1, Ordering::SeqCst);
                 }
-                Ok(())
+                Ok(CatalogRefreshFailureControl::FollowRetryPolicy)
             },
         )
         .unwrap();
@@ -519,7 +539,7 @@ mod tests {
                 if terminal {
                     worker_terminal_calls.fetch_add(1, Ordering::SeqCst);
                 }
-                Ok(())
+                Ok(CatalogRefreshFailureControl::FollowRetryPolicy)
             },
         )
         .unwrap();
@@ -537,6 +557,37 @@ mod tests {
         assert!(called_rx.recv_timeout(Duration::from_millis(80)).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(terminal_calls.load(Ordering::SeqCst), 1);
+        scheduler.shutdown().unwrap();
+    }
+
+    #[test]
+    fn integrity_failure_control_stops_before_the_retry_ceiling() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (called_tx, called_rx) = unbounded();
+        let worker_calls = Arc::clone(&calls);
+        let mut scheduler = CatalogRefreshScheduler::start_with_policy_and_failure_handler(
+            move |_| {
+                let call = worker_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                called_tx.send(call).unwrap();
+                Err(EngineError::CatalogIntegrity {
+                    operation: "test catalog assembly",
+                })
+            },
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+            3,
+            move |error, terminal| {
+                assert!(matches!(error, EngineError::CatalogIntegrity { .. }));
+                assert!(!terminal);
+                Ok(CatalogRefreshFailureControl::Stop)
+            },
+        )
+        .unwrap();
+
+        scheduler.request().unwrap();
+        assert_eq!(called_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        assert!(called_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         scheduler.shutdown().unwrap();
     }
 }

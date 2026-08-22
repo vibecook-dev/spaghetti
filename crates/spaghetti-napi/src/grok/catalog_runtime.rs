@@ -972,27 +972,29 @@ fn object_origin(index: usize) -> Result<RecordOrigin, CatalogCompositionError> 
 }
 
 fn map_driver_error(error: SourceDriverError) -> CatalogCompositionError {
-    CatalogCompositionError::invalid(match error {
-        SourceDriverError::InvalidConfig(_) => {
-            "Grok catalog producer received invalid driver configuration"
+    match error {
+        SourceDriverError::LimitExceeded(_) => CatalogCompositionError::source_unavailable(
+            "Grok catalog producer exceeded a declared source bound",
+        ),
+        SourceDriverError::Unstable(_) => CatalogCompositionError::source_unavailable(
+            "Grok catalog producer observed an unstable source snapshot",
+        ),
+        SourceDriverError::Io { .. } => CatalogCompositionError::source_unavailable(
+            "Grok catalog producer failed to read a declared source object",
+        ),
+        SourceDriverError::InvalidConfig(_) => CatalogCompositionError::invalid(
+            "Grok catalog producer received invalid driver configuration",
+        ),
+        SourceDriverError::InvalidCursor(_) => CatalogCompositionError::invalid(
+            "Grok catalog producer received an invalid driver cursor",
+        ),
+        SourceDriverError::PathEscape(_) => CatalogCompositionError::invalid(
+            "Grok catalog producer rejected a path outside its declared root",
+        ),
+        SourceDriverError::Database(_) => {
+            CatalogCompositionError::invalid("Grok catalog producer cannot use a database source")
         }
-        SourceDriverError::InvalidCursor(_) => {
-            "Grok catalog producer received an invalid driver cursor"
-        }
-        SourceDriverError::PathEscape(_) => {
-            "Grok catalog producer rejected a path outside its declared root"
-        }
-        SourceDriverError::LimitExceeded(_) => {
-            "Grok catalog producer exceeded a declared source bound"
-        }
-        SourceDriverError::Unstable(_) => {
-            "Grok catalog producer observed an unstable source snapshot"
-        }
-        SourceDriverError::Database(_) => "Grok catalog producer cannot use a database source",
-        SourceDriverError::Io { .. } => {
-            "Grok catalog producer failed to read a declared source object"
-        }
-    })
+    }
 }
 
 fn identity_digest<T: serde::Serialize + Ord>(values: &BTreeSet<T>) -> String {

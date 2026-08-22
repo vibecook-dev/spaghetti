@@ -734,27 +734,29 @@ fn object_origin(index: usize) -> Result<RecordOrigin, CatalogCompositionError> 
 }
 
 fn map_driver_error(error: SourceDriverError) -> CatalogCompositionError {
-    CatalogCompositionError::invalid(match error {
-        SourceDriverError::InvalidConfig(_) => {
-            "Codex catalog producer received invalid driver configuration"
+    match error {
+        SourceDriverError::LimitExceeded(_) => CatalogCompositionError::source_unavailable(
+            "Codex catalog producer exceeded a declared source bound",
+        ),
+        SourceDriverError::Unstable(_) => CatalogCompositionError::source_unavailable(
+            "Codex catalog producer observed an unstable source snapshot",
+        ),
+        SourceDriverError::Io { .. } => CatalogCompositionError::source_unavailable(
+            "Codex catalog producer failed to read a declared source object",
+        ),
+        SourceDriverError::InvalidConfig(_) => CatalogCompositionError::invalid(
+            "Codex catalog producer received invalid driver configuration",
+        ),
+        SourceDriverError::InvalidCursor(_) => CatalogCompositionError::invalid(
+            "Codex catalog producer received an invalid driver cursor",
+        ),
+        SourceDriverError::PathEscape(_) => CatalogCompositionError::invalid(
+            "Codex catalog producer rejected a path outside its declared root",
+        ),
+        SourceDriverError::Database(_) => {
+            CatalogCompositionError::invalid("Codex catalog producer cannot use a database source")
         }
-        SourceDriverError::InvalidCursor(_) => {
-            "Codex catalog producer received an invalid driver cursor"
-        }
-        SourceDriverError::PathEscape(_) => {
-            "Codex catalog producer rejected a path outside its declared root"
-        }
-        SourceDriverError::LimitExceeded(_) => {
-            "Codex catalog producer exceeded a declared source bound"
-        }
-        SourceDriverError::Unstable(_) => {
-            "Codex catalog producer observed an unstable source snapshot"
-        }
-        SourceDriverError::Database(_) => "Codex catalog producer cannot use a database source",
-        SourceDriverError::Io { .. } => {
-            "Codex catalog producer failed to read a declared source object"
-        }
-    })
+    }
 }
 
 fn identity_digest<T: serde::Serialize + Ord>(values: &BTreeSet<T>) -> String {

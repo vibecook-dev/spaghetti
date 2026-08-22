@@ -15,6 +15,7 @@ use crate::catalog_contract::{
     CatalogAccessPolicyDigest, CatalogCoveragePlan, CatalogCoveragePlanSource,
     CatalogCoverageScope, CatalogReadinessPhase,
 };
+use crate::source::catalog_composition::{CatalogCompositionError, CatalogCompositionFailureClass};
 use crate::source::catalog_projection::{
     CatalogInitialProjectionBatch, CatalogRefreshProjectionBatch, CatalogSourceProjection,
 };
@@ -197,7 +198,9 @@ impl SpaghettiEngineCore {
             let runtime = self
                 .catalog_source_runtimes
                 .resolve(&source.configured.adapter_id)
-                .map_err(|error| catalog_build_error("resolve catalog source runtime", error))?;
+                .map_err(|error| {
+                    catalog_composition_error("resolve catalog source runtime", error)
+                })?;
             for instance in source.instances {
                 authorized.push(PreparedCatalogSource {
                     instance,
@@ -217,11 +220,15 @@ impl SpaghettiEngineCore {
         let mut plan_sources = Vec::with_capacity(authorized.len());
         for source in &authorized {
             check_cancelled(&cancellation)?;
-            plan_sources.push(derive_plan_source(source)?);
+            plan_sources.push(derive_plan_source(source).map_err(|_| {
+                EngineError::InvalidCommit(
+                    "configured catalog source does not match its bound composition".to_string(),
+                )
+            })?);
         }
         let plan =
             CatalogCoveragePlan::new(CatalogCoverageScope::Library, plan_sources, Vec::new())
-                .map_err(|error| catalog_build_error("freeze catalog coverage plan", error))?;
+                .map_err(|_| catalog_integrity_error("freeze catalog coverage plan"))?;
 
         let durable_state = self.load_catalog_build_state()?;
         if durable_state
@@ -359,7 +366,7 @@ fn publish_initial(
         selection,
         context.observation_commit(),
     )
-    .map_err(|error| catalog_build_error("assemble initial catalog projection", error))?;
+    .map_err(|_| catalog_integrity_error("assemble initial catalog projection"))?;
     let source_count = batch.source_count();
     let member_count = batch.member_count();
     check_cancelled(cancellation)?;
@@ -384,8 +391,11 @@ fn publish_refresh(
     let mut projections = Vec::with_capacity(sources.len());
     for source in sources {
         check_cancelled(cancellation)?;
-        let plan_source = derive_plan_source(source)?;
-        let prior = context.prior_source_coverage(&plan_source)?;
+        let plan_source = derive_plan_source(source)
+            .map_err(|error| catalog_composition_error("bind catalog plan source", error))?;
+        let prior = context
+            .prior_source_coverage(&plan_source)
+            .map_err(|_| catalog_integrity_error("bind prior catalog source coverage"))?;
         projections.push(produce_projection(source, Some(prior))?);
     }
     let batch = CatalogRefreshProjectionBatch::assemble(
@@ -394,7 +404,7 @@ fn publish_refresh(
         context.observation_commit(),
         context.prior_reducer(),
     )
-    .map_err(|error| catalog_build_error("assemble catalog refresh projection", error))?;
+    .map_err(|_| catalog_integrity_error("assemble catalog refresh projection"))?;
     let source_count = batch.source_count();
     let member_count = batch.member_count();
     check_cancelled(cancellation)?;
@@ -429,15 +439,12 @@ fn common_contract_selection(
 
 fn derive_plan_source(
     source: &PreparedCatalogSource,
-) -> Result<CatalogCoveragePlanSource, EngineError> {
-    source
-        .runtime
-        .library_plan_source(
-            &source.authorization,
-            &source.instance,
-            source.access_policy_digest,
-        )
-        .map_err(|error| catalog_build_error("bind catalog plan source", error))
+) -> Result<CatalogCoveragePlanSource, CatalogCompositionError> {
+    source.runtime.library_plan_source(
+        &source.authorization,
+        &source.instance,
+        source.access_policy_digest,
+    )
 }
 
 fn produce_projection(
@@ -452,7 +459,7 @@ fn produce_projection(
             source.access_policy_digest,
             prior,
         )
-        .map_err(|error| catalog_build_error("produce catalog source", error))
+        .map_err(|error| catalog_composition_error("produce catalog source", error))
 }
 
 fn check_cancelled(cancellation: &QueryCancellationToken) -> Result<(), EngineError> {
@@ -467,6 +474,20 @@ fn catalog_build_error(operation: &'static str, error: impl std::fmt::Display) -
     EngineError::Observation {
         operation,
         detail: error.to_string(),
+    }
+}
+
+fn catalog_integrity_error(operation: &'static str) -> EngineError {
+    EngineError::CatalogIntegrity { operation }
+}
+
+fn catalog_composition_error(
+    operation: &'static str,
+    error: CatalogCompositionError,
+) -> EngineError {
+    match error.class() {
+        CatalogCompositionFailureClass::SourceUnavailable => catalog_build_error(operation, error),
+        CatalogCompositionFailureClass::Integrity => catalog_integrity_error(operation),
     }
 }
 
@@ -719,5 +740,37 @@ mod tests {
             .unwrap();
         assert_eq!(source_count, 0);
         engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn composition_failures_classify_source_loss_without_leaking_integrity_detail() {
+        let source = catalog_composition_error(
+            "produce catalog source",
+            CatalogCompositionError::source_unavailable(
+                "catalog producer failed to read a declared source object",
+            ),
+        );
+        assert!(matches!(
+            source,
+            EngineError::Observation {
+                operation: "produce catalog source",
+                ..
+            }
+        ));
+
+        let integrity = catalog_composition_error(
+            "assemble catalog refresh projection",
+            CatalogCompositionError::invalid("/Users/alice/private/catalog.json"),
+        );
+        assert!(matches!(
+            integrity,
+            EngineError::CatalogIntegrity {
+                operation: "assemble catalog refresh projection"
+            }
+        ));
+        let message = integrity.to_string();
+        assert!(!message.contains("/Users/"));
+        assert!(!message.contains("alice"));
+        assert!(!message.contains("private"));
     }
 }

@@ -267,6 +267,9 @@ pub enum EngineError {
     #[error("invalid observation commit: {0}")]
     InvalidCommit(String),
 
+    #[error("catalog composition integrity validation failed during {operation}")]
+    CatalogIntegrity { operation: &'static str },
+
     #[error("observation coordinator {operation} failed: {detail}")]
     Observation {
         operation: &'static str,
@@ -1806,6 +1809,43 @@ impl SpaghettiEngineCore {
         let expected = state.refresh_publication_expectation()?;
         let now = engine_now_unix_ms()?;
         self.commit_catalog_build_state(CatalogBuildStateCommand::degrade_active_refresh(
+            expected,
+            reason_code,
+            now,
+            now,
+        ))
+    }
+
+    pub(crate) fn fail_active_catalog_refresh_integrity(
+        &self,
+        reason_code: &str,
+    ) -> Result<Option<u64>, EngineError> {
+        let mut state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog integrity failure requires durable catalog readiness".to_string(),
+            )
+        })?;
+        if state.readiness.state == CatalogReadinessPhase::Error {
+            return Ok(None);
+        }
+        if state.readiness.state == CatalogReadinessPhase::Ready
+            && state.readiness.refreshing_from_snapshot.is_none()
+        {
+            let now = engine_now_unix_ms()?;
+            self.commit_catalog_build_state(CatalogBuildStateCommand::begin_refresh(
+                state.refresh_expectation()?,
+                now,
+                now,
+            ))?;
+            state = self.load_catalog_build_state()?.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog integrity failure lost its durable refresh start".to_string(),
+                )
+            })?;
+        }
+        let expected = state.refresh_publication_expectation()?;
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::fail_active_refresh_integrity(
             expected,
             reason_code,
             now,

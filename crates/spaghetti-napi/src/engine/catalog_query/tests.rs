@@ -2497,6 +2497,77 @@ fn transient_source_retrying_can_publish_and_restart_active_and_recovery_lineage
 }
 
 #[test]
+fn recovery_integrity_failure_restarts_as_error_with_the_safe_snapshot() {
+    let mut published = degraded_catalog();
+    let retained_snapshot = published.state.readiness.last_complete_snapshot.unwrap();
+    let retry = CatalogBuildStateCommand::retry_degraded_refresh(
+        published.state.expectation().unwrap(),
+        44,
+        45,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &retry)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    let retrying = CatalogBuildStateCommand::mark_active_refresh_retrying(
+        published.state.refresh_publication_expectation().unwrap(),
+        "catalog_source_refresh_retrying",
+        46,
+        47,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &retrying)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    let failure = CatalogBuildStateCommand::fail_active_refresh_integrity(
+        published.state.refresh_publication_expectation().unwrap(),
+        "catalog_refresh_integrity_failed",
+        48,
+        49,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &failure)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        published.state.readiness.state,
+        CatalogReadinessPhase::Error
+    );
+    assert_eq!(published.state.readiness.attempt, 2);
+    assert_eq!(
+        published.state.readiness.complete_through_commit,
+        Some(retained_snapshot.complete_commit)
+    );
+    assert_eq!(
+        published.state.readiness.reason,
+        Some(CatalogReadinessReason::IntegrityFailure {
+            code: "catalog_refresh_integrity_failed".to_string(),
+            snapshot_disposition: CatalogIntegritySnapshotDisposition::IndependentlySafe,
+        })
+    );
+    assert_eq!(
+        published
+            .state
+            .ready_read_authority()
+            .unwrap()
+            .snapshot_id(),
+        retained_snapshot
+    );
+    assert!(
+        catalog_state::apply_catalog_build_state_commit(&mut published.connection, &failure,)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn terminal_source_loss_rolls_back_every_precommit_seam() {
     const PRECOMMIT_STAGES: [CatalogCommitStage; 7] = [
         CatalogCommitStage::BeforeTransaction,

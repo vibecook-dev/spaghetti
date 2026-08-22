@@ -1823,6 +1823,7 @@ fn decode_stored_state(
                     updated_at: stored.updated_at,
                     retained_snapshot: snapshot_id,
                     publication_identity: &publication.identity,
+                    publication_attempt,
                 },
             )?;
             if stored_reason_code != Some(evidence_reason.as_str()) {
@@ -2585,7 +2586,8 @@ fn load_integrity_failure_evidence(
                    CASE WHEN typeof(refresh.reason) = 'text'
                                   AND refresh.reason IN (
                                       'catalog.library.refresh.started',
-                                      'catalog.library.refresh.source_retrying'
+                                      'catalog.library.refresh.source_retrying',
+                                      'catalog.library.refresh.recovery_started'
                                   )
                         THEN refresh.reason END,
                    refresh.committed_at,
@@ -2687,6 +2689,8 @@ fn exact_integrity_failure_exists(
         && stored.refresh_reason.as_deref()
             == Some(if expected.retry_reason_code().is_some() {
                 REFRESH_SOURCE_RETRYING_REASON
+            } else if expected.is_recovery() {
+                REFRESH_RECOVERY_STARTED_REASON
             } else {
                 REFRESH_STARTED_REASON
             })
@@ -2902,6 +2906,7 @@ struct CatalogIntegrityRestartContext<'a> {
     updated_at: i64,
     retained_snapshot: CatalogSnapshotId,
     publication_identity: &'a CatalogReadyPublicationIdentity,
+    publication_attempt: u64,
 }
 
 fn validate_integrity_failure_for_restart(
@@ -2932,6 +2937,11 @@ fn validate_integrity_failure_for_restart(
         .ok_or_else(|| {
             corrupt_catalog_state("catalog integrity failure has no retained publication")
         })?;
+    let expected_refresh_reason = if context.attempt > context.publication_attempt {
+        REFRESH_RECOVERY_STARTED_REASON
+    } else {
+        REFRESH_STARTED_REASON
+    };
     if failure_commit != context.state_commit_seq
         || refresh_commit <= context.retained_snapshot.complete_commit
         || refresh_commit >= failure_commit
@@ -2955,7 +2965,8 @@ fn validate_integrity_failure_for_restart(
         || stored.refresh_source.is_some()
         || !matches!(
             stored.refresh_reason.as_deref(),
-            Some(REFRESH_STARTED_REASON | REFRESH_SOURCE_RETRYING_REASON)
+            Some(reason)
+                if reason == expected_refresh_reason || reason == REFRESH_SOURCE_RETRYING_REASON
         )
         || stored.refresh_committed_at.is_none()
         || stored.refresh_fact_count != 0
@@ -3100,9 +3111,56 @@ fn write_build_state(
                         .to_string(),
                 ));
             }
-            transaction
-                .execute(
-                    r#"
+            if expected.is_recovery() {
+                transaction
+                    .execute(
+                        r#"
+                        UPDATE catalog_build_state
+                        SET state = 'error',
+                            complete_through_commit = ?1,
+                            reason_code = ?2,
+                            last_commit_seq = ?3,
+                            updated_at = ?4
+                        WHERE scope_kind = ?5
+                          AND coverage_plan_id = ?6
+                          AND desired_contract_version = ?7
+                          AND epoch = ?8
+                          AND attempt = ?9
+                          AND state = 'building'
+                          AND completed_contract_version = ?7
+                          AND complete_through_commit IS NULL
+                          AND last_complete_snapshot_commit = ?1
+                          AND refreshing_from_snapshot_commit IS NULL
+                          AND reason_code IS ?10
+                          AND last_commit_seq = ?11
+                        "#,
+                        params![
+                            to_i64(
+                                expected.predecessor_snapshot.complete_commit,
+                                "catalog recovery retained snapshot commit",
+                            )?,
+                            reason_code,
+                            to_i64(commit_seq, "catalog recovery integrity-failure commit")?,
+                            updated_at,
+                            LIBRARY_SCOPE,
+                            snapshot.coverage_plan_id.storage_bytes().as_slice(),
+                            i64::from(snapshot.desired_contract_version),
+                            to_i64(snapshot.epoch, "catalog readiness epoch")?,
+                            to_i64(snapshot.attempt, "catalog readiness attempt")?,
+                            expected.retry_reason_code(),
+                            to_i64(
+                                expected.refresh_started_commit_seq,
+                                "catalog failed recovery commit",
+                            )?,
+                        ],
+                    )
+                    .map_err(|error| {
+                        sqlite_error("fail recovering catalog refresh integrity", error)
+                    })?
+            } else {
+                transaction
+                    .execute(
+                        r#"
                     UPDATE catalog_build_state
                     SET state = 'error',
                         refreshing_from_snapshot_commit = NULL,
@@ -3122,27 +3180,28 @@ fn write_build_state(
                       AND reason_code IS ?10
                       AND last_commit_seq = ?11
                     "#,
-                    params![
-                        reason_code,
-                        to_i64(commit_seq, "catalog integrity-failure commit")?,
-                        updated_at,
-                        LIBRARY_SCOPE,
-                        snapshot.coverage_plan_id.storage_bytes().as_slice(),
-                        i64::from(snapshot.desired_contract_version),
-                        to_i64(snapshot.epoch, "catalog readiness epoch")?,
-                        to_i64(snapshot.attempt, "catalog readiness attempt")?,
-                        to_i64(
-                            expected.predecessor_snapshot.complete_commit,
-                            "catalog retained snapshot commit",
-                        )?,
-                        expected.retry_reason_code(),
-                        to_i64(
-                            expected.refresh_started_commit_seq,
-                            "catalog failed refresh commit",
-                        )?,
-                    ],
-                )
-                .map_err(|error| sqlite_error("fail active catalog refresh integrity", error))?
+                        params![
+                            reason_code,
+                            to_i64(commit_seq, "catalog integrity-failure commit")?,
+                            updated_at,
+                            LIBRARY_SCOPE,
+                            snapshot.coverage_plan_id.storage_bytes().as_slice(),
+                            i64::from(snapshot.desired_contract_version),
+                            to_i64(snapshot.epoch, "catalog readiness epoch")?,
+                            to_i64(snapshot.attempt, "catalog readiness attempt")?,
+                            to_i64(
+                                expected.predecessor_snapshot.complete_commit,
+                                "catalog retained snapshot commit",
+                            )?,
+                            expected.retry_reason_code(),
+                            to_i64(
+                                expected.refresh_started_commit_seq,
+                                "catalog failed refresh commit",
+                            )?,
+                        ],
+                    )
+                    .map_err(|error| sqlite_error("fail active catalog refresh integrity", error))?
+            }
         }
         CatalogBuildStateWrite::MarkActiveRefreshRetrying {
             expected,
