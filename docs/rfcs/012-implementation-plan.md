@@ -1130,8 +1130,33 @@ only through authenticated retirement evidence. Malformed, oversized, stale,
 foreign, or path-shaped inputs fail closed behind privacy-safe errors. This
 makes B1's contract/transport gate complete; it does not promote any support
 candidate or complete B2/B3. Caller-authorized local disclosure, richer
-filters/sorts, retry/degraded/partial refresh lineage, automatic retention and
-physical compaction, and candidate promotion evidence remain open.
+filters/sorts, partial and integrity-error recovery lineage, automatic
+retention and physical compaction, and candidate promotion evidence remain
+open.
+
+The tenth bounded B3 slice (`d5b92e0`, with the retry-coverage correction in
+`d0b0974`) adds schema-v57 and production-owned temporary-source retry,
+terminal degradation, and same-plan recovery. A configured refresh now writes
+a privacy-safe `SourceRetrying` reason without replacing the exact complete
+snapshot; current coverage is conservatively `Partial` (or remains
+`Unavailable` during recovery), while snapshot-frozen pages continue through
+the restart-authenticated last-complete authority. The fixed three-attempt
+policy is durable in effect and cannot be postponed by a native wake storm.
+Exhaustion atomically appends immutable failure evidence bound to the failed
+execution commit, plan, epoch, attempt, retained snapshot, and publication and
+content digests, then advances readiness to `Degraded`. A later signal enters
+`Building` with `attempt + 1`; a successful successor publication clears the
+retry reason and replaces the complete snapshot, while another exhausted
+attempt appends a distinct terminal record. Restart authenticates the whole
+failure ledger and both ordinary and recovery publication owners. Exact
+lost-ack replay, stale-command and success/failure CAS races, all precommit
+rollback seams, source-evidence corruption, transient success from both retry
+lineages, historical reads across attempts, and retry-wake pressure are
+executable. This closes the required-source retry/degraded/recovery path for
+the configured Library refresh scheduler. `Partial` publication, retry from an
+integrity `Error`, automatic integrity classification, changed-plan/epoch
+replacement, physical compaction, caller-authorized local policy, richer
+queries, and promotion evidence remain open.
 
 ### B4. Progressive host and UX
 
@@ -1167,11 +1192,14 @@ bounded and FIFO within each class. Writer queue depth halves or serializes new
 producer admission, and an incomplete checkpoint serializes it; internal
 source-baseline reads inherit the enclosing pass so capacity-one pressure
 cannot deadlock every query worker. This is a semantic scheduling policy, not
-a calibrated latency or capacity claim. The scoped-observer facade is not yet
-wired into this production domain. Renderer pagination/content states, product
-loading/error flow, cross-workload flood/slow-consumer measurements, and the
-complete cold/warm/selected-hydration UX and performance matrix remain open.
-B4 remains `In progress`.
+a calibrated latency or capacity claim. Commit `d5b92e0` also keeps
+last-complete pages available through durable `SourceRetrying`, terminal
+`Degraded`, and recovery `Building` states, with the bounded configured-source
+retry policy owned by the same host scheduler. The scoped-observer facade is
+not yet wired into this production domain. Renderer pagination/content states,
+product loading/error flow, cross-workload flood/slow-consumer measurements,
+and the complete cold/warm/selected-hydration UX and performance matrix remain
+open. B4 remains `In progress`.
 
 ### B5. Performance calibration
 
