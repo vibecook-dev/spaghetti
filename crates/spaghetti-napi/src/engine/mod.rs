@@ -68,6 +68,9 @@ use catalog_publication::{
     CatalogInitialPublicationCommand, CatalogInitialPublicationReceipt,
     CatalogRefreshPublicationCommand, CatalogRefreshPublicationReceipt,
 };
+pub(crate) use catalog_query::{
+    CatalogPageQueryRequest, CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
+};
 use catalog_retention::{CatalogSnapshotRetirementCommand, CatalogSnapshotRetirementReceipt};
 use catalog_state::CatalogBuildStateCommand;
 pub use commit::{
@@ -815,6 +818,29 @@ impl SpaghettiEngineCore {
     ) -> Result<HistorySessionPage, EngineError> {
         let (_, queries) = self.clients()?;
         queries.history_sessions(request)
+    }
+
+    /// Execute one snapshot-bound RFC 012B library page on the persistent
+    /// read-only query pool. Public transports must construct this request
+    /// through the checked catalog contract boundary.
+    pub(crate) fn catalog_page(
+        &self,
+        request: CatalogPageQueryRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CatalogRetainedPageOutcome, EngineError> {
+        let queries = self.query_client()?;
+        queries.catalog_page(request, cancellation)
+    }
+
+    /// Resolve one persisted RFC 012B external reference against the current
+    /// restart-authenticated Ready snapshot.
+    pub(crate) fn resolve_catalog_entity(
+        &self,
+        request: CatalogResolutionQueryRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<crate::catalog_contract::page::CatalogEntityResolutionResponse, EngineError> {
+        let queries = self.query_client()?;
+        queries.catalog_resolution(request, cancellation)
     }
 
     /// Read one transcript-backed canonical session plus counts and decisive

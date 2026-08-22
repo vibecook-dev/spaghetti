@@ -1,15 +1,17 @@
 //! Checked crate-private RFC 012B retained-snapshot page and external-reference
 //! reads.
 //!
-//! This module intentionally exposes no public engine or N-API surface. The
-//! first executable slice supports only the frozen v1 `All` filter ordered by
-//! ascending external entity key and always projects policy-sensitive values
-//! as withheld.
+//! The engine-facing requests negotiate against restart-authenticated durable
+//! authority on a persistent read worker. This module intentionally exposes no
+//! N-API surface. The first executable slice supports only the frozen v1 `All`
+//! filter ordered by ascending external entity key and always projects
+//! policy-sensitive values as withheld.
 
 use std::collections::BTreeMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::adapter::ExternalEntityRef;
 use crate::catalog_contract::evidence::{
     decode_durable_project_row, decode_durable_session_row, CatalogEntityKind, CatalogLiveRow,
     CatalogResolvedLifecycle,
@@ -25,7 +27,11 @@ use crate::catalog_contract::page::{
 use crate::catalog_contract::publication::{
     CatalogDurablePublicationEntryKind, MAX_DURABLE_CATALOG_ROW_BYTES,
 };
-use crate::catalog_contract::query::{CatalogContinuationRequest, CatalogQueryContractSelection};
+use crate::catalog_contract::query::{
+    negotiate_catalog_query_contract_for_selection, CatalogContinuationRequest,
+    CatalogQueryContractRequest, CatalogQueryContractSelection, CatalogQueryNegotiationError,
+    MAX_CONTINUATION_PAGE_SIZE,
+};
 use crate::catalog_contract::{
     CatalogContractError, CatalogCoverageScope, CatalogCursor, CatalogQueryFingerprint,
     CatalogQueryKind, CatalogSortKey,
@@ -83,6 +89,139 @@ const EXACT_RESOLUTION_ROW_SQL: &str = r#"
     FROM catalog_snapshot_entries
     WHERE snapshot_commit_seq = ?1 AND entry_kind = ?2 AND entry_key = ?3
 "#;
+
+#[derive(Clone)]
+pub(crate) struct CatalogPageQueryRequest {
+    contract_request: CatalogQueryContractRequest,
+    query_kind: CatalogQueryKind,
+    page_size: u32,
+    continuation: Option<CatalogContinuationRequest>,
+}
+
+impl CatalogPageQueryRequest {
+    pub(crate) fn new(
+        contract_request: CatalogQueryContractRequest,
+        query_kind: CatalogQueryKind,
+        page_size: u32,
+        continuation: Option<CatalogContinuationRequest>,
+    ) -> Result<Self, EngineError> {
+        if page_size == 0 || page_size > MAX_CONTINUATION_PAGE_SIZE {
+            return Err(invalid_catalog_query_input(
+                "page size is outside the supported bound",
+            ));
+        }
+        if continuation
+            .as_ref()
+            .is_some_and(|continuation| continuation.page_size != page_size)
+        {
+            return Err(invalid_catalog_query_input(
+                "page size differs from the continuation",
+            ));
+        }
+        Ok(Self {
+            contract_request,
+            query_kind,
+            page_size,
+            continuation,
+        })
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CatalogResolutionQueryRequest {
+    contract_request: CatalogQueryContractRequest,
+    external_ref: ExternalEntityRef,
+}
+
+impl CatalogResolutionQueryRequest {
+    pub(crate) fn new(
+        contract_request: CatalogQueryContractRequest,
+        external_ref: ExternalEntityRef,
+    ) -> Self {
+        Self {
+            contract_request,
+            external_ref,
+        }
+    }
+}
+
+fn invalid_catalog_query_input(detail: &'static str) -> EngineError {
+    EngineError::InvalidQuery(format!("invalid catalog query request: {detail}"))
+}
+
+fn negotiate_durable_query(
+    request: &CatalogQueryContractRequest,
+    authority: &CatalogReadyReadAuthority,
+) -> Result<CatalogQueryContractSelection, EngineError> {
+    negotiate_catalog_query_contract_for_selection(request, authority.contract_selection()).map_err(
+        |error| match error {
+            CatalogQueryNegotiationError::IncompatibleCatalogContract { axis } => {
+                EngineError::InvalidQuery(format!("IncompatibleCatalogContract: {axis}"))
+            }
+            CatalogQueryNegotiationError::InvalidCatalogContract { .. } => {
+                invalid_catalog_query_input("contract negotiation is invalid")
+            }
+        },
+    )
+}
+
+pub(crate) fn execute_catalog_page_query(
+    connection: &Connection,
+    request: &CatalogPageQueryRequest,
+) -> Result<CatalogRetainedPageOutcome, EngineError> {
+    let state = catalog_state::load_catalog_build_state(connection)?.ok_or_else(|| {
+        EngineError::InvalidQuery("catalog readiness is not available".to_string())
+    })?;
+    let current_authority = state.ready_read_authority()?;
+    let selection = negotiate_durable_query(&request.contract_request, &current_authority)?;
+    let continuation = request
+        .continuation
+        .as_ref()
+        .map(|continuation| {
+            let wire = serde_json::to_value(continuation)
+                .map_err(|_| invalid_catalog_query_input("continuation is not portable"))?;
+            CatalogContinuationRequest::from_wire_value(wire, &selection)
+                .map_err(|_| invalid_catalog_query_input("continuation is invalid"))
+        })
+        .transpose()?;
+    let snapshot_id = continuation.as_ref().map_or_else(
+        || current_authority.snapshot_id(),
+        |value| value.snapshot_id,
+    );
+    let retained_request = match request.query_kind {
+        CatalogQueryKind::Projects => CatalogRetainedPageRequest::projects_all(
+            selection,
+            snapshot_id,
+            request.page_size,
+            continuation,
+        ),
+        CatalogQueryKind::Sessions => CatalogRetainedPageRequest::sessions_all(
+            selection,
+            snapshot_id,
+            request.page_size,
+            continuation,
+        ),
+    };
+    read_catalog_page_with_retirement(connection, &current_authority, &retained_request)
+}
+
+pub(crate) fn execute_catalog_resolution_query(
+    connection: &Connection,
+    request: &CatalogResolutionQueryRequest,
+) -> Result<CatalogEntityResolutionResponse, EngineError> {
+    let state = catalog_state::load_catalog_build_state(connection)?.ok_or_else(|| {
+        EngineError::InvalidQuery("catalog readiness is not available".to_string())
+    })?;
+    let authority = state.ready_read_authority()?;
+    let selection = negotiate_durable_query(&request.contract_request, &authority)?;
+    let binding = CatalogResolutionRequestBinding::new(
+        selection,
+        authority.snapshot_id(),
+        request.external_ref,
+    )
+    .map_err(|_| invalid_catalog_query_input("external reference is invalid"))?;
+    resolve_retained_catalog_entity(connection, &authority, &binding)
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct CatalogRetainedPageRequest {
@@ -204,12 +343,12 @@ impl CatalogRetainedPageRequest {
     }
 }
 
-pub(super) enum CatalogRetainedPage {
+pub(crate) enum CatalogRetainedPage {
     Projects(CatalogProjectPage),
     Sessions(CatalogSessionPage),
 }
 
-pub(super) enum CatalogRetainedPageOutcome {
+pub(crate) enum CatalogRetainedPageOutcome {
     Page(Box<CatalogRetainedPage>),
     SnapshotExpired(Box<CatalogSnapshotExpired>),
 }

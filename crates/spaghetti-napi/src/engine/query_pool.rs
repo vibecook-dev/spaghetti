@@ -13,6 +13,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+use crate::catalog_contract::page::CatalogEntityResolutionResponse;
 use crate::core::schema;
 use crate::source::SharedSourcePassPool;
 
@@ -23,6 +24,10 @@ use super::capability_query::{
     validate_tool_result_page, ArtifactPage, ArtifactPageRequest, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanPage, PlanPageRequest, TaskCollectionPage,
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
+};
+use super::catalog_query::{
+    execute_catalog_page_query, execute_catalog_resolution_query, CatalogPageQueryRequest,
+    CatalogResolutionQueryRequest, CatalogRetainedPageOutcome,
 };
 use super::coverage_query::{
     read_fact_family_coverage_page, read_fact_family_replay_target,
@@ -544,6 +549,18 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         request: ChangeReplayRequest,
         response: Sender<Result<ChangeReplay, EngineError>>,
+    },
+    CatalogPage {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: CatalogPageQueryRequest,
+        response: Sender<Result<CatalogRetainedPageOutcome, EngineError>>,
+    },
+    CatalogResolution {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: CatalogResolutionQueryRequest,
+        response: Sender<Result<CatalogEntityResolutionResponse, EngineError>>,
     },
     SourceCatalog {
         cancellation_epoch: u64,
@@ -1596,6 +1613,38 @@ impl QueryClient {
         )
     }
 
+    pub(crate) fn catalog_page(
+        &self,
+        request: CatalogPageQueryRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CatalogRetainedPageOutcome, EngineError> {
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::CatalogPage {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
+    pub(crate) fn catalog_resolution(
+        &self,
+        request: CatalogResolutionQueryRequest,
+        cancellation: QueryCancellationToken,
+    ) -> Result<CatalogEntityResolutionResponse, EngineError> {
+        self.send_cancellable(
+            cancellation,
+            |cancellation_epoch, cancellation, response| QueryCommand::CatalogResolution {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            },
+        )
+    }
+
     pub fn source_catalog(
         &self,
         adapter_id: &str,
@@ -2459,6 +2508,38 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_change_replay(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::CatalogPage {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || execute_catalog_page_query(&connection, &request),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::CatalogResolution {
+                cancellation_epoch,
+                cancellation,
+                request,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || execute_catalog_resolution_query(&connection, &request),
                 );
                 let _ = response.send(result);
             }

@@ -32,7 +32,7 @@ pub(crate) const CATALOG_BASE_MODEL_MAJOR: u32 = 1;
 const MAX_TYPED_UNKNOWN_PAYLOAD_BYTES: u32 = 64 * 1024;
 const MAX_TYPED_UNKNOWN_DEPTH: usize = 16;
 const MAX_TYPED_UNKNOWN_NODES: usize = 1_024;
-pub(super) const MAX_CONTINUATION_PAGE_SIZE: u32 = 1_000;
+pub(crate) const MAX_CONTINUATION_PAGE_SIZE: u32 = 1_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

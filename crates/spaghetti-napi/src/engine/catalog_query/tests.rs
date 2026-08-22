@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use super::*;
 use crate::adapter::{
     CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
-    ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
-    CoverageDomain, CoverageMembershipRevision, CoverageObjectKey, CoveragePosition,
-    CoveragePositionKind, CoverageProvenance, CoverageSetCompleteness, CoverageStatus,
-    CoverageStreamKey, FactRevisionId, QualifiedUnknownReason, QualifiedValue,
+    ContractVersionRequest, ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind,
+    CoverageDeclarationDigest, CoverageDomain, CoverageMembershipRevision, CoverageObjectKey,
+    CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageSetCompleteness,
+    CoverageStatus, CoverageStreamKey, FactRevisionId, QualifiedUnknownReason, QualifiedValue,
     QualifiedValueQuality, SemanticRevisionRef, SourceCoveragePoint, SourceCoverageSet,
     CONTRACT_VERSION_SELECTION_VERSION, SOURCE_COVERAGE_CONTRACT_VERSION,
 };
@@ -47,6 +47,7 @@ use crate::engine::catalog_retention::{
 use crate::engine::catalog_state::{
     self, CatalogBuildStateCommand, CatalogCommitHook, CatalogCommitStage, DurableCatalogBuildState,
 };
+use crate::engine::query_pool::QueryPool;
 
 const FIXTURE_ADAPTER: &str = "retained-page-fixture";
 
@@ -234,6 +235,30 @@ fn query_selection() -> CatalogQueryContractSelection {
         contract_versions: durable_selection(),
         typed_unknown: CatalogTypedUnknownCapability::preserving(4_096).unwrap(),
     }
+}
+
+fn public_query_request() -> CatalogQueryContractRequest {
+    let exact = durable_selection();
+    CatalogQueryContractRequest::new(
+        ContractVersionRequest {
+            selection_contract_version: exact.selection_contract_version,
+            model_major: exact.model_major,
+            external_entity_reference_version: exact.external_entity_reference_version,
+            semantic_revision_reference_version: exact.semantic_revision_reference_version,
+            coverage_contract_versions: vec![exact.coverage_contract_version],
+            fact_family_versions: exact
+                .fact_family_versions
+                .iter()
+                .map(|(family, version)| (family.clone(), vec![*version]))
+                .collect(),
+            query_pack_versions: exact.query_pack_version.map(|version| vec![version]),
+            observation_contract_versions: exact
+                .observation_contract_version
+                .map(|version| vec![version]),
+        },
+        CatalogTypedUnknownCapability::preserving(4_096).unwrap(),
+    )
+    .unwrap()
 }
 
 fn semantic_revision(owner: &CatalogEvidenceOwner, label: &str) -> SemanticRevisionRef {
@@ -966,6 +991,92 @@ fn publish_lifecycle_catalog(connection: &mut Connection) -> [CatalogEntityRef; 
     .unwrap()
     .unwrap();
     [deleted_ref, prior_ref, replacement_ref]
+}
+
+#[test]
+fn persistent_query_worker_negotiates_and_reads_catalog_pages_and_resolution() {
+    let directory = tempfile::tempdir().unwrap();
+    let database_path = directory.path().join("catalog-public-query.db");
+    let connection = Connection::open(&database_path).unwrap();
+    schema::initialize_schema(&connection).unwrap();
+    let published = publish_catalog_in(connection, 2, 2);
+    drop(published.connection);
+
+    let mut pool = QueryPool::start(database_path, 1, None).unwrap();
+    let client = pool.client();
+    let page = client
+        .catalog_page(
+            CatalogPageQueryRequest::new(
+                public_query_request(),
+                CatalogQueryKind::Projects,
+                10,
+                None,
+            )
+            .unwrap(),
+            crate::engine::QueryCancellationToken::default(),
+        )
+        .unwrap();
+    let CatalogRetainedPageOutcome::Page(page) = page else {
+        panic!("current Ready snapshot must return a page");
+    };
+    let CatalogRetainedPage::Projects(page) = *page else {
+        panic!("projects request must return a project page");
+    };
+    assert_eq!(page.rows.len(), 2);
+    let portable_page = serde_json::to_string(&page).unwrap();
+    assert!(portable_page.contains("withheld"));
+    assert!(!portable_page.contains("private-project"));
+
+    let source_instance_key =
+        CanonicalSourceInstanceKey::derive(1, b"retained-page-source").unwrap();
+    let session_key = CanonicalEntityKey::derive(
+        FIXTURE_ADAPTER,
+        &source_instance_key,
+        "session",
+        b"session-0",
+    )
+    .unwrap();
+    let external_ref = crate::adapter::ExternalEntityRef::new(session_key);
+    let response = client
+        .catalog_resolution(
+            CatalogResolutionQueryRequest::new(public_query_request(), external_ref),
+            crate::engine::QueryCancellationToken::default(),
+        )
+        .unwrap();
+    assert!(matches!(
+        response.resolution,
+        CatalogEntityResolution::Live {
+            external_ref: resolved,
+            ..
+        } if resolved == external_ref
+    ));
+
+    let mut incompatible = public_query_request();
+    incompatible.contract_versions.query_pack_versions = Some(vec![2]);
+    let error = client
+        .catalog_page(
+            CatalogPageQueryRequest::new(incompatible, CatalogQueryKind::Sessions, 10, None)
+                .unwrap(),
+            crate::engine::QueryCancellationToken::default(),
+        )
+        .err()
+        .expect("incompatible query pack must fail");
+    assert!(
+        matches!(error, EngineError::InvalidQuery(ref detail) if detail == "IncompatibleCatalogContract: query_pack_version")
+    );
+
+    let cancelled = crate::engine::QueryCancellationToken::default();
+    cancelled.cancel();
+    let error = client
+        .catalog_resolution(
+            CatalogResolutionQueryRequest::new(public_query_request(), external_ref),
+            cancelled,
+        )
+        .err()
+        .expect("cancelled catalog resolution must not enter SQLite");
+    assert!(matches!(error, EngineError::QueryCancelled));
+
+    pool.shutdown().unwrap();
 }
 
 #[test]
