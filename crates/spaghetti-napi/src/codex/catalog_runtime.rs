@@ -19,6 +19,9 @@ use crate::adapter::{
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceRoot};
+use crate::catalog_contract::evidence::{
+    CatalogAvailability, CatalogEvidenceOwner, ProjectAssociationBasis,
+};
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::decode_runtime::{
     decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecoderDependenciesDenied,
@@ -32,6 +35,7 @@ use crate::source::catalog_composition::{
     CatalogMembershipAuthorityEvidence, CatalogMembershipEntry, CatalogOverlapStrategy,
     CatalogSourceComponent, CatalogSourceComposition, CatalogSourcePrimitive,
 };
+use crate::source::catalog_projection::{CatalogSourceMemberProjection, CatalogSourceProjection};
 use crate::source::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
     AppendTransition, DirectoryEntryKind, DirectoryScan, DirectorySelection, DirectorySnapshot,
@@ -78,6 +82,7 @@ pub(crate) struct CodexCatalogIdentity {
 pub(crate) struct CodexCatalogProduction {
     pub(crate) identity: CodexCatalogIdentity,
     pub(crate) assembly: CatalogLibraryCoverageAssembly,
+    pub(crate) projection: CatalogSourceProjection,
 }
 
 pub(crate) fn codex_catalog_components() -> Vec<CatalogSourceComponent> {
@@ -262,6 +267,7 @@ fn produce_codex_library_coverage_after_heads(
     let mut members = BTreeSet::<String>::new();
     let mut coverage_objects = Vec::with_capacity(checkpoint.entries.len());
     let mut reads = Vec::with_capacity(checkpoint.entries.len());
+    let mut projection_members = Vec::with_capacity(checkpoint.entries.len());
 
     for (index, entry) in checkpoint.entries.values().enumerate() {
         let relative_path = PathBuf::from(&entry.display_path);
@@ -379,6 +385,17 @@ fn produce_codex_library_coverage_after_heads(
                     session.native_project_key.clone(),
                     session.native_session_id.clone(),
                 ));
+                projection_members.push(CatalogSourceMemberProjection::new(
+                    projection_owner(
+                        source_instance_key,
+                        &entry.path_key,
+                        head_checkpoint.generation,
+                    )?,
+                    session.native_project_key.clone(),
+                    session.native_session_id.clone(),
+                    CatalogAvailability::TranscriptDiscovered,
+                    ProjectAssociationBasis::RolloutHeader,
+                ));
             }
             DecodeDisposition::IgnoredKnown => {}
             _ => {
@@ -439,6 +456,12 @@ fn produce_codex_library_coverage_after_heads(
         membership_entries,
         vec![completion],
     )?;
+    let publication_source = assembly.complete_publication_source().map_err(|_| {
+        CatalogCompositionError::invalid(
+            "Codex catalog coverage could not form a complete publication source",
+        )
+    })?;
+    let projection = CatalogSourceProjection::assemble(publication_source, projection_members)?;
 
     Ok(CodexCatalogProduction {
         identity: CodexCatalogIdentity {
@@ -449,7 +472,27 @@ fn produce_codex_library_coverage_after_heads(
             session_identity_digest: identity_digest(&sessions),
         },
         assembly,
+        projection,
     })
+}
+
+fn projection_owner(
+    source_instance_key: crate::adapter::CanonicalSourceInstanceKey,
+    object_key: &[u8],
+    generation: u64,
+) -> Result<CatalogEvidenceOwner, CatalogCompositionError> {
+    CatalogEvidenceOwner::new(
+        ADAPTER_ID,
+        source_instance_key,
+        crate::adapter::CoverageStreamKey::derive(ADAPTER_ID, STREAM_ID.as_bytes()).map_err(
+            |_| CatalogCompositionError::invalid("Codex catalog stream identity is invalid"),
+        )?,
+        crate::adapter::CoverageObjectKey::derive(STREAM_ID, object_key).map_err(|_| {
+            CatalogCompositionError::invalid("Codex catalog object identity is invalid")
+        })?,
+        generation,
+    )
+    .map_err(|_| CatalogCompositionError::invalid("Codex catalog evidence owner is invalid"))
 }
 
 fn require_exact_runtime_composition(
