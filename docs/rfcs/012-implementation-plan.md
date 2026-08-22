@@ -1143,7 +1143,7 @@ coordinates must match the retained evidence; raw values, native keys, and
 locators cannot enter it. The contract grants no source access, query,
 observer ordering, or replacement authority. The same bounded aggregate is
 now captured from the scoped reducer at each completed-poll boundary and
-carried by the attachment-bound RFC 012D watermark with exact Rust-issued
+carried by the attachment-bound RFC 012D watermark v2 with exact Rust-issued
 context. This is one coalesced state snapshot, not one public event per unknown
 record. The public durable query plus bootstrap/resync completion and
 replacement-digest integration remain open.
@@ -2245,7 +2245,7 @@ Current landing status (2026-08-20):
   bootstrap and resync at equal state. This adds no N-API method, portable
   observer owner, unknown-event preservation, native source access, or task/
   artifact discovery authority; and
-- the contextual poll-watermark slice (`c28bdef`) now freezes one completed
+- the contextual poll-watermark v1 slice (`c28bdef`) freezes one completed
   poll's offered boundary without turning request generation or a native clock
   into semantic progress. A process-local attachment authority is retained by
   every captured watermark, and only the exact owning host can mint its non-
@@ -2267,7 +2267,10 @@ Current landing status (2026-08-20):
   queue, bound, or unknown-field drift against one privacy-reduced fixture.
   This adds no source-access authority, request-
   generation field, unified event union, N-API method, iterator owner, native
-  payload/locator disclosure, or public observer transport; and
+  payload/locator disclosure, or public observer transport. The bounded
+  unknown-evidence extension advances this strict required-field contract to
+  v2; the original v1 fixture remains frozen rather than being silently
+  reinterpreted; and
 - the contextual poll-completion slice (`5854c5f`) now carries that frozen
   watermark through the real request-local poll runtime rather than leaving
   wire construction as a detached contract test. After a ticket resolves, the

@@ -22,6 +22,10 @@ type WatermarkContext = super::ScopedObservationWatermarkConsumerContext;
 
 const FROZEN_FIXTURE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/contracts/rfc012d-scoped-watermark-v2.json"
+));
+const FROZEN_V1_FIXTURE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
     "/fixtures/contracts/rfc012d-scoped-watermark-v1.json"
 ));
 
@@ -351,6 +355,14 @@ fn frozen_bootstrap_and_live_watermark_fixture_is_stable() {
     let bootstrap_value = serde_json::to_value(&bootstrap.wire).unwrap();
     let parsed = parse(bootstrap_value.clone(), &bootstrap.context).unwrap();
     assert_eq!(serde_json::to_value(parsed).unwrap(), bootstrap_value);
+
+    let legacy: Value = serde_json::from_str(FROZEN_V1_FIXTURE).unwrap();
+    assert_eq!(
+        legacy["watermark"]["scoped_observation_watermark_contract_version"],
+        json!(1)
+    );
+    assert!(legacy["watermark"].get("unknown_evidence").is_none());
+    assert!(parse(legacy["watermark"].clone(), &live.context).is_err());
 }
 
 #[test]

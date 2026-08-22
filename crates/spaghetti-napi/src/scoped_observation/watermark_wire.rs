@@ -35,7 +35,7 @@ use super::{
     ScopedObservationDeliveryState, ScopedObservationRootIdentity, ScopedObservationWatermarkCore,
 };
 
-pub(crate) const SCOPED_OBSERVATION_WATERMARK_CONTRACT_VERSION: u32 = 1;
+pub(crate) const SCOPED_OBSERVATION_WATERMARK_CONTRACT_VERSION: u32 = 2;
 
 const MAX_SOURCE_COVERAGE_SETS: usize = 64;
 const MAX_COVERAGE_ERRORS_PER_SET: usize = 4_096;

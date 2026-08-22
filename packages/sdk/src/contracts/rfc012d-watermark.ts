@@ -40,7 +40,7 @@ import {
 import { parseScopedUsageRoot, type ScopedUsageRoot } from './rfc012d-usage-envelope.js';
 import { parseObservationContractSelectionForExpected, type ObservationContractSelection } from './rfc012d.js';
 
-export const SCOPED_OBSERVATION_WATERMARK_CONTRACT_VERSION = 1 as const;
+export const SCOPED_OBSERVATION_WATERMARK_CONTRACT_VERSION = 2 as const;
 
 const MAX_SOURCE_COVERAGE_SETS = 64;
 const MAX_COVERAGE_ERRORS_PER_SET = 4_096;

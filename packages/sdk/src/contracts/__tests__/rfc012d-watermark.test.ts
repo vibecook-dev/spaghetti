@@ -25,6 +25,15 @@ interface WatermarkFixture {
 const fixture = JSON.parse(
   readFileSync(
     new URL(
+      '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012d-scoped-watermark-v2.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+) as WatermarkFixture;
+const legacyV1 = JSON.parse(
+  readFileSync(
+    new URL(
       '../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012d-scoped-watermark-v1.json',
       import.meta.url,
     ),
@@ -47,6 +56,12 @@ test('portable TypeScript parses the Rust-issued contextual poll watermark', () 
   assert.equal(fixture.fixture_contract_version, 1);
   assert.deepEqual(fixture.expected.queue_continuity, ['bootstrap', 'valid']);
   assert.equal(fixture.expected.request_generation_is_flow_control_only, true);
+});
+
+test('the strict v2 parser does not reinterpret the frozen v1 shape', () => {
+  assert.equal(legacyV1.watermark.scoped_observation_watermark_contract_version, 1);
+  assert.equal(Object.hasOwn(legacyV1.watermark, 'unknown_evidence'), false);
+  reject(legacyV1.watermark);
 });
 
 test('selection root support and nested semantic state are exact', () => {
