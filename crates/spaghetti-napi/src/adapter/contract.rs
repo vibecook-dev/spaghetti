@@ -9,7 +9,7 @@ use crate::source::{
     SqliteSnapshotConfig,
 };
 
-use super::scope::{ScopeJoinCandidate, ScopeProgramManifest};
+use super::scope::{ScopeJoinUpdate, ScopeProgramManifest};
 use super::support::AdapterSupportBinding;
 use super::FactBatch;
 
@@ -666,7 +666,7 @@ pub trait AgentAdapter: Send + Sync + 'static {
         _context: DecodeContext<'_>,
         _record: &SourceRecord,
         _decoded: &FactBatch,
-    ) -> Result<Vec<ScopeJoinCandidate>, AdapterError> {
+    ) -> Result<Vec<ScopeJoinUpdate>, AdapterError> {
         Ok(Vec::new())
     }
 }
@@ -739,7 +739,7 @@ where
         context: DecodeContext<'_>,
         record: &SourceRecord,
         decoded: &FactBatch,
-    ) -> Result<Vec<ScopeJoinCandidate>, AdapterError> {
+    ) -> Result<Vec<ScopeJoinUpdate>, AdapterError> {
         (**self).join_scope_relations(context, record, decoded)
     }
 }

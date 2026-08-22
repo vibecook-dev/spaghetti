@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, BoundedNativeEvidence,
     CapabilityId, DecodeContext, DecodeDisposition, DecoderId, FactBatch, FactSemanticContext,
-    RawRetentionPolicy, RecordMappingDisposition, ScopeJoinCandidate, SourceAccess, SourceInstance,
+    RawRetentionPolicy, RecordMappingDisposition, ScopeJoinUpdate, SourceAccess, SourceInstance,
     SourceObjectDescriptor,
 };
 use crate::source::SourceRecord;
 
-const MAX_SCOPE_JOIN_CANDIDATES_PER_RECORD: usize = 256;
+const MAX_SCOPE_JOIN_UPDATES_PER_RECORD: usize = 256;
 const MAX_SCOPE_JOIN_RETAINED_BYTES_PER_RECORD: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +45,7 @@ pub(crate) struct DecodedFactBatch {
     pub quarantined: bool,
     pub unscoped_permanent_diagnostic: bool,
     pub diagnostic_coverage_gaps: Vec<CapabilityId>,
-    pub scope_join_candidates: Vec<ScopeJoinCandidate>,
+    pub scope_join_updates: Vec<ScopeJoinUpdate>,
 }
 
 /// A decode attempt always reports timing, including controlled failures.
@@ -128,7 +128,7 @@ pub(crate) fn decode_record<A: AgentAdapter + ?Sized>(
             "adapter panicked at the controlled decode boundary",
         )),
         Ok(Err(error)) => Err(error),
-        Ok(Ok((disposition, candidates))) => {
+        Ok(Ok((disposition, updates))) => {
             finish_decode(request.record, request.retention, disposition, batch).and_then(
                 |mut decoded| {
                     validate_scope_join_candidates(
@@ -136,9 +136,9 @@ pub(crate) fn decode_record<A: AgentAdapter + ?Sized>(
                         request.semantic_context,
                         decoded.disposition,
                         &decoded.batch,
-                        &candidates,
+                        &updates,
                     )?;
-                    decoded.scope_join_candidates = candidates;
+                    decoded.scope_join_updates = updates;
                     Ok(decoded)
                 },
             )
@@ -200,7 +200,7 @@ fn finish_decode(
         quarantined,
         unscoped_permanent_diagnostic,
         diagnostic_coverage_gaps,
-        scope_join_candidates: Vec::new(),
+        scope_join_updates: Vec::new(),
     })
 }
 
@@ -209,35 +209,35 @@ fn validate_scope_join_candidates(
     semantic_context: &FactSemanticContext,
     disposition: DecodeDisposition,
     batch: &FactBatch,
-    candidates: &[ScopeJoinCandidate],
+    updates: &[ScopeJoinUpdate],
 ) -> Result<(), AdapterError> {
-    if candidates.is_empty() {
+    if updates.is_empty() {
         return Ok(());
     }
     if disposition != DecodeDisposition::Applied
-        || candidates.len() > MAX_SCOPE_JOIN_CANDIDATES_PER_RECORD
+        || updates.len() > MAX_SCOPE_JOIN_UPDATES_PER_RECORD
     {
         return Err(AdapterError::invalid_contract(
             "scope join candidates are invalid for the decoded record",
         ));
     }
-    let retained_bytes = candidates.iter().try_fold(0_usize, |total, candidate| {
+    let retained_bytes = updates.iter().try_fold(0_usize, |total, update| {
         total
-            .checked_add(candidate.retained_bytes())
-            .ok_or_else(|| AdapterError::invalid_contract("scope join candidate bytes overflow"))
+            .checked_add(update.retained_bytes())
+            .ok_or_else(|| AdapterError::invalid_contract("scope join update bytes overflow"))
     })?;
     if retained_bytes > MAX_SCOPE_JOIN_RETAINED_BYTES_PER_RECORD {
         return Err(AdapterError::invalid_contract(
-            "scope join candidates exceed the common retained-byte bound",
+            "scope join updates exceed the common retained-byte bound",
         ));
     }
-    if candidates
-        .iter()
-        .enumerate()
-        .any(|(index, candidate)| candidates[..index].contains(candidate))
-    {
+    if updates.iter().enumerate().any(|(index, update)| {
+        updates[..index]
+            .iter()
+            .any(|prior| prior.same_owner(update))
+    }) {
         return Err(AdapterError::invalid_contract(
-            "scope join candidates must be unique",
+            "scope join updates must have unique relation and fact owners",
         ));
     }
 
@@ -247,11 +247,12 @@ fn validate_scope_join_candidates(
         .iter()
         .filter_map(|envelope| envelope.semantic_revision)
         .collect::<Vec<_>>();
-    if candidates.iter().any(|candidate| {
-        candidate.evidence().iter().any(|evidence| {
+    if updates.iter().any(|update| {
+        update.evidence().iter().any(|evidence| {
             !semantic_revisions.iter().any(|semantic| {
                 semantic.source_record_id == expected_source_record_id
-                    && semantic.semantic_revision_ref == *evidence
+                    && semantic.fact_id == evidence.fact_id()
+                    && semantic.semantic_revision_ref == evidence.semantic_revision_ref()
             })
         })
     }) {
@@ -461,10 +462,11 @@ impl SourceAccess for DecoderDependenciesDenied {
 mod tests {
     use crate::adapter::{
         AdapterDiagnostic, AdapterId, AdapterManifest, DiscoveryContext, EntityKey, EvidenceKind,
-        EvidenceStrength, Fact, FactRevisionId, RunEvidenceFact, ScopeJoinCandidate,
-        ScopeJoinIdentityInput, SemanticRevisionRef, SourceInstance, SourceInstanceKey,
-        SourceInstanceSpec, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest,
-        SourceQuery, SourceRows, SourceSnapshot, StreamId, StreamSpec,
+        EvidenceStrength, Fact, FactRevisionId, RunEvidenceFact, ScopeJoinEvidence,
+        ScopeJoinIdentityInput, ScopeJoinParameterSet, ScopeJoinUpdate, SemanticRevisionRef,
+        SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor,
+        SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot,
+        StreamId, StreamSpec,
     };
     use crate::source::{RecordOrigin, SourceCursor, SourceMediaType};
 
@@ -626,8 +628,8 @@ mod tests {
             _context: DecodeContext<'_>,
             _record: &SourceRecord,
             decoded: &FactBatch,
-        ) -> Result<Vec<ScopeJoinCandidate>, AdapterError> {
-            let candidate = || {
+        ) -> Result<Vec<ScopeJoinUpdate>, AdapterError> {
+            let update = || {
                 let semantic = decoded
                     .facts()
                     .first()
@@ -647,23 +649,25 @@ mod tests {
                         ),
                         _ => semantic.semantic_revision_ref,
                     };
-                ScopeJoinCandidate::new(
-                    "related-object",
-                    vec![ScopeJoinIdentityInput::new(
-                        "native-id",
-                        b"/Users/alice/private/session.jsonl".to_vec(),
-                    )
-                    .map_err(|_| AdapterError::invalid_contract("fixture input failed"))?],
-                    vec![evidence],
+                let parameters = ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
+                    "native-id",
+                    b"/Users/alice/private/session.jsonl".to_vec(),
                 )
-                .map_err(|_| AdapterError::invalid_contract("fixture candidate failed"))
+                .map_err(|_| AdapterError::invalid_contract("fixture input failed"))?])
+                .map_err(|_| AdapterError::invalid_contract("fixture parameters failed"))?;
+                ScopeJoinUpdate::new(
+                    "related-object",
+                    vec![ScopeJoinEvidence::new(semantic.fact_id, evidence)],
+                    vec![parameters],
+                )
+                .map_err(|_| AdapterError::invalid_contract("fixture update failed"))
             };
             match self.join_mode {
                 FixtureJoinMode::None => Ok(Vec::new()),
-                FixtureJoinMode::Valid | FixtureJoinMode::ForeignEvidence => Ok(vec![candidate()?]),
+                FixtureJoinMode::Valid | FixtureJoinMode::ForeignEvidence => Ok(vec![update()?]),
                 FixtureJoinMode::Duplicate => {
-                    let candidate = candidate()?;
-                    Ok(vec![candidate.clone(), candidate])
+                    let update = update()?;
+                    Ok(vec![update.clone(), update])
                 }
                 FixtureJoinMode::Panic => {
                     panic!("private join panic /Users/alice/private/session.jsonl")
@@ -878,15 +882,18 @@ mod tests {
         )
         .result
         .unwrap();
-        assert_eq!(valid.scope_join_candidates.len(), 1);
+        assert_eq!(valid.scope_join_updates.len(), 1);
         assert_eq!(
-            valid.scope_join_candidates[0].evidence(),
-            &[valid.batch.facts()[0]
-                .semantic_revision
-                .unwrap()
-                .semantic_revision_ref]
+            valid.scope_join_updates[0].evidence(),
+            &[ScopeJoinEvidence::new(
+                valid.batch.facts()[0].semantic_revision.unwrap().fact_id,
+                valid.batch.facts()[0]
+                    .semantic_revision
+                    .unwrap()
+                    .semantic_revision_ref,
+            )]
         );
-        let debug = format!("{:?}", valid.scope_join_candidates[0]);
+        let debug = format!("{:?}", valid.scope_join_updates[0]);
         for private in ["/Users/", "alice", "private", "session.jsonl"] {
             assert!(!debug.contains(private));
         }

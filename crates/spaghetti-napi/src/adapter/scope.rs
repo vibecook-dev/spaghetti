@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::semantic::SemanticRevisionRef;
+use super::semantic::{CanonicalFactId, SemanticRevisionRef};
 
 pub const SCOPE_PROGRAM_SCHEMA_VERSION: u32 = 1;
 
@@ -16,6 +16,7 @@ const MAX_IDENTIFIER_BYTES: usize = 128;
 const MAX_LOCATOR_BYTES: usize = 4 * 1024;
 const MAX_BLOCKER_BYTES: usize = 16 * 1024;
 const MAX_SCOPE_JOIN_IDENTITY_INPUTS: usize = 32;
+const MAX_SCOPE_JOIN_PARAMETER_SETS: usize = 256;
 const MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES: usize = 8 * 1024;
 const MAX_SCOPE_JOIN_IDENTITY_BYTES: usize = 64 * 1024;
 const MAX_SCOPE_JOIN_EVIDENCE_REFS: usize = 16;
@@ -84,32 +85,19 @@ impl std::fmt::Debug for ScopeJoinIdentityInput {
     }
 }
 
-/// A bounded adapter-native join result. The common runtime still validates
-/// the relation and exact ordered inputs against the selected program before
-/// rendering or opening anything. Every candidate must cite at least one
-/// semantic revision emitted from the supplied decoded record.
+/// One exact parameter set proposed for a declared scope relation. The owning
+/// [`ScopeJoinUpdate`] supplies the relation and stable fact evidence so one
+/// fact correction can atomically replace all of its prior parameter sets.
 #[derive(Clone, PartialEq, Eq)]
-pub struct ScopeJoinCandidate {
-    relation_id: String,
+pub struct ScopeJoinParameterSet {
     identity_inputs: Vec<ScopeJoinIdentityInput>,
-    evidence: Vec<SemanticRevisionRef>,
 }
 
-impl ScopeJoinCandidate {
-    pub fn new(
-        relation_id: impl Into<String>,
-        identity_inputs: Vec<ScopeJoinIdentityInput>,
-        evidence: Vec<SemanticRevisionRef>,
-    ) -> Result<Self, ScopeContractError> {
-        let relation_id = relation_id.into();
-        validate_identifier("scope join relation id", &relation_id)?;
-        if identity_inputs.is_empty()
-            || identity_inputs.len() > MAX_SCOPE_JOIN_IDENTITY_INPUTS
-            || evidence.is_empty()
-            || evidence.len() > MAX_SCOPE_JOIN_EVIDENCE_REFS
-        {
+impl ScopeJoinParameterSet {
+    pub fn new(identity_inputs: Vec<ScopeJoinIdentityInput>) -> Result<Self, ScopeContractError> {
+        if identity_inputs.is_empty() || identity_inputs.len() > MAX_SCOPE_JOIN_IDENTITY_INPUTS {
             return Err(ScopeContractError::invalid(
-                "scope join candidate shape is outside common bounds",
+                "scope join parameter shape is outside common bounds",
             ));
         }
         let mut names = BTreeSet::new();
@@ -131,56 +119,25 @@ impl ScopeJoinCandidate {
                 "scope join identity inputs exceed the common byte bound",
             ));
         }
-        let mut evidence_ids = BTreeSet::new();
-        if evidence
-            .iter()
-            .any(|reference| !evidence_ids.insert(reference.fact_revision_id))
-        {
-            return Err(ScopeContractError::invalid(
-                "scope join evidence references must be unique",
-            ));
-        }
-        Ok(Self {
-            relation_id,
-            identity_inputs,
-            evidence,
-        })
-    }
-
-    pub fn relation_id(&self) -> &str {
-        &self.relation_id
+        Ok(Self { identity_inputs })
     }
 
     pub fn identity_inputs(&self) -> &[ScopeJoinIdentityInput] {
         &self.identity_inputs
     }
 
-    pub fn evidence(&self) -> &[SemanticRevisionRef] {
-        &self.evidence
-    }
-
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.relation_id
-            .len()
-            .saturating_add(
-                self.identity_inputs
-                    .iter()
-                    .map(ScopeJoinIdentityInput::retained_bytes)
-                    .sum::<usize>(),
-            )
-            .saturating_add(
-                self.evidence
-                    .len()
-                    .saturating_mul(std::mem::size_of::<SemanticRevisionRef>()),
-            )
+    fn retained_bytes(&self) -> usize {
+        self.identity_inputs
+            .iter()
+            .map(ScopeJoinIdentityInput::retained_bytes)
+            .sum()
     }
 }
 
-impl std::fmt::Debug for ScopeJoinCandidate {
+impl std::fmt::Debug for ScopeJoinParameterSet {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ScopeJoinCandidate")
-            .field("relation_id", &self.relation_id)
+            .debug_struct("ScopeJoinParameterSet")
             .field(
                 "identity_input_names",
                 &self
@@ -189,7 +146,145 @@ impl std::fmt::Debug for ScopeJoinCandidate {
                     .map(ScopeJoinIdentityInput::name)
                     .collect::<Vec<_>>(),
             )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Stable fact owner plus the exact semantic revision that produced one join
+/// update. Keeping both coordinates lets corrections replace prior native
+/// parameter sets without treating a topology-specific delivery ID as owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeJoinEvidence {
+    fact_id: CanonicalFactId,
+    semantic_revision_ref: SemanticRevisionRef,
+}
+
+impl ScopeJoinEvidence {
+    pub fn new(fact_id: CanonicalFactId, semantic_revision_ref: SemanticRevisionRef) -> Self {
+        Self {
+            fact_id,
+            semantic_revision_ref,
+        }
+    }
+
+    pub fn fact_id(&self) -> CanonicalFactId {
+        self.fact_id
+    }
+
+    pub fn semantic_revision_ref(&self) -> SemanticRevisionRef {
+        self.semantic_revision_ref
+    }
+}
+
+/// One complete replacement of the candidate parameter set owned by a stable
+/// fact group for one declared relation. An empty `parameters` vector is the
+/// explicit retraction shape; omission means no new information.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopeJoinUpdate {
+    relation_id: String,
+    evidence: Vec<ScopeJoinEvidence>,
+    parameters: Vec<ScopeJoinParameterSet>,
+}
+
+impl ScopeJoinUpdate {
+    pub fn new(
+        relation_id: impl Into<String>,
+        mut evidence: Vec<ScopeJoinEvidence>,
+        parameters: Vec<ScopeJoinParameterSet>,
+    ) -> Result<Self, ScopeContractError> {
+        let relation_id = relation_id.into();
+        validate_identifier("scope join relation id", &relation_id)?;
+        if evidence.is_empty()
+            || evidence.len() > MAX_SCOPE_JOIN_EVIDENCE_REFS
+            || parameters.len() > MAX_SCOPE_JOIN_PARAMETER_SETS
+        {
+            return Err(ScopeContractError::invalid(
+                "scope join update shape is outside common bounds",
+            ));
+        }
+        evidence.sort_by_key(ScopeJoinEvidence::fact_id);
+        if evidence
+            .windows(2)
+            .any(|pair| pair[0].fact_id == pair[1].fact_id)
+        {
+            return Err(ScopeContractError::invalid(
+                "scope join evidence fact owners must be unique",
+            ));
+        }
+        if parameters
+            .iter()
+            .enumerate()
+            .any(|(index, parameter)| parameters[..index].contains(parameter))
+        {
+            return Err(ScopeContractError::invalid(
+                "scope join parameter sets must be unique",
+            ));
+        }
+        let retained_parameter_bytes =
+            parameters.iter().try_fold(0_usize, |total, parameter| {
+                total
+                    .checked_add(parameter.retained_bytes())
+                    .ok_or_else(|| {
+                        ScopeContractError::invalid("scope join parameter bytes overflow")
+                    })
+            })?;
+        if retained_parameter_bytes > MAX_SCOPE_JOIN_IDENTITY_BYTES {
+            return Err(ScopeContractError::invalid(
+                "scope join parameters exceed the common byte bound",
+            ));
+        }
+        Ok(Self {
+            relation_id,
+            evidence,
+            parameters,
+        })
+    }
+
+    pub fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub fn evidence(&self) -> &[ScopeJoinEvidence] {
+        &self.evidence
+    }
+
+    pub fn parameters(&self) -> &[ScopeJoinParameterSet] {
+        &self.parameters
+    }
+
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.relation_id == other.relation_id
+            && self
+                .evidence
+                .iter()
+                .map(ScopeJoinEvidence::fact_id)
+                .eq(other.evidence.iter().map(ScopeJoinEvidence::fact_id))
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.relation_id
+            .len()
+            .saturating_add(
+                self.evidence
+                    .len()
+                    .saturating_mul(std::mem::size_of::<ScopeJoinEvidence>()),
+            )
+            .saturating_add(
+                self.parameters
+                    .iter()
+                    .map(ScopeJoinParameterSet::retained_bytes)
+                    .sum::<usize>(),
+            )
+    }
+}
+
+impl std::fmt::Debug for ScopeJoinUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopeJoinUpdate")
+            .field("relation_id", &self.relation_id)
             .field("evidence_count", &self.evidence.len())
+            .field("parameter_count", &self.parameters.len())
             .finish_non_exhaustive()
     }
 }
@@ -1006,37 +1101,39 @@ mod tests {
     }
 
     #[test]
-    fn scope_join_candidates_are_bounded_unique_and_value_private() {
+    fn scope_join_updates_are_bounded_replaceable_and_value_private() {
         use crate::adapter::{CanonicalFactId, CanonicalSourceInstanceKey, FactRevisionId};
 
         let source = CanonicalSourceInstanceKey::derive(1, b"scope-join-source").unwrap();
         let fact = CanonicalFactId::native("fixture", &source, "fixture", b"fact").unwrap();
-        let evidence =
+        let reference =
             SemanticRevisionRef::new(FactRevisionId::derive(&fact, 1, b"revision").unwrap());
+        let evidence = ScopeJoinEvidence::new(fact, reference);
         let private_value = b"/Users/alice/private/session.jsonl".to_vec();
-        let candidate = ScopeJoinCandidate::new(
-            "related-object",
-            vec![ScopeJoinIdentityInput::new("native-id", private_value.clone()).unwrap()],
-            vec![evidence],
+        let parameters = ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
+            "native-id",
+            private_value.clone(),
         )
+        .unwrap()])
         .unwrap();
+        let update =
+            ScopeJoinUpdate::new("related-object", vec![evidence], vec![parameters]).unwrap();
 
-        assert_eq!(candidate.relation_id(), "related-object");
-        assert_eq!(candidate.identity_inputs()[0].value(), private_value);
-        assert_eq!(candidate.evidence(), &[evidence]);
-        let debug = format!("{candidate:?}");
+        assert_eq!(update.relation_id(), "related-object");
+        assert_eq!(
+            update.parameters()[0].identity_inputs()[0].value(),
+            private_value
+        );
+        assert_eq!(update.evidence(), &[evidence]);
+        let debug = format!("{update:?}");
         for private in ["/Users/", "alice", "private", "session.jsonl"] {
             assert!(!debug.contains(private));
         }
 
-        let duplicate_name = ScopeJoinCandidate::new(
-            "related-object",
-            vec![
-                ScopeJoinIdentityInput::new("native-id", b"one".to_vec()).unwrap(),
-                ScopeJoinIdentityInput::new("native-id", b"two".to_vec()).unwrap(),
-            ],
-            vec![evidence],
-        )
+        let duplicate_name = ScopeJoinParameterSet::new(vec![
+            ScopeJoinIdentityInput::new("native-id", b"one".to_vec()).unwrap(),
+            ScopeJoinIdentityInput::new("native-id", b"two".to_vec()).unwrap(),
+        ])
         .unwrap_err();
         assert!(duplicate_name.to_string().contains("must be unique"));
         assert!(ScopeJoinIdentityInput::new(
@@ -1044,11 +1141,11 @@ mod tests {
             vec![0; MAX_SCOPE_JOIN_IDENTITY_VALUE_BYTES + 1],
         )
         .is_err());
-        assert!(ScopeJoinCandidate::new(
-            "related-object",
-            vec![ScopeJoinIdentityInput::new("native-id", b"one".to_vec()).unwrap()],
-            vec![evidence, evidence],
-        )
-        .is_err());
+        assert!(
+            ScopeJoinUpdate::new("related-object", vec![evidence, evidence], Vec::new(),).is_err()
+        );
+        let retraction =
+            ScopeJoinUpdate::new("related-object", vec![evidence], Vec::new()).unwrap();
+        assert!(retraction.parameters().is_empty());
     }
 }
