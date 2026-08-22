@@ -1729,6 +1729,19 @@ impl SpaghettiEngineCore {
                 "catalog refresh cannot change its frozen coverage plan".to_string(),
             ));
         }
+        if state.readiness.state == CatalogReadinessPhase::Degraded {
+            let now = engine_now_unix_ms()?;
+            self.commit_catalog_build_state(CatalogBuildStateCommand::retry_degraded_refresh(
+                state.expectation()?,
+                now,
+                now,
+            ))?;
+            state = self.load_catalog_build_state()?.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog recovery start lost its durable state".to_string(),
+                )
+            })?;
+        }
         if state.readiness.state == CatalogReadinessPhase::Ready
             && state.readiness.refreshing_from_snapshot.is_none()
         {
@@ -1744,20 +1757,103 @@ impl SpaghettiEngineCore {
                 )
             })?;
         }
-        if state.plan != plan
-            || state.readiness.state != CatalogReadinessPhase::Ready
-            || state.readiness.refreshing_from_snapshot.is_none()
-        {
+        let recovering = state.readiness.state == CatalogReadinessPhase::Building
+            && state.readiness.last_complete_snapshot.is_some()
+            && state.readiness.complete_through_commit.is_none();
+        let active = state.readiness.state == CatalogReadinessPhase::Ready
+            && state.readiness.refreshing_from_snapshot.is_some();
+        if state.plan != plan || (!active && !recovering) {
             return Err(EngineError::InvalidCommit(
-                "catalog refresh requires the exact durable active-refresh lineage".to_string(),
+                "catalog refresh requires an exact active or recovery lineage".to_string(),
             ));
         }
         let expected = state.refresh_publication_expectation()?;
+        let readiness = state.refresh_build_readiness()?;
         Ok(CatalogRefreshBuildContext {
             plan,
-            readiness: state.readiness,
+            readiness,
             expected,
         })
+    }
+
+    pub(crate) fn degrade_active_catalog_refresh(
+        &self,
+        reason_code: &str,
+    ) -> Result<Option<u64>, EngineError> {
+        let mut state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog source failure requires a durable active refresh".to_string(),
+            )
+        })?;
+        if state.readiness.state == CatalogReadinessPhase::Degraded {
+            return Ok(None);
+        }
+        if state.readiness.state == CatalogReadinessPhase::Ready
+            && state.readiness.refreshing_from_snapshot.is_none()
+        {
+            let now = engine_now_unix_ms()?;
+            self.commit_catalog_build_state(CatalogBuildStateCommand::begin_refresh(
+                state.refresh_expectation()?,
+                now,
+                now,
+            ))?;
+            state = self.load_catalog_build_state()?.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog source failure lost its durable refresh start".to_string(),
+                )
+            })?;
+        }
+        let expected = state.refresh_publication_expectation()?;
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::degrade_active_refresh(
+            expected,
+            reason_code,
+            now,
+            now,
+        ))
+    }
+
+    pub(crate) fn mark_active_catalog_refresh_retrying(
+        &self,
+        reason_code: &str,
+    ) -> Result<Option<u64>, EngineError> {
+        let mut state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog source retry requires durable catalog readiness".to_string(),
+            )
+        })?;
+        if state.readiness.reason
+            == Some(
+                crate::catalog_contract::CatalogReadinessReason::SourceRetrying {
+                    code: reason_code.to_string(),
+                },
+            )
+        {
+            return Ok(None);
+        }
+        if state.readiness.state == CatalogReadinessPhase::Ready
+            && state.readiness.refreshing_from_snapshot.is_none()
+        {
+            let now = engine_now_unix_ms()?;
+            self.commit_catalog_build_state(CatalogBuildStateCommand::begin_refresh(
+                state.refresh_expectation()?,
+                now,
+                now,
+            ))?;
+            state = self.load_catalog_build_state()?.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog source retry lost its durable refresh start".to_string(),
+                )
+            })?;
+        }
+        let expected = state.refresh_publication_expectation()?;
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::mark_active_refresh_retrying(
+            expected,
+            reason_code,
+            now,
+            now,
+        ))
     }
 
     /// Atomically publish a checked all-source refresh successor against its

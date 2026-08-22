@@ -776,6 +776,42 @@ fn validate_refresh_semantics(
     durable: &CatalogDurableRefreshPublication,
 ) -> Result<(), EngineError> {
     let expected = durable.build();
+    let lineage_matches = if current.refresh_publication_expectation()?.is_recovery() {
+        current.readiness.state == CatalogReadinessPhase::Building
+            && current.readiness.refreshing_from_snapshot.is_none()
+            && current.readiness.complete_through_commit.is_none()
+            && current
+                .readiness
+                .reason
+                .as_ref()
+                .and_then(|reason| match reason {
+                    crate::catalog_contract::CatalogReadinessReason::SourceRetrying { code } => {
+                        Some(code.as_str())
+                    }
+                    _ => None,
+                })
+                == current
+                    .refresh_publication_expectation()?
+                    .retry_reason_code()
+    } else {
+        current.readiness.state == CatalogReadinessPhase::Ready
+            && current.readiness.refreshing_from_snapshot == Some(expected.predecessor_snapshot)
+            && current.readiness.complete_through_commit
+                == Some(expected.predecessor_snapshot.complete_commit)
+            && current
+                .readiness
+                .reason
+                .as_ref()
+                .and_then(|reason| match reason {
+                    crate::catalog_contract::CatalogReadinessReason::SourceRetrying { code } => {
+                        Some(code.as_str())
+                    }
+                    _ => None,
+                })
+                == current
+                    .refresh_publication_expectation()?
+                    .retry_reason_code()
+    };
     if current.plan.scope != CatalogCoverageScope::Library
         || current.plan.coverage_plan_id != expected.coverage_plan_id
         || current.readiness.scope != CatalogCoverageScope::Library
@@ -785,9 +821,7 @@ fn validate_refresh_semantics(
         || current.readiness.epoch != expected.epoch
         || current.readiness.attempt != expected.attempt
         || current.readiness.last_complete_snapshot != Some(expected.predecessor_snapshot)
-        || current.readiness.refreshing_from_snapshot != Some(expected.predecessor_snapshot)
-        || current.readiness.complete_through_commit
-            != Some(expected.predecessor_snapshot.complete_commit)
+        || !lineage_matches
         || current.last_commit_seq != expected.refresh_started_commit_seq
     {
         return Err(EngineError::InvalidCommit(
@@ -1080,13 +1114,59 @@ fn write_refresh_ready_state(
             "catalog refresh Ready transition does not identify one newer publication".to_string(),
         ));
     }
-    let changed = transaction
-        .execute(
-            r#"
+    let changed = if expected.is_recovery() {
+        transaction
+            .execute(
+                r#"
+                UPDATE catalog_build_state
+                SET state = 'ready',
+                    complete_through_commit = ?1,
+                    last_complete_snapshot_commit = ?1,
+                    refreshing_from_snapshot_commit = NULL,
+                    reason_code = NULL,
+                    last_commit_seq = ?1, updated_at = ?2
+                WHERE scope_kind = ?3
+                  AND coverage_plan_id = ?4
+                  AND desired_contract_version = ?5
+                  AND epoch = ?6
+                  AND attempt = ?7
+                  AND state = 'building'
+                  AND completed_contract_version = ?5
+                  AND complete_through_commit IS NULL
+                  AND last_complete_snapshot_commit = ?8
+                  AND refreshing_from_snapshot_commit IS NULL
+                  AND reason_code IS ?9
+                  AND last_commit_seq = ?10
+                "#,
+                params![
+                    catalog_state::to_i64(commit_seq, "catalog recovery Ready commit")?,
+                    updated_at,
+                    catalog_state::LIBRARY_SCOPE,
+                    current.plan.coverage_plan_id.storage_bytes().as_slice(),
+                    i64::from(readiness.desired_contract_version),
+                    catalog_state::to_i64(readiness.epoch, "catalog recovery epoch")?,
+                    catalog_state::to_i64(readiness.attempt, "catalog recovery attempt")?,
+                    catalog_state::to_i64(
+                        predecessor.complete_commit,
+                        "catalog recovery predecessor commit"
+                    )?,
+                    expected.retry_reason_code(),
+                    catalog_state::to_i64(
+                        expected.refresh_started_commit_seq(),
+                        "catalog recovery-start commit"
+                    )?,
+                ],
+            )
+            .map_err(|error| catalog_state::sqlite_error("publish catalog recovery Ready", error))?
+    } else {
+        transaction
+            .execute(
+                r#"
             UPDATE catalog_build_state
             SET complete_through_commit = ?1,
                 last_complete_snapshot_commit = ?1,
                 refreshing_from_snapshot_commit = NULL,
+                reason_code = NULL,
                 last_commit_seq = ?1, updated_at = ?2
             WHERE scope_kind = ?3
               AND coverage_plan_id = ?4
@@ -1098,24 +1178,30 @@ fn write_refresh_ready_state(
               AND complete_through_commit = ?8
               AND last_complete_snapshot_commit = ?8
               AND refreshing_from_snapshot_commit = ?8
-              AND last_commit_seq = ?9
+              AND reason_code IS ?9
+              AND last_commit_seq = ?10
             "#,
-            params![
-                catalog_state::to_i64(commit_seq, "catalog refresh Ready commit")?,
-                updated_at,
-                catalog_state::LIBRARY_SCOPE,
-                current.plan.coverage_plan_id.storage_bytes().as_slice(),
-                i64::from(readiness.desired_contract_version),
-                catalog_state::to_i64(readiness.epoch, "catalog refresh epoch")?,
-                catalog_state::to_i64(readiness.attempt, "catalog refresh attempt")?,
-                catalog_state::to_i64(predecessor.complete_commit, "catalog predecessor commit")?,
-                catalog_state::to_i64(
-                    expected.refresh_started_commit_seq(),
-                    "catalog refresh-start commit"
-                )?,
-            ],
-        )
-        .map_err(|error| catalog_state::sqlite_error("publish catalog refresh Ready", error))?;
+                params![
+                    catalog_state::to_i64(commit_seq, "catalog refresh Ready commit")?,
+                    updated_at,
+                    catalog_state::LIBRARY_SCOPE,
+                    current.plan.coverage_plan_id.storage_bytes().as_slice(),
+                    i64::from(readiness.desired_contract_version),
+                    catalog_state::to_i64(readiness.epoch, "catalog refresh epoch")?,
+                    catalog_state::to_i64(readiness.attempt, "catalog refresh attempt")?,
+                    catalog_state::to_i64(
+                        predecessor.complete_commit,
+                        "catalog predecessor commit"
+                    )?,
+                    expected.retry_reason_code(),
+                    catalog_state::to_i64(
+                        expected.refresh_started_commit_seq(),
+                        "catalog refresh-start commit"
+                    )?,
+                ],
+            )
+            .map_err(|error| catalog_state::sqlite_error("publish catalog refresh Ready", error))?
+    };
     if changed != 1 {
         return Err(EngineError::InvalidCommit(
             "catalog refresh Ready compare-and-swap changed no row".to_string(),
@@ -1856,11 +1942,25 @@ fn load_ready_publication_at_depth(
                     "catalog refresh lineage exceeds its bounded retained depth",
                 ));
             }
+            let predecessor_attempt: i64 = connection
+                .query_row(
+                    "SELECT attempt FROM catalog_snapshots WHERE snapshot_commit_seq = ?1",
+                    [catalog_state::to_i64(
+                        predecessor_snapshot.complete_commit,
+                        "catalog predecessor snapshot commit",
+                    )?],
+                    |row| row.get(0),
+                )
+                .map_err(|error| {
+                    catalog_state::sqlite_error("load catalog predecessor attempt", error)
+                })?;
+            let predecessor_attempt =
+                catalog_state::positive_u64(predecessor_attempt, "catalog predecessor attempt")?;
             let predecessor = load_ready_publication_at_depth(
                 connection,
                 plan,
                 *predecessor_snapshot,
-                expected_attempt,
+                predecessor_attempt,
                 refresh_depth + 1,
             )?;
             if predecessor.identity.header.publication_digest != *predecessor_publication_digest
@@ -2389,10 +2489,14 @@ fn validate_snapshot_lineage(
                     "catalog refresh snapshot commit order is not strictly increasing",
                 ));
             }
-            validate_commit_owner(
+            validate_commit_owner_one_of(
                 connection,
                 build_commit_seq,
-                "catalog.library.refresh.started",
+                &[
+                    "catalog.library.refresh.started",
+                    catalog_state::REFRESH_SOURCE_RETRYING_REASON,
+                    catalog_state::REFRESH_RECOVERY_STARTED_REASON,
+                ],
                 None,
             )?;
             validate_commit_owner(
@@ -2431,6 +2535,20 @@ fn validate_commit_owner(
     expected_reason: &str,
     expected_committed_at: Option<i64>,
 ) -> Result<(), EngineError> {
+    validate_commit_owner_one_of(
+        connection,
+        commit_seq,
+        &[expected_reason],
+        expected_committed_at,
+    )
+}
+
+fn validate_commit_owner_one_of(
+    connection: &Connection,
+    commit_seq: u64,
+    expected_reasons: &[&str],
+    expected_committed_at: Option<i64>,
+) -> Result<(), EngineError> {
     let (source, reason, committed_at, fact_count): (Option<i64>, String, Option<i64>, i64) =
         connection
             .query_row(
@@ -2442,13 +2560,15 @@ fn validate_commit_owner(
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .map_err(|error| catalog_state::sqlite_error("load catalog lineage commit", error))?;
-    catalog_state::validate_admin_commit(
-        source,
-        &reason,
-        committed_at,
-        fact_count,
-        expected_reason,
-    )?;
+    if source.is_some()
+        || !expected_reasons.contains(&reason.as_str())
+        || committed_at.is_none()
+        || fact_count != 0
+    {
+        return Err(catalog_state::corrupt_catalog_state(
+            "catalog publication lineage is not owned by the expected source-neutral commit",
+        ));
+    }
     if expected_committed_at.is_some() && committed_at != expected_committed_at {
         return Err(catalog_state::corrupt_catalog_state(
             "catalog snapshot timestamp does not match its owning commit",

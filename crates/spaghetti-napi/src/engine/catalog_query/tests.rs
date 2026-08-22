@@ -724,12 +724,32 @@ fn prepare_refresh_catalog(
     project_count: usize,
     session_count: usize,
 ) -> CatalogRefreshPublicationCommand {
-    let begin = CatalogBuildStateCommand::begin_refresh(
-        published.state.refresh_expectation().unwrap(),
-        40,
-        41,
-    );
-    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &begin).unwrap();
+    match published.state.readiness.state {
+        CatalogReadinessPhase::Ready
+            if published.state.readiness.refreshing_from_snapshot.is_none() =>
+        {
+            let begin = CatalogBuildStateCommand::begin_refresh(
+                published.state.refresh_expectation().unwrap(),
+                40,
+                41,
+            );
+            catalog_state::apply_catalog_build_state_commit(&mut published.connection, &begin)
+                .unwrap();
+        }
+        CatalogReadinessPhase::Degraded => {
+            let retry = CatalogBuildStateCommand::retry_degraded_refresh(
+                published.state.expectation().unwrap(),
+                44,
+                45,
+            );
+            catalog_state::apply_catalog_build_state_commit(&mut published.connection, &retry)
+                .unwrap();
+        }
+        CatalogReadinessPhase::Ready => {}
+        CatalogReadinessPhase::Building
+            if published.state.readiness.last_complete_snapshot.is_some() => {}
+        _ => panic!("catalog refresh fixture requires Ready, Degraded, or recovery Building"),
+    }
     let active = catalog_state::load_catalog_build_state(&published.connection)
         .unwrap()
         .unwrap();
@@ -919,6 +939,33 @@ fn prepare_integrity_failure(
     )
 }
 
+fn prepare_source_failure(
+    published: &mut PublishedCatalog,
+    reason_code: &str,
+    started_at: i64,
+    committed_at: i64,
+) -> CatalogBuildStateCommand {
+    if published.state.readiness.state == CatalogReadinessPhase::Ready
+        && published.state.readiness.refreshing_from_snapshot.is_none()
+    {
+        let begin = CatalogBuildStateCommand::begin_refresh(
+            published.state.refresh_expectation().unwrap(),
+            started_at - 2,
+            committed_at - 2,
+        );
+        catalog_state::apply_catalog_build_state_commit(&mut published.connection, &begin).unwrap();
+    }
+    let active = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    CatalogBuildStateCommand::degrade_active_refresh(
+        active.refresh_publication_expectation().unwrap(),
+        reason_code,
+        started_at,
+        committed_at,
+    )
+}
+
 fn failed_catalog() -> PublishedCatalog {
     let mut published = publish_catalog(0, 0);
     let command = prepare_integrity_failure(
@@ -927,6 +974,19 @@ fn failed_catalog() -> PublishedCatalog {
         42,
         43,
     );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &command)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    published
+}
+
+fn degraded_catalog() -> PublishedCatalog {
+    let mut published = publish_catalog(0, 0);
+    let command =
+        prepare_source_failure(&mut published, "catalog_source_refresh_exhausted", 42, 43);
     catalog_state::apply_catalog_build_state_commit(&mut published.connection, &command)
         .unwrap()
         .unwrap();
@@ -2131,6 +2191,341 @@ fn safe_refresh_integrity_failure_rolls_back_every_seam_and_replays_lost_ack() {
 }
 
 #[test]
+fn terminal_source_loss_degrades_restarts_and_recovers_without_losing_safe_reads() {
+    let mut published = publish_catalog(1, 1);
+    let retained_snapshot = published.state.readiness.last_complete_snapshot.unwrap();
+    let stale_failure =
+        prepare_source_failure(&mut published, "catalog_source_refresh_exhausted", 42, 43);
+    let active = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    let retrying = CatalogBuildStateCommand::mark_active_refresh_retrying(
+        active.refresh_publication_expectation().unwrap(),
+        "catalog_source_refresh_retrying",
+        40,
+        41,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &retrying)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.state.readiness.reason,
+        Some(CatalogReadinessReason::SourceRetrying {
+            code: "catalog_source_refresh_retrying".to_string(),
+        })
+    );
+    assert!(
+        catalog_state::apply_catalog_build_state_commit(&mut published.connection, &retrying,)
+            .unwrap()
+            .is_none()
+    );
+    assert!(catalog_state::apply_catalog_build_state_commit(
+        &mut published.connection,
+        &stale_failure,
+    )
+    .is_err());
+    let first_failure =
+        prepare_source_failure(&mut published, "catalog_source_refresh_exhausted", 42, 43);
+    assert!(catalog_state::apply_catalog_build_state_commit_with_hook(
+        &mut published.connection,
+        &first_failure,
+        &FailRefreshAt(CatalogCommitStage::AfterCommit),
+    )
+    .is_err());
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.state.readiness.state,
+        CatalogReadinessPhase::Degraded
+    );
+    assert_eq!(
+        published.state.readiness.reason,
+        Some(CatalogReadinessReason::TerminalSourceUnavailable {
+            code: "catalog_source_refresh_exhausted".to_string(),
+        })
+    );
+    assert!(published
+        .state
+        .readiness
+        .source_coverage
+        .iter()
+        .all(|coverage| coverage.completeness == CoverageSetCompleteness::Unavailable));
+    assert_eq!(
+        published
+            .state
+            .ready_read_authority()
+            .unwrap()
+            .snapshot_id(),
+        retained_snapshot
+    );
+    let degraded_query = execute_catalog_readiness_query(
+        &published.connection,
+        &CatalogReadinessQueryRequest::new(public_query_request()),
+    )
+    .unwrap();
+    assert_eq!(
+        degraded_query.readiness.readiness.state,
+        CatalogReadinessPhase::Degraded
+    );
+    assert!(catalog_state::apply_catalog_build_state_commit(
+        &mut published.connection,
+        &first_failure,
+    )
+    .unwrap()
+    .is_none());
+
+    let retry = CatalogBuildStateCommand::retry_degraded_refresh(
+        published.state.expectation().unwrap(),
+        44,
+        45,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &retry)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.state.readiness.state,
+        CatalogReadinessPhase::Building
+    );
+    assert_eq!(published.state.readiness.attempt, 2);
+    assert_eq!(published.state.readiness.complete_through_commit, None);
+    assert_eq!(
+        published
+            .state
+            .ready_read_authority()
+            .unwrap()
+            .snapshot_id(),
+        retained_snapshot
+    );
+
+    let recovery_retrying = CatalogBuildStateCommand::mark_active_refresh_retrying(
+        published.state.refresh_publication_expectation().unwrap(),
+        "catalog_source_refresh_retrying",
+        45,
+        46,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &recovery_retrying)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.state.readiness.reason,
+        Some(CatalogReadinessReason::SourceRetrying {
+            code: "catalog_source_refresh_retrying".to_string(),
+        })
+    );
+
+    let recovery_failure =
+        prepare_source_failure(&mut published, "catalog_source_refresh_exhausted", 47, 48);
+    catalog_state::apply_catalog_build_state_commit(&mut published.connection, &recovery_failure)
+        .unwrap()
+        .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.state.readiness.state,
+        CatalogReadinessPhase::Degraded
+    );
+    assert_eq!(published.state.readiness.attempt, 2);
+    assert_eq!(published.state.readiness.complete_through_commit, None);
+    assert_eq!(
+        published
+            .state
+            .ready_read_authority()
+            .unwrap()
+            .snapshot_id(),
+        retained_snapshot
+    );
+    assert!(catalog_state::apply_catalog_build_state_commit(
+        &mut published.connection,
+        &recovery_failure,
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        table_count(&published.connection, "catalog_refresh_source_failures"),
+        2
+    );
+
+    let recovery_publication = prepare_refresh_catalog(&mut published, 2, 2);
+    let recovered =
+        apply_refresh_catalog_publication(&mut published.connection, &recovery_publication)
+            .unwrap()
+            .unwrap();
+    published.state = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        published.state.readiness.state,
+        CatalogReadinessPhase::Ready
+    );
+    assert_eq!(published.state.readiness.attempt, 3);
+    assert!(recovered.snapshot_id.complete_commit > retained_snapshot.complete_commit);
+    assert_eq!(
+        published
+            .state
+            .ready_read_authority()
+            .unwrap()
+            .snapshot_id(),
+        recovered.snapshot_id
+    );
+    let current_authority = published.state.ready_read_authority().unwrap();
+    let historical = current_authority
+        .for_historical_snapshot(&published.connection, retained_snapshot, 0)
+        .unwrap();
+    assert_eq!(historical.snapshot_id(), retained_snapshot);
+    assert_eq!(historical.readiness().attempt, 1);
+}
+
+#[test]
+fn transient_source_retrying_can_publish_and_restart_active_and_recovery_lineages() {
+    let mut active = publish_catalog(1, 1);
+    let begin = CatalogBuildStateCommand::begin_refresh(
+        active.state.refresh_expectation().unwrap(),
+        40,
+        41,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut active.connection, &begin)
+        .unwrap()
+        .unwrap();
+    active.state = catalog_state::load_catalog_build_state(&active.connection)
+        .unwrap()
+        .unwrap();
+    let retrying = CatalogBuildStateCommand::mark_active_refresh_retrying(
+        active.state.refresh_publication_expectation().unwrap(),
+        "catalog_source_refresh_retrying",
+        42,
+        43,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut active.connection, &retrying)
+        .unwrap()
+        .unwrap();
+    active.state = catalog_state::load_catalog_build_state(&active.connection)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        active.state.readiness.reason,
+        Some(CatalogReadinessReason::SourceRetrying { .. })
+    ));
+    let active_publication = prepare_refresh_catalog(&mut active, 2, 2);
+    let active_receipt =
+        apply_refresh_catalog_publication(&mut active.connection, &active_publication)
+            .unwrap()
+            .unwrap();
+    active.state = catalog_state::load_catalog_build_state(&active.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.state.readiness.state, CatalogReadinessPhase::Ready);
+    assert_eq!(active.state.readiness.reason, None);
+    assert_eq!(
+        active.state.ready_read_authority().unwrap().snapshot_id(),
+        active_receipt.snapshot_id
+    );
+
+    let mut recovery = publish_catalog(1, 1);
+    let failure = prepare_source_failure(&mut recovery, "catalog_source_refresh_exhausted", 44, 45);
+    catalog_state::apply_catalog_build_state_commit(&mut recovery.connection, &failure)
+        .unwrap()
+        .unwrap();
+    recovery.state = catalog_state::load_catalog_build_state(&recovery.connection)
+        .unwrap()
+        .unwrap();
+    let retry = CatalogBuildStateCommand::retry_degraded_refresh(
+        recovery.state.expectation().unwrap(),
+        46,
+        47,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut recovery.connection, &retry)
+        .unwrap()
+        .unwrap();
+    recovery.state = catalog_state::load_catalog_build_state(&recovery.connection)
+        .unwrap()
+        .unwrap();
+    let recovery_retrying = CatalogBuildStateCommand::mark_active_refresh_retrying(
+        recovery.state.refresh_publication_expectation().unwrap(),
+        "catalog_source_refresh_retrying",
+        48,
+        49,
+    );
+    catalog_state::apply_catalog_build_state_commit(&mut recovery.connection, &recovery_retrying)
+        .unwrap()
+        .unwrap();
+    recovery.state = catalog_state::load_catalog_build_state(&recovery.connection)
+        .unwrap()
+        .unwrap();
+    let recovery_publication = prepare_refresh_catalog(&mut recovery, 2, 2);
+    let recovery_receipt =
+        apply_refresh_catalog_publication(&mut recovery.connection, &recovery_publication)
+            .unwrap()
+            .unwrap();
+    recovery.state = catalog_state::load_catalog_build_state(&recovery.connection)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovery.state.readiness.state, CatalogReadinessPhase::Ready);
+    assert_eq!(recovery.state.readiness.attempt, 2);
+    assert_eq!(recovery.state.readiness.reason, None);
+    assert_eq!(
+        recovery.state.ready_read_authority().unwrap().snapshot_id(),
+        recovery_receipt.snapshot_id
+    );
+}
+
+#[test]
+fn terminal_source_loss_rolls_back_every_precommit_seam() {
+    const PRECOMMIT_STAGES: [CatalogCommitStage; 7] = [
+        CatalogCommitStage::BeforeTransaction,
+        CatalogCommitStage::AfterCommitInsert,
+        CatalogCommitStage::AfterPlanWrite,
+        CatalogCommitStage::AfterFailureEvidenceWrite,
+        CatalogCommitStage::AfterBuildStateWrite,
+        CatalogCommitStage::AfterOutboxInsert,
+        CatalogCommitStage::BeforeCommit,
+    ];
+    let mut published = publish_catalog(1, 1);
+    let command =
+        prepare_source_failure(&mut published, "catalog_source_refresh_exhausted", 42, 43);
+    let active = catalog_state::load_catalog_build_state(&published.connection)
+        .unwrap()
+        .unwrap();
+    let baseline_commits = table_count(&published.connection, "ingest_commits");
+    let baseline_changes = table_count(&published.connection, "change_log");
+    for stage in PRECOMMIT_STAGES {
+        assert!(catalog_state::apply_catalog_build_state_commit_with_hook(
+            &mut published.connection,
+            &command,
+            &FailRefreshAt(stage),
+        )
+        .is_err());
+        let unchanged = catalog_state::load_catalog_build_state(&published.connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.readiness, active.readiness);
+        assert_eq!(unchanged.last_commit_seq, active.last_commit_seq);
+        assert_eq!(
+            table_count(&published.connection, "catalog_refresh_source_failures"),
+            0
+        );
+        assert_eq!(
+            table_count(&published.connection, "ingest_commits"),
+            baseline_commits
+        );
+        assert_eq!(
+            table_count(&published.connection, "change_log"),
+            baseline_changes
+        );
+    }
+}
+
+#[test]
 fn refresh_publication_and_integrity_failure_are_exactly_ordered_by_the_active_refresh_cas() {
     let mut failure_first = publish_catalog(1, 1);
     let successor_command = prepare_refresh_catalog(&mut failure_first, 2, 2);
@@ -2401,6 +2796,113 @@ fn integrity_failure_restart_rejects_missing_duplicated_or_forged_durable_eviden
                    retained_snapshot_commit_seq, retained_publication_digest,
                    retained_content_digest, reason_code, snapshot_disposition, 53
             FROM catalog_refresh_integrity_failures
+            LIMIT 1
+            "#,
+            params![extra_failure, extra_refresh],
+        )
+        .unwrap();
+    assert!(catalog_state::load_catalog_build_state(&duplicated.connection).is_err());
+}
+
+#[test]
+fn source_failure_restart_rejects_missing_duplicated_or_forged_durable_evidence() {
+    let immutable = degraded_catalog();
+    assert!(immutable
+        .connection
+        .execute(
+            "UPDATE catalog_refresh_source_failures SET reason_code = 'changed'",
+            [],
+        )
+        .is_err());
+    assert!(immutable
+        .connection
+        .execute("DELETE FROM catalog_refresh_source_failures", [])
+        .is_err());
+
+    for mutation in [
+        "UPDATE catalog_refresh_source_failures SET reason_code = '/private/catalog.sqlite'",
+        "UPDATE catalog_refresh_source_failures SET retained_publication_digest = zeroblob(32)",
+        "UPDATE catalog_refresh_source_failures SET retained_content_digest = zeroblob(32)",
+    ] {
+        let corrupted = degraded_catalog();
+        corrupted
+            .connection
+            .execute_batch(
+                "DROP TRIGGER catalog_refresh_source_failures_no_update; PRAGMA ignore_check_constraints = ON",
+            )
+            .unwrap();
+        corrupted.connection.execute(mutation, []).unwrap();
+        assert!(catalog_state::load_catalog_build_state(&corrupted.connection).is_err());
+    }
+
+    let missing = degraded_catalog();
+    missing
+        .connection
+        .execute_batch("DROP TRIGGER catalog_refresh_source_failures_no_delete")
+        .unwrap();
+    missing
+        .connection
+        .execute("DELETE FROM catalog_refresh_source_failures", [])
+        .unwrap();
+    assert!(catalog_state::load_catalog_build_state(&missing.connection).is_err());
+
+    for (commit_column, drifted_reason) in [
+        ("failure_commit_seq", "catalog.library.refresh.started"),
+        (
+            "failed_refresh_commit_seq",
+            "catalog.library.build.scheduled",
+        ),
+    ] {
+        let drifted = degraded_catalog();
+        let commit: i64 = drifted
+            .connection
+            .query_row(
+                &format!("SELECT {commit_column} FROM catalog_refresh_source_failures"),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drifted
+            .connection
+            .execute(
+                "UPDATE ingest_commits SET reason = ?1 WHERE commit_seq = ?2",
+                params![drifted_reason, commit],
+            )
+            .unwrap();
+        assert!(catalog_state::load_catalog_build_state(&drifted.connection).is_err());
+    }
+
+    let duplicated = degraded_catalog();
+    duplicated
+        .connection
+        .execute(
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.started', 50, 51, 0)",
+            [],
+        )
+        .unwrap();
+    let extra_refresh = duplicated.connection.last_insert_rowid();
+    duplicated
+        .connection
+        .execute(
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.source_unavailable', 52, 53, 0)",
+            [],
+        )
+        .unwrap();
+    let extra_failure = duplicated.connection.last_insert_rowid();
+    duplicated
+        .connection
+        .execute(
+            r#"
+            INSERT INTO catalog_refresh_source_failures (
+                failure_commit_seq, failed_refresh_commit_seq, coverage_plan_id,
+                readiness_epoch, attempt, retained_snapshot_commit_seq,
+                retained_publication_digest, retained_content_digest,
+                reason_code, failed_at
+            )
+            SELECT ?1, ?2, coverage_plan_id, readiness_epoch, attempt,
+                   retained_snapshot_commit_seq, retained_publication_digest,
+                   retained_content_digest, reason_code, 53
+            FROM catalog_refresh_source_failures
             LIMIT 1
             "#,
             params![extra_failure, extra_refresh],

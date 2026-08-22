@@ -24,6 +24,15 @@ const MAX_AUTOMATIC_REFRESH_ATTEMPTS: usize = 3;
 
 type RefreshOperation =
     Box<dyn Fn(&QueryCancellationToken) -> Result<(), EngineError> + Send + 'static>;
+type RefreshFailureHandler =
+    Box<dyn Fn(&EngineError, bool) -> Result<(), EngineError> + Send + 'static>;
+
+#[derive(Debug, Clone, Copy)]
+struct CatalogRefreshRetryPolicy {
+    coalesce_window: Duration,
+    retry_delay: Duration,
+    max_attempts: usize,
+}
 
 #[derive(Default)]
 pub(super) struct ConfiguredCatalogRefreshRuntime {
@@ -44,7 +53,8 @@ impl CatalogRefreshScheduler {
         engine: Weak<SpaghettiEngineCore>,
         configured: Vec<CatalogConfiguredSource>,
     ) -> Result<Self, EngineError> {
-        Self::start_with_policy(
+        let failure_engine = engine.clone();
+        Self::start_with_policy_and_failure_handler(
             move |cancellation| {
                 let engine = engine.upgrade().ok_or(EngineError::ShuttingDown)?;
                 match engine.reconcile_configured_catalog(
@@ -69,6 +79,22 @@ impl CatalogRefreshScheduler {
             CATALOG_REFRESH_COALESCE_WINDOW,
             CATALOG_REFRESH_RETRY_DELAY,
             MAX_AUTOMATIC_REFRESH_ATTEMPTS,
+            move |error, terminal| {
+                if !matches!(error, EngineError::Observation { .. }) {
+                    return Ok(());
+                }
+                if terminal {
+                    let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
+                    engine
+                        .degrade_active_catalog_refresh("catalog_source_refresh_exhausted")
+                        .map(|_| ())
+                } else {
+                    let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
+                    engine
+                        .mark_active_catalog_refresh_retrying("catalog_source_refresh_retrying")
+                        .map(|_| ())
+                }
+            },
         )
     }
 
@@ -81,6 +107,26 @@ impl CatalogRefreshScheduler {
     where
         F: Fn(&QueryCancellationToken) -> Result<(), EngineError> + Send + 'static,
     {
+        Self::start_with_policy_and_failure_handler(
+            operation,
+            coalesce_window,
+            retry_delay,
+            max_attempts,
+            |_, _| Ok(()),
+        )
+    }
+
+    fn start_with_policy_and_failure_handler<F, H>(
+        operation: F,
+        coalesce_window: Duration,
+        retry_delay: Duration,
+        max_attempts: usize,
+        failure_handler: H,
+    ) -> Result<Self, EngineError>
+    where
+        F: Fn(&QueryCancellationToken) -> Result<(), EngineError> + Send + 'static,
+        H: Fn(&EngineError, bool) -> Result<(), EngineError> + Send + 'static,
+    {
         if max_attempts == 0 {
             return Err(EngineError::InvalidConfig(
                 "catalog refresh scheduler requires at least one attempt".to_string(),
@@ -92,6 +138,12 @@ impl CatalogRefreshScheduler {
         let alive = Arc::new(AtomicBool::new(true));
         let thread_alive = Arc::clone(&alive);
         let operation: RefreshOperation = Box::new(operation);
+        let failure_handler: RefreshFailureHandler = Box::new(failure_handler);
+        let retry_policy = CatalogRefreshRetryPolicy {
+            coalesce_window,
+            retry_delay,
+            max_attempts,
+        };
         let join = thread::Builder::new()
             .name("spaghetti-catalog-refresh".to_string())
             .spawn(move || {
@@ -100,9 +152,8 @@ impl CatalogRefreshScheduler {
                     thread_cancellation,
                     thread_alive,
                     operation,
-                    coalesce_window,
-                    retry_delay,
-                    max_attempts,
+                    retry_policy,
+                    failure_handler,
                 );
             })
             .map_err(|error| EngineError::WorkerStart {
@@ -154,15 +205,15 @@ fn catalog_refresh_worker(
     cancellation: QueryCancellationToken,
     alive: Arc<AtomicBool>,
     operation: RefreshOperation,
-    coalesce_window: Duration,
-    retry_delay: Duration,
-    max_attempts: usize,
+    retry_policy: CatalogRefreshRetryPolicy,
+    failure_handler: RefreshFailureHandler,
 ) {
     let mut attempts: usize = 0;
     let mut retry = false;
     loop {
+        let continuing_failed_attempt = retry;
         let external_wake = if retry {
-            match wake.recv_timeout(retry_delay) {
+            match wake.recv_timeout(retry_policy.retry_delay) {
                 Ok(()) => true,
                 Err(RecvTimeoutError::Timeout) => false,
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -176,11 +227,11 @@ fn catalog_refresh_worker(
         if cancellation.is_cancelled() {
             break;
         }
-        if external_wake {
+        if external_wake && !continuing_failed_attempt {
             attempts = 0;
         }
 
-        let deadline = Instant::now() + coalesce_window;
+        let deadline = Instant::now() + retry_policy.coalesce_window;
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match wake.recv_timeout(remaining) {
                 Ok(()) => {}
@@ -205,9 +256,11 @@ fn catalog_refresh_worker(
             {
                 break;
             }
-            Err(_) => {
+            Err(error) => {
                 attempts = attempts.saturating_add(1);
-                retry = attempts < max_attempts;
+                let terminal = attempts >= retry_policy.max_attempts;
+                let transition = failure_handler(&error, terminal);
+                retry = !terminal || transition.is_err();
             }
         }
     }
@@ -398,6 +451,92 @@ mod tests {
         }
         assert!(called_rx.recv_timeout(Duration::from_millis(50)).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 6);
+        scheduler.shutdown().unwrap();
+    }
+
+    #[test]
+    fn exhausted_refresh_runs_one_terminal_failure_transition() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminal_calls = Arc::new(AtomicUsize::new(0));
+        let (called_tx, called_rx) = unbounded();
+        let worker_calls = Arc::clone(&calls);
+        let worker_terminal_calls = Arc::clone(&terminal_calls);
+        let mut scheduler = CatalogRefreshScheduler::start_with_policy_and_failure_handler(
+            move |_| {
+                let call = worker_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                called_tx.send(call).unwrap();
+                Err(EngineError::Observation {
+                    operation: "test catalog refresh",
+                    detail: "/Users/alice/private/catalog.json".to_string(),
+                })
+            },
+            Duration::from_millis(1),
+            Duration::from_millis(5),
+            3,
+            move |error, terminal| {
+                assert!(matches!(error, EngineError::Observation { .. }));
+                if terminal {
+                    worker_terminal_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        scheduler.request().unwrap();
+        for expected in 1..=3 {
+            assert_eq!(
+                called_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                expected
+            );
+        }
+        assert!(called_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(terminal_calls.load(Ordering::SeqCst), 1);
+        scheduler.shutdown().unwrap();
+    }
+
+    #[test]
+    fn retry_wakes_do_not_reset_the_terminal_attempt_ceiling() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let terminal_calls = Arc::new(AtomicUsize::new(0));
+        let (called_tx, called_rx) = unbounded();
+        let worker_calls = Arc::clone(&calls);
+        let worker_terminal_calls = Arc::clone(&terminal_calls);
+        let mut scheduler = CatalogRefreshScheduler::start_with_policy_and_failure_handler(
+            move |_| {
+                let call = worker_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                called_tx.send(call).unwrap();
+                Err(EngineError::Observation {
+                    operation: "test catalog refresh",
+                    detail: "retryable".to_string(),
+                })
+            },
+            Duration::from_millis(1),
+            Duration::from_millis(20),
+            3,
+            move |_, terminal| {
+                if terminal {
+                    worker_terminal_calls.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        scheduler.request().unwrap();
+        for expected in 1..=3 {
+            assert_eq!(
+                called_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                expected
+            );
+            if expected < 3 {
+                scheduler.request().unwrap();
+            }
+        }
+        assert!(called_rx.recv_timeout(Duration::from_millis(80)).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(terminal_calls.load(Ordering::SeqCst), 1);
         scheduler.shutdown().unwrap();
     }
 }

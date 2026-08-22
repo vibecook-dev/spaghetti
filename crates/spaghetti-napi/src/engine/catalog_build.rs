@@ -266,7 +266,18 @@ impl SpaghettiEngineCore {
             ));
         }
         match durable_state.as_ref().map(|state| state.readiness.state) {
-            None | Some(CatalogReadinessPhase::Pending | CatalogReadinessPhase::Building) => {
+            None | Some(CatalogReadinessPhase::Pending) => {
+                publish_initial(self, plan, selection, &sources, &cancellation)
+            }
+            Some(CatalogReadinessPhase::Building)
+                if durable_state
+                    .as_ref()
+                    .and_then(|state| state.readiness.last_complete_snapshot)
+                    .is_some() =>
+            {
+                publish_refresh(self, plan, selection, &sources, &cancellation)
+            }
+            Some(CatalogReadinessPhase::Building) => {
                 publish_initial(self, plan, selection, &sources, &cancellation)
             }
             Some(CatalogReadinessPhase::Ready) => {
@@ -288,6 +299,12 @@ impl SpaghettiEngineCore {
                         .is_some() =>
             {
                 Ok(CatalogBuildOutcome::LastCompleteRetained)
+            }
+            Some(CatalogReadinessPhase::Degraded) if intent == CatalogBuildIntent::Startup => {
+                Ok(CatalogBuildOutcome::LastCompleteRetained)
+            }
+            Some(CatalogReadinessPhase::Degraded) => {
+                publish_refresh(self, plan, selection, &sources, &cancellation)
             }
             Some(_) => Err(EngineError::InvalidCommit(
                 "catalog build cannot resume from the durable readiness phase".to_string(),

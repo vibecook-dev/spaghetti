@@ -19,7 +19,7 @@ use super::evidence::{
 use super::query::CATALOG_BASE_MODEL_MAJOR;
 use super::{
     validate_identifier, CatalogContractError, CatalogCoveragePlan, CatalogCoveragePlanId,
-    CatalogCoveragePlanSource, CatalogCoverageScope, CatalogReadinessPhase,
+    CatalogCoveragePlanSource, CatalogCoverageScope, CatalogReadinessPhase, CatalogReadinessReason,
     CatalogReadinessSnapshot, CatalogSnapshotId, CATALOG_PROJECTION_PACK_ID,
     CATALOG_QUERY_PACK_CONTRACT_VERSION, DIGEST_BYTES,
 };
@@ -2409,24 +2409,36 @@ fn validate_refresh_build(
     readiness.validate_against(plan)?;
     validate_contract_selection(selection)?;
     let snapshot = predecessor.snapshot_id;
+    let active_ready = readiness.state == CatalogReadinessPhase::Ready
+        && readiness.complete_through_commit == Some(snapshot.complete_commit)
+        && readiness.refreshing_from_snapshot == Some(snapshot)
+        && matches!(
+            readiness.reason.as_ref(),
+            None | Some(CatalogReadinessReason::SourceRetrying { .. })
+        );
+    let recovery_building = readiness.state == CatalogReadinessPhase::Building
+        && readiness.complete_through_commit.is_none()
+        && readiness.refreshing_from_snapshot.is_none()
+        && matches!(
+            readiness.reason.as_ref(),
+            None | Some(CatalogReadinessReason::SourceRetrying { .. })
+        )
+        && readiness.attempt > 1;
     if plan.scope != CatalogCoverageScope::Library
-        || readiness.state != CatalogReadinessPhase::Ready
+        || (!active_ready && !recovery_building)
         || readiness.coverage_plan_id != plan.coverage_plan_id
         || readiness.desired_contract_version != CATALOG_QUERY_PACK_CONTRACT_VERSION
         || readiness.completed_contract_version != Some(readiness.desired_contract_version)
-        || readiness.complete_through_commit != Some(snapshot.complete_commit)
         || readiness.last_complete_snapshot != Some(snapshot)
-        || readiness.refreshing_from_snapshot != Some(snapshot)
         || refresh_started_commit_seq <= snapshot.complete_commit
         || selection != &predecessor.contract_selection
         || selection.query_pack_version != Some(readiness.desired_contract_version)
         || snapshot.coverage_plan_id != plan.coverage_plan_id
         || snapshot.pack_contract_version != readiness.desired_contract_version
         || snapshot.readiness_epoch != readiness.epoch
-        || readiness.reason.is_some()
     {
         return Err(CatalogContractError::invalid(
-            "catalog refresh publication requires one exact active ordinary-refresh Ready lineage",
+            "catalog refresh publication requires one exact active or degraded-recovery lineage",
         ));
     }
     Ok(CatalogRefreshBuildExpectation {
