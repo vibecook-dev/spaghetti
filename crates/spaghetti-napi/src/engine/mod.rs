@@ -155,8 +155,8 @@ pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
     MAX_SEARCH_PAGE_PAYLOAD_BYTES, SEARCH_QUERY_CONTRACT_VERSION,
 };
-use supervisor::ObservationSupervisor;
 pub use supervisor::ObservationSupervisorOptions;
+use supervisor::{ObservationSupervisor, PreparedObservationSupervisor};
 pub use team_query::{
     TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage,
     TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember,
@@ -2052,8 +2052,27 @@ impl SpaghettiEngineCore {
         options: ObservationSupervisorOptions,
         cancellation: QueryCancellationToken,
     ) -> Result<(), EngineError> {
+        let prepared = self.prepare_registered_observation_cancellable(
+            adapter_id,
+            options,
+            cancellation.clone(),
+        )?;
+        let supervisor = prepared.start()?;
+        if cancellation.is_cancelled() {
+            drop(supervisor);
+            return Err(EngineError::QueryCancelled);
+        }
+        self.install_started_observation_supervisor(supervisor)
+    }
+
+    pub(crate) fn prepare_registered_observation_cancellable(
+        self: &Arc<Self>,
+        adapter_id: &str,
+        options: ObservationSupervisorOptions,
+        cancellation: QueryCancellationToken,
+    ) -> Result<PreparedObservationSupervisor, EngineError> {
         let adapter = self.registered_adapter(adapter_id)?;
-        self.start_observation_supervisor_cancellable(adapter, options, cancellation)
+        self.prepare_observation_supervisor_cancellable(adapter, options, cancellation)
     }
 
     fn registered_adapter(
@@ -2180,6 +2199,25 @@ impl SpaghettiEngineCore {
         options: ObservationSupervisorOptions,
         cancellation: QueryCancellationToken,
     ) -> Result<(), EngineError> {
+        let prepared = self.prepare_observation_supervisor_cancellable(
+            adapter,
+            options,
+            cancellation.clone(),
+        )?;
+        let supervisor = prepared.start()?;
+        if cancellation.is_cancelled() {
+            drop(supervisor);
+            return Err(EngineError::QueryCancelled);
+        }
+        self.install_started_observation_supervisor(supervisor)
+    }
+
+    fn prepare_observation_supervisor_cancellable<A: crate::adapter::AgentAdapter>(
+        self: &Arc<Self>,
+        adapter: A,
+        options: ObservationSupervisorOptions,
+        cancellation: QueryCancellationToken,
+    ) -> Result<PreparedObservationSupervisor, EngineError> {
         if cancellation.is_cancelled() {
             return Err(EngineError::QueryCancelled);
         }
@@ -2199,16 +2237,29 @@ impl SpaghettiEngineCore {
         }
         drop(supervisors);
         drop(lifecycle);
-        let supervisor = ObservationSupervisor::start_cancellable(
+        let prepared = ObservationSupervisor::prepare_cancellable(
             Arc::clone(self),
             adapter,
             options,
             cancellation.clone(),
         )?;
         if cancellation.is_cancelled() {
-            drop(supervisor);
+            drop(prepared);
             return Err(EngineError::QueryCancelled);
         }
+        Ok(prepared)
+    }
+
+    pub(crate) fn install_started_observation_supervisor(
+        &self,
+        supervisor: ObservationSupervisor,
+    ) -> Result<(), EngineError> {
+        if !supervisor.is_alive() {
+            return Err(EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            });
+        }
+        let adapter_id = supervisor.adapter_id().to_string();
         let lifecycle = self.lock_lifecycle();
         if lifecycle.phase != LifecyclePhase::Running {
             drop(lifecycle);

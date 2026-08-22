@@ -33,6 +33,7 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(20);
 // 500 ms / 5 s polling policy below.
 const WATCHER_AUDIT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MAX_RECONCILE_PASSES_PER_WAKE: usize = 16;
+const MAX_STARTUP_SETTLE_WINDOWS: usize = 16;
 const MAX_REASON_BYTES: usize = 128;
 
 #[derive(Debug, Clone)]
@@ -60,6 +61,11 @@ enum SupervisorCommand {
         resume: Receiver<()>,
         completed: Sender<Result<(), EngineError>>,
     },
+    Shutdown,
+}
+
+enum SupervisorStartup {
+    BeginInitialScan,
     Shutdown,
 }
 
@@ -115,6 +121,24 @@ pub(crate) struct ObservationSupervisor {
     join: Option<JoinHandle<()>>,
 }
 
+pub(crate) struct PreparedObservationSupervisor {
+    inner: Option<PreparedObservationSupervisorInner>,
+}
+
+struct PreparedObservationSupervisorInner {
+    adapter_id: String,
+    watched_instances: u32,
+    watch_roots: u32,
+    commands: Sender<SupervisorCommand>,
+    startup: Sender<SupervisorStartup>,
+    started: Receiver<Result<(), EngineError>>,
+    alive: Arc<AtomicBool>,
+    watcher_available: Arc<AtomicBool>,
+    cancellation: QueryCancellationToken,
+    startup_cancellation: QueryCancellationToken,
+    join: Option<JoinHandle<()>>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ObservationSupervisorClient {
     commands: Sender<SupervisorCommand>,
@@ -141,13 +165,14 @@ impl ObservationSupervisor {
         options: ObservationSupervisorOptions,
         startup_cancellation: QueryCancellationToken,
     ) -> Result<Self, EngineError> {
-        Self::start_with_watcher_factory(
+        Self::prepare_with_watcher_factory(
             engine,
             adapter,
             options,
             create_registered_watcher,
             startup_cancellation,
-        )
+        )?
+        .start()
     }
 
     fn start_with_watcher_factory<A: AgentAdapter>(
@@ -157,6 +182,38 @@ impl ObservationSupervisor {
         watcher_factory: WatcherFactory,
         startup_cancellation: QueryCancellationToken,
     ) -> Result<Self, EngineError> {
+        Self::prepare_with_watcher_factory(
+            engine,
+            adapter,
+            options,
+            watcher_factory,
+            startup_cancellation,
+        )?
+        .start()
+    }
+
+    pub(crate) fn prepare_cancellable<A: AgentAdapter>(
+        engine: Arc<SpaghettiEngineCore>,
+        adapter: A,
+        options: ObservationSupervisorOptions,
+        startup_cancellation: QueryCancellationToken,
+    ) -> Result<PreparedObservationSupervisor, EngineError> {
+        Self::prepare_with_watcher_factory(
+            engine,
+            adapter,
+            options,
+            create_registered_watcher,
+            startup_cancellation,
+        )
+    }
+
+    fn prepare_with_watcher_factory<A: AgentAdapter>(
+        engine: Arc<SpaghettiEngineCore>,
+        adapter: A,
+        options: ObservationSupervisorOptions,
+        watcher_factory: WatcherFactory,
+        startup_cancellation: QueryCancellationToken,
+    ) -> Result<PreparedObservationSupervisor, EngineError> {
         validate_options(&options)?;
         let options = normalize_options(options)?;
         adapter
@@ -165,13 +222,16 @@ impl ObservationSupervisor {
             .map_err(|error| supervisor_error("validate adapter manifest", error))?;
         let adapter_id = adapter.manifest().id.as_str().to_string();
         let (command_tx, command_rx) = bounded(CONTROL_CAPACITY);
-        let (ready_tx, ready_rx) = bounded(1);
+        let (startup_tx, startup_rx) = bounded(1);
+        let (prepared_tx, prepared_rx) = bounded(1);
+        let (started_tx, started_rx) = bounded(1);
         let alive = Arc::new(AtomicBool::new(false));
         let thread_alive = Arc::clone(&alive);
         let watcher_available = Arc::new(AtomicBool::new(false));
         let thread_watcher_available = Arc::clone(&watcher_available);
         let cancellation = QueryCancellationToken::default();
         let thread_cancellation = cancellation.clone();
+        let thread_startup_cancellation = startup_cancellation.clone();
         let worker_adapter_id = adapter_id.clone();
         let weak_engine = Arc::downgrade(&engine);
 
@@ -184,12 +244,14 @@ impl ObservationSupervisor {
                         engine: weak_engine,
                         options,
                         commands: command_rx,
-                        ready: ready_tx,
+                        startup: startup_rx,
+                        prepared: prepared_tx,
+                        started: started_tx,
                         alive: thread_alive,
                         watcher_available: thread_watcher_available,
                         watcher_factory,
                         cancellation: thread_cancellation,
-                        startup_cancellation,
+                        startup_cancellation: thread_startup_cancellation,
                     },
                 );
             })
@@ -198,18 +260,23 @@ impl ObservationSupervisor {
                 detail: error.to_string(),
             })?;
 
-        match ready_rx.recv() {
+        match prepared_rx.recv() {
             Ok(Ok(ready)) => {
                 debug_assert!(ready.topology_instances > 0);
-                Ok(Self {
-                    adapter_id: worker_adapter_id,
-                    watched_instances: bounded_u32(ready.topology_instances),
-                    watch_roots: bounded_u32(ready.physical_roots),
-                    commands: command_tx,
-                    alive,
-                    watcher_available,
-                    cancellation,
-                    join: Some(join),
+                Ok(PreparedObservationSupervisor {
+                    inner: Some(PreparedObservationSupervisorInner {
+                        adapter_id: worker_adapter_id,
+                        watched_instances: bounded_u32(ready.topology_instances),
+                        watch_roots: bounded_u32(ready.physical_roots),
+                        commands: command_tx,
+                        startup: startup_tx,
+                        started: started_rx,
+                        alive,
+                        watcher_available,
+                        cancellation,
+                        startup_cancellation,
+                        join: Some(join),
+                    }),
                 })
             }
             Ok(Err(error)) => {
@@ -220,7 +287,7 @@ impl ObservationSupervisor {
                 let _ = join.join();
                 Err(EngineError::WorkerStart {
                     worker: "observation supervisor",
-                    detail: "supervisor exited before reporting readiness".to_string(),
+                    detail: "supervisor exited before reporting watcher preparation".to_string(),
                 })
             }
         }
@@ -266,6 +333,97 @@ impl ObservationSupervisor {
         join.join().map_err(|_| EngineError::WorkerPanic {
             worker: "observation supervisor",
         })
+    }
+}
+
+impl PreparedObservationSupervisor {
+    pub(crate) fn adapter_id(&self) -> &str {
+        &self.inner().adapter_id
+    }
+
+    pub(crate) fn watched_instances(&self) -> u32 {
+        self.inner().watched_instances
+    }
+
+    pub(crate) fn watch_roots(&self) -> u32 {
+        if self.watcher_available() {
+            self.inner().watch_roots
+        } else {
+            0
+        }
+    }
+
+    pub(crate) fn watcher_available(&self) -> bool {
+        self.inner().watcher_available.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn start(mut self) -> Result<ObservationSupervisor, EngineError> {
+        let mut inner = self
+            .inner
+            .take()
+            .expect("prepared supervisor retains its worker until start or drop");
+        if inner.startup_cancellation.is_cancelled() {
+            inner.shutdown();
+            return Err(EngineError::QueryCancelled);
+        }
+        if inner
+            .startup
+            .send(SupervisorStartup::BeginInitialScan)
+            .is_err()
+        {
+            inner.shutdown();
+            return Err(EngineError::WorkerUnavailable {
+                worker: "observation supervisor",
+            });
+        }
+        match inner.started.recv() {
+            Ok(Ok(())) => Ok(ObservationSupervisor {
+                adapter_id: inner.adapter_id,
+                watched_instances: inner.watched_instances,
+                watch_roots: inner.watch_roots,
+                commands: inner.commands,
+                alive: inner.alive,
+                watcher_available: inner.watcher_available,
+                cancellation: inner.cancellation,
+                join: inner.join.take(),
+            }),
+            Ok(Err(error)) => {
+                inner.shutdown();
+                Err(error)
+            }
+            Err(_) => {
+                inner.shutdown();
+                Err(EngineError::WorkerStart {
+                    worker: "observation supervisor",
+                    detail: "supervisor exited before completing its initial scan".to_string(),
+                })
+            }
+        }
+    }
+
+    fn inner(&self) -> &PreparedObservationSupervisorInner {
+        self.inner
+            .as_ref()
+            .expect("prepared supervisor retains its worker until start or drop")
+    }
+}
+
+impl PreparedObservationSupervisorInner {
+    fn shutdown(&mut self) {
+        self.cancellation.cancel();
+        let _ = self.startup.send(SupervisorStartup::Shutdown);
+        let _ = self.commands.send(SupervisorCommand::Shutdown);
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+impl Drop for PreparedObservationSupervisor {
+    fn drop(&mut self) {
+        if let Some(mut inner) = self.inner.take() {
+            inner.shutdown();
+        }
     }
 }
 
@@ -365,7 +523,9 @@ struct SupervisorThreadContext {
     engine: Weak<SpaghettiEngineCore>,
     options: ObservationSupervisorOptions,
     commands: Receiver<SupervisorCommand>,
-    ready: Sender<Result<StartReady, EngineError>>,
+    startup: Receiver<SupervisorStartup>,
+    prepared: Sender<Result<StartReady, EngineError>>,
+    started: Sender<Result<(), EngineError>>,
     alive: Arc<AtomicBool>,
     watcher_available: Arc<AtomicBool>,
     watcher_factory: WatcherFactory,
@@ -378,7 +538,9 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         engine,
         options,
         commands,
-        ready,
+        startup,
+        prepared,
+        started,
         alive,
         watcher_available,
         watcher_factory,
@@ -389,13 +551,13 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
     let topology = match discover_topology(&adapter, &options.configured_roots) {
         Ok(topology) => topology,
         Err(error) => {
-            let _ = ready.send(Err(error));
+            let _ = prepared.send(Err(error));
             return;
         }
     };
     let topology = Arc::new(topology);
     if startup_cancellation.is_cancelled() {
-        let _ = ready.send(Err(EngineError::QueryCancelled));
+        let _ = prepared.send(Err(EngineError::QueryCancelled));
         return;
     }
     let (wake_tx, wake_rx) = bounded(WATCH_EVENT_CAPACITY);
@@ -412,12 +574,30 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         Err(_) => None,
     };
 
+    if prepared
+        .send(Ok(StartReady {
+            topology_instances: topology.instances.len(),
+            physical_roots: topology.physical_roots.len(),
+        }))
+        .is_err()
+    {
+        return;
+    }
+    match startup.recv() {
+        Ok(SupervisorStartup::BeginInitialScan) => {}
+        Ok(SupervisorStartup::Shutdown) | Err(_) => return,
+    }
+    if startup_cancellation.is_cancelled() || cancellation.is_cancelled() {
+        let _ = started.send(Err(EngineError::QueryCancelled));
+        return;
+    }
+
     // Watch registration is complete before the first scan begins. Callbacks
     // admit dirty state synchronously; their bounded channel only wakes this
     // worker, so an event during the scan cannot be lost or acknowledged by
     // the lease that began before it.
     let Some(initial_engine) = engine.upgrade() else {
-        let _ = ready.send(Err(EngineError::ShuttingDown));
+        let _ = started.send(Err(EngineError::ShuttingDown));
         return;
     };
     if let Err(error) = ObservationCoordinator::with_cancellations(
@@ -431,7 +611,7 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
             reason: format!("{}_initial_scan", options.reason),
         },
     ) {
-        let _ = ready.send(Err(error));
+        let _ = started.send(Err(error));
         return;
     }
     let mut polling = PollingPolicy::default();
@@ -454,19 +634,50 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
         &[cancellation.clone(), startup_cancellation.clone()],
     );
     if let Err(error) = initial_summary.result {
-        let _ = ready.send(Err(error));
+        let _ = started.send(Err(error));
+        return;
+    }
+    let mut startup_settled = false;
+    for _ in 0..MAX_STARTUP_SETTLE_WINDOWS {
+        match wake_rx.recv_timeout(COALESCE_WINDOW) {
+            Ok(()) => {
+                while wake_rx.try_recv().is_ok() {}
+                let summary = drain_until_caught_up(
+                    &initial_engine,
+                    &adapter,
+                    &options,
+                    &topology,
+                    &mut watcher,
+                    &watcher_available,
+                    &mut polling,
+                    &[cancellation.clone(), startup_cancellation.clone()],
+                );
+                if let Err(error) = summary.result {
+                    let _ = started.send(Err(error));
+                    return;
+                }
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                startup_settled = true;
+                break;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                startup_settled = true;
+                break;
+            }
+        }
+    }
+    if !startup_settled {
+        let _ = started.send(Err(EngineError::Observation {
+            operation: "settle startup watcher",
+            detail: "native changes did not quiesce within the bounded startup window".to_string(),
+        }));
         return;
     }
     drop(initial_engine);
 
     alive.store(true, Ordering::Release);
-    if ready
-        .send(Ok(StartReady {
-            topology_instances: topology.instances.len(),
-            physical_roots: topology.physical_roots.len(),
-        }))
-        .is_err()
-    {
+    if started.send(Ok(())).is_err() {
         alive.store(false, Ordering::Release);
         return;
     }
@@ -1293,6 +1504,95 @@ mod tests {
             worker: "test observation watcher",
             detail: error.to_string(),
         })
+    }
+
+    #[test]
+    fn prepared_supervisor_installs_watcher_without_starting_history_scan() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("first.jsonl"), b"{}\n").unwrap();
+        let database = temp.path().join("prepared.db");
+        let engine = open_engine(database.clone());
+
+        let prepared = ObservationSupervisor::prepare_with_watcher_factory(
+            Arc::clone(&engine),
+            IgnoredAppendAdapter::new(),
+            ObservationSupervisorOptions::new(vec![root.clone()]),
+            silent_watcher,
+            QueryCancellationToken::default(),
+        )
+        .unwrap();
+        assert_eq!(prepared.adapter_id(), "ignored-append");
+        assert_eq!(prepared.watched_instances(), 1);
+        assert_eq!(prepared.watch_roots(), 1);
+        assert!(prepared.watcher_available());
+
+        let connection = Connection::open(&database).unwrap();
+        let source_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let object_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source_count, 0, "preparation must not register by itself");
+        assert_eq!(object_count, 0, "preparation must not scan source content");
+        drop(connection);
+
+        std::fs::write(root.join("second.jsonl"), b"{}\n").unwrap();
+        let mut supervisor = prepared.start().unwrap();
+        let connection = Connection::open(&database).unwrap();
+        let source_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let object_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source_count, 1);
+        assert_eq!(object_count, 2);
+        drop(connection);
+
+        supervisor.shutdown().unwrap();
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cancelled_prepared_supervisor_exits_without_scanning() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("first.jsonl"), b"{}\n").unwrap();
+        let database = temp.path().join("cancelled-prepared.db");
+        let engine = open_engine(database.clone());
+        let cancellation = QueryCancellationToken::default();
+        let prepared = ObservationSupervisor::prepare_with_watcher_factory(
+            Arc::clone(&engine),
+            IgnoredAppendAdapter::new(),
+            ObservationSupervisorOptions::new(vec![root]),
+            silent_watcher,
+            cancellation.clone(),
+        )
+        .unwrap();
+
+        cancellation.cancel();
+        assert!(matches!(prepared.start(), Err(EngineError::QueryCancelled)));
+        let connection = Connection::open(database).unwrap();
+        let source_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_instances", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let object_count: u64 = connection
+            .query_row("SELECT COUNT(*) FROM source_objects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source_count, 0);
+        assert_eq!(object_count, 0);
+        drop(connection);
+        engine.shutdown().unwrap();
     }
 
     #[test]
