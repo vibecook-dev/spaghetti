@@ -1306,6 +1306,45 @@ source-retry-to-integrity edge are executable. Automatic source-reset
 detection, coverage-plan and contract-version replacement, compaction, local
 policy, richer queries, and promotion evidence remain open.
 
+The nineteenth bounded B3 slice (`55a970b`) defines the store-independent
+coverage-plan successor contract. A refresh predecessor now explicitly records
+whether it authorizes a distinct canonical prior plan, and only that authority
+allows the refresh reducer to retract owners belonging to a removed plan
+source. The successor plan, replacement classification, source assemblies,
+cumulative member history, reducer transition, and publication digest are
+bound together; ordinary same-plan refresh cannot use the replacement path,
+and a replacement cannot silently reuse the same plan identity. This slice
+does not itself mutate durable readiness or make the scheduler accept a new
+configured plan.
+
+The twentieth bounded B3 slice (`806b8d2`) adds schema-v62 and makes
+coverage-plan replacement durable. One exact compare-and-swap transition
+appends an immutable, bounded old-plan/new-plan ledger row, advances to
+`Building` at `epoch + 1`, `attempt = 1`, and preserves any independently safe
+Ready snapshot under its own prior plan. Restart validates the complete plan
+lineage and replacement chain before decoding active state. Partial progress,
+terminal source or integrity failure, recovery, cross-plan publication,
+historical reads, logical retirement, precommit rollback, lost-ack replay,
+corruption, the replacement ceiling, and canonical `A -> B -> A` plan reuse are
+executable. Rust and TypeScript schema contracts agree on v62.
+
+The twenty-first bounded B3 slice (`7dd5143`) wires that transition through the
+production catalog scheduler. Preparation may freeze a changed authorized plan
+without reading source objects; after the watcher barrier and before the first
+producer read, publication durably installs the replacement. Startup therefore
+cannot retain a snapshot for stale configuration. The refresh context carries
+the restart-authenticated prior plan, passes exact prior coverage only to
+unchanged sources, gives new or changed sources no fabricated baseline, and
+selects the cross-plan reducer/publication path. Removed sources and uncovered
+owners from changed policy/declaration coordinates retract under the prior-plan
+authority, while unchanged covered owners remain stable. Addition, restart,
+publication, historical reads, invalid projection failure, changed-source
+retraction, and the ordinary-refresh missing-predecessor negative are covered
+by the full Rust and strict-Clippy matrices. Coverage-plan replacement is now
+closed; automatic native source-reset detection, contract-version replacement,
+compaction beyond retained bounds, caller-authorized local policy, richer
+queries, and promotion evidence remain open.
+
 ### B4. Progressive host and UX
 
 Change host lifecycle so all source catalogs are registered before full history
