@@ -1,5 +1,7 @@
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use super::{DirtyReason, SourceDriverError};
 
@@ -25,8 +27,37 @@ pub(crate) enum SharedSourcePassPoolError {
 /// one workload being able to resize or replace it after construction.
 #[derive(Clone)]
 pub(crate) struct SharedSourcePassPool {
-    permits: Arc<tokio::sync::Semaphore>,
+    inner: Arc<SharedSourcePassPoolInner>,
+}
+
+struct SharedSourcePassPoolInner {
+    state: Mutex<SharedSourcePassPoolState>,
     max_concurrent_passes: usize,
+}
+
+struct SharedSourcePassPoolState {
+    active: usize,
+    concurrency_limit: usize,
+    queues: [VecDeque<Arc<SharedSourcePassWaiter>>; 4],
+    fairness_cursor: usize,
+    next_waiter_id: u64,
+}
+
+struct SharedSourcePassWaiter {
+    id: u64,
+    granted: AtomicBool,
+    notified: tokio::sync::Notify,
+}
+
+pub(crate) struct SharedSourcePassPermit {
+    inner: Arc<SharedSourcePassPoolInner>,
+    released: bool,
+}
+
+struct SharedSourcePassRegistration {
+    inner: Arc<SharedSourcePassPoolInner>,
+    waiter: Arc<SharedSourcePassWaiter>,
+    active: bool,
 }
 
 impl SharedSourcePassPool {
@@ -36,57 +67,221 @@ impl SharedSourcePassPool {
             return Err(SharedSourcePassPoolError::InvalidCapacity);
         }
         Ok(Self {
-            permits: Arc::new(tokio::sync::Semaphore::new(max_concurrent_passes)),
-            max_concurrent_passes,
+            inner: Arc::new(SharedSourcePassPoolInner {
+                state: Mutex::new(SharedSourcePassPoolState {
+                    active: 0,
+                    concurrency_limit: max_concurrent_passes,
+                    queues: std::array::from_fn(|_| VecDeque::new()),
+                    fairness_cursor: 0,
+                    next_waiter_id: 1,
+                }),
+                max_concurrent_passes,
+            }),
         })
     }
 
     pub(crate) fn max_concurrent_passes(&self) -> usize {
-        self.max_concurrent_passes
+        self.inner.max_concurrent_passes
+    }
+
+    pub(crate) fn set_concurrency_limit(
+        &self,
+        concurrency_limit: usize,
+    ) -> Result<(), SharedSourcePassPoolError> {
+        if concurrency_limit == 0 || concurrency_limit > self.inner.max_concurrent_passes {
+            return Err(SharedSourcePassPoolError::InvalidCapacity);
+        }
+        let notifications = {
+            let mut state = self.lock_state();
+            state.concurrency_limit = concurrency_limit;
+            grant_shared_source_waiters(&mut state)
+        };
+        notify_shared_source_waiters(notifications);
+        Ok(())
+    }
+
+    pub(crate) fn concurrency_limit(&self) -> usize {
+        self.lock_state().concurrency_limit
     }
 
     #[cfg(test)]
     pub(crate) fn available_permits(&self) -> usize {
-        self.permits.available_permits()
+        let state = self.lock_state();
+        state.concurrency_limit.saturating_sub(state.active)
     }
 
     #[cfg(test)]
-    pub(crate) async fn acquire_for_test(&self) -> tokio::sync::OwnedSemaphorePermit {
+    pub(crate) fn queued_waiters(&self) -> usize {
+        self.lock_state().queues.iter().map(VecDeque::len).sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn acquire_for_test(&self) -> SharedSourcePassPermit {
         self.acquire().await
     }
 
-    pub(crate) async fn acquire(&self) -> tokio::sync::OwnedSemaphorePermit {
-        Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .expect("the shared source pass pool never closes its semaphore")
+    pub(crate) async fn acquire(&self) -> SharedSourcePassPermit {
+        self.acquire_priority(IngestPriority::Interactive).await
+    }
+
+    pub(crate) async fn acquire_priority(
+        &self,
+        priority: IngestPriority,
+    ) -> SharedSourcePassPermit {
+        self.register(priority).wait().await
     }
 
     /// Blocking acquire for catalog/query worker threads that are not on a
     /// Tokio runtime. Observer source owners keep using [`Self::acquire`].
-    pub(crate) fn blocking_acquire(&self) -> tokio::sync::OwnedSemaphorePermit {
-        match Arc::clone(&self.permits).try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(tokio::sync::TryAcquireError::Closed) => {
-                unreachable!("the shared source pass pool never closes its semaphore")
+    pub(crate) fn blocking_acquire(&self) -> SharedSourcePassPermit {
+        self.blocking_acquire_priority(IngestPriority::Interactive)
+    }
+
+    pub(crate) fn blocking_acquire_priority(
+        &self,
+        priority: IngestPriority,
+    ) -> SharedSourcePassPermit {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("shared pass pool blocking runtime")
+            .block_on(self.acquire_priority(priority))
+    }
+
+    fn register(&self, priority: IngestPriority) -> SharedSourcePassRegistration {
+        let (waiter, notifications) = {
+            let mut state = self.lock_state();
+            let waiter = Arc::new(SharedSourcePassWaiter {
+                id: state.next_waiter_id,
+                granted: AtomicBool::new(false),
+                notified: tokio::sync::Notify::new(),
+            });
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1).max(1);
+            state.queues[priority.index()].push_back(Arc::clone(&waiter));
+            let notifications = grant_shared_source_waiters(&mut state);
+            (waiter, notifications)
+        };
+        notify_shared_source_waiters(notifications);
+        SharedSourcePassRegistration {
+            inner: Arc::clone(&self.inner),
+            waiter,
+            active: true,
+        }
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, SharedSourcePassPoolState> {
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl SharedSourcePassRegistration {
+    async fn wait(mut self) -> SharedSourcePassPermit {
+        loop {
+            let notified = self.waiter.notified.notified();
+            if self.waiter.granted.load(Ordering::Acquire) {
+                break;
             }
-            Err(tokio::sync::TryAcquireError::NoPermits) => {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .expect("shared pass pool blocking runtime")
-                    .block_on(self.acquire())
+            notified.await;
+        }
+        self.active = false;
+        SharedSourcePassPermit {
+            inner: Arc::clone(&self.inner),
+            released: false,
+        }
+    }
+}
+
+impl Drop for SharedSourcePassRegistration {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let notifications = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if self.waiter.granted.load(Ordering::Acquire) {
+                state.active = state.active.saturating_sub(1);
+            } else {
+                for queue in &mut state.queues {
+                    if let Some(index) = queue.iter().position(|waiter| waiter.id == self.waiter.id)
+                    {
+                        queue.remove(index);
+                        break;
+                    }
+                }
+            }
+            grant_shared_source_waiters(&mut state)
+        };
+        notify_shared_source_waiters(notifications);
+    }
+}
+
+impl Drop for SharedSourcePassPermit {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let notifications = {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.active = state.active.saturating_sub(1);
+            grant_shared_source_waiters(&mut state)
+        };
+        notify_shared_source_waiters(notifications);
+    }
+}
+
+fn grant_shared_source_waiters(
+    state: &mut SharedSourcePassPoolState,
+) -> Vec<Arc<SharedSourcePassWaiter>> {
+    let mut notifications = Vec::new();
+    while state.active < state.concurrency_limit {
+        let mut selected = None;
+        for _ in 0..FAIR_SEQUENCE.len() {
+            let priority = FAIR_SEQUENCE[state.fairness_cursor];
+            state.fairness_cursor = (state.fairness_cursor + 1) % FAIR_SEQUENCE.len();
+            if let Some(waiter) = state.queues[priority.index()].pop_front() {
+                selected = Some(waiter);
+                break;
             }
         }
+        let Some(waiter) = selected else {
+            break;
+        };
+        state.active = state.active.saturating_add(1);
+        waiter.granted.store(true, Ordering::Release);
+        notifications.push(waiter);
+    }
+    notifications
+}
+
+fn notify_shared_source_waiters(waiters: Vec<Arc<SharedSourcePassWaiter>>) {
+    for waiter in waiters {
+        waiter.notified.notify_one();
     }
 }
 
 impl std::fmt::Debug for SharedSourcePassPool {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = self.lock_state();
         formatter
             .debug_struct("SharedSourcePassPool")
-            .field("max_concurrent_passes", &self.max_concurrent_passes)
-            .field("available_permits", &self.permits.available_permits())
+            .field("max_concurrent_passes", &self.inner.max_concurrent_passes)
+            .field("concurrency_limit", &state.concurrency_limit)
+            .field("active", &state.active)
+            .field(
+                "queued",
+                &state.queues.iter().map(VecDeque::len).sum::<usize>(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -378,5 +573,86 @@ mod tests {
             scheduler.enqueue(work(100 + dispatch_index, IngestPriority::Interactive));
         }
         assert!(maintenance_dispatch.is_some_and(|index| index <= 7));
+    }
+
+    #[tokio::test]
+    async fn shared_pass_pool_weights_priorities_without_starving_maintenance() {
+        let pool = SharedSourcePassPool::new(1).unwrap();
+        let held = pool.acquire_priority(IngestPriority::Interactive).await;
+        let registrations = [
+            IngestPriority::Interactive,
+            IngestPriority::Interactive,
+            IngestPriority::Interactive,
+            IngestPriority::Interactive,
+            IngestPriority::Interactive,
+            IngestPriority::Interactive,
+            IngestPriority::Interactive,
+            IngestPriority::Interactive,
+            IngestPriority::Maintenance,
+        ]
+        .into_iter()
+        .map(|priority| (priority, pool.register(priority)))
+        .collect::<Vec<_>>();
+        assert_eq!(pool.queued_waiters(), registrations.len());
+
+        let (order_tx, mut order_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tasks = registrations
+            .into_iter()
+            .map(|(priority, registration)| {
+                let order_tx = order_tx.clone();
+                tokio::spawn(async move {
+                    let _permit = registration.wait().await;
+                    order_tx.send(priority).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(order_tx);
+        drop(held);
+
+        let mut order = Vec::new();
+        while let Some(priority) = order_rx.recv().await {
+            order.push(priority);
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(order.len(), 9);
+        assert!(
+            order
+                .iter()
+                .position(|priority| *priority == IngestPriority::Maintenance)
+                .is_some_and(|index| index <= 4),
+            "maintenance must receive a bounded turn: {order:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_pass_pool_cancels_waiters_and_applies_dynamic_limits_safely() {
+        let pool = SharedSourcePassPool::new(2).unwrap();
+        let first = pool.acquire().await;
+        let second = pool.acquire().await;
+        pool.set_concurrency_limit(1).unwrap();
+        assert_eq!(pool.concurrency_limit(), 1);
+        assert_eq!(pool.available_permits(), 0);
+
+        let registration = pool.register(IngestPriority::Maintenance);
+        assert_eq!(pool.queued_waiters(), 1);
+        drop(registration);
+        assert_eq!(pool.queued_waiters(), 0);
+
+        let waiting = pool.register(IngestPriority::Backfill);
+        drop(first);
+        assert_eq!(pool.available_permits(), 0);
+        assert_eq!(pool.queued_waiters(), 1);
+        drop(second);
+        let permit = waiting.wait().await;
+        assert_eq!(pool.queued_waiters(), 0);
+        drop(permit);
+        assert_eq!(pool.available_permits(), 1);
+
+        pool.set_concurrency_limit(2).unwrap();
+        assert_eq!(pool.available_permits(), 2);
+        assert!(pool.set_concurrency_limit(0).is_err());
+        assert!(pool.set_concurrency_limit(3).is_err());
     }
 }

@@ -67,9 +67,10 @@ use crate::source::{
     AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AppendCheckpoint,
     AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuthorizedScopeAccessPlan,
     DirtyHint, DirtyReason, DirtyScope, DriverQuarantine, HintEnqueue, RecordHash, RecordOrigin,
-    Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool,
-    SourceCursor, SourceDriverError, SourceMediaType, SourceRecord, SourceRecordState, StableRead,
-    StartupAction, StartupPhase, WatchBeforeScan, MAX_IDENTITY_VALUE_BYTES,
+    Revision, ScopeAccessReport, ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPermit,
+    SharedSourcePassPool, SourceCursor, SourceDriverError, SourceMediaType, SourceRecord,
+    SourceRecordState, StableRead, StartupAction, StartupPhase, WatchBeforeScan,
+    MAX_IDENTITY_VALUE_BYTES,
 };
 use crate::unknown_evidence_reducer::{
     UnknownEvidenceAggregateSnapshot, UnknownEvidenceOccurrence, UnknownEvidenceReducer,
@@ -5551,7 +5552,7 @@ impl ScopedObservationAsyncSourceOwner {
 
     async fn acquire_shared_pass_permit(
         &self,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, ScopedObservationSourceOwnerRunExit> {
+    ) -> Result<SharedSourcePassPermit, ScopedObservationSourceOwnerRunExit> {
         let permit = tokio::select! {
             biased;
             _ = self.handle.shared.host.lifecycle.wait_for_close_request_async() => {

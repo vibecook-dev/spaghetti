@@ -69,8 +69,8 @@ pub use replace_document::{
     MalformedRevisionGuard, MalformedRevisionPolicy, ParseFailureDecision, ReplaceCheckpoint,
     ReplaceDocument, ReplaceDocumentConfig, ReplaceRead,
 };
-pub(crate) use scheduler::SharedSourcePassPool;
 pub use scheduler::{BoundedScheduler, IngestPriority, ScheduleOutcome, ScheduledWork, WorkKey};
+pub(crate) use scheduler::{SharedSourcePassPermit, SharedSourcePassPool};
 pub(crate) use selector::GlobPattern;
 pub use sqlite_snapshot::{
     SqliteCheckpoint, SqliteColumn, SqliteQuerySpec, SqliteRead, SqliteRowRecord, SqliteSnapshot,
