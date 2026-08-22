@@ -12,60 +12,60 @@
     "completeness": "complete",
     "operation": "upsert",
     "ordered_content_block_keys": ["block-a", "block-b"],
-    "semantic_revision_key_hex": "9c16dd2935728b34c131297f99d6a071695949c5f33cae983cc388c60a69a2e2",
+    "semantic_revision_key_hex": "853ad78a59da4d3263d3e37eb73911aea216f32509ccd49aaa8c5fbe3237648c",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:hxB7MiwQzUd1aXo1CQTZHTOfbELRHhzXkeO2PwuKmbw"
+      "fact_revision_id": "v1:AXFrYhf75AXhy9cYWkTObyOFd3nz1Xc7IPNuak-i-YU"
     }
   },
   "correction": {
     "completeness": "complete",
     "operation": "upsert",
-    "ordered_content_block_keys": ["block-a", "block-b"],
-    "semantic_revision_key_hex": "912656a77b5fb603684499ef54593bef735bab029d334e7c18a4d579aa8127b7",
+    "ordered_content_block_keys": ["block-a", "block-c"],
+    "semantic_revision_key_hex": "1e3b35730a4b5fe7fdec2d80bd6835819c624db30772bc041d30ec67e9108b7b",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:hnrmSJXQuUSM1qiNNaYcL8V8rcw-9aseCEgt-2bLfp8"
+      "fact_revision_id": "v1:GR7I6f4jPd_yV2hG2BU4BZDFdOnpwzFc4BDDyxjvdHc"
     }
   },
   "complete_blocks": {
     "completeness": "complete",
     "operation": "upsert",
     "ordered_content_block_keys": ["block-a"],
-    "semantic_revision_key_hex": "0afeece40c97433fe9aa07a52d31dce4d7b468c3a4c2b3b04de35fd2020beb3a",
+    "semantic_revision_key_hex": "fc6cae458c83750b07c437215cb65d7da8270cd9c28078953ea91fb2ab8e3a28",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:Xzj2PqxuaxQj5p6LVZR2_S6_JnunsL02NtVWTSEd2So"
+      "fact_revision_id": "v1:qUflgmVJE8BpqeWGwb92QZkSD47k1i8e4cubHzfxNLw"
     }
   },
   "partial_blocks": {
     "completeness": "partial",
     "operation": "upsert",
     "ordered_content_block_keys": ["block-a"],
-    "semantic_revision_key_hex": "436cc309e8440b6e0a9641e8c53c6aff958030bce831c744fe9828efba879ead",
+    "semantic_revision_key_hex": "a30b0fbdd7e5c386683fb0bd4614f00a8d0be67517c8eb97783f3273112c2878",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:C9mLlMkjeV1Dci8eWQH1VMQ5sxV1oSj0iNZnwZtt7a0"
+      "fact_revision_id": "v1:MfZu3K_aeIoyk1TbKMpRYaVcTV7eYrTsFGZqEu8xBb4"
     }
   },
   "retract": {
     "completeness": "complete",
     "operation": "retract",
     "ordered_content_block_keys": ["block-a", "block-b"],
-    "semantic_revision_key_hex": "3f33465e830e526b17020da2995b0cf6e12ac1c594f750bbf5e47ceb4e2a33a5",
+    "semantic_revision_key_hex": "b3cda0b32baec567b5776654cb6fc4542b9218798116d33136a0b0fbc003b616",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:HElYUvFKXjie_IIcgjhtstj6xzPaLf7KDYGoAKwmGDQ"
+      "fact_revision_id": "v1:W1zHVt5N5W_HUymNwsrHTgbpO8vpGpSTn_Aj5IpEyYU"
     }
   },
   "partial": {
     "completeness": "partial",
     "operation": "upsert",
     "ordered_content_block_keys": ["block-a", "block-b"],
-    "semantic_revision_key_hex": "4e6cfa1b1f075e7f24530bdc63e48446de2498220d64900ea8a7dfcfcf7b7868",
+    "semantic_revision_key_hex": "e43797a9c50eabce3f4f0cc817a34d54f8e2de3e3eaebda68d08037fbdebcd3c",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:VmAbZISJlWPrli5lnSKE1r--li_x8NYm8HD_LR0CGn8"
+      "fact_revision_id": "v1:QXgHsbWb9ZvHzMiaC90TREYS5IbZJuAF3POxlldi-vM"
     }
   },
   "runtime_semantic_contract_version": 1,

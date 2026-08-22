@@ -3,11 +3,22 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { parseEffectiveStateFixture, parseInteractionFixture } from '../rfc012c.js';
+import {
+  parseEffectiveStateFixture,
+  parseInteractionFixture,
+  parseMessageFixture,
+  parsePlanFixture,
+  parseTaskFixture,
+  parseToolFixture,
+} from '../rfc012c.js';
 
 interface NativeContractAddon {
   parseRfc012cEffectiveStateV1Json: (json: string) => string;
   parseRfc012cInteractionV1Json: (json: string) => string;
+  parseRfc012cMessageV1Json: (json: string) => string;
+  parseRfc012cTaskV1Json: (json: string) => string;
+  parseRfc012cPlanV1Json: (json: string) => string;
+  parseRfc012cToolV1Json: (json: string) => string;
 }
 
 const native = createRequire(import.meta.url)('@vibecook/spaghetti-sdk-native') as NativeContractAddon;
@@ -18,6 +29,22 @@ const effectiveStateJson = readFileSync(
 );
 const interactionJson = readFileSync(
   new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-interaction-v1.json', import.meta.url),
+  'utf8',
+);
+const messageJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-message-v1.json', import.meta.url),
+  'utf8',
+);
+const taskJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-task-v1.json', import.meta.url),
+  'utf8',
+);
+const planJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-plan-v1.json', import.meta.url),
+  'utf8',
+);
+const toolJson = readFileSync(
+  new URL('../../../../../crates/spaghetti-napi/fixtures/contracts/rfc012c-tool-v1.json', import.meta.url),
   'utf8',
 );
 
@@ -52,4 +79,88 @@ test('native RFC 012C interaction helper preserves RFC 012C §11 lifecycle ident
   const extra = JSON.parse(interactionJson) as Record<string, unknown>;
   extra.native_payload = { prompt: 'raw' };
   assert.throws(() => native.parseRfc012cInteractionV1Json(JSON.stringify(extra)), /invalid semantic fixture/);
+});
+
+test('native RFC 012C message, task, plan, and tool helpers preserve value-bound identities', () => {
+  const cases = [
+    [messageJson, native.parseRfc012cMessageV1Json, parseMessageFixture],
+    [taskJson, native.parseRfc012cTaskV1Json, parseTaskFixture],
+    [planJson, native.parseRfc012cPlanV1Json, parsePlanFixture],
+    [toolJson, native.parseRfc012cToolV1Json, parseToolFixture],
+  ] as const;
+  for (const [json, nativeParse, portableParse] of cases) {
+    assert.equal(typeof nativeParse, 'function');
+    const committed = JSON.parse(json) as unknown;
+    const nativeFixture = portableParse(JSON.parse(nativeParse(json)) as unknown, committed);
+    const portableFixture = portableParse(committed, committed);
+    assert.deepEqual(nativeFixture, portableFixture);
+  }
+});
+
+test('native and portable RFC 012C C1 helpers reject semantic mutation with stale identity', () => {
+  const cases: Array<{
+    json: string;
+    nativeParse: (json: string) => string;
+    portableParse: (value: unknown, expected: unknown) => unknown;
+    mutate: (value: Record<string, unknown>) => void;
+  }> = [
+    {
+      json: effectiveStateJson,
+      nativeParse: native.parseRfc012cEffectiveStateV1Json,
+      portableParse: parseEffectiveStateFixture,
+      mutate: (value) => {
+        (value.configured as Record<string, unknown>).value = 'claude-opus';
+      },
+    },
+    {
+      json: interactionJson,
+      nativeParse: native.parseRfc012cInteractionV1Json,
+      portableParse: parseInteractionFixture,
+      mutate: (value) => {
+        const questions = value.questions as Array<Record<string, unknown>>;
+        questions[0]!.prompt = 'Which different option should we take?';
+      },
+    },
+    {
+      json: messageJson,
+      nativeParse: native.parseRfc012cMessageV1Json,
+      portableParse: parseMessageFixture,
+      mutate: (value) => {
+        value.role = 'user';
+      },
+    },
+    {
+      json: taskJson,
+      nativeParse: native.parseRfc012cTaskV1Json,
+      portableParse: parseTaskFixture,
+      mutate: (value) => {
+        value.subject = 'Different task subject';
+      },
+    },
+    {
+      json: planJson,
+      nativeParse: native.parseRfc012cPlanV1Json,
+      portableParse: parsePlanFixture,
+      mutate: (value) => {
+        value.subject = 'Different plan subject';
+      },
+    },
+    {
+      json: toolJson,
+      nativeParse: native.parseRfc012cToolV1Json,
+      portableParse: parseToolFixture,
+      mutate: (value) => {
+        value.tool_name = 'write';
+      },
+    },
+  ];
+
+  for (const { json, nativeParse, portableParse, mutate } of cases) {
+    const expected = JSON.parse(json) as Record<string, unknown>;
+    const mutated = structuredClone(expected);
+    mutate(mutated);
+    const mutatedJson = JSON.stringify(mutated);
+    assert.throws(() => nativeParse(mutatedJson), /invalid semantic fixture/);
+    assert.throws(() => portableParse(mutated, expected));
+  }
 });

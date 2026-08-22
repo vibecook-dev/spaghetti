@@ -14,10 +14,10 @@
     "completeness": "complete",
     "evidence_kind": "configured_intent",
     "operation": "upsert",
-    "semantic_revision_key_hex": "1a72374d6779e1d8293e7606b705e40bb610be9c18ab21fd1ab0609254322076",
+    "semantic_revision_key_hex": "802bcff698fb82a060275714a4b1db6e1fd7f92aa28ae001b7697e68bc28b0a3",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:KXeh7VAfe2PhSkqfcfQUlReJdbC1DPXUpOIvMFYWwxA"
+      "fact_revision_id": "v1:hPnXVQtlqopo2s9oK1o3PlvjTydlWwLF08lVJvuKJw4"
     },
     "value": "claude-sonnet"
   },
@@ -25,10 +25,10 @@
     "completeness": "complete",
     "evidence_kind": "response_observed",
     "operation": "upsert",
-    "semantic_revision_key_hex": "09bdb1e6dc18dad456d32c2c058deab15c7a4143bc5258daa6b079a311e1566e",
+    "semantic_revision_key_hex": "bace6350271ce1bf410696b4598b419c39629f1342677655ff4fdbca7a997837",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:bk6DTdRZlFIFATlZc_tRen23rHzunVRPy90NqbalrB0"
+      "fact_revision_id": "v1:D0rhXb-cUiPd2ELtotfJyWfQaj43UXs9YH7dyfxbfeA"
     },
     "value": "claude-sonnet"
   },
@@ -36,10 +36,10 @@
     "completeness": "complete",
     "evidence_kind": "native_transition",
     "operation": "retract",
-    "semantic_revision_key_hex": "70ebbe29e9f291c59a0a706b217959e420aaa42321711e9d157b6bd2ed3d45ef",
+    "semantic_revision_key_hex": "3e6ee47884f34ed691f51d2cc957cbb2ab5d218acd96f8f2325199d6849ab383",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:dokdqE31YwuxmRmSWV_hYFkpQWtZtnmCN8sIMMS_p-8"
+      "fact_revision_id": "v1:7H6Sp5_QU-usTk6XKeRUpogIxDLDlFk7yZ2okgc17XM"
     },
     "value": "claude-sonnet"
   }

@@ -40,6 +40,7 @@ test('RFC 012C message fixture validates correction and complete/partial block r
   assert.equal(fixture.family, 'runtime.message');
   assert.equal(fixture.role, 'assistant');
   assert.deepEqual(fixture.current.ordered_content_block_keys, ['block-a', 'block-b']);
+  assert.deepEqual(fixture.correction.ordered_content_block_keys, ['block-a', 'block-c']);
   assert.deepEqual(fixture.complete_blocks.ordered_content_block_keys, ['block-a']);
   assert.equal(fixture.complete_blocks.completeness, 'complete');
   assert.equal(fixture.partial_blocks.completeness, 'partial');
@@ -91,6 +92,25 @@ test('RFC 012C tool fixture validates unmatched result and correlation without r
 });
 
 test('message and task fixtures reject identity and snapshot drift', () => {
+  const semanticMessageDrift = clone(messageContext) as { role: string };
+  semanticMessageDrift.role = 'user';
+  assert.throws(
+    () => parseRfc012cMessageV1Json(JSON.stringify(semanticMessageDrift), messageContext),
+    ContractValidationError,
+  );
+
+  const semanticTaskDrift = clone(taskContext) as { subject: string };
+  semanticTaskDrift.subject = 'Different task subject';
+  assert.throws(() => parseRfc012cTaskV1Json(JSON.stringify(semanticTaskDrift), taskContext), ContractValidationError);
+
+  const semanticPlanDrift = clone(planContext) as { subject: string };
+  semanticPlanDrift.subject = 'Different plan subject';
+  assert.throws(() => parseRfc012cPlanV1Json(JSON.stringify(semanticPlanDrift), planContext), ContractValidationError);
+
+  const semanticToolDrift = clone(toolContext) as { tool_name: string };
+  semanticToolDrift.tool_name = 'write';
+  assert.throws(() => parseRfc012cToolV1Json(JSON.stringify(semanticToolDrift), toolContext), ContractValidationError);
+
   const drifted = clone(messageContext) as { fact_id: string; session: string };
   drifted.fact_id = drifted.session;
   assert.throws(() => parseRfc012cMessageV1Json(JSON.stringify(drifted), messageContext), ContractValidationError);

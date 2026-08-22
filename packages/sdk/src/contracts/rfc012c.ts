@@ -1039,6 +1039,12 @@ function bindSlotIdentity(
   }
 }
 
+function bindFixtureSemanticContext(label: string, parsed: unknown, expected: unknown): void {
+  if (JSON.stringify(parsed) !== JSON.stringify(expected)) {
+    throw new ContractValidationError(`${label} semantic content does not match the caller-held revision identity`);
+  }
+}
+
 function parseEffectiveStateSlot(value: unknown, label: string): EffectiveStateSlot {
   const input = record(value, label);
   assertKnownFields(
@@ -1165,6 +1171,7 @@ export function parseEffectiveStateFixture(value: unknown, expectedContextInput:
   bindSlotIdentity('configured', parsed.configured, expected.configured);
   bindSlotIdentity('observed', parsed.observed, expected.observed);
   bindSlotIdentity('retract', parsed.retract, expected.retract);
+  bindFixtureSemanticContext('effective-state fixture', parsed, expected);
   return parsed;
 }
 
@@ -1367,6 +1374,7 @@ export function parseInteractionFixture(value: unknown, expectedContextInput: un
   bindSlotIdentity('cancelled', parsed.cancelled, expected.cancelled);
   bindSlotIdentity('retract', parsed.retract, expected.retract);
   bindSlotIdentity('partial', parsed.partial, expected.partial);
+  bindFixtureSemanticContext('interaction fixture', parsed, expected);
   return parsed;
 }
 
@@ -1510,7 +1518,7 @@ function parseMessageFixtureShape(value: unknown): MessageFixture {
     throw new ContractValidationError('unsupported message role');
   }
   const current = parseMessageSlot(input.current, 'current', 'upsert', 'complete', ['block-a', 'block-b']);
-  const correction = parseMessageSlot(input.correction, 'correction', 'upsert', 'complete', ['block-a', 'block-b']);
+  const correction = parseMessageSlot(input.correction, 'correction', 'upsert', 'complete', ['block-a', 'block-c']);
   const completeBlocks = parseMessageSlot(input.complete_blocks, 'complete_blocks', 'upsert', 'complete', ['block-a']);
   const partialBlocks = parseMessageSlot(input.partial_blocks, 'partial_blocks', 'upsert', 'partial', ['block-a']);
   const retract = parseMessageSlot(input.retract, 'retract', 'retract', 'complete', ['block-a', 'block-b']);
@@ -1559,6 +1567,7 @@ export function parseMessageFixture(value: unknown, expectedContextInput: unknow
   bindSlotIdentity('partial_blocks', parsed.partial_blocks, expected.partial_blocks);
   bindSlotIdentity('retract', parsed.retract, expected.retract);
   bindSlotIdentity('partial', parsed.partial, expected.partial);
+  bindFixtureSemanticContext('message fixture', parsed, expected);
   return parsed;
 }
 
@@ -1693,6 +1702,7 @@ export function parseTaskFixture(value: unknown, expectedContextInput: unknown):
   bindSlotIdentity('retract', parsed.retract, expected.retract);
   bindSlotIdentity('partial', parsed.partial, expected.partial);
   bindSlotIdentity('collection_omit', parsed.collection_omit, expected.collection_omit);
+  bindFixtureSemanticContext('task fixture', parsed, expected);
   return parsed;
 }
 
@@ -1882,6 +1892,7 @@ export function parsePlanFixture(value: unknown, expectedContextInput: unknown):
   bindSlotIdentity('retract', parsed.retract, expected.retract);
   bindSlotIdentity('partial', parsed.partial, expected.partial);
   bindSlotIdentity('collection_omit', parsed.collection_omit, expected.collection_omit);
+  bindFixtureSemanticContext('plan fixture', parsed, expected);
   return parsed;
 }
 
@@ -2075,6 +2086,7 @@ export function parseToolFixture(value: unknown, expectedContextInput: unknown):
   bindSlotIdentity('correlated_result', parsed.correlated_result, expected.correlated_result);
   bindSlotIdentity('retract', parsed.retract, expected.retract);
   bindSlotIdentity('partial', parsed.partial, expected.partial);
+  bindFixtureSemanticContext('tool fixture', parsed, expected);
   return parsed;
 }
 

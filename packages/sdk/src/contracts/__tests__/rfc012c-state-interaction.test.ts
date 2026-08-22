@@ -54,6 +54,20 @@ test('RFC 012C interaction fixture validates RFC 012C §11 lifecycle slots', () 
 });
 
 test('effective-state and interaction fixtures reject identity and lifecycle drift', () => {
+  const semanticStateDrift = clone(effectiveStateContext) as { configured: { value: string } };
+  semanticStateDrift.configured.value = 'claude-opus';
+  assert.throws(
+    () => parseRfc012cEffectiveStateV1Json(JSON.stringify(semanticStateDrift), effectiveStateContext),
+    ContractValidationError,
+  );
+
+  const semanticInteractionDrift = clone(interactionContext) as { questions: Array<{ prompt: string }> };
+  semanticInteractionDrift.questions[0]!.prompt = 'Which different option should we take?';
+  assert.throws(
+    () => parseRfc012cInteractionV1Json(JSON.stringify(semanticInteractionDrift), interactionContext),
+    ContractValidationError,
+  );
+
   const driftedState = clone(effectiveStateContext) as {
     fact_id: string;
     session: string;

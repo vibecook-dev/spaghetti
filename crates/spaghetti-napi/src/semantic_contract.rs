@@ -11,11 +11,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::adapter::{
     compare_coverage, ActorAffiliationDimension, ActorAffiliationRevisionFact,
-    ActorAffiliationState, ActorRunRevisionFact, ActorRunRole, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, ContractCompleteness, CoverageComparison, ExternalEntityRef,
-    FactRevisionId, NativeIdentityClaim, QualifiedTimestamp, QualifiedValue, SemanticRevisionRef,
-    SourceCoverageSet, SourceRecordId, TimestampQuality, UsageBucketsV2, UsageResponseIdentity,
-    UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
+    ActorAffiliationState, ActorRunRevisionFact, ActorRunRole, AdapterError, CanonicalEntityKey,
+    CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness, CoverageComparison,
+    EffectiveStateRevisionFact, ExternalEntityRef, FactRevisionId, MessageRevisionFact,
+    NativeIdentityClaim, PlanRevisionFact, QualifiedTimestamp, QualifiedValue, SemanticRevisionRef,
+    SourceCoverageSet, SourceRecordId, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
+    UsageBucketsV2, UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority,
+    UsageValueProvenance, UserInputRequestRevisionFact,
 };
 
 pub(crate) const MAX_SEMANTIC_FIXTURE_JSON_BYTES: usize = 1024 * 1024;
@@ -1146,22 +1148,159 @@ pub(crate) fn parse_rfc012c_runtime_v1_json(json: &str) -> Result<String, Semant
     encode_json(&fixture)
 }
 
-fn fixture_slot_revision_key(family: &str, native: &[u8], slot: &str) -> [u8; 32] {
-    let mut encoded = Vec::new();
-    encoded.extend_from_slice(format!("spaghetti/{family}/semantic-revision\0").as_bytes());
-    encoded.extend_from_slice(&1_u32.to_be_bytes());
-    encoded.extend_from_slice(native);
-    encoded.push(0);
-    encoded.extend_from_slice(slot.as_bytes());
-    *blake3::hash(&encoded).as_bytes()
-}
-
 fn effective_state_native_bytes(dimension: EffectiveStateDimension) -> &'static [u8] {
     match dimension {
         EffectiveStateDimension::Model => b"model",
         EffectiveStateDimension::Effort => b"effort",
         EffectiveStateDimension::SessionMode => b"session_mode",
         EffectiveStateDimension::PermissionMode => b"permission_mode",
+    }
+}
+
+fn verify_fact_revision_identity(
+    family: &str,
+    fact_id: &CanonicalFactId,
+    semantic_revision_key_hex: &str,
+    semantic_revision_ref: &SemanticRevisionRef,
+    revision_key: Result<[u8; 32], AdapterError>,
+) -> Result<(), SemanticFixtureError> {
+    let revision_key =
+        revision_key.map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
+    verify_semantic_revision(
+        family,
+        FAMILY_VERSION,
+        family,
+        semantic_revision_key_hex,
+        revision_key,
+        fact_id,
+        semantic_revision_ref,
+    )
+}
+
+fn effective_state_revision(
+    fixture: &EffectiveStateFixtureWire,
+    slot: &EffectiveStateSlotWire,
+) -> EffectiveStateRevisionFact {
+    EffectiveStateRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        dimension: match fixture.dimension {
+            EffectiveStateDimension::Model => crate::adapter::EffectiveStateDimension::Model,
+            EffectiveStateDimension::Effort => crate::adapter::EffectiveStateDimension::Effort,
+            EffectiveStateDimension::SessionMode => {
+                crate::adapter::EffectiveStateDimension::SessionMode
+            }
+            EffectiveStateDimension::PermissionMode => {
+                crate::adapter::EffectiveStateDimension::PermissionMode
+            }
+        },
+        value: slot.value.clone(),
+        evidence_kind: match slot.evidence_kind {
+            EffectiveStateEvidenceKind::ConfiguredIntent => {
+                crate::adapter::EffectiveStateEvidenceKind::ConfiguredIntent
+            }
+            EffectiveStateEvidenceKind::ResponseObserved => {
+                crate::adapter::EffectiveStateEvidenceKind::ResponseObserved
+            }
+            EffectiveStateEvidenceKind::NativeTransition => {
+                crate::adapter::EffectiveStateEvidenceKind::NativeTransition
+            }
+        },
+        completeness: slot.completeness,
+        operation: match slot.operation {
+            EffectiveStateOperation::Upsert => UserInputOperation::Upsert,
+            EffectiveStateOperation::Retract => UserInputOperation::Retract,
+        },
+    }
+}
+
+fn interaction_revision(
+    fixture: &InteractionFixtureWire,
+    slot: &InteractionLifecycleSlotWire,
+) -> UserInputRequestRevisionFact {
+    UserInputRequestRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        native_tool_use_id: fixture.native_tool_use_id.clone(),
+        kind: fixture.kind,
+        questions: fixture.questions.clone(),
+        state: slot.state,
+        operation: slot.operation,
+        completeness: slot.completeness,
+        result_reference: slot.result_reference.clone(),
+    }
+}
+
+fn message_revision(
+    fixture: &MessageFixtureWire,
+    slot: &MessageRevisionSlotWire,
+) -> MessageRevisionFact {
+    MessageRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        native_message_id: fixture.native_message_id.clone(),
+        role: match fixture.role {
+            MessageRevisionRole::User => crate::adapter::MessageRevisionRole::User,
+            MessageRevisionRole::Assistant => crate::adapter::MessageRevisionRole::Assistant,
+            MessageRevisionRole::System => crate::adapter::MessageRevisionRole::System,
+        },
+        ordered_content_block_keys: slot.ordered_content_block_keys.clone(),
+        completeness: slot.completeness,
+        operation: slot.operation,
+    }
+}
+
+fn task_revision(
+    fixture: &TaskFixtureWire,
+    native_task_id: &str,
+    slot: &TaskRevisionSlotWire,
+) -> TaskRevisionFact {
+    TaskRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        native_task_id: native_task_id.to_owned(),
+        subject: fixture.subject.clone(),
+        state: match slot.state {
+            TaskLifecycleState::Created => crate::adapter::TaskLifecycleState::Created,
+            TaskLifecycleState::Updated => crate::adapter::TaskLifecycleState::Updated,
+            TaskLifecycleState::Completed => crate::adapter::TaskLifecycleState::Completed,
+            TaskLifecycleState::Failed => crate::adapter::TaskLifecycleState::Failed,
+            TaskLifecycleState::Cancelled => crate::adapter::TaskLifecycleState::Cancelled,
+            TaskLifecycleState::Removed => crate::adapter::TaskLifecycleState::Removed,
+        },
+        completeness: slot.completeness,
+        operation: slot.operation,
+        owned_set: slot.owned_set.clone(),
+    }
+}
+
+fn plan_revision(
+    fixture: &PlanFixtureWire,
+    native_plan_id: &str,
+    slot: &PlanRevisionSlotWire,
+) -> PlanRevisionFact {
+    PlanRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        native_plan_id: native_plan_id.to_owned(),
+        subject: fixture.subject.clone(),
+        ordered_step_keys: slot.ordered_step_keys.clone(),
+        completeness: slot.completeness,
+        operation: slot.operation,
+        owned_set: slot.owned_set.clone(),
+    }
+}
+
+fn tool_revision(fixture: &ToolFixtureWire, slot: &ToolRevisionSlotWire) -> ToolRevisionFact {
+    ToolRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        native_tool_id: tool_slot_native_id(fixture, slot).to_owned(),
+        kind: slot.kind,
+        tool_name: fixture.tool_name.clone(),
+        correlated_native_id: slot.correlated_native_id.clone(),
+        completeness: slot.completeness,
+        operation: slot.operation,
     }
 }
 
@@ -1180,25 +1319,6 @@ fn verify_committed_fact_id(
         )));
     }
     Ok(())
-}
-
-fn verify_slot_identity(
-    family: &str,
-    native: &[u8],
-    slot: &str,
-    fact_id: &CanonicalFactId,
-    semantic_revision_key_hex: &str,
-    semantic_revision_ref: &SemanticRevisionRef,
-) -> Result<(), SemanticFixtureError> {
-    verify_semantic_revision(
-        family,
-        FAMILY_VERSION,
-        family,
-        semantic_revision_key_hex,
-        fixture_slot_revision_key(family, native, slot),
-        fact_id,
-        semantic_revision_ref,
-    )
 }
 
 fn validate_canonical_runtime_text(label: &str, value: &str) -> Result<(), SemanticFixtureError> {
@@ -1228,13 +1348,12 @@ fn validate_effective_state_slot(
         )));
     }
     validate_canonical_runtime_text("effective-state value", &slot.value)?;
-    verify_slot_identity(
+    verify_fact_revision_identity(
         EFFECTIVE_STATE_FAMILY,
-        effective_state_native_bytes(fixture.dimension),
-        slot_name,
         &fixture.fact_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
+        effective_state_revision(fixture, slot).semantic_revision_key(),
     )
 }
 
@@ -1361,13 +1480,12 @@ fn validate_interaction_slot(
     if let Some(result_reference) = &slot.result_reference {
         validate_canonical_runtime_text("result_reference", result_reference)?;
     }
-    verify_slot_identity(
+    verify_fact_revision_identity(
         USER_INPUT_FAMILY,
-        fixture.native_tool_use_id.as_bytes(),
-        slot_name,
         &fixture.fact_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
+        interaction_revision(fixture, slot).semantic_revision_key(),
     )
 }
 
@@ -1509,13 +1627,12 @@ fn validate_message_slot(
             ));
         }
     }
-    verify_slot_identity(
+    verify_fact_revision_identity(
         MESSAGE_FAMILY,
-        fixture.native_message_id.as_bytes(),
-        slot_name,
         &fixture.fact_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
+        message_revision(fixture, slot).semantic_revision_key(),
     )
 }
 
@@ -1557,7 +1674,7 @@ fn validate_rfc012c_message_fixture(
         &fixture.correction,
         UserInputOperation::Upsert,
         ContractCompleteness::Complete,
-        &["block-a", "block-b"],
+        &["block-a", "block-c"],
     )?;
     validate_message_slot(
         fixture,
@@ -1653,13 +1770,12 @@ fn validate_task_slot(
             )));
         }
     }
-    verify_slot_identity(
+    verify_fact_revision_identity(
         TASK_FAMILY,
-        fixture.native_task_id.as_bytes(),
-        slot_name,
         &fixture.fact_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
+        task_revision(fixture, &fixture.native_task_id, slot).semantic_revision_key(),
     )
 }
 
@@ -1829,13 +1945,12 @@ fn validate_plan_slot(
             )));
         }
     }
-    verify_slot_identity(
+    verify_fact_revision_identity(
         PLAN_FAMILY,
-        fixture.native_plan_id.as_bytes(),
-        slot_name,
         &fixture.fact_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
+        plan_revision(fixture, &fixture.native_plan_id, slot).semantic_revision_key(),
     )
 }
 
@@ -2051,16 +2166,15 @@ fn validate_tool_slot(
             )));
         }
     }
-    verify_slot_identity(
+    verify_fact_revision_identity(
         TOOL_FAMILY,
-        tool_slot_native_id(fixture, slot).as_bytes(),
-        slot_name,
         match slot.kind {
             ToolRevisionKind::Call => &fixture.fact_id,
             ToolRevisionKind::Result => &fixture.result_fact_id,
         },
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
+        tool_revision(fixture, slot).semantic_revision_key(),
     )
 }
 
@@ -2684,6 +2798,10 @@ mod tests {
             ["block-a", "block-b"]
         );
         assert_eq!(
+            fixture.correction.ordered_content_block_keys,
+            ["block-a", "block-c"]
+        );
+        assert_eq!(
             fixture.complete_blocks.ordered_content_block_keys,
             ["block-a"]
         );
@@ -2786,5 +2904,35 @@ mod tests {
             fixture.call.semantic_revision_ref,
             fixture.correlated_call.semantic_revision_ref
         );
+    }
+
+    #[test]
+    fn rfc012c_c1_fixtures_reject_semantic_mutation_with_stale_identity() {
+        let mut effective: serde_json::Value =
+            serde_json::from_str(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
+        effective["configured"]["value"] = serde_json::json!("claude-opus");
+        assert!(parse_rfc012c_effective_state_v1_json(&effective.to_string()).is_err());
+
+        let mut interaction: serde_json::Value =
+            serde_json::from_str(RFC012C_INTERACTION_FIXTURE).unwrap();
+        interaction["questions"][0]["prompt"] =
+            serde_json::json!("Which different option should we take?");
+        assert!(parse_rfc012c_interaction_v1_json(&interaction.to_string()).is_err());
+
+        let mut message: serde_json::Value = serde_json::from_str(RFC012C_MESSAGE_FIXTURE).unwrap();
+        message["role"] = serde_json::json!("user");
+        assert!(parse_rfc012c_message_v1_json(&message.to_string()).is_err());
+
+        let mut task: serde_json::Value = serde_json::from_str(RFC012C_TASK_FIXTURE).unwrap();
+        task["subject"] = serde_json::json!("Different task subject");
+        assert!(parse_rfc012c_task_v1_json(&task.to_string()).is_err());
+
+        let mut plan: serde_json::Value = serde_json::from_str(RFC012C_PLAN_FIXTURE).unwrap();
+        plan["subject"] = serde_json::json!("Different plan subject");
+        assert!(parse_rfc012c_plan_v1_json(&plan.to_string()).is_err());
+
+        let mut tool: serde_json::Value = serde_json::from_str(RFC012C_TOOL_FIXTURE).unwrap();
+        tool["tool_name"] = serde_json::json!("write");
+        assert!(parse_rfc012c_tool_v1_json(&tool.to_string()).is_err());
     }
 }
