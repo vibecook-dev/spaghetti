@@ -1299,6 +1299,89 @@ fn executable_composition_assembles_canonical_complete_library_coverage() {
     let publication_debug = format!("{publication_source:?}");
     assert!(!publication_debug.contains("claude-session-a"));
     assert!(!publication_debug.contains("claude-session-b"));
+
+    let prior_coverage = assembly.source_coverage().clone();
+    let changed_prior = prior_coverage.points[0].clone();
+    let omitted_prior = prior_coverage.points[1].clone();
+    let unchanged_prior = prior_coverage.points[2].clone();
+    let mut refreshed = assembly.clone();
+    refreshed.source_coverage.points.remove(1);
+    let changed = &mut refreshed.source_coverage.points[0];
+    changed.position = Some(
+        CoveragePosition::derive(
+            changed.position.as_ref().unwrap().kind,
+            b"replacement-position",
+            changed
+                .position
+                .as_ref()
+                .unwrap()
+                .monotonic_order
+                .map(|order| order + 1),
+        )
+        .unwrap(),
+    );
+    let fresh_owner = CatalogEvidenceOwner::new(
+        changed.adapter_id.clone(),
+        changed.source_instance_key,
+        changed.stream_key,
+        changed.object_key,
+        changed.generation,
+    )
+    .unwrap();
+    let (refresh_source, generations) = refreshed
+        .refresh_publication_source(&prior_coverage)
+        .unwrap();
+    let changed_refresh = refresh_source
+        .source_coverage()
+        .points
+        .iter()
+        .find(|point| {
+            point.stream_key == changed_prior.stream_key
+                && point.object_key == changed_prior.object_key
+        })
+        .unwrap();
+    assert_eq!(changed_refresh.generation, changed_prior.generation + 1);
+    let unchanged_refresh = refresh_source
+        .source_coverage()
+        .points
+        .iter()
+        .find(|point| {
+            point.stream_key == unchanged_prior.stream_key
+                && point.object_key == unchanged_prior.object_key
+        })
+        .unwrap();
+    assert_eq!(unchanged_refresh.generation, unchanged_prior.generation);
+    assert!(refresh_source
+        .source_coverage()
+        .explicit_absence_or_deletion
+        .iter()
+        .any(|absence| {
+            absence.stream_key == changed_prior.stream_key
+                && absence.object_key == changed_prior.object_key
+                && absence.generation == changed_prior.generation
+                && absence.kind == CoverageAbsenceKind::Deleted
+        }));
+    assert!(refresh_source
+        .source_coverage()
+        .explicit_absence_or_deletion
+        .iter()
+        .any(|absence| {
+            absence.stream_key == omitted_prior.stream_key
+                && absence.object_key == omitted_prior.object_key
+                && absence.generation == omitted_prior.generation
+                && absence.kind == CoverageAbsenceKind::Deleted
+        }));
+    assert_eq!(
+        generations
+            .reconcile_owner(&fresh_owner)
+            .unwrap()
+            .generation,
+        changed_prior.generation + 1
+    );
+    let reconciliation_debug = format!("{generations:?}");
+    assert!(!reconciliation_debug.contains("replacement-position"));
+    assert!(!reconciliation_debug.contains("opaque-object"));
+
     assert_eq!(
         assembly
             .source_coverage()

@@ -26,6 +26,7 @@ use crate::adapter::{
     SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceRecordId, SourceRoot,
     SOURCE_COVERAGE_CONTRACT_VERSION,
 };
+use crate::catalog_contract::evidence::CatalogEvidenceOwner;
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogPublicationMemberRef, CatalogSourceCompletionRevision,
     CatalogSourceMembershipRevision,
@@ -61,6 +62,59 @@ const MAX_SEMANTIC_IDENTITY_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_CATALOG_COVERAGE_POINTS: usize = 250_000;
 pub(crate) const MAX_CATALOG_COVERAGE_ABSENCES: usize = 250_000;
 const MAX_PORTABLE_GENERATION: u64 = 9_007_199_254_740_991;
+
+/// Source-neutral mapping from a fresh complete catalog scan's object
+/// generations to the exact predecessor-aware generations used by refresh
+/// evidence. It contains no native paths or values.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct CatalogRefreshCoverageGenerations {
+    adapter_id: String,
+    source_instance_key: CanonicalSourceInstanceKey,
+    generations: BTreeMap<(CoverageStreamKey, CoverageObjectKey, u64), u64>,
+}
+
+impl CatalogRefreshCoverageGenerations {
+    pub(crate) fn reconcile_owner(
+        &self,
+        owner: &CatalogEvidenceOwner,
+    ) -> Result<CatalogEvidenceOwner, CatalogCompositionError> {
+        if owner.adapter_id != self.adapter_id
+            || owner.source_instance_key != self.source_instance_key
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog refresh owner belongs to another complete source",
+            ));
+        }
+        let generation = self
+            .generations
+            .get(&(owner.stream_key, owner.object_key, owner.generation))
+            .copied()
+            .ok_or_else(|| {
+                CatalogCompositionError::invalid(
+                    "catalog refresh owner is outside reconciled complete coverage",
+                )
+            })?;
+        CatalogEvidenceOwner::new(
+            owner.adapter_id.clone(),
+            owner.source_instance_key,
+            owner.stream_key,
+            owner.object_key,
+            generation,
+        )
+        .map_err(|_| CatalogCompositionError::invalid("catalog refresh owner is invalid"))
+    }
+}
+
+impl fmt::Debug for CatalogRefreshCoverageGenerations {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogRefreshCoverageGenerations")
+            .field("adapter_id", &self.adapter_id)
+            .field("source_instance_key", &self.source_instance_key)
+            .field("object_count", &self.generations.len())
+            .finish()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
@@ -2018,6 +2072,170 @@ impl CatalogLibraryCoverageAssembly {
                 .collect(),
             self.source_coverage.clone(),
         )
+    }
+
+    /// Reconcile a fresh complete scan against the prior complete source
+    /// coverage before constructing refresh evidence. Unchanged objects retain
+    /// their generation. Any changed object becomes an explicit replacement
+    /// generation, and every prior object omitted from the fresh complete set
+    /// is retained as an explicit deletion. This is the owned-set bridge that
+    /// prevents a same-generation metadata snapshot from leaving removed
+    /// members live.
+    pub(crate) fn refresh_publication_source(
+        &self,
+        prior: &SourceCoverageSet,
+    ) -> Result<
+        (
+            CatalogCompleteSourceAssembly,
+            CatalogRefreshCoverageGenerations,
+        ),
+        CatalogCompositionError,
+    > {
+        prior.validate().map_err(|_| {
+            CatalogCompositionError::invalid("catalog refresh predecessor coverage is invalid")
+        })?;
+        if prior.coverage_domain != self.source_coverage.coverage_domain
+            || prior.scope != self.source_coverage.scope
+            || prior.completeness != CoverageSetCompleteness::Complete
+            || self.source_coverage.completeness != CoverageSetCompleteness::Complete
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog refresh requires matching complete predecessor coverage",
+            ));
+        }
+
+        let mut prior_points = BTreeMap::new();
+        for point in &prior.points {
+            if prior_points
+                .insert((point.stream_key, point.object_key), point)
+                .is_some()
+            {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog refresh predecessor has multiple live generations for one object",
+                ));
+            }
+        }
+        let mut current_objects = BTreeMap::new();
+        let mut generations = BTreeMap::new();
+        let mut points = Vec::with_capacity(self.source_coverage.points.len());
+        let mut absences = self
+            .source_coverage
+            .explicit_absence_or_deletion
+            .iter()
+            .cloned()
+            .map(|absence| {
+                (
+                    (absence.stream_key, absence.object_key, absence.generation),
+                    absence,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for current in &self.source_coverage.points {
+            let object = (current.stream_key, current.object_key);
+            if current_objects.insert(object, ()).is_some() {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog refresh scan has multiple live generations for one object",
+                ));
+            }
+            let mut point = current.clone();
+            if let Some(prior_point) = prior_points.remove(&object) {
+                let unchanged = current.position == prior_point.position
+                    && current.status == prior_point.status
+                    && current.provenance == prior_point.provenance;
+                point.generation = if unchanged {
+                    prior_point.generation
+                } else {
+                    let next = prior_point.generation.checked_add(1).ok_or_else(|| {
+                        CatalogCompositionError::invalid(
+                            "catalog refresh source generation overflowed",
+                        )
+                    })?;
+                    if next > MAX_PORTABLE_GENERATION {
+                        return Err(CatalogCompositionError::invalid(
+                            "catalog refresh source generation exceeds the portable range",
+                        ));
+                    }
+                    absences.insert(
+                        (
+                            prior_point.stream_key,
+                            prior_point.object_key,
+                            prior_point.generation,
+                        ),
+                        CoverageAbsence {
+                            stream_key: prior_point.stream_key,
+                            object_key: prior_point.object_key,
+                            generation: prior_point.generation,
+                            kind: CoverageAbsenceKind::Deleted,
+                        },
+                    );
+                    next
+                };
+            }
+            generations.insert(
+                (current.stream_key, current.object_key, current.generation),
+                point.generation,
+            );
+            points.push(point);
+        }
+        for prior_point in prior_points.into_values() {
+            absences.insert(
+                (
+                    prior_point.stream_key,
+                    prior_point.object_key,
+                    prior_point.generation,
+                ),
+                CoverageAbsence {
+                    stream_key: prior_point.stream_key,
+                    object_key: prior_point.object_key,
+                    generation: prior_point.generation,
+                    kind: CoverageAbsenceKind::Deleted,
+                },
+            );
+        }
+        let source_coverage = SourceCoverageSet::new(
+            self.source_coverage.coverage_domain.clone(),
+            self.source_coverage.scope.clone(),
+            self.source_coverage.membership_revision,
+            points,
+            absences.into_values().collect(),
+            self.source_coverage.explicit_errors.clone(),
+            self.source_coverage.completeness,
+        )
+        .map_err(|_| {
+            CatalogCompositionError::invalid(
+                "catalog refresh coverage reconciliation is outside contract bounds",
+            )
+        })?;
+        let publication = CatalogCompleteSourceAssembly::from_complete_library_coverage(
+            self.plan_source.clone(),
+            self.contract_selection.clone(),
+            self.member_identity_contract_id.clone(),
+            CatalogSourceMembershipRevision::from_digest(
+                *self.catalog_membership_revision.as_bytes(),
+            ),
+            CatalogSourceCompletionRevision::from_digest(
+                *self.component_completion_revision.as_bytes(),
+            ),
+            self.member_refs
+                .iter()
+                .map(|member_ref| CatalogPublicationMemberRef::from_digest(*member_ref.as_bytes()))
+                .collect(),
+            source_coverage,
+        )
+        .map_err(|_| {
+            CatalogCompositionError::invalid(
+                "catalog refresh publication source is outside contract bounds",
+            )
+        })?;
+        Ok((
+            publication,
+            CatalogRefreshCoverageGenerations {
+                adapter_id: self.plan_source.adapter_id.clone(),
+                source_instance_key: self.plan_source.source_instance_key,
+                generations,
+            },
+        ))
     }
 }
 

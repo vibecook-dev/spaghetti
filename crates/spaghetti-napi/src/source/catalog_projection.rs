@@ -27,7 +27,9 @@ use crate::catalog_contract::{
     CatalogCoveragePlan, CatalogCoverageScope, CatalogReadinessSnapshot,
 };
 
-use super::catalog_composition::{CatalogCompositionError, CatalogMemberRef};
+use super::catalog_composition::{
+    CatalogCompositionError, CatalogMemberRef, CatalogRefreshCoverageGenerations,
+};
 
 const PROJECTION_REVISION_CONTRACT_VERSION: u32 = 1;
 const NATIVE_IDENTITY_AUTHORITY: &str = "native-catalog-identity";
@@ -61,6 +63,14 @@ impl CatalogSourceMemberProjection {
             availability,
             association_basis,
         }
+    }
+
+    pub(crate) fn reconcile_refresh_generation(
+        &mut self,
+        generations: &CatalogRefreshCoverageGenerations,
+    ) -> Result<(), CatalogCompositionError> {
+        self.owner = generations.reconcile_owner(&self.owner)?;
+        Ok(())
     }
 }
 
