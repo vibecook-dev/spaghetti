@@ -5,17 +5,19 @@
 //! state digest at an equal source/family coverage vector.  This module owns
 //! that shared law; it deliberately contains no database or observer types.
 
+use std::collections::BTreeSet;
+
 use crate::adapter::{
-    ActorAffiliationRevisionFact, ActorRunRevisionFact, AdapterId, CanonicalSourceInstanceKey,
-    ContentBlockRevisionFact, ContentBlockRevisionValue, ContractCompleteness, CoverageObjectKey,
-    CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
-    EffectiveStateRevisionFact, EffectiveStateValueAuthority, FactProvenance, FactRevisionId,
-    FactSemanticRevision, MessageRevisionFact, MessageRevisionRole, NativeCompactionPhase,
-    NativeProgressState, NativeQueueOperation, NativeRuntimeMarkerRevisionFact,
-    NativeRuntimeMarkerValue, PlanRevisionFact, QualifiedUnknownReason, QualifiedValueQuality,
-    SourceRecordId, TaskLifecycleState, TaskRevisionFact, ToolRevisionFact, ToolRevisionKind,
-    UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState, UserInputOperation,
-    UserInputQuestion, UserInputRequestRevisionFact,
+    ActorAffiliationRevisionFact, ActorRunRevisionFact, ActorRunRole, AdapterId,
+    CanonicalSourceInstanceKey, ContentBlockRevisionFact, ContentBlockRevisionValue,
+    ContractCompleteness, CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension,
+    EffectiveStateEvidenceKind, EffectiveStateRevisionFact, EffectiveStateValueAuthority,
+    FactProvenance, FactRevisionId, FactSemanticRevision, MessageRevisionFact, MessageRevisionRole,
+    NativeCompactionPhase, NativeProgressState, NativeQueueOperation,
+    NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PlanRevisionFact,
+    QualifiedUnknownReason, QualifiedValueQuality, SourceRecordId, TaskLifecycleState,
+    TaskRevisionFact, ToolRevisionFact, ToolRevisionKind, UsageRevisionV2Fact, UserInputKind,
+    UserInputLifecycleState, UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
 };
 use crate::source::SourceRecordState;
 
@@ -977,6 +979,13 @@ pub(crate) struct ToolReducedDigestEntity<'a> {
     pub revision: &'a ToolRevisionFact,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ActorRunReducedDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub source: RuntimeSemanticSourceRef<'a>,
+    pub revision: &'a ActorRunRevisionFact,
+}
+
 fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value);
@@ -1043,6 +1052,123 @@ fn validate_and_hash_semantic_source(
         SourceRecordState::Absent => 2,
     }]);
     Ok(())
+}
+
+/// Compute the canonical current-state digest for `runtime.actor-run`.
+/// Actor-run order, rather than delivery order or fact-hash order, preserves
+/// the frozen replacement-family byte contract. Duplicate run or fact
+/// identities fail closed.
+pub(crate) fn actor_run_reduced_state_digest<'a>(
+    entities: impl IntoIterator<Item = ActorRunReducedDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.revision.actor_run);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].revision.actor_run == pair[1].revision.actor_run)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let mut fact_ids = BTreeSet::new();
+    if entities
+        .iter()
+        .any(|entity| !fact_ids.insert(entity.semantic.fact_id))
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/replacement-semantic-digest\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, b"runtime.actor-run");
+    hasher.update(&1_u32.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in &entities {
+        validate_actor_run_entity(entity.semantic, entity.revision)?;
+        validate_and_hash_semantic_source(&mut hasher, entity.semantic, entity.source)?;
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hash_component(&mut hasher, entity.revision.session.as_bytes());
+        hasher.update(&[match entity.revision.role {
+            ActorRunRole::Root => 1,
+            ActorRunRole::Child => 2,
+        }]);
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .parent_actor_run
+                .as_ref()
+                .map(|key| key.as_bytes().as_slice()),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_session_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_actor_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_actor_type
+                .as_deref()
+                .map(str::as_bytes),
+        );
+
+        // The frozen v1 digest also binds the derived ActorRunRef projection.
+        // Re-encode that projection from the validated common revision so a
+        // topology-local wrapper cannot supply a divergent duplicate value.
+        hash_component(&mut hasher, entity.revision.session.as_bytes());
+        hash_component(&mut hasher, entity.revision.actor_run.as_bytes());
+        hasher.update(&[match entity.revision.role {
+            ActorRunRole::Root => 1,
+            ActorRunRole::Child => 2,
+        }]);
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .parent_actor_run
+                .as_ref()
+                .map(|key| key.as_bytes().as_slice()),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_session_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_actor_id
+                .as_deref()
+                .map(str::as_bytes),
+        );
+        hash_optional_component(
+            &mut hasher,
+            entity
+                .revision
+                .native_actor_type
+                .as_deref()
+                .map(str::as_bytes),
+        );
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Compute the canonical current-state digest for

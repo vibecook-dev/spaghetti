@@ -1137,6 +1137,12 @@ axes and roll the whole commit back on drift. Parentage, native actor metadata,
 usage attribution, counters, qualifications, and correlation metadata remain
 revisionable values, as required by RFC 012C, and focused durable/scoped tests
 prove both the rejection and allowed-correction sides.
+`runtime.actor-run` now also uses one topology-neutral current-state digest in
+the durable `FactBatch` view and selected scoped replacement snapshot. The
+frozen v1 digest order and derived `ActorRunRef` binding are preserved, while a
+scoped wrapper can no longer supply an actor reference that diverges from the
+validated common revision. Reverse-order creation, value correction, exact
+replay, identity drift, and generation reset all retain digest equality.
 Native compaction/progress/queue evidence now has a closed common
 `runtime.native-marker` fact shape: only exact or native-claimed quality is
 accepted, counters are portable safe integers, free-form detail is digest-only,
