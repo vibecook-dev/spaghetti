@@ -206,7 +206,7 @@
         {
           "component_id": "session-directory-membership",
           "contribution": {
-            "admission_contract_id": "session-directory-admission-v1",
+            "admission_contract_id": "current-sidecar-session-admission-v1",
             "kind": "membership",
             "member_identity_contract_id": "catalog-session-identity-v1",
             "provides_metadata": false
@@ -214,21 +214,25 @@
           "decoder_contract_id": "grok-session-membership",
           "decoder_contract_version": 1,
           "discovery_bounds": {
-            "max_depth": 64,
-            "max_entries": 250000
+            "max_depth": 8,
+            "max_entries": 100000
           },
           "disposition_ownership": [
             "native-family:session-membership"
           ],
           "framing_contract_version": 1,
           "overlap_strategy": {
-            "kind": "commit_catalog_facts"
+            "kind": "disjoint_catalog_family",
+            "ownership_contract_id": "grok-session-membership-catalog-family-v1"
           },
           "primitive": {
             "kind": "directory_membership"
           },
           "relative_selectors": [
-            "*/*"
+            "**/chat_history.jsonl",
+            "**/events.jsonl",
+            "**/signals.json",
+            "**/summary.json"
           ],
           "root_id": "sessions",
           "safe_decoder_state_boundary": "full_snapshot",
@@ -245,8 +249,8 @@
           "decoder_contract_id": "grok-summary",
           "decoder_contract_version": 1,
           "discovery_bounds": {
-            "max_depth": 64,
-            "max_entries": 250000
+            "max_depth": 8,
+            "max_entries": 100000
           },
           "disposition_ownership": [
             "native-family:session-summary"
@@ -260,7 +264,7 @@
             "max_object_bytes": 1048576
           },
           "relative_selectors": [
-            "*/*/summary.json"
+            "**/summary.json"
           ],
           "root_id": "sessions",
           "safe_decoder_state_boundary": "object_generation_revision",
@@ -269,7 +273,7 @@
         }
       ],
       "composition_contract_version": 1,
-      "composition_id": "catalog-composition-v1:mpE-Ta3Ll3p3hKznCeoxE1AwXkCFqz08bVjukYTm0GU",
+      "composition_id": "catalog-composition-v1:QKbt38V5dt0UuvoBwJq7fB7YbIof4rnbF-92n-kvRBA",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "source_declaration_id": "grok.catalog-sources-v1",
       "support_release_id": "grok.catalog-candidate-2026-08-15"
@@ -372,7 +376,7 @@
           "generation": 1
         }
       ],
-      "composition_id": "catalog-composition-v1:mpE-Ta3Ll3p3hKznCeoxE1AwXkCFqz08bVjukYTm0GU",
+      "composition_id": "catalog-composition-v1:QKbt38V5dt0UuvoBwJq7fB7YbIof4rnbF-92n-kvRBA",
       "member_identity_contract_id": "catalog-session-identity-v1",
       "members": [
         {
@@ -386,7 +390,7 @@
         }
       ],
       "membership_contract_version": 1,
-      "membership_revision": "catalog-membership-v1:H3IsnWm3TbBcZMywyOv71QOc-ksD1VLs1CpQR6YDbDw"
+      "membership_revision": "catalog-membership-v1:OmnMUhX1JFjDlYwVoYOM6ovspE0hsE2hagNrswkqPe0"
     }
   },
   "overlap_conformance": {

@@ -4,9 +4,17 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::adapter::{
-    verify_support_release_bundle, AdapterSupportRegistration, CompatibilityClass,
-    ContractVersionOffer, ContractVersionRequest, NativeArtifactProbe, SupportBundleDocument,
-    SupportCatalog, SupportOperation, VerifiedSupportRelease,
+    verify_support_release_bundle, AdapterSupportRegistration, AuthorizedCatalogAccess,
+    CompatibilityClass, ContractVersionOffer, ContractVersionRequest, ContractVersionSelection,
+    NativeArtifactProbe, Sha256Digest, SupportBundleDocument, SupportCatalog, SupportOperation,
+    VerifiedSupportRelease, CONTRACT_VERSION_SELECTION_VERSION,
+};
+use crate::catalog_contract::CatalogAccessPolicyDigest;
+use crate::grok::catalog_runtime::{
+    grok_catalog_source_instance, grok_conformance_promoted_composition,
+    grok_conformance_source_declaration_bytes, grok_conformance_support_release_bytes,
+    grok_conformance_support_release_id, grok_planned_catalog_composition,
+    produce_grok_library_coverage, produce_grok_library_coverage_with_post_summary_mutation,
 };
 
 const FROZEN_FIXTURE: &str = include_str!(concat!(
@@ -279,27 +287,52 @@ fn exact_candidate_bundle_and_streams_remain_non_authorizing_and_planned_unbound
         .unwrap();
     assert_eq!(
         planned_membership["relative_selectors"],
-        serde_json::json!(["*/*"])
+        serde_json::json!([
+            "**/chat_history.jsonl",
+            "**/events.jsonl",
+            "**/signals.json",
+            "**/summary.json"
+        ])
     );
     assert_eq!(
         planned_membership["discovery_bounds"]["max_entries"],
-        250_000
+        CANDIDATE_MEMBERSHIP_MAX_ENTRIES
     );
-    assert_eq!(planned_membership["discovery_bounds"]["max_depth"], 64);
+    assert_eq!(
+        planned_membership["discovery_bounds"]["max_depth"],
+        CANDIDATE_MEMBERSHIP_MAX_DEPTH
+    );
     assert_eq!(
         planned_membership["overlap_strategy"]["kind"],
-        "commit_catalog_facts"
+        "disjoint_catalog_family"
     );
-    assert_ne!(
-        planned_membership["relative_selectors"],
-        declared_membership["relative_patterns"]
+    assert_eq!(
+        planned_membership["overlap_strategy"]["ownership_contract_id"],
+        "grok-session-membership-catalog-family-v1"
     );
+    let planned_selectors = planned_membership["relative_selectors"].as_array().unwrap();
+    let declared_patterns = declared_membership["relative_patterns"].as_array().unwrap();
+    assert_eq!(planned_selectors.len(), declared_patterns.len());
+    assert!(planned_selectors
+        .iter()
+        .all(|selector| declared_patterns.contains(selector)));
     let planned_summary = planned["components"]
         .as_array()
         .unwrap()
         .iter()
         .find(|component| component["component_id"] == "session-summary-metadata")
         .unwrap();
+    assert_eq!(
+        planned_summary["relative_selectors"],
+        serde_json::json!(["**/summary.json"])
+    );
+    assert_eq!(
+        planned_summary["discovery_bounds"],
+        serde_json::json!({
+            "max_entries": CANDIDATE_MEMBERSHIP_MAX_ENTRIES,
+            "max_depth": CANDIDATE_MEMBERSHIP_MAX_DEPTH
+        })
+    );
     assert_eq!(
         planned_summary["overlap_strategy"]["kind"],
         "idempotent_overlap"
@@ -348,6 +381,404 @@ fn exact_candidate_bundle_and_streams_remain_non_authorizing_and_planned_unbound
         )
         .unwrap_err();
     assert!(error.to_string().contains("forbidden"));
+}
+
+fn catalog_contract_selection() -> ContractVersionSelection {
+    ContractVersionSelection {
+        selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+        model_major: 1,
+        external_entity_reference_version: 1,
+        semantic_revision_reference_version: 1,
+        coverage_contract_version: 1,
+        fact_family_versions: BTreeMap::from([
+            ("catalog.project".to_owned(), 1),
+            ("catalog.session".to_owned(), 1),
+        ]),
+        query_pack_version: Some(1),
+        observation_contract_version: None,
+    }
+}
+
+fn synthetic_grok_catalog_access(
+    selection: &ContractVersionSelection,
+    compatibility: CompatibilityClass,
+) -> AuthorizedCatalogAccess<'_> {
+    AuthorizedCatalogAccess::fixture_with_compatibility(
+        ADAPTER_ID,
+        grok_conformance_support_release_id(),
+        Sha256Digest::of(grok_conformance_support_release_bytes()),
+        Sha256Digest::of(grok_conformance_source_declaration_bytes()),
+        selection,
+        compatibility,
+    )
+}
+
+fn produce_catalog_from_root(
+    root: &Path,
+    discriminator: &[u8],
+    compatibility: CompatibilityClass,
+    policy: &[u8],
+) -> Result<crate::grok::catalog_runtime::GrokCatalogProduction, String> {
+    let composition = grok_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let executable = composition
+        .authorize_execution(synthetic_grok_catalog_access(&selection, compatibility))
+        .map_err(|error| error.to_string())?;
+    let instance =
+        grok_catalog_source_instance(root, discriminator).map_err(|error| error.to_string())?;
+    let bound = executable
+        .bind_source_instance(&instance)
+        .map_err(|error| error.to_string())?;
+    produce_grok_library_coverage(
+        &bound,
+        CatalogAccessPolicyDigest::derive(1, policy).unwrap(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn produce_catalog_fixture(
+    compatibility: CompatibilityClass,
+    policy: &[u8],
+) -> crate::grok::catalog_runtime::GrokCatalogProduction {
+    produce_catalog_from_root(
+        &fixture_root(),
+        FIXTURE_SOURCE_INSTANCE,
+        compatibility,
+        policy,
+    )
+    .unwrap()
+}
+
+#[test]
+fn synthetic_producer_matches_frozen_identity_and_complete_coverage() {
+    let report = candidate_projection(&fixture_root(), 7).unwrap().report();
+    let produced = produce_catalog_fixture(
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    );
+
+    assert_eq!(produced.identity.adapter_id, ADAPTER_ID);
+    assert_eq!(
+        produced.identity.project_count,
+        report.independent_oracle.project_count
+    );
+    assert_eq!(
+        produced.identity.session_count,
+        report.independent_oracle.session_count
+    );
+    assert_eq!(
+        produced.identity.project_identity_digest,
+        report.independent_oracle.project_identity_digest
+    );
+    assert_eq!(
+        produced.identity.session_identity_digest,
+        report.independent_oracle.session_identity_digest
+    );
+    assert_eq!(
+        produced.assembly.source_coverage().completeness,
+        crate::adapter::CoverageSetCompleteness::Complete
+    );
+    assert_eq!(
+        produced.assembly.source_coverage().points.len() as u64,
+        report.rust_conformance.admitted_membership_object_count
+            + report.rust_conformance.summary_source_record_count
+    );
+    assert_ne!(
+        produced.assembly.catalog_membership_revision().as_bytes(),
+        produced
+            .assembly
+            .source_coverage()
+            .membership_revision
+            .as_bytes()
+    );
+    assert_ne!(
+        produced.assembly.catalog_membership_revision().as_bytes(),
+        produced.assembly.component_completion_revision().as_bytes()
+    );
+
+    let replayed = produce_catalog_fixture(
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    );
+    assert_eq!(produced, replayed);
+    let range = produce_catalog_fixture(
+        CompatibilityClass::RangeSupported,
+        b"fixture-local-catalog-policy",
+    );
+    assert_eq!(produced.identity, range.identity);
+    assert_eq!(
+        produced.assembly.catalog_membership_revision(),
+        range.assembly.catalog_membership_revision()
+    );
+
+    let policy_drift = produce_catalog_fixture(
+        CompatibilityClass::ExactSupported,
+        b"fixture-other-catalog-policy",
+    );
+    assert_eq!(produced.identity, policy_drift.identity);
+    assert_eq!(
+        produced.assembly.catalog_membership_revision(),
+        policy_drift.assembly.catalog_membership_revision()
+    );
+    assert_ne!(
+        produced.assembly.component_completion_revision(),
+        policy_drift.assembly.component_completion_revision()
+    );
+
+    let another_instance = produce_catalog_from_root(
+        &fixture_root(),
+        b"another-canonical-source-instance",
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap();
+    assert_eq!(produced.identity, another_instance.identity);
+    assert_ne!(
+        produced.assembly.catalog_membership_revision(),
+        another_instance.assembly.catalog_membership_revision()
+    );
+
+    let publication = produced.assembly.complete_publication_source().unwrap();
+    assert_eq!(
+        publication.member_count(),
+        report.rust_conformance.member_count as usize
+    );
+    assert_eq!(publication.plan_source(), produced.assembly.plan_source());
+    assert_eq!(
+        publication.source_coverage(),
+        produced.assembly.source_coverage()
+    );
+
+    let debug = format!("{produced:?}");
+    assert!(!debug.contains("/Users/"));
+    assert!(!debug.contains("/Volumes/"));
+    assert!(!debug.contains("small-grok"));
+}
+
+#[test]
+fn planned_composition_cannot_authorize_synthetic_producer() {
+    let selection = catalog_contract_selection();
+    let planned = grok_planned_catalog_composition().unwrap();
+    assert!(planned
+        .authorize_execution(synthetic_grok_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .is_err());
+
+    let promoted = grok_conformance_promoted_composition().unwrap();
+    let executable = promoted
+        .authorize_execution(synthetic_grok_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    assert_ne!(planned.composition_id(), executable.composition_id());
+    assert_ne!(
+        executable.composition().support_release_id(),
+        SUPPORT_RELEASE_ID
+    );
+}
+
+#[test]
+fn producer_rejects_composition_drift_before_source_access() {
+    let reviewed = grok_conformance_promoted_composition().unwrap();
+    let mut components = reviewed.components().to_vec();
+    components[0].disposition_ownership = vec!["native-family:drifted".to_owned()];
+    let drifted = crate::source::catalog_composition::CatalogSourceComposition::new_promoted(
+        ADAPTER_ID,
+        reviewed.support_release_id(),
+        reviewed.source_declaration_id(),
+        reviewed.promoted_binding().unwrap(),
+        components,
+    )
+    .unwrap();
+    let selection = catalog_contract_selection();
+    let executable = drifted
+        .authorize_execution(synthetic_grok_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    let absent = TempDir::new().unwrap();
+    let instance = grok_catalog_source_instance(absent.path(), FIXTURE_SOURCE_INSTANCE).unwrap();
+    let bound = executable.bind_source_instance(&instance).unwrap();
+    let error = produce_grok_library_coverage(
+        &bound,
+        CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap(),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("exact synthetic conformance composition"));
+    assert!(!error.contains("failed to read"));
+    assert!(!error.contains(absent.path().to_string_lossy().as_ref()));
+}
+
+fn produce_with_post_summary_mutation(
+    root: &Path,
+    mutate: impl FnOnce(&Path),
+) -> Result<crate::grok::catalog_runtime::GrokCatalogProduction, String> {
+    let composition = grok_conformance_promoted_composition().unwrap();
+    let selection = catalog_contract_selection();
+    let executable = composition
+        .authorize_execution(synthetic_grok_catalog_access(
+            &selection,
+            CompatibilityClass::ExactSupported,
+        ))
+        .unwrap();
+    let instance = grok_catalog_source_instance(root, FIXTURE_SOURCE_INSTANCE)
+        .map_err(|error| error.to_string())?;
+    let bound = executable
+        .bind_source_instance(&instance)
+        .map_err(|error| error.to_string())?;
+    produce_grok_library_coverage_with_post_summary_mutation(
+        &bound,
+        CatalogAccessPolicyDigest::derive(1, b"fixture-local-catalog-policy").unwrap(),
+        mutate,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn summary(session_id: &str, cwd: &str, title: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "info": {"id": session_id, "cwd": cwd},
+        "generated_title": title
+    }))
+    .unwrap()
+}
+
+#[test]
+fn producer_fails_closed_when_membership_or_summary_changes_during_production() {
+    let membership = TempDir::new().unwrap();
+    let membership_root = membership.path().join(".grok");
+    write_sidecar(
+        &membership_root,
+        "%2Ftmp%2Fproject",
+        "first",
+        "summary.json",
+        &summary("first", "/tmp/project", "first"),
+    );
+    let membership_error = produce_with_post_summary_mutation(&membership_root, |sessions_root| {
+        let directory = sessions_root.join("%2Ftmp%2Fproject/late");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("chat_history.jsonl"), b"").unwrap();
+    })
+    .unwrap_err();
+    assert!(membership_error.contains("membership authority changed"));
+    assert!(!membership_error.contains("chat_history"));
+    assert!(!membership_error.contains("/tmp/project"));
+
+    let summary_change = TempDir::new().unwrap();
+    let summary_root = summary_change.path().join(".grok");
+    write_sidecar(
+        &summary_root,
+        "%2Ftmp%2Fproject",
+        "first",
+        "summary.json",
+        &summary("first", "/tmp/project", "first"),
+    );
+    let summary_error = produce_with_post_summary_mutation(&summary_root, |sessions_root| {
+        fs::write(
+            sessions_root.join("%2Ftmp%2Fproject/first/summary.json"),
+            summary("first", "/tmp/project", "changed"),
+        )
+        .unwrap();
+    })
+    .unwrap_err();
+    assert!(summary_error.contains("summary driver revision changed"));
+    assert!(!summary_error.contains("summary.json"));
+    assert!(!summary_error.contains("/tmp/project"));
+}
+
+#[test]
+fn producer_rejects_invalid_summary_and_keeps_updates_only_non_admitting() {
+    let updates = TempDir::new().unwrap();
+    let updates_root = updates.path().join(".grok");
+    write_sidecar(
+        &updates_root,
+        "%2Ftmp%2Fproject",
+        "updates-only",
+        "updates.jsonl",
+        b"{}\n",
+    );
+    let empty = produce_catalog_from_root(
+        &updates_root,
+        FIXTURE_SOURCE_INSTANCE,
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap();
+    assert_eq!(empty.identity.session_count, 0);
+    assert_eq!(
+        empty.assembly.source_coverage().completeness,
+        crate::adapter::CoverageSetCompleteness::Complete
+    );
+    assert_eq!(
+        empty
+            .assembly
+            .complete_publication_source()
+            .unwrap()
+            .member_count(),
+        0
+    );
+
+    let malformed = TempDir::new().unwrap();
+    let malformed_root = malformed.path().join(".grok");
+    write_sidecar(
+        &malformed_root,
+        "%2Ftmp%2Fproject",
+        "malformed",
+        "summary.json",
+        b"{",
+    );
+    let malformed_error = produce_catalog_from_root(
+        &malformed_root,
+        FIXTURE_SOURCE_INSTANCE,
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap_err();
+    assert!(malformed_error.contains("summary JSON is invalid"));
+    assert!(!malformed_error.contains("summary.json"));
+
+    let oversized = TempDir::new().unwrap();
+    let oversized_root = oversized.path().join(".grok");
+    write_sidecar(
+        &oversized_root,
+        "%2Ftmp%2Fproject",
+        "oversized",
+        "summary.json",
+        &sized_summary("oversized", "/tmp/project", CANDIDATE_SUMMARY_MAX_BYTES + 1),
+    );
+    let oversized_error = produce_catalog_from_root(
+        &oversized_root,
+        FIXTURE_SOURCE_INSTANCE,
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap_err();
+    assert!(oversized_error.contains("not completely readable"));
+    assert!(!oversized_error.contains("summary.json"));
+
+    let retarget = TempDir::new().unwrap();
+    let retarget_root = retarget.path().join(".grok");
+    write_sidecar(
+        &retarget_root,
+        "%2Ftmp%2Fproject",
+        "path-session",
+        "summary.json",
+        &summary("different-session", "/tmp/different", "retarget"),
+    );
+    let retarget_error = produce_catalog_from_root(
+        &retarget_root,
+        FIXTURE_SOURCE_INSTANCE,
+        CompatibilityClass::ExactSupported,
+        b"fixture-local-catalog-policy",
+    )
+    .unwrap_err();
+    assert!(retarget_error.contains("identity disagrees"));
+    assert!(!retarget_error.contains("different-session"));
+    assert!(!retarget_error.contains("/tmp/"));
 }
 
 fn exact_declared_stream<'a>(

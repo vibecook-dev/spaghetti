@@ -130,7 +130,7 @@ prerequisite for early vertical slices.
 | A3. Current-agent support candidates     | 012A                | In progress | Claude 2.1.223 review-blocked candidate; Codex/Grok remain candidate                    |
 | A4. New-agent adaptation proof           | 012A/umbrella       | Gate met    | fourth adapter without common-runtime/query/observer change                             |
 | B1. Catalog identity/readiness contracts | 012B                | In progress | contract fixtures complete; authorized public transport open                            |
-| B2. Bounded catalog source compositions  | 012B                | In progress | candidate conformance; runtime producers incomplete                                     |
+| B2. Bounded catalog source compositions  | 012B                | In progress | three test-only producers; promotion/access-plan/runtime publication open                |
 | B3. Durable catalog/query snapshots      | 012B                | In progress | private pack/pagination; public policy/query lifecycle open                             |
 | B4. Progressive host and UX              | 012B                | In progress | partial host readiness; selected hydration and UI flow open                             |
 | B5. Catalog performance calibration      | 012B                | In progress | partial experiment; complete report and ratification open                               |
@@ -845,8 +845,28 @@ known internal sessions, binds canonical source-instance member identity,
 revalidates every head, and performs the complete membership scan last. Exact
 and range identity, policy-view separation, competing project identity,
 oversized input, and in-flight membership/head mutation are covered. The module
-is `#[cfg(test)]`; the built-in Candidate remains non-authorizing. The Grok
-producer, persistence, and public catalog N-API remain open.
+is `#[cfg(test)]`; the built-in Candidate remains non-authorizing. At that
+landing, the Grok producer, persistence, and public catalog N-API remained
+open.
+
+The Grok B2 follow-on completes the three-adapter test-only producer set while
+retaining the exact reviewed candidate admission policy: only
+`chat_history.jsonl`, `events.jsonl`, `signals.json`, or `summary.json` may
+admit a session, at 100,000 entries/depth 8, and summary replacement is bounded
+to 1 MiB. The planned composition no longer widens that policy to arbitrary
+two-level directories. Membership owns a disjoint catalog family; summary is
+metadata for an already-known member and cannot fabricate or retarget one. The
+producer uses the common directory/replace drivers and common decoder runtime,
+revalidates every summary revision, re-scans summary membership, and performs
+the admitting membership scan last before publishing Complete evidence.
+Frozen identity, exact/range execution, policy and source-instance separation,
+oversize/malformed/retargeting failure, updates-only non-admission, and
+in-flight mutation are covered. The module remains `#[cfg(test)]`, the built-in
+Candidate remains non-authorizing, and no source authority, persistence, or
+public transport is added. B2 therefore still remains in progress on real
+promoted support/declarations, an authorized production access plan, durable
+publication, and public catalog transport rather than on missing vendor
+producer semantics.
 
 The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
 `ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,

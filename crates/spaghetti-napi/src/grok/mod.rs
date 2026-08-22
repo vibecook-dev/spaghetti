@@ -8,6 +8,8 @@
 mod adapter;
 #[cfg(test)]
 mod catalog_conformance;
+#[cfg(test)]
+pub(crate) mod catalog_runtime;
 #[cfg(feature = "legacy-oracle")]
 pub mod message_extractor;
 #[cfg(feature = "legacy-oracle")]

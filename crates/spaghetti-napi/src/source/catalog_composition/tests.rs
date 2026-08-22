@@ -164,41 +164,7 @@ fn codex_composition() -> CatalogSourceComposition {
 }
 
 fn grok_composition() -> CatalogSourceComposition {
-    planned_composition(
-        "grok",
-        "grok.catalog-candidate-2026-08-15",
-        "grok.catalog-sources-v1",
-        vec![
-            component(
-                (
-                    "session-directory-membership",
-                    "session-membership",
-                    "sessions",
-                ),
-                &["*/*"],
-                CatalogSourcePrimitive::DirectoryMembership,
-                membership("session-directory-admission-v1", false),
-                CatalogOverlapStrategy::CommitCatalogFacts,
-                CatalogDecoderStateBoundary::FullSnapshot,
-                (
-                    "grok-session-membership",
-                    &["native-family:session-membership"],
-                ),
-            ),
-            component(
-                ("session-summary-metadata", "session-summaries", "sessions"),
-                &["*/*/summary.json"],
-                CatalogSourcePrimitive::ReplaceDocument {
-                    max_object_bytes: 1024 * 1024,
-                },
-                metadata("replaceable-session-summary-v1"),
-                CatalogOverlapStrategy::IdempotentOverlap,
-                CatalogDecoderStateBoundary::ObjectGenerationRevision,
-                ("grok-summary", &["native-family:session-summary"]),
-            ),
-        ],
-    )
-    .unwrap()
+    crate::grok::catalog_runtime::grok_planned_catalog_composition().unwrap()
 }
 
 fn member(label: &str) -> CatalogMemberRef {
