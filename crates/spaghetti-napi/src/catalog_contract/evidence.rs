@@ -2853,6 +2853,28 @@ impl CatalogDurableReducerRestore {
 }
 
 impl CatalogReducerPublication {
+    /// Canonical set of exact source-object generations that still own live
+    /// reducer evidence. Refresh reconciliation uses this only with complete
+    /// source-coverage absences; the values contain no native paths.
+    pub(crate) fn live_owners(&self) -> BTreeSet<CatalogEvidenceOwner> {
+        self.projects
+            .iter()
+            .map(|stored| stored.fact.owner.clone())
+            .chain(self.sessions.iter().map(|stored| stored.fact.owner.clone()))
+            .chain(
+                self.associations
+                    .iter()
+                    .map(|stored| stored.fact.owner.clone()),
+            )
+            .chain(self.locators.iter().map(|stored| stored.fact.owner.clone()))
+            .chain(
+                self.identity_relations
+                    .iter()
+                    .map(|stored| stored.fact.owner.clone()),
+            )
+            .collect()
+    }
+
     pub(crate) fn validate_durable_row_commitments(
         &self,
         max_row_bytes: usize,

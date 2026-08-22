@@ -11,17 +11,19 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use crate::adapter::{
-    CanonicalEntityKey, CanonicalFactId, ContractCompleteness, FactRevisionId, NativeIdentity,
-    QualifiedValue, QualifiedValueQuality, SemanticRevisionRef,
+    CanonicalEntityKey, CanonicalFactId, ContractCompleteness, CoverageAbsenceKind, FactRevisionId,
+    NativeIdentity, QualifiedValue, QualifiedValueQuality, SemanticRevisionRef,
 };
 use crate::catalog_contract::evidence::{
     CatalogAvailability, CatalogDisclosureClass, CatalogEntityRef, CatalogEvidenceOwner,
     CatalogFieldAuthority, CatalogProjectAssertion, CatalogQualifiedField, CatalogReducer,
+    CatalogReducerPublication, CatalogRetractionCause, CatalogRetractionEvidence,
     CatalogSessionAssertion, ProjectAssociationBasis, SessionProjectAssociationFact,
 };
 use crate::catalog_contract::publication::{
     CatalogCompleteSourceAssembly, CatalogInitialPublicationAssembly, CatalogPublicationLimits,
-    CatalogPublicationMemberBinding, CatalogPublicationMemberRef,
+    CatalogPublicationMemberBinding, CatalogPublicationMemberHistory, CatalogPublicationMemberRef,
+    CatalogRefreshPredecessor, CatalogRefreshPublicationAssembly,
 };
 use crate::catalog_contract::{
     CatalogCoveragePlan, CatalogCoverageScope, CatalogReadinessSnapshot,
@@ -518,6 +520,230 @@ impl fmt::Debug for CatalogInitialProjectionBatch {
     }
 }
 
+/// Canonical all-source successor input for one ordinary Library refresh. It
+/// resumes the authenticated predecessor reducer, applies current complete
+/// projections, and retracts only prior owner generations named by explicit
+/// complete-coverage absence/replacement evidence.
+pub(crate) struct CatalogRefreshProjectionBatch {
+    plan: CatalogCoveragePlan,
+    contract_selection: crate::adapter::ContractVersionSelection,
+    reducer: CatalogReducer,
+    sources: Vec<CatalogCompleteSourceAssembly>,
+    member_bindings: Vec<CatalogPublicationMemberBinding>,
+}
+
+impl CatalogRefreshProjectionBatch {
+    pub(crate) fn assemble(
+        projections: Vec<CatalogSourceProjection>,
+        contract_selection: crate::adapter::ContractVersionSelection,
+        observation_commit: u64,
+        prior_reducer: &CatalogReducerPublication,
+    ) -> Result<Self, CatalogCompositionError> {
+        if observation_commit == 0 {
+            return Err(CatalogCompositionError::invalid(
+                "catalog refresh projection requires a positive observation commit",
+            ));
+        }
+        let absence_commit = observation_commit.checked_add(1).ok_or_else(|| {
+            CatalogCompositionError::invalid("catalog refresh observation commit overflowed")
+        })?;
+        let plan = CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            projections
+                .iter()
+                .map(|projection| projection.source.plan_source().clone())
+                .collect(),
+            Vec::new(),
+        )
+        .map_err(|_| {
+            CatalogCompositionError::invalid(
+                "catalog refresh projection sources do not form one canonical Library plan",
+            )
+        })?;
+
+        let mut reducer = prior_reducer.resume_for_refresh();
+        for projection in &projections {
+            reducer = projection.reduce_into(reducer, observation_commit)?;
+        }
+        for owner in prior_reducer.live_owners() {
+            let Some(projection) = projections.iter().find(|projection| {
+                let source = projection.source.plan_source();
+                source.adapter_id == owner.adapter_id
+                    && source.source_instance_key == owner.source_instance_key
+            }) else {
+                return Err(CatalogCompositionError::invalid(
+                    "catalog refresh predecessor owner has no matching complete source",
+                ));
+            };
+            let coverage = projection.source.source_coverage();
+            let Some(absence) = coverage
+                .explicit_absence_or_deletion
+                .iter()
+                .find(|absence| {
+                    absence.stream_key == owner.stream_key
+                        && absence.object_key == owner.object_key
+                        && absence.generation == owner.generation
+                })
+            else {
+                continue;
+            };
+            let replacement = coverage.points.iter().any(|point| {
+                point.stream_key == owner.stream_key
+                    && point.object_key == owner.object_key
+                    && point.generation > owner.generation
+            });
+            let cause = if replacement {
+                CatalogRetractionCause::ConfirmedReplacement
+            } else {
+                match absence.kind {
+                    CoverageAbsenceKind::Absent | CoverageAbsenceKind::Deleted => {
+                        CatalogRetractionCause::ConfirmedDeletion
+                    }
+                }
+            };
+            let evidence = CatalogRetractionEvidence::new(
+                owner.clone(),
+                cause,
+                ContractCompleteness::Complete,
+                vec![refresh_retraction_revision(
+                    &owner,
+                    coverage.membership_revision.as_bytes(),
+                    cause,
+                    replacement.then(|| {
+                        coverage
+                            .points
+                            .iter()
+                            .filter(|point| {
+                                point.stream_key == owner.stream_key
+                                    && point.object_key == owner.object_key
+                            })
+                            .map(|point| point.generation)
+                            .max()
+                            .expect("replacement point checked above")
+                    }),
+                )?],
+            )
+            .map_err(|_| {
+                CatalogCompositionError::invalid(
+                    "catalog refresh retraction evidence is outside contract bounds",
+                )
+            })?;
+            let retraction = reducer
+                .retract_owner(&evidence, observation_commit)
+                .map_err(|_| {
+                    CatalogCompositionError::invalid(
+                        "catalog refresh could not retract replaced source evidence",
+                    )
+                })?;
+            for entity_ref in retraction.orphaned_entities {
+                reducer
+                    .confirm_absent(entity_ref, &evidence, absence_commit)
+                    .map_err(|_| {
+                        CatalogCompositionError::invalid(
+                            "catalog refresh could not confirm an orphaned entity absence",
+                        )
+                    })?;
+            }
+        }
+
+        let mut sources = Vec::with_capacity(projections.len());
+        let mut member_bindings = Vec::new();
+        for projection in projections {
+            let (source, mut bindings) = projection.into_publication_parts();
+            sources.push(source);
+            member_bindings.append(&mut bindings);
+        }
+        Ok(Self {
+            plan,
+            contract_selection,
+            reducer,
+            sources,
+            member_bindings,
+        })
+    }
+
+    pub(crate) fn plan(&self) -> &CatalogCoveragePlan {
+        &self.plan
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn into_publication(
+        self,
+        readiness: &CatalogReadinessSnapshot,
+        refresh_started_commit_seq: u64,
+        predecessor: CatalogRefreshPredecessor,
+        prior_reducer: &CatalogReducerPublication,
+        prior_member_history: &CatalogPublicationMemberHistory,
+        limits: CatalogPublicationLimits,
+    ) -> Result<CatalogRefreshPublicationAssembly, CatalogCompositionError> {
+        CatalogRefreshPublicationAssembly::assemble(
+            &self.plan,
+            readiness,
+            refresh_started_commit_seq,
+            predecessor,
+            prior_reducer,
+            prior_member_history,
+            self.contract_selection,
+            self.sources,
+            &self.reducer,
+            self.member_bindings,
+            limits,
+        )
+        .map_err(|_| {
+            CatalogCompositionError::invalid(
+                "catalog refresh projection does not match the frozen refresh lineage",
+            )
+        })
+    }
+}
+
+impl fmt::Debug for CatalogRefreshProjectionBatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogRefreshProjectionBatch")
+            .field("coverage_plan_id", &self.plan.coverage_plan_id)
+            .field("source_count", &self.sources.len())
+            .field("member_count", &self.member_bindings.len())
+            .finish()
+    }
+}
+
+fn refresh_retraction_revision(
+    owner: &CatalogEvidenceOwner,
+    membership_revision: &[u8; 32],
+    cause: CatalogRetractionCause,
+    replacement_generation: Option<u64>,
+) -> Result<SemanticRevisionRef, CatalogCompositionError> {
+    let mut key_hasher = blake3::Hasher::new();
+    key_hasher.update(b"spaghetti/rfc012b/catalog-refresh-retraction-key-v1\0");
+    key_hasher.update(owner.stream_key.as_bytes());
+    key_hasher.update(owner.object_key.as_bytes());
+    key_hasher.update(&owner.generation.to_be_bytes());
+    let fact_id = CanonicalFactId::native(
+        &owner.adapter_id,
+        &owner.source_instance_key,
+        "catalog.owner-retraction",
+        key_hasher.finalize().as_bytes(),
+    )
+    .map_err(|_| CatalogCompositionError::invalid("catalog retraction identity is invalid"))?;
+    let mut semantic = blake3::Hasher::new();
+    semantic.update(b"spaghetti/rfc012b/catalog-refresh-retraction-v1\0");
+    semantic.update(membership_revision);
+    semantic.update(&[match cause {
+        CatalogRetractionCause::ConfirmedDeletion => 1,
+        CatalogRetractionCause::ConfirmedReplacement => 2,
+        CatalogRetractionCause::TemporarilyUnavailable => 3,
+    }]);
+    semantic.update(&replacement_generation.unwrap_or(0).to_be_bytes());
+    let revision = FactRevisionId::derive(
+        &fact_id,
+        PROJECTION_REVISION_CONTRACT_VERSION,
+        semantic.finalize().as_bytes(),
+    )
+    .map_err(|_| CatalogCompositionError::invalid("catalog retraction revision is invalid"))?;
+    Ok(SemanticRevisionRef::new(revision))
+}
+
 fn known_field<T>(
     value: T,
     quality: QualifiedValueQuality,
@@ -641,10 +867,10 @@ mod tests {
 
     use super::*;
     use crate::adapter::{
-        CanonicalSourceInstanceKey, ContractVersionSelection, CoverageDeclarationDigest,
-        CoverageDomain, CoverageMembershipRevision, CoverageObjectKey, CoveragePosition,
-        CoveragePositionKind, CoverageProvenance, CoverageSetCompleteness, CoverageStatus,
-        CoverageStreamKey, SourceCoveragePoint, SourceCoverageSet,
+        CanonicalSourceInstanceKey, ContractVersionSelection, CoverageAbsence, CoverageAbsenceKind,
+        CoverageDeclarationDigest, CoverageDomain, CoverageMembershipRevision, CoverageObjectKey,
+        CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageSetCompleteness,
+        CoverageStatus, CoverageStreamKey, SourceCoveragePoint, SourceCoverageSet,
         CONTRACT_VERSION_SELECTION_VERSION,
     };
     use crate::catalog_contract::evidence::{
@@ -680,12 +906,20 @@ mod tests {
     fn fixture(
         object_label: &str,
     ) -> (CatalogCompleteSourceAssembly, CatalogSourceMemberProjection) {
+        fixture_at_generation(object_label, 1)
+    }
+
+    fn fixture_at_generation(
+        object_label: &str,
+        generation: u64,
+    ) -> (CatalogCompleteSourceAssembly, CatalogSourceMemberProjection) {
         let source_key = CanonicalSourceInstanceKey::derive(1, b"projection-source").unwrap();
         let stream_key = CoverageStreamKey::derive(ADAPTER_ID, b"catalog-stream").unwrap();
         let object_key =
             CoverageObjectKey::derive("catalog-stream", object_label.as_bytes()).unwrap();
         let owner =
-            CatalogEvidenceOwner::new(ADAPTER_ID, source_key, stream_key, object_key, 1).unwrap();
+            CatalogEvidenceOwner::new(ADAPTER_ID, source_key, stream_key, object_key, generation)
+                .unwrap();
         let plan_source = CatalogCoveragePlanSource::new(
             ADAPTER_ID,
             source_key,
@@ -704,7 +938,7 @@ mod tests {
             source_key,
             stream_key,
             object_key,
-            1,
+            generation,
             Some(
                 CoveragePosition::derive(
                     CoveragePositionKind::SnapshotRevision,
@@ -722,7 +956,15 @@ mod tests {
             plan_source.coverage_scope(CatalogCoverageScope::Library),
             CoverageMembershipRevision::derive(object_label.as_bytes()).unwrap(),
             vec![point],
-            Vec::new(),
+            (generation > 1)
+                .then(|| CoverageAbsence {
+                    stream_key,
+                    object_key,
+                    generation: generation - 1,
+                    kind: CoverageAbsenceKind::Deleted,
+                })
+                .into_iter()
+                .collect(),
             Vec::new(),
             CoverageSetCompleteness::Complete,
         )
@@ -739,10 +981,12 @@ mod tests {
             selection(),
             MEMBER_CONTRACT,
             CatalogSourceMembershipRevision::from_digest(
-                *blake3::hash(format!("membership:{object_label}").as_bytes()).as_bytes(),
+                *blake3::hash(format!("membership:{object_label}:{generation}").as_bytes())
+                    .as_bytes(),
             ),
             CatalogSourceCompletionRevision::from_digest(
-                *blake3::hash(format!("completion:{object_label}").as_bytes()).as_bytes(),
+                *blake3::hash(format!("completion:{object_label}:{generation}").as_bytes())
+                    .as_bytes(),
             ),
             vec![CatalogPublicationMemberRef::from_digest(
                 *member_ref.as_bytes(),
@@ -758,6 +1002,55 @@ mod tests {
             ProjectAssociationBasis::RolloutHeader,
         );
         (source, input)
+    }
+
+    fn deleted_fixture(object_label: &str) -> CatalogSourceProjection {
+        let source_key = CanonicalSourceInstanceKey::derive(1, b"projection-source").unwrap();
+        let stream_key = CoverageStreamKey::derive(ADAPTER_ID, b"catalog-stream").unwrap();
+        let object_key =
+            CoverageObjectKey::derive("catalog-stream", object_label.as_bytes()).unwrap();
+        let plan_source = CatalogCoveragePlanSource::new(
+            ADAPTER_ID,
+            source_key,
+            "fixture-support-v1",
+            CoverageDeclarationDigest::derive(b"fixture-declaration-v1").unwrap(),
+            CatalogAccessPolicyDigest::derive(1, b"fixture-withheld-policy-v1").unwrap(),
+        )
+        .unwrap();
+        let domain = CoverageDomain::ProjectionPack {
+            pack: CATALOG_PROJECTION_PACK_ID.to_owned(),
+            version: CATALOG_QUERY_PACK_CONTRACT_VERSION,
+        };
+        let coverage = SourceCoverageSet::new(
+            domain,
+            plan_source.coverage_scope(CatalogCoverageScope::Library),
+            CoverageMembershipRevision::derive(b"deleted-membership").unwrap(),
+            Vec::new(),
+            vec![CoverageAbsence {
+                stream_key,
+                object_key,
+                generation: 1,
+                kind: CoverageAbsenceKind::Deleted,
+            }],
+            Vec::new(),
+            CoverageSetCompleteness::Complete,
+        )
+        .unwrap();
+        let source = CatalogCompleteSourceAssembly::from_complete_library_coverage(
+            plan_source,
+            selection(),
+            MEMBER_CONTRACT,
+            CatalogSourceMembershipRevision::from_digest(
+                *blake3::hash(b"deleted-membership").as_bytes(),
+            ),
+            CatalogSourceCompletionRevision::from_digest(
+                *blake3::hash(b"deleted-completion").as_bytes(),
+            ),
+            Vec::new(),
+            coverage,
+        )
+        .unwrap();
+        CatalogSourceProjection::assemble(source, Vec::new()).unwrap()
     }
 
     #[test]
@@ -880,5 +1173,51 @@ mod tests {
             }
             CatalogAssociationCoverage::Unknown => panic!("reassociation must remain available"),
         }
+    }
+
+    #[test]
+    fn refresh_batch_replaces_and_tombstones_only_explicitly_absent_owner_generations() {
+        let (initial_source, initial_member) = fixture("object-a");
+        let initial =
+            CatalogSourceProjection::assemble(initial_source, vec![initial_member]).unwrap();
+        let initial_reducer = initial.reduce_into(CatalogReducer::default(), 1).unwrap();
+        let prior = initial_reducer
+            .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+            .unwrap();
+
+        let (replacement_source, replacement_member) = fixture_at_generation("object-a", 2);
+        let replacement =
+            CatalogSourceProjection::assemble(replacement_source, vec![replacement_member])
+                .unwrap();
+        let replacement_batch =
+            CatalogRefreshProjectionBatch::assemble(vec![replacement], selection(), 3, &prior)
+                .unwrap();
+        let replacement_publication = replacement_batch
+            .reducer
+            .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+            .unwrap();
+        assert_eq!(replacement_publication.project_row_count(), 1);
+        assert_eq!(replacement_publication.session_row_count(), 1);
+        assert_eq!(replacement_publication.tombstone_count(), 0);
+        assert!(replacement_publication
+            .live_owners()
+            .iter()
+            .all(|owner| owner.generation == 2));
+
+        let deletion_batch = CatalogRefreshProjectionBatch::assemble(
+            vec![deleted_fixture("object-a")],
+            selection(),
+            3,
+            &prior,
+        )
+        .unwrap();
+        let deletion_publication = deletion_batch
+            .reducer
+            .freeze_for_initial_publication(CatalogReducerPublicationLimits::default())
+            .unwrap();
+        assert_eq!(deletion_publication.project_row_count(), 0);
+        assert_eq!(deletion_publication.session_row_count(), 0);
+        assert_eq!(deletion_publication.tombstone_count(), 2);
+        assert!(deletion_publication.live_owners().is_empty());
     }
 }

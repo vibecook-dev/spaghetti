@@ -59,7 +59,9 @@ use crate::adapter::{
 };
 use crate::catalog_contract::publication::CatalogPublicationLimits;
 use crate::catalog_contract::{CatalogCoveragePlan, CatalogReadinessPhase};
-use crate::source::catalog_projection::CatalogInitialProjectionBatch;
+use crate::source::catalog_projection::{
+    CatalogInitialProjectionBatch, CatalogRefreshProjectionBatch,
+};
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
@@ -573,6 +575,68 @@ impl std::fmt::Debug for CatalogInitialBuildContext {
             .field("readiness_epoch", &self.readiness.epoch)
             .field("readiness_attempt", &self.readiness.attempt)
             .field("expected_build_commit_seq", &self.expected_build_commit_seq)
+            .finish()
+    }
+}
+
+/// Restart-safe handle for one exact ordinary refresh. It retains the
+/// authenticated predecessor reducer and member history in non-serializable
+/// authority, while exposing only the frozen plan and prior source coverage
+/// needed by authorized adapter producers.
+#[derive(Clone)]
+pub(crate) struct CatalogRefreshBuildContext {
+    plan: CatalogCoveragePlan,
+    readiness: crate::catalog_contract::CatalogReadinessSnapshot,
+    expected: catalog_state::CatalogActiveRefreshPublicationExpectation,
+}
+
+impl CatalogRefreshBuildContext {
+    pub(crate) fn plan(&self) -> &CatalogCoveragePlan {
+        &self.plan
+    }
+
+    pub(crate) fn observation_commit(&self) -> u64 {
+        self.expected.refresh_started_commit_seq()
+    }
+
+    pub(crate) fn prior_reducer(
+        &self,
+    ) -> &crate::catalog_contract::evidence::CatalogReducerPublication {
+        self.expected.prior_reducer()
+    }
+
+    pub(crate) fn prior_source_coverage(
+        &self,
+        source: &crate::catalog_contract::CatalogCoveragePlanSource,
+    ) -> Result<&SourceCoverageSet, EngineError> {
+        if !self.plan.required_sources.contains(source)
+            && !self.plan.optional_sources.contains(source)
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog refresh requested coverage outside its frozen plan".to_string(),
+            ));
+        }
+        self.readiness
+            .source_coverage
+            .iter()
+            .find(|coverage| source.matches_coverage(coverage))
+            .ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog refresh predecessor is missing exact source coverage".to_string(),
+                )
+            })
+    }
+}
+
+impl std::fmt::Debug for CatalogRefreshBuildContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogRefreshBuildContext")
+            .field("coverage_plan_id", &self.plan.coverage_plan_id)
+            .field("readiness_epoch", &self.readiness.epoch)
+            .field("readiness_attempt", &self.readiness.attempt)
+            .field("refresh_started_commit_seq", &self.observation_commit())
+            .field("source_count", &self.readiness.source_coverage.len())
             .finish()
     }
 }
@@ -1596,6 +1660,86 @@ impl SpaghettiEngineCore {
         ))
     }
 
+    /// Freeze one ordinary same-plan refresh before source reads, or resume
+    /// the exact active refresh after restart. The predecessor publication
+    /// remains queryable throughout this phase.
+    pub(crate) fn begin_catalog_refresh(
+        &self,
+        plan: CatalogCoveragePlan,
+    ) -> Result<CatalogRefreshBuildContext, EngineError> {
+        let mut state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog refresh requires a durable Ready publication".to_string(),
+            )
+        })?;
+        if state.plan != plan {
+            return Err(EngineError::InvalidCommit(
+                "catalog refresh cannot change its frozen coverage plan".to_string(),
+            ));
+        }
+        if state.readiness.state == CatalogReadinessPhase::Ready
+            && state.readiness.refreshing_from_snapshot.is_none()
+        {
+            let now = engine_now_unix_ms()?;
+            self.commit_catalog_build_state(CatalogBuildStateCommand::begin_refresh(
+                state.refresh_expectation()?,
+                now,
+                now,
+            ))?;
+            state = self.load_catalog_build_state()?.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog refresh start lost its durable state".to_string(),
+                )
+            })?;
+        }
+        if state.plan != plan
+            || state.readiness.state != CatalogReadinessPhase::Ready
+            || state.readiness.refreshing_from_snapshot.is_none()
+        {
+            return Err(EngineError::InvalidCommit(
+                "catalog refresh requires the exact durable active-refresh lineage".to_string(),
+            ));
+        }
+        let expected = state.refresh_publication_expectation()?;
+        Ok(CatalogRefreshBuildContext {
+            plan,
+            readiness: state.readiness,
+            expected,
+        })
+    }
+
+    /// Atomically publish a checked all-source refresh successor against its
+    /// restart-authenticated predecessor. Exact lost-ack replay is delegated
+    /// to the existing writer compare-and-swap contract.
+    pub(crate) fn commit_catalog_refresh_projection(
+        &self,
+        context: CatalogRefreshBuildContext,
+        batch: CatalogRefreshProjectionBatch,
+    ) -> Result<Option<CatalogRefreshPublicationReceipt>, EngineError> {
+        if batch.plan() != context.plan() {
+            return Err(EngineError::InvalidCommit(
+                "catalog refresh projection does not match the frozen pre-read plan".to_string(),
+            ));
+        }
+        let assembly = batch
+            .into_publication(
+                &context.readiness,
+                context.expected.refresh_started_commit_seq(),
+                context.expected.predecessor()?,
+                context.expected.prior_reducer(),
+                context.expected.prior_member_history(),
+                CatalogPublicationLimits::default(),
+            )
+            .map_err(|error| EngineError::InvalidCommit(error.to_string()))?;
+        let now = engine_now_unix_ms()?;
+        self.commit_refresh_catalog_publication(CatalogRefreshPublicationCommand::new(
+            assembly,
+            context.expected,
+            now,
+            now,
+        ))
+    }
+
     fn load_catalog_build_state(
         &self,
     ) -> Result<Option<catalog_state::DurableCatalogBuildState>, EngineError> {
@@ -2403,7 +2547,9 @@ mod tests {
     use super::*;
     use crate::adapter::{ContractVersionSelection, CONTRACT_VERSION_SELECTION_VERSION};
     use crate::catalog_contract::CATALOG_QUERY_PACK_CONTRACT_VERSION;
-    use crate::source::catalog_projection::CatalogInitialProjectionBatch;
+    use crate::source::catalog_projection::{
+        CatalogInitialProjectionBatch, CatalogRefreshProjectionBatch,
+    };
     use crate::source::SharedSourcePassPool;
     use std::collections::BTreeMap;
     use std::sync::mpsc;
@@ -2477,6 +2623,69 @@ mod tests {
         .unwrap();
         assert!(engine
             .commit_initial_catalog_projection(context, replay)
+            .unwrap()
+            .is_none());
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn ordinary_catalog_refresh_resumes_after_restart_and_replays_exactly() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("catalog-refresh-pipeline.db");
+        let engine = SpaghettiEngineCore::open(options(database.clone())).unwrap();
+        let plan = CatalogCoveragePlan::new(
+            crate::catalog_contract::CatalogCoverageScope::Library,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let initial_context = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        let initial_batch = CatalogInitialProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            initial_context.observation_commit(),
+        )
+        .unwrap();
+        let initial = engine
+            .commit_initial_catalog_projection(initial_context, initial_batch)
+            .unwrap()
+            .unwrap();
+        let first_refresh = engine.begin_catalog_refresh(plan.clone()).unwrap();
+        let refresh_observation_commit = first_refresh.observation_commit();
+        assert!(engine.status().catalog_query_ready);
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let engine = SpaghettiEngineCore::open(options(database)).unwrap();
+        let context = engine.begin_catalog_refresh(plan.clone()).unwrap();
+        assert_eq!(context.plan(), &plan);
+        assert_eq!(context.observation_commit(), refresh_observation_commit);
+        let replay_context = context.clone();
+        let batch = CatalogRefreshProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            context.observation_commit(),
+            context.prior_reducer(),
+        )
+        .unwrap();
+        let receipt = engine
+            .commit_catalog_refresh_projection(context, batch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.predecessor_snapshot, initial.snapshot_id);
+        assert_ne!(receipt.snapshot_id, initial.snapshot_id);
+        assert_eq!(receipt.snapshot_id.complete_commit, receipt.commit_seq);
+        assert!(receipt.readiness.refreshing_from_snapshot.is_none());
+
+        let replay = CatalogRefreshProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            replay_context.observation_commit(),
+            replay_context.prior_reducer(),
+        )
+        .unwrap();
+        assert!(engine
+            .commit_catalog_refresh_projection(replay_context, replay)
             .unwrap()
             .is_none());
         engine.shutdown().unwrap();
