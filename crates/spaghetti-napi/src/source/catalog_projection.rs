@@ -20,7 +20,11 @@ use crate::catalog_contract::evidence::{
     CatalogSessionAssertion, ProjectAssociationBasis, SessionProjectAssociationFact,
 };
 use crate::catalog_contract::publication::{
-    CatalogCompleteSourceAssembly, CatalogPublicationMemberBinding, CatalogPublicationMemberRef,
+    CatalogCompleteSourceAssembly, CatalogInitialPublicationAssembly, CatalogPublicationLimits,
+    CatalogPublicationMemberBinding, CatalogPublicationMemberRef,
+};
+use crate::catalog_contract::{
+    CatalogCoveragePlan, CatalogCoverageScope, CatalogReadinessSnapshot,
 };
 
 use super::catalog_composition::{CatalogCompositionError, CatalogMemberRef};
@@ -406,6 +410,104 @@ impl fmt::Debug for CatalogSourceProjection {
     }
 }
 
+/// Canonical all-source input to one initial Library publication. The batch
+/// owns its reducer candidate and complete source bindings; no caller can pass
+/// independently assembled rows, coverage, or member bindings to B3.
+pub(crate) struct CatalogInitialProjectionBatch {
+    plan: CatalogCoveragePlan,
+    contract_selection: crate::adapter::ContractVersionSelection,
+    reducer: CatalogReducer,
+    sources: Vec<CatalogCompleteSourceAssembly>,
+    member_bindings: Vec<CatalogPublicationMemberBinding>,
+}
+
+impl CatalogInitialProjectionBatch {
+    pub(crate) fn assemble(
+        projections: Vec<CatalogSourceProjection>,
+        contract_selection: crate::adapter::ContractVersionSelection,
+        observation_commit: u64,
+    ) -> Result<Self, CatalogCompositionError> {
+        if observation_commit == 0 {
+            return Err(CatalogCompositionError::invalid(
+                "catalog initial projection requires a positive observation commit",
+            ));
+        }
+        let mut reducer = CatalogReducer::default();
+        let mut sources = Vec::with_capacity(projections.len());
+        let mut member_bindings = Vec::new();
+        for projection in projections {
+            reducer = projection.reduce_into(reducer, observation_commit)?;
+            let (source, mut bindings) = projection.into_publication_parts();
+            sources.push(source);
+            member_bindings.append(&mut bindings);
+        }
+        let plan = CatalogCoveragePlan::new(
+            CatalogCoverageScope::Library,
+            sources
+                .iter()
+                .map(|source| source.plan_source().clone())
+                .collect(),
+            Vec::new(),
+        )
+        .map_err(|_| {
+            CatalogCompositionError::invalid(
+                "catalog initial projection sources do not form one canonical Library plan",
+            )
+        })?;
+        Ok(Self {
+            plan,
+            contract_selection,
+            reducer,
+            sources,
+            member_bindings,
+        })
+    }
+
+    pub(crate) fn plan(&self) -> &CatalogCoveragePlan {
+        &self.plan
+    }
+
+    pub(crate) fn source_count(&self) -> usize {
+        self.sources.len()
+    }
+
+    pub(crate) fn member_count(&self) -> usize {
+        self.member_bindings.len()
+    }
+
+    pub(crate) fn into_publication(
+        self,
+        readiness: &CatalogReadinessSnapshot,
+        limits: CatalogPublicationLimits,
+    ) -> Result<CatalogInitialPublicationAssembly, CatalogCompositionError> {
+        CatalogInitialPublicationAssembly::assemble(
+            &self.plan,
+            readiness,
+            self.contract_selection,
+            self.sources,
+            &self.reducer,
+            self.member_bindings,
+            limits,
+        )
+        .map_err(|_| {
+            CatalogCompositionError::invalid(
+                "catalog initial projection does not match the frozen build lineage",
+            )
+        })
+    }
+}
+
+impl fmt::Debug for CatalogInitialProjectionBatch {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogInitialProjectionBatch")
+            .field("coverage_plan_id", &self.plan.coverage_plan_id)
+            .field("source_count", &self.sources.len())
+            .field("member_count", &self.member_bindings.len())
+            .finish()
+    }
+}
+
 fn known_field<T>(
     value: T,
     quality: QualifiedValueQuality,
@@ -523,7 +625,7 @@ mod tests {
     };
     use crate::catalog_contract::{
         CatalogAccessPolicyDigest, CatalogCoveragePlanSource, CatalogCoverageScope,
-        CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
+        CatalogReadinessMachine, CATALOG_PROJECTION_PACK_ID, CATALOG_QUERY_PACK_CONTRACT_VERSION,
     };
 
     const ADAPTER_ID: &str = "fixture-agent";
@@ -648,6 +750,28 @@ mod tests {
         let (source, bindings) = projection.into_publication_parts();
         assert_eq!(source.member_count(), 1);
         assert_eq!(bindings.len(), 1);
+    }
+
+    #[test]
+    fn initial_batch_freezes_plan_reducer_coverage_and_bindings_together() {
+        let (source, input) = fixture("object-a");
+        let projection = CatalogSourceProjection::assemble(source, vec![input]).unwrap();
+        let batch =
+            CatalogInitialProjectionBatch::assemble(vec![projection], selection(), 7).unwrap();
+        assert_eq!(batch.source_count(), 1);
+        assert_eq!(batch.member_count(), 1);
+        let mut readiness = CatalogReadinessMachine::register(batch.plan().clone(), 1).unwrap();
+        readiness.schedule_build().unwrap();
+        let publication = batch
+            .into_publication(readiness.snapshot(), CatalogPublicationLimits::default())
+            .unwrap();
+        assert_eq!(publication.source_count(), 1);
+        assert_eq!(publication.member_count(), 1);
+        assert_eq!(publication.project_row_count(), 1);
+        assert_eq!(publication.session_row_count(), 1);
+        let debug = format!("{publication:?}");
+        assert!(!debug.contains("project-a"));
+        assert!(!debug.contains("session-a"));
     }
 
     #[test]
