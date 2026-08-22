@@ -195,7 +195,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// catalog snapshots.
 /// v55: append-only independently-safe integrity-failure evidence for an
 /// active RFC 012B Library refresh while retaining its exact prior snapshot.
-pub const SCHEMA_VERSION: u32 = 55;
+/// v56: bounded current-generation RFC 012C unknown-native evidence owned by
+/// topology-neutral source-record identities.
+pub const SCHEMA_VERSION: u32 = 56;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -871,6 +873,26 @@ CREATE TABLE IF NOT EXISTS fact_records (
     )
   )
 );
+
+-- RFC 012C bounded unknown-native evidence. This is a current-generation
+-- semantic projection, not a per-record diagnostic log. The common writer
+-- enforces the hard per-object occurrence ceiling and derives samples and the
+-- complete aggregate digest with the topology-neutral reducer.
+CREATE TABLE IF NOT EXISTS unknown_native_evidence (
+  source_record_id BLOB PRIMARY KEY CHECK (length(source_record_id) = 32),
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  source_stream_id INTEGER NOT NULL REFERENCES source_streams(source_stream_id) ON DELETE CASCADE,
+  source_object_id INTEGER NOT NULL REFERENCES source_objects(source_object_id) ON DELETE CASCADE,
+  source_generation INTEGER NOT NULL CHECK (source_generation >= 0),
+  family_hint TEXT CHECK (family_hint IS NULL OR (length(family_hint) BETWEEN 1 AND 128)),
+  observed_bytes INTEGER NOT NULL CHECK (observed_bytes >= 0 AND observed_bytes <= 4194304),
+  payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
+  sanitized_excerpt BLOB NOT NULL CHECK (length(sanitized_excerpt) BETWEEN 1 AND 1024),
+  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_unknown_native_evidence_object_generation
+ON unknown_native_evidence(source_object_id, source_generation, source_record_id);
 
 CREATE TABLE IF NOT EXISTS fact_dependency_reads (
   fact_id BLOB NOT NULL REFERENCES fact_records(fact_id) ON DELETE CASCADE,
@@ -2444,6 +2466,7 @@ const CURRENT_TABLES: &[&str] = &[
     "canonical_runs",
     "canonical_sessions",
     "fact_dependency_reads",
+    "unknown_native_evidence",
     "fact_records",
     "source_record_errors",
     "change_log",
@@ -3484,6 +3507,12 @@ mod tests {
         assert!(object_exists(&conn, "table", "source_record_errors"));
         assert!(object_exists(&conn, "table", "change_log"));
         assert!(object_exists(&conn, "table", "fact_records"));
+        assert!(object_exists(&conn, "table", "unknown_native_evidence"));
+        assert!(object_exists(
+            &conn,
+            "index",
+            "idx_unknown_native_evidence_object_generation"
+        ));
         assert!(object_exists(&conn, "table", "canonical_sessions"));
         assert!(object_exists(
             &conn,

@@ -41,6 +41,7 @@ use super::timeline_projection::{
 use super::tool_result_projection::{
     apply_persisted_tool_result_facts, replace_message_references, replaced_message_reference_keys,
 };
+use super::unknown_evidence_projection::apply_unknown_evidence_mappings;
 use super::workflow_projection::apply_workflow_facts;
 use super::EngineError;
 
@@ -488,6 +489,7 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
     ) -> Result<Vec<ChangeEntry>, EngineError> {
         let run_state_started = Instant::now();
         let mut changes = Vec::new();
+        apply_unknown_evidence_mappings(transaction, context, self.batch)?;
         if !super::ingest_profile::IngestProfileSkip::current().runtime {
             apply_runtime_semantic_v2_facts(transaction, context, self.batch)?;
             let mut affected_states = BTreeSet::new();
@@ -4588,7 +4590,7 @@ mod tests {
         FactSemanticContext, HookEventSummary, InterpretationSettingsDocumentStatus,
         InterpretationSettingsFact, InterpretationSettingsLayer, InterpretationSettingsSnapshot,
         MessageFact, PersistedToolResultFact, PlanSnapshotFact, PresenceFact,
-        ProjectMemoryDocumentFact, RunEvidenceFact, RunFact, SessionFact,
+        ProjectMemoryDocumentFact, RecordMappingDisposition, RunEvidenceFact, RunFact, SessionFact,
         SessionIndexEntrySnapshot, SessionIndexSnapshotFact, SourceInstance, SourceInstanceKey,
         SourceInstanceSpec as AdapterSourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
         StreamId, TaskCollectionKind, TaskItemSnapshot, TaskSnapshotCoverage, TaskSnapshotFact,
@@ -4620,7 +4622,11 @@ mod tests {
     use crate::engine::runtime_usage_query::{
         read_runtime_usage_v2_page, RuntimeUsageV2PageRequest,
     };
+    use crate::engine::unknown_evidence_projection::{
+        read_unknown_evidence_snapshot, unknown_evidence_owner,
+    };
     use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
+    use crate::unknown_evidence_reducer::{UnknownEvidenceOccurrence, UnknownEvidenceReducer};
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
     const PROJECT: &str = "-Users-fixture-project";
@@ -4899,6 +4905,48 @@ mod tests {
         )
         .try_into()
         .expect("catalog identifiers fit SQLite INTEGER")
+    }
+
+    fn unknown_mapping_batch(
+        object_key: &[u8],
+        record: &SourceRecord,
+        family_hint: &str,
+        source_record_id_override: Option<crate::adapter::SourceRecordId>,
+    ) -> (FactBatch, UnknownEvidenceOccurrence) {
+        let mut batch = FactBatch::new_with_semantic_context(1, 1, semantic_context(object_key))
+            .expect("create unknown mapping batch");
+        batch
+            .push(
+                record,
+                Fact::UnknownRecord {
+                    native_kind: Some(family_hint.to_string()),
+                    raw_payload: record.payload.clone(),
+                    reason: "unmapped native fixture".to_string(),
+                },
+            )
+            .expect("retain unknown audit fact");
+        let source_record_id = source_record_id_override.unwrap_or_else(|| {
+            batch
+                .source_record_id(record)
+                .expect("derive source record id")
+        });
+        let occurrence = UnknownEvidenceOccurrence::new(
+            Some(family_hint.to_string()),
+            crate::adapter::BoundedNativeEvidence {
+                source_record_id,
+                observed_bytes: record.payload.len() as u64,
+                payload_digest: *record.payload_hash.as_bytes(),
+                sanitized_excerpt: crate::decode_runtime::diagnostic_excerpt(&record.payload),
+            },
+        )
+        .expect("construct bounded unknown occurrence");
+        batch
+            .add_record_mapping_disposition(RecordMappingDisposition::RetainedUnknown {
+                family_hint: occurrence.family_hint.clone(),
+                bounded_evidence: occurrence.evidence.clone(),
+            })
+            .expect("bind retained-unknown mapping");
+        (batch, occurrence)
     }
 
     fn direct_record(
@@ -6558,6 +6606,242 @@ mod tests {
             count(&connection, "fact_records"),
             i64::try_from(FACTS).unwrap()
         );
+    }
+
+    #[test]
+    fn durable_unknown_evidence_corrects_restarts_and_retracts_with_shared_digest() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("unknown-evidence.db");
+        let object_key = b"fixture-transcript";
+        let object_id = u64::try_from(object_catalog_id(object_key)).unwrap();
+        let first_record = direct_record(1, 0, 10, 20, br#"{"future":"first"}"#);
+        let (first_batch, first_occurrence) =
+            unknown_mapping_batch(object_key, &first_record, "future.message", None);
+
+        let mut connection = Connection::open(&database_path).unwrap();
+        schema::initialize_schema(&connection).unwrap();
+        let mut first_request = request(
+            ExpectedSourceCursor::Absent,
+            1,
+            first_record.cursor_end.as_bytes().to_vec(),
+            20,
+        );
+        first_request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
+        apply_fact_observation_commit(&mut connection, &first_request, &first_batch).unwrap();
+
+        let mut reference = UnknownEvidenceReducer::new(
+            crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
+            crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_SAMPLES,
+        )
+        .unwrap();
+        reference.apply(first_occurrence.clone()).unwrap();
+        assert_eq!(
+            read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
+            reference.snapshot().unwrap()
+        );
+        assert_eq!(
+            unknown_evidence_owner(&connection, &first_occurrence.evidence.source_record_id)
+                .unwrap(),
+            Some((object_id, 1))
+        );
+
+        let corrected_record = direct_record(1, 0, 10, 30, br#"{"future":"corrected"}"#);
+        let (corrected_batch, corrected_occurrence) =
+            unknown_mapping_batch(object_key, &corrected_record, "future.message", None);
+        assert_eq!(
+            first_occurrence.evidence.source_record_id,
+            corrected_occurrence.evidence.source_record_id
+        );
+        let mut correction_request = request(
+            ExpectedSourceCursor::At {
+                generation: 1,
+                committed_cursor: first_record.cursor_end.as_bytes().to_vec(),
+            },
+            1,
+            corrected_record.cursor_end.as_bytes().to_vec(),
+            30,
+        );
+        correction_request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
+        apply_fact_observation_commit(&mut connection, &correction_request, &corrected_batch)
+            .unwrap();
+        reference.apply(corrected_occurrence).unwrap();
+        let corrected_snapshot = reference.snapshot().unwrap();
+        assert_eq!(
+            read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
+            corrected_snapshot
+        );
+        assert_eq!(count(&connection, "unknown_native_evidence"), 1);
+
+        drop(connection);
+        let mut connection = Connection::open(&database_path).unwrap();
+        schema::initialize_schema(&connection).unwrap();
+        assert_eq!(
+            read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
+            corrected_snapshot
+        );
+
+        let mut reset_request = request(
+            ExpectedSourceCursor::At {
+                generation: 1,
+                committed_cursor: corrected_record.cursor_end.as_bytes().to_vec(),
+            },
+            2,
+            SourceCursor::append_offset(0).into_bytes(),
+            40,
+        );
+        reset_request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
+        apply_fact_observation_commit(
+            &mut connection,
+            &reset_request,
+            &FactBatch::new(1, 1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_unknown_evidence_snapshot(&connection, object_id, 2)
+                .unwrap()
+                .complete_count,
+            0
+        );
+        assert_eq!(count(&connection, "unknown_native_evidence"), 0);
+    }
+
+    #[test]
+    fn durable_unknown_evidence_rejects_cross_owner_and_capacity_atomically() {
+        let mut connection = database();
+        let object_key = b"fixture-transcript";
+        remember_test_object(object_key);
+        let record = direct_record(1, 0, 10, 20, br#"{"future":true}"#);
+        let (batch, occurrence) =
+            unknown_mapping_batch(object_key, &record, "future.message", None);
+        apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::Absent,
+                1,
+                record.cursor_end.as_bytes().to_vec(),
+                20,
+            ),
+            &batch,
+        )
+        .unwrap();
+
+        remember_test_object(b"foreign-object");
+        let foreign_record = object_record(
+            2,
+            1,
+            SourceCursor::append_offset(0),
+            SourceCursor::append_offset(10),
+            30,
+            &record.payload,
+        );
+        let (foreign_batch, _) = unknown_mapping_batch(
+            b"foreign-object",
+            &foreign_record,
+            "future.message",
+            Some(occurrence.evidence.source_record_id),
+        );
+        let error = apply_fact_observation_commit(
+            &mut connection,
+            &request_for_object(
+                b"foreign-object",
+                ExpectedSourceCursor::Absent,
+                1,
+                foreign_record.cursor_end.as_bytes().to_vec(),
+                30,
+            ),
+            &foreign_batch,
+        )
+        .unwrap_err();
+        assert!(matches!(error, EngineError::InvalidCommit(_)));
+        assert_eq!(count(&connection, "unknown_native_evidence"), 1);
+
+        let (source_instance_id, source_stream_id, source_object_id, commit_seq) = connection
+            .query_row(
+                r#"
+                SELECT so.source_instance_id, ss.source_stream_id,
+                       obj.source_object_id, obj.last_commit_seq
+                FROM source_objects obj
+                JOIN source_streams ss ON ss.source_stream_id = obj.source_stream_id
+                JOIN source_instances so ON so.source_instance_id = ss.source_instance_id
+                WHERE obj.object_key = ?1
+                "#,
+                [object_key.as_slice()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        connection
+            .execute("DELETE FROM unknown_native_evidence", [])
+            .unwrap();
+        connection
+            .execute(
+                r#"
+                WITH RECURSIVE sequence(value) AS (
+                  VALUES(1)
+                  UNION ALL
+                  SELECT value + 1 FROM sequence WHERE value < 65536
+                )
+                INSERT INTO unknown_native_evidence (
+                  source_record_id, source_instance_id, source_stream_id,
+                  source_object_id, source_generation, family_hint,
+                  observed_bytes, payload_digest, sanitized_excerpt,
+                  last_commit_seq
+                )
+                SELECT CAST(printf('%032d', value) AS BLOB), ?1, ?2, ?3, 1,
+                       NULL, 1, zeroblob(32), X'7B7D', ?4
+                FROM sequence
+                "#,
+                params![
+                    source_instance_id,
+                    source_stream_id,
+                    source_object_id,
+                    commit_seq,
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            count(&connection, "unknown_native_evidence"),
+            i64::try_from(crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_OCCURRENCES)
+                .unwrap()
+        );
+
+        let excess_record = direct_record(1, 10, 20, 40, br#"{"future":"excess"}"#);
+        let (excess_batch, _) =
+            unknown_mapping_batch(object_key, &excess_record, "future.message", None);
+        let error = apply_fact_observation_commit(
+            &mut connection,
+            &request(
+                ExpectedSourceCursor::At {
+                    generation: 1,
+                    committed_cursor: record.cursor_end.as_bytes().to_vec(),
+                },
+                1,
+                excess_record.cursor_end.as_bytes().to_vec(),
+                40,
+            ),
+            &excess_batch,
+        )
+        .unwrap_err();
+        assert!(matches!(error, EngineError::InvalidCommit(_)));
+        assert_eq!(
+            count(&connection, "unknown_native_evidence"),
+            i64::try_from(crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_OCCURRENCES)
+                .unwrap()
+        );
+        let committed_cursor: Vec<u8> = connection
+            .query_row(
+                "SELECT committed_cursor FROM source_objects WHERE object_key = ?1",
+                [object_key.as_slice()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(committed_cursor, record.cursor_end.as_bytes());
     }
 
     #[test]

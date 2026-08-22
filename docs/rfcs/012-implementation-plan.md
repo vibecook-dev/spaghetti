@@ -1130,8 +1130,12 @@ unknown corrections without whole-state cloning, and retracts object-owned
 evidence on reset, deletion, and replacement rollback. Forward/reverse scoped
 application matches the topology-neutral complete-set digest. Durable
 fact batches now retain every record mapping through append-slice merging and
-writer handoff without enlarging scoped queue variants. SQLite projection/query
-ownership and the portable fact/replacement carrier remain open.
+writer handoff without enlarging scoped queue variants. Schema v56 now stores
+the hard-bounded current unknown set under topology-neutral `SourceRecordId`,
+replaces complete snapshots, retracts prior generations, rejects cross-owner
+identity reuse and over-capacity commits atomically, and reconstructs the same
+exact aggregate/sample digest after reopen. The public durable query and the
+portable fact/replacement carrier remain open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
 does not close C1: capability and bounded unknown-evidence families, complete

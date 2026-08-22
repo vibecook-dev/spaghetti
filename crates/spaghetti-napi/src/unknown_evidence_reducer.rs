@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::adapter::{BoundedNativeEvidence, SourceRecordId};
+use crate::adapter::{BoundedNativeEvidence, SourceRecordId, MAX_UNKNOWN_RAW_PAYLOAD_BYTES};
 use crate::decode_runtime::MAX_DIAGNOSTIC_EXCERPT_BYTES;
 
 pub(crate) const UNKNOWN_EVIDENCE_AGGREGATE_CONTRACT_VERSION: u32 = 1;
@@ -56,6 +56,7 @@ impl UnknownEvidenceOccurrence {
             .family_hint
             .as_deref()
             .is_some_and(|value| !is_safe_family_hint(value))
+            || self.evidence.observed_bytes > MAX_UNKNOWN_RAW_PAYLOAD_BYTES as u64
             || self.evidence.sanitized_excerpt.is_empty()
             || self.evidence.sanitized_excerpt.len() > MAX_DIAGNOSTIC_EXCERPT_BYTES
         {
@@ -393,6 +394,14 @@ mod tests {
             vec![0; MAX_DIAGNOSTIC_EXCERPT_BYTES.saturating_add(1)];
         assert_eq!(
             reducer.replace_complete([invalid]),
+            Err(UnknownEvidenceReductionError::InvalidEvidence)
+        );
+        assert_eq!(reducer.snapshot().unwrap(), before);
+
+        let mut oversized = occurrence(2, b"oversized");
+        oversized.evidence.observed_bytes = MAX_UNKNOWN_RAW_PAYLOAD_BYTES as u64 + 1;
+        assert_eq!(
+            reducer.apply(oversized),
             Err(UnknownEvidenceReductionError::InvalidEvidence)
         );
         assert_eq!(reducer.snapshot().unwrap(), before);
