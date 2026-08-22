@@ -509,9 +509,9 @@ struct GrokSessionContext {
     clock_truncated: bool,
 }
 
-/// Test-only, privacy-sensitive coordinates used by the RFC 012B candidate
-/// oracle. They never enter its frozen fixture or a public contract.
-#[cfg(test)]
+/// Crate-private, privacy-sensitive coordinates shared by the bounded catalog
+/// producer and its independent oracle. They never enter a public contract or
+/// derive `Debug`.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct GrokCatalogCoordinates {
     pub(super) cwd: String,
@@ -519,8 +519,7 @@ pub(super) struct GrokCatalogCoordinates {
     pub(super) session_id: String,
 }
 
-#[cfg(test)]
-pub(super) fn candidate_catalog_path_coordinates(
+pub(super) fn catalog_path_coordinates(
     relative_path: &Path,
 ) -> Result<GrokCatalogCoordinates, AdapterError> {
     Ok(catalog_coordinates(session_context_from_path(
@@ -528,8 +527,7 @@ pub(super) fn candidate_catalog_path_coordinates(
     )?))
 }
 
-#[cfg(test)]
-pub(super) fn candidate_catalog_summary_coordinates(
+pub(super) fn catalog_summary_coordinates(
     relative_path: &Path,
     summary: &Value,
 ) -> Result<GrokCatalogCoordinates, AdapterError> {
@@ -545,7 +543,6 @@ pub(super) fn candidate_catalog_summary_coordinates(
     Ok(catalog_coordinates(context))
 }
 
-#[cfg(test)]
 fn catalog_coordinates(context: GrokSessionContext) -> GrokCatalogCoordinates {
     GrokCatalogCoordinates {
         cwd: context.cwd,

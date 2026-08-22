@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use super::adapter::{
-    candidate_catalog_path_coordinates, candidate_catalog_summary_coordinates, GrokAdapter,
-    GrokCatalogCoordinates,
+    catalog_path_coordinates, catalog_summary_coordinates, GrokAdapter, GrokCatalogCoordinates,
 };
 use crate::adapter::{
     AdapterId, AgentAdapter, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
@@ -304,7 +303,7 @@ fn candidate_projection(
             .parent()
             .ok_or("Grok membership object has no session directory")?
             .to_path_buf();
-        let coordinates = candidate_catalog_path_coordinates(&relative_path)?;
+        let coordinates = catalog_path_coordinates(&relative_path)?;
         if let Some(existing) = projection.member_coordinates.get(&directory) {
             if existing != &coordinates {
                 return Err("one Grok session directory produced conflicting coordinates".into());
@@ -494,7 +493,7 @@ fn enrich_summary(
                 return Ok(());
             }
         };
-    let summary_coordinates = candidate_catalog_summary_coordinates(&relative_path, &summary)?;
+    let summary_coordinates = catalog_summary_coordinates(&relative_path, &summary)?;
     if summary_coordinates != path_coordinates {
         return Err(
             "Grok summary identity disagrees with membership; explicit relation evidence is required"
