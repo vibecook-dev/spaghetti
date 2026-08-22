@@ -900,6 +900,18 @@ reject only when attempting to label the result Complete. No engine catalog
 runner, public transport, release promotion, or forward-degraded producer is
 added by this correction.
 
+The host now also registers bounded, path-free native artifact probes for all
+three built-in adapters. Codex selects the latest declared dated rollout in
+each configured root and binds its `session_meta.payload.cli_version`; older
+rollouts are historical evidence rather than a false version contradiction,
+while disagreement between configured roots fails closed. Grok recognizes the
+three required summary/event/signal shapes only when they are co-located in one
+bounded session directory. Because the reviewed Grok sidecars do not carry a
+trustworthy distributable version, that probe deliberately publishes no
+version and therefore cannot grant typed access. Codex and Grok remain
+Candidate/non-authorizing until their separate artifact pins, fixture-backed
+version ceilings, and promotion gates are complete.
+
 The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
 `ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,
 Codex, and Grok candidate catalog paths and freezes regression guards against

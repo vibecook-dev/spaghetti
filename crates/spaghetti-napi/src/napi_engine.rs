@@ -10,7 +10,7 @@ use napi::bindgen_prelude::{
 };
 use napi_derive::napi;
 
-use crate::adapter::{AdapterRegistry, SupportCatalog, SupportContractError};
+use crate::adapter::{AdapterError, AdapterRegistry, SupportCatalog, SupportContractError};
 use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
@@ -60,6 +60,8 @@ use crate::engine::{
 use crate::grok::GrokAdapter;
 
 const CLAUDE_ADAPTER_ID: &str = "claude-code";
+const CODEX_ADAPTER_ID: &str = "codex";
+const GROK_ADAPTER_ID: &str = "grok";
 
 fn verified_builtin_support_catalog() -> std::result::Result<SupportCatalog, SupportContractError> {
     SupportCatalog::new([
@@ -67,6 +69,28 @@ fn verified_builtin_support_catalog() -> std::result::Result<SupportCatalog, Sup
         crate::codex::verified_support_release()?,
         crate::grok::verified_support_release()?,
     ])
+}
+
+fn verified_builtin_registry(
+    support_catalog: Arc<SupportCatalog>,
+) -> std::result::Result<AdapterRegistry, AdapterError> {
+    AdapterRegistry::builder()
+        .register(ClaudeCodeAdapter::new())
+        .register(CodexAdapter::new())
+        .register(GrokAdapter::new())
+        .register_native_support_probe(
+            CLAUDE_ADAPTER_ID,
+            crate::claude::support_probe::probe_claude_native_artifact,
+        )
+        .register_native_support_probe(
+            CODEX_ADAPTER_ID,
+            crate::codex::support_probe::probe_codex_native_artifact,
+        )
+        .register_native_support_probe(
+            GROK_ADAPTER_ID,
+            crate::grok::support_probe::probe_grok_native_artifact,
+        )
+        .build_verified(support_catalog)
 }
 
 fn ns_to_ms(value: u64) -> f64 {
@@ -5112,15 +5136,7 @@ impl Task for OpenEngineTask {
         let support_catalog = verified_builtin_support_catalog()
             .map(Arc::new)
             .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
-        let registry = AdapterRegistry::builder()
-            .register(ClaudeCodeAdapter::new())
-            .register(CodexAdapter::new())
-            .register(GrokAdapter::new())
-            .register_native_support_probe(
-                CLAUDE_ADAPTER_ID,
-                crate::claude::support_probe::probe_claude_native_artifact,
-            )
-            .build_verified(support_catalog)
+        let registry = verified_builtin_registry(support_catalog)
             .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
         let inner = SpaghettiEngineCore::open_with_registry(
             EngineOptions {
@@ -6468,9 +6484,14 @@ fn validate_roots(roots: &[String], operation: &str) -> Result<()> {
 
 #[cfg(test)]
 mod support_binding_tests {
-    use super::public_engine_error_message;
+    use std::sync::Arc;
+
+    use super::{
+        public_engine_error_message, verified_builtin_registry, verified_builtin_support_catalog,
+    };
     use crate::adapter::{
-        verify_support_release_bundle, AgentAdapter, SupportBundleDocument, SupportReleaseStatus,
+        verify_support_release_bundle, AdapterId, AgentAdapter, SupportBundleDocument,
+        SupportReleaseStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::codex::CodexAdapter;
@@ -6486,6 +6507,29 @@ mod support_binding_tests {
         assert_eq!(message, "observation coordinator read source object failed");
         for private in ["/Users/", "alice", "private", "session.jsonl", "secret"] {
             assert!(!message.contains(private));
+        }
+    }
+
+    #[test]
+    fn shipped_registry_has_a_host_probe_for_every_builtin_adapter() {
+        let registry = verified_builtin_registry(Arc::new(
+            verified_builtin_support_catalog().expect("built-in support catalog is valid"),
+        ))
+        .expect("built-in adapter registry is valid");
+        let root = tempfile::TempDir::new().unwrap();
+        for (adapter_id, family) in [
+            ("claude-code", "claude-code"),
+            ("codex", "codex"),
+            ("grok", "grok"),
+        ] {
+            let probe = registry
+                .probe_native_support(
+                    &AdapterId::new(adapter_id).unwrap(),
+                    &[root.path().to_path_buf()],
+                )
+                .unwrap()
+                .expect("shipped adapter has a registered native probe");
+            assert_eq!(probe.family, family);
         }
     }
 

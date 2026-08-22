@@ -16,6 +16,7 @@ pub mod estimate_tokens;
 pub mod message_extractor;
 #[cfg(feature = "legacy-oracle")]
 pub mod reader;
+pub(crate) mod support_probe;
 
 pub(crate) use adapter::verified_support_release;
 pub use adapter::CodexAdapter;

@@ -16,6 +16,7 @@ pub mod message_extractor;
 pub mod reader;
 #[cfg(feature = "legacy-oracle")]
 pub mod sidecars;
+pub(crate) mod support_probe;
 
 pub(crate) use adapter::verified_support_release;
 pub use adapter::GrokAdapter;
