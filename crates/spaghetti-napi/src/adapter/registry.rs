@@ -2426,7 +2426,10 @@ pub(crate) mod tests {
         )
         .unwrap()
         .unwrap();
-        let prepared = attachment.prepare_append_runtime(16, 16).unwrap();
+        let prepared = attachment
+            .prepare_append_runtime(16, 16)
+            .unwrap()
+            .with_forced_contract_replay_for_test();
         let callback_slot = Arc::new(std::sync::Mutex::new(None));
         let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
         let drops = Arc::new(AtomicUsize::new(0));
@@ -2478,6 +2481,22 @@ pub(crate) mod tests {
             handle.ready_applied().await.unwrap(),
             ScopedObservationReadyResolution::Ready(_)
         ));
+
+        // A forced contract replay is consumed by bootstrap only. If the
+        // configured supervisor leaked it into the live owner, this unchanged
+        // poll would restart the object and emit a correction reset.
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), handle.poll())
+                .await
+                .unwrap()
+                .unwrap(),
+            ScopedObservationPollResolution::Ready(_)
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), runtime.next_event())
+                .await
+                .is_err()
+        );
 
         let resync_task = tokio::spawn({
             let handle = handle.clone();

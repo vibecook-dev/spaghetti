@@ -635,6 +635,14 @@ impl PreparedConfiguredAppendRuntime {
     {
         self.open_with_watcher_factory_inner(options, factory)
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_forced_contract_replay_for_test(mut self) -> Self {
+        for binding in &mut self.bindings {
+            binding.force_contract_replay = true;
+        }
+        self
+    }
 }
 
 impl std::fmt::Debug for PreparedConfiguredAppendRuntime {
@@ -666,6 +674,14 @@ impl ConfiguredScopedObservationSupervisor {
         if let Err(error) = self.bootstrap().await {
             configured_fail_watcher(&mut self.watcher);
             return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(error);
+        }
+
+        // Contract replay is a one-shot migration instruction. Bootstrap has
+        // now drained every exact object through its completion boundary, so
+        // carrying the bit into the live source owner would restart later
+        // polls at offset zero and manufacture a new generation forever.
+        for binding in &mut self.bindings {
+            binding.force_contract_replay = false;
         }
 
         let Self {
