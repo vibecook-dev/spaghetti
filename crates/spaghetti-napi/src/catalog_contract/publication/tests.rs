@@ -434,7 +434,7 @@ fn complete_source_coverage_order_is_canonical_and_zero_member_refs_are_rejected
 }
 
 #[test]
-fn initial_publication_requires_the_exact_empty_building_lineage_and_selection() {
+fn initial_publication_requires_an_exact_active_lineage_and_selection() {
     let alpha = fixture_source("alpha-lineage");
     let coverage_plan = plan(&[&alpha], &[]);
     let reducer = reducer_with(&[&alpha], 10);
@@ -457,18 +457,21 @@ fn initial_publication_requires_the_exact_empty_building_lineage_and_selection()
     )
     .is_err());
 
-    let mut drifted_readiness = building(&coverage_plan);
-    drifted_readiness.epoch = 2;
-    assert!(CatalogInitialPublicationAssembly::assemble(
+    let mut replacement_machine =
+        CatalogReadinessMachine::resume(coverage_plan.clone(), building(&coverage_plan)).unwrap();
+    replacement_machine.invalidate_source_generation().unwrap();
+    let replacement = CatalogInitialPublicationAssembly::assemble(
         &coverage_plan,
-        &drifted_readiness,
+        replacement_machine.snapshot(),
         selection(),
         sources.clone(),
         &reducer,
         member_bindings.clone(),
         CatalogPublicationLimits::default(),
     )
-    .is_err());
+    .unwrap();
+    assert_eq!(replacement.build().epoch, 2);
+    assert_eq!(replacement.build().attempt, 1);
 
     let mut drifted_selection = selection();
     drifted_selection.model_major = 2;

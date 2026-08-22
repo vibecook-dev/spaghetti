@@ -2971,6 +2971,67 @@ fn load_and_validate_epoch_invalidation(
     Ok(Some(commit_seq))
 }
 
+fn validate_initial_snapshot_epoch_replacement(
+    connection: &Connection,
+    plan: &CatalogCoveragePlan,
+    snapshot_id: CatalogSnapshotId,
+    publication_attempt: u64,
+    build_commit_seq: u64,
+) -> Result<(), EngineError> {
+    if snapshot_id.readiness_epoch == 1 {
+        return Ok(());
+    }
+    let invalidation = load_and_validate_epoch_invalidation(
+        connection,
+        plan,
+        snapshot_id.pack_contract_version,
+        snapshot_id.readiness_epoch,
+        None,
+    )?
+    .ok_or_else(|| {
+        corrupt_catalog_state(
+            "cold catalog publication is missing source-generation invalidation evidence",
+        )
+    })?;
+    if invalidation > build_commit_seq {
+        return Err(corrupt_catalog_state(
+            "cold catalog publication precedes its source-generation invalidation",
+        ));
+    }
+    if publication_attempt == 1 && invalidation != build_commit_seq {
+        let exact_partial: i64 = connection
+            .query_row(
+                r#"
+                SELECT EXISTS(
+                  SELECT 1 FROM catalog_partial_builds
+                  WHERE partial_commit_seq = ?1
+                    AND coverage_plan_id = ?2
+                    AND readiness_epoch = ?3
+                    AND attempt = 1
+                )
+                "#,
+                params![
+                    to_i64(build_commit_seq, "catalog initial build commit")?,
+                    plan.coverage_plan_id.storage_bytes().as_slice(),
+                    to_i64(snapshot_id.readiness_epoch, "catalog readiness epoch")?,
+                ],
+                |row| row.get(0),
+            )
+            .map_err(|error| sqlite_error("validate cold catalog publication base", error))?;
+        if exact_partial != 1 {
+            return Err(corrupt_catalog_state(
+                "cold catalog publication is not anchored to its invalidation or partial chain",
+            ));
+        }
+    }
+    if publication_attempt > 1 && invalidation >= build_commit_seq {
+        return Err(corrupt_catalog_state(
+            "retried cold catalog publication does not descend from its invalidation",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_partial_base_change(
     connection: &Connection,
     plan: &CatalogCoveragePlan,
@@ -3471,6 +3532,15 @@ fn decode_stored_state(
             snapshot_id,
             publication_attempt,
         )?;
+        if !publication.identity.is_refresh() {
+            validate_initial_snapshot_epoch_replacement(
+                connection,
+                &plan,
+                snapshot_id,
+                publication_attempt,
+                publication.identity.build_commit_seq(),
+            )?;
+        }
         let retained_snapshot_scan_limit =
             super::catalog_publication::MAX_RETAINED_REFRESH_LINEAGE_DEPTH
                 .checked_add(2)

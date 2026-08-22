@@ -2474,6 +2474,7 @@ fn validate_snapshot_lineage(
                     "catalog.library.build.scheduled",
                     catalog_state::PARTIAL_REASON,
                     catalog_state::REFRESH_RECOVERY_STARTED_REASON,
+                    catalog_state::SOURCE_GENERATION_INVALIDATED_REASON,
                 ],
                 None,
             )?;
@@ -3207,6 +3208,50 @@ mod tests {
         )
     }
 
+    fn prepare_cold_replacement(
+        connection: &mut Connection,
+        completion_label: &[u8],
+    ) -> (CatalogCoveragePlan, CatalogInitialPublicationCommand) {
+        let coverage_plan = plan();
+        catalog_state::apply_catalog_build_state_commit(
+            connection,
+            &CatalogBuildStateCommand::register(coverage_plan.clone(), 1, 10, 11),
+        )
+        .unwrap()
+        .unwrap();
+        let pending = catalog_state::load_catalog_build_state(connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            connection,
+            &CatalogBuildStateCommand::schedule(pending.expectation().unwrap(), 20, 21),
+        )
+        .unwrap()
+        .unwrap();
+        let building = catalog_state::load_catalog_build_state(connection)
+            .unwrap()
+            .unwrap();
+        let replacement = catalog_state::apply_catalog_build_state_commit(
+            connection,
+            &CatalogBuildStateCommand::invalidate_source_generation(
+                building
+                    .source_generation_invalidation_expectation()
+                    .unwrap(),
+                30,
+                31,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(replacement.commit_seq, 3);
+        assert_eq!(replacement.readiness.epoch, 2);
+        let assembly = assemble(&coverage_plan, &replacement.readiness, completion_label);
+        (
+            coverage_plan,
+            CatalogInitialPublicationCommand::new(assembly, replacement.commit_seq, 40, 41),
+        )
+    }
+
     fn prepare_refresh(
         connection: &mut Connection,
         initial_label: &[u8],
@@ -3396,6 +3441,48 @@ mod tests {
         assert_eq!(payload["project_row_count"], 0);
         assert_eq!(payload["session_row_count"], 0);
         assert_eq!(payload["tombstone_count"], 0);
+    }
+
+    #[test]
+    fn cold_source_generation_replacement_publishes_and_restarts_from_exact_invalidation() {
+        let mut connection = database();
+        let (coverage_plan, command) =
+            prepare_cold_replacement(&mut connection, b"cold-replacement");
+        let receipt = apply_initial_catalog_publication(&mut connection, &command)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.commit_seq, 4);
+        assert_eq!(receipt.snapshot_id.readiness_epoch, 2);
+        assert_eq!(
+            receipt.snapshot_id.coverage_plan_id,
+            coverage_plan.coverage_plan_id
+        );
+        assert_eq!(receipt.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(receipt.readiness.epoch, 2);
+
+        let restarted = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restarted.readiness, receipt.readiness);
+        assert_eq!(
+            apply_initial_catalog_publication(&mut connection, &command).unwrap(),
+            None
+        );
+
+        connection
+            .execute_batch(
+                "DROP TRIGGER catalog_epoch_invalidations_no_delete; \
+                 PRAGMA foreign_keys = OFF; \
+                 DELETE FROM catalog_epoch_invalidations;",
+            )
+            .unwrap();
+        let error = catalog_state::load_catalog_build_state(&connection).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("missing source-generation invalidation evidence"),
+            "{error}"
+        );
     }
 
     #[test]
