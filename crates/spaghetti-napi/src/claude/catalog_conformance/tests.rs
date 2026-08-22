@@ -832,6 +832,30 @@ fn authorized_producer_matches_frozen_identity_without_authorizing_candidate() {
         publication.source_coverage(),
         produced.assembly.source_coverage()
     );
+    assert_eq!(
+        produced.projection.member_count(),
+        produced.identity.session_count as usize
+    );
+    let reducer = produced
+        .projection
+        .reduce_into(
+            crate::catalog_contract::evidence::CatalogReducer::default(),
+            1,
+        )
+        .unwrap();
+    let frozen = reducer
+        .freeze_for_initial_publication(
+            crate::catalog_contract::evidence::CatalogReducerPublicationLimits::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        frozen.project_row_count(),
+        produced.identity.project_count as usize
+    );
+    assert_eq!(
+        frozen.session_row_count(),
+        produced.identity.session_count as usize
+    );
 
     let debug = format!("{produced:?}");
     assert!(!debug.contains("/Users/"));

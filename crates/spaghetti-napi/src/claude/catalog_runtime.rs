@@ -20,6 +20,9 @@ use crate::adapter::{
 };
 #[cfg(test)]
 use crate::adapter::{SourceInstanceKey, SourceInstanceSpec, SourceRoot};
+use crate::catalog_contract::evidence::{
+    CatalogAvailability, CatalogEvidenceOwner, ProjectAssociationBasis,
+};
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 use crate::decode_runtime::{
     decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecodedFactBatch,
@@ -35,6 +38,7 @@ use crate::source::catalog_composition::{
     CatalogOverlapStrategy, CatalogSourceComponent, CatalogSourceComposition,
     CatalogSourcePrimitive, MAX_CATALOG_COVERAGE_POINTS, MAX_MEMBERSHIP_MEMBERS,
 };
+use crate::source::catalog_projection::{CatalogSourceMemberProjection, CatalogSourceProjection};
 use crate::source::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
     AppendTransition, DirectoryCheckpoint, DirectoryEntryKind, DirectoryEntryState, DirectoryScan,
@@ -90,6 +94,7 @@ pub(crate) struct ClaudeCatalogIdentity {
 pub(crate) struct ClaudeCatalogProduction {
     pub(crate) identity: ClaudeCatalogIdentity,
     pub(crate) assembly: CatalogLibraryCoverageAssembly,
+    pub(crate) projection: CatalogSourceProjection,
 }
 
 pub(crate) fn claude_catalog_components() -> Vec<CatalogSourceComponent> {
@@ -346,7 +351,7 @@ fn produce_claude_library_coverage_after_heads(
 
     for entry in top_level_scan.entries.values() {
         let coordinates = parent_coordinates(&entry.display_path)?;
-        admit_member(
+        let member = admit_member(
             &mut MemberAdmission {
                 members: &mut members,
                 projects: &mut projects,
@@ -357,10 +362,24 @@ fn produce_claude_library_coverage_after_heads(
             coordinates.session_id,
             TOP_LEVEL_COMPONENT_ID,
         )?;
+        retain_projection_owner(
+            &mut members,
+            &member,
+            ProjectionOwner::new(
+                0,
+                projection_owner(
+                    source_instance_key,
+                    top_level_component,
+                    &entry.path_key,
+                    entry.generation,
+                )?,
+                ProjectAssociationBasis::SessionDirectory,
+            ),
+        );
     }
     for entry in nested_scan.entries.values() {
         let coordinates = nested_coordinates(&entry.display_path)?;
-        admit_member(
+        let member = admit_member(
             &mut MemberAdmission {
                 members: &mut members,
                 projects: &mut projects,
@@ -371,6 +390,20 @@ fn produce_claude_library_coverage_after_heads(
             coordinates.session_id,
             NESTED_COMPONENT_ID,
         )?;
+        retain_projection_owner(
+            &mut members,
+            &member,
+            ProjectionOwner::new(
+                1,
+                projection_owner(
+                    source_instance_key,
+                    nested_component,
+                    &entry.path_key,
+                    entry.generation,
+                )?,
+                ProjectAssociationBasis::SessionDirectory,
+            ),
+        );
     }
 
     let adapter = ClaudeCodeAdapter::new();
@@ -481,6 +514,20 @@ fn produce_claude_library_coverage_after_heads(
                 index_entry.native_session_id.clone(),
                 INDEX_COMPONENT_ID,
             )?;
+            retain_projection_owner(
+                &mut members,
+                &member,
+                ProjectionOwner::new(
+                    2,
+                    projection_owner(
+                        source_instance_key,
+                        index_component,
+                        &entry.path_key,
+                        checkpoint.generation,
+                    )?,
+                    ProjectAssociationBasis::NativeProjectIndex,
+                ),
+            );
             let metadata = members.get_mut(&member).expect("admitted member exists");
             metadata.merge_index(
                 canonical_display(Some(index_entry.project_path.clone())),
@@ -706,6 +753,30 @@ fn produce_claude_library_coverage_after_heads(
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let projection_members = members
+        .iter()
+        .map(|(member, state)| {
+            let owner = state.projection_owner.as_ref().ok_or_else(|| {
+                CatalogCompositionError::invalid(
+                    "Claude catalog member has no covered projection owner",
+                )
+            })?;
+            let availability = if state.admitting_component_ids.iter().any(|component| {
+                component == TOP_LEVEL_COMPONENT_ID || component == NESTED_COMPONENT_ID
+            }) {
+                CatalogAvailability::TranscriptDiscovered
+            } else {
+                CatalogAvailability::MetadataOnly
+            };
+            Ok(CatalogSourceMemberProjection::new(
+                owner.owner.clone(),
+                member.0.clone(),
+                member.1.clone(),
+                availability,
+                owner.association_basis,
+            ))
+        })
+        .collect::<Result<Vec<_>, CatalogCompositionError>>()?;
 
     let completions = vec![
         complete_directory(
@@ -767,6 +838,12 @@ fn produce_claude_library_coverage_after_heads(
         membership_entries,
         completions,
     )?;
+    let publication_source = assembly.complete_publication_source().map_err(|_| {
+        CatalogCompositionError::invalid(
+            "Claude catalog coverage could not form a complete publication source",
+        )
+    })?;
+    let projection = CatalogSourceProjection::assemble(publication_source, projection_members)?;
 
     Ok(ClaudeCatalogProduction {
         identity: ClaudeCatalogIdentity {
@@ -777,6 +854,7 @@ fn produce_claude_library_coverage_after_heads(
             session_identity_digest: identity_digest(&sessions),
         },
         assembly,
+        projection,
     })
 }
 
@@ -788,6 +866,64 @@ struct MemberState {
     first_prompt: Option<String>,
     title: Option<String>,
     created_at: Option<String>,
+    projection_owner: Option<ProjectionOwner>,
+}
+
+#[derive(Clone)]
+struct ProjectionOwner {
+    priority: u8,
+    owner: CatalogEvidenceOwner,
+    association_basis: ProjectAssociationBasis,
+}
+
+impl ProjectionOwner {
+    fn new(
+        priority: u8,
+        owner: CatalogEvidenceOwner,
+        association_basis: ProjectAssociationBasis,
+    ) -> Self {
+        Self {
+            priority,
+            owner,
+            association_basis,
+        }
+    }
+}
+
+fn retain_projection_owner(
+    members: &mut BTreeMap<MemberKey, MemberState>,
+    member: &MemberKey,
+    candidate: ProjectionOwner,
+) {
+    let state = members.get_mut(member).expect("admitted member exists");
+    if state
+        .projection_owner
+        .as_ref()
+        .is_none_or(|current| candidate.priority < current.priority)
+    {
+        state.projection_owner = Some(candidate);
+    }
+}
+
+fn projection_owner(
+    source_instance_key: CanonicalSourceInstanceKey,
+    component: &CatalogSourceComponent,
+    object_key: &[u8],
+    generation: u64,
+) -> Result<CatalogEvidenceOwner, CatalogCompositionError> {
+    CatalogEvidenceOwner::new(
+        ADAPTER_ID,
+        source_instance_key,
+        crate::adapter::CoverageStreamKey::derive(ADAPTER_ID, component.stream_id.as_bytes())
+            .map_err(|_| {
+                CatalogCompositionError::invalid("Claude catalog stream identity is invalid")
+            })?,
+        crate::adapter::CoverageObjectKey::derive(&component.stream_id, object_key).map_err(
+            |_| CatalogCompositionError::invalid("Claude catalog object identity is invalid"),
+        )?,
+        generation,
+    )
+    .map_err(|_| CatalogCompositionError::invalid("Claude catalog evidence owner is invalid"))
 }
 
 impl MemberState {
