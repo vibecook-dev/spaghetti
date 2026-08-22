@@ -575,7 +575,7 @@ pub struct SpaghettiEngineCore {
 pub(crate) struct CatalogInitialBuildContext {
     plan: CatalogCoveragePlan,
     readiness: crate::catalog_contract::CatalogReadinessSnapshot,
-    partial_expectation: catalog_state::CatalogPartialBuildExpectation,
+    partial_expectation: Option<catalog_state::CatalogPartialBuildExpectation>,
     expected_build_commit_seq: u64,
 }
 
@@ -590,6 +590,10 @@ impl CatalogInitialBuildContext {
 
     pub(crate) fn progress_coverage(&self) -> &[SourceCoverageSet] {
         &self.readiness.source_coverage
+    }
+
+    pub(crate) fn can_record_partial(&self) -> bool {
+        self.partial_expectation.is_some()
     }
 }
 
@@ -1741,8 +1745,10 @@ impl SpaghettiEngineCore {
                 "catalog initial build resumed a different frozen plan".to_string(),
             ));
         }
-        if state.readiness.state == CatalogReadinessPhase::Error
-            && state.readiness.last_complete_snapshot.is_none()
+        if matches!(
+            state.readiness.state,
+            CatalogReadinessPhase::Degraded | CatalogReadinessPhase::Error
+        ) && state.readiness.last_complete_snapshot.is_none()
         {
             self.commit_catalog_build_state(CatalogBuildStateCommand::retry_terminal_refresh(
                 state.expectation()?,
@@ -1777,11 +1783,16 @@ impl SpaghettiEngineCore {
                 "catalog initial build requires the exact durable active-build lineage".to_string(),
             ));
         }
-        let partial_expectation = state.partial_expectation()?;
+        let partial_expectation = state
+            .readiness
+            .reason
+            .is_none()
+            .then(|| state.partial_expectation())
+            .transpose()?;
         Ok(CatalogInitialBuildContext {
             plan,
             readiness: state.readiness,
-            expected_build_commit_seq: partial_expectation.state_commit_seq(),
+            expected_build_commit_seq: state.last_commit_seq,
             partial_expectation,
         })
     }
@@ -1792,7 +1803,11 @@ impl SpaghettiEngineCore {
         source_coverage: Vec<SourceCoverageSet>,
     ) -> Result<CatalogInitialBuildContext, EngineError> {
         let now = engine_now_unix_ms()?;
-        let partial_expectation = context.partial_expectation;
+        let partial_expectation = context.partial_expectation.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog retry progress cannot replace its source-retrying state".to_string(),
+            )
+        })?;
         self.commit_catalog_build_state(CatalogBuildStateCommand::record_partial(
             partial_expectation,
             source_coverage,
@@ -1814,7 +1829,7 @@ impl SpaghettiEngineCore {
             plan: context.plan,
             readiness: state.readiness,
             expected_build_commit_seq: partial_expectation.state_commit_seq(),
-            partial_expectation,
+            partial_expectation: Some(partial_expectation),
         })
     }
 
@@ -2005,6 +2020,79 @@ impl SpaghettiEngineCore {
             partial_expectation,
             expected,
         })
+    }
+
+    /// Record terminal required-source loss against whichever durable Library
+    /// lineage is active. A cold build uses the no-snapshot evidence contract;
+    /// a retained publication continues through the refresh contract.
+    pub(crate) fn degrade_active_catalog_source(
+        &self,
+        reason_code: &str,
+    ) -> Result<Option<u64>, EngineError> {
+        let state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog source failure requires durable active readiness".to_string(),
+            )
+        })?;
+        if state.readiness.last_complete_snapshot.is_some() {
+            return self.degrade_active_catalog_refresh(reason_code);
+        }
+        if state.readiness.state == CatalogReadinessPhase::Degraded {
+            return match state.readiness.reason {
+                Some(
+                    crate::catalog_contract::CatalogReadinessReason::TerminalSourceUnavailable {
+                        code,
+                    },
+                ) if code == reason_code => Ok(None),
+                _ => Err(EngineError::InvalidCommit(
+                    "catalog cold source failure conflicts with durable failure evidence"
+                        .to_string(),
+                )),
+            };
+        }
+        let expected = state.initial_source_expectation()?;
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::degrade_initial_build_source(
+            expected,
+            reason_code,
+            now,
+            now,
+        ))
+    }
+
+    /// Publish a retryable required-source reason without confusing a cold
+    /// build with retained-snapshot refresh authority.
+    pub(crate) fn mark_active_catalog_source_retrying(
+        &self,
+        reason_code: &str,
+    ) -> Result<Option<u64>, EngineError> {
+        let state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog source retry requires durable active readiness".to_string(),
+            )
+        })?;
+        if state.readiness.last_complete_snapshot.is_some() {
+            return self.mark_active_catalog_refresh_retrying(reason_code);
+        }
+        if state.readiness.reason
+            == Some(
+                crate::catalog_contract::CatalogReadinessReason::SourceRetrying {
+                    code: reason_code.to_string(),
+                },
+            )
+        {
+            return Ok(None);
+        }
+        let expected = state.initial_source_expectation()?;
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(
+            CatalogBuildStateCommand::mark_initial_build_source_retrying(
+                expected,
+                reason_code,
+                now,
+                now,
+            ),
+        )
     }
 
     pub(crate) fn degrade_active_catalog_refresh(

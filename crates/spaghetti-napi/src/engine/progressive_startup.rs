@@ -10,13 +10,16 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::adapter::AdapterId;
 use crate::catalog_contract::CatalogAccessPolicyDigest;
 
 use super::catalog_build::{
     CatalogBuildIntent, CatalogBuildOutcome, CatalogBuildPreparation, CatalogConfiguredSource,
+    PreparedCatalogBuild,
 };
+use super::catalog_refresh::{CATALOG_REFRESH_RETRY_DELAY, MAX_AUTOMATIC_REFRESH_ATTEMPTS};
 use super::coordinator::validate_request;
 use super::supervisor::StartingObservationSupervisor;
 use super::{
@@ -403,9 +406,13 @@ impl SpaghettiEngineCore {
                     )
                 }
                 CatalogBuildPreparation::Prepared(prepared) if watcher_unavailable.is_empty() => {
-                    ConfiguredCatalogStartupOutcome::Catalog(
-                        self.publish_prepared_catalog(prepared, cancellation.clone())?,
-                    )
+                    ConfiguredCatalogStartupOutcome::Catalog(publish_startup_catalog_with_retry(
+                        self,
+                        prepared,
+                        cancellation.clone(),
+                        CATALOG_REFRESH_RETRY_DELAY,
+                        MAX_AUTOMATIC_REFRESH_ATTEMPTS,
+                    )?)
                 }
                 CatalogBuildPreparation::Prepared(_) => {
                     ConfiguredCatalogStartupOutcome::WatcherUnavailable {
@@ -418,6 +425,7 @@ impl SpaghettiEngineCore {
                 &catalog,
                 ConfiguredCatalogStartupOutcome::Catalog(
                     CatalogBuildOutcome::LastCompleteRetained
+                        | CatalogBuildOutcome::InitialSourceUnavailable { .. }
                         | CatalogBuildOutcome::Published { .. }
                 )
             );
@@ -540,6 +548,78 @@ fn check_cancelled(cancellation: &QueryCancellationToken) -> Result<(), EngineEr
     }
 }
 
+fn publish_startup_catalog_with_retry(
+    engine: &Arc<SpaghettiEngineCore>,
+    prepared: PreparedCatalogBuild,
+    cancellation: QueryCancellationToken,
+    retry_delay: Duration,
+    max_attempts: usize,
+) -> Result<CatalogBuildOutcome, EngineError> {
+    run_startup_catalog_retry_policy(
+        max_attempts,
+        || {
+            check_cancelled(&cancellation)?;
+            engine.publish_prepared_catalog(prepared.clone(), cancellation.clone())
+        },
+        || {
+            engine
+                .mark_active_catalog_source_retrying("catalog_source_initial_retrying")
+                .map(|_| ())
+        },
+        || engine.degrade_active_catalog_source("catalog_source_initial_exhausted"),
+        || wait_for_catalog_retry(&cancellation, retry_delay),
+    )
+}
+
+fn run_startup_catalog_retry_policy<Publish, MarkRetry, Degrade, Wait>(
+    max_attempts: usize,
+    mut publish: Publish,
+    mut mark_retry: MarkRetry,
+    mut degrade: Degrade,
+    mut wait: Wait,
+) -> Result<CatalogBuildOutcome, EngineError>
+where
+    Publish: FnMut() -> Result<CatalogBuildOutcome, EngineError>,
+    MarkRetry: FnMut() -> Result<(), EngineError>,
+    Degrade: FnMut() -> Result<Option<u64>, EngineError>,
+    Wait: FnMut() -> Result<(), EngineError>,
+{
+    if max_attempts == 0 {
+        return Err(EngineError::InvalidConfig(
+            "catalog startup retry policy requires at least one attempt".to_string(),
+        ));
+    }
+    for attempt in 1..=max_attempts {
+        match publish() {
+            Ok(outcome) => return Ok(outcome),
+            Err(EngineError::Observation { .. }) if attempt < max_attempts => {
+                mark_retry()?;
+                wait()?;
+            }
+            Err(EngineError::Observation { .. }) => {
+                let commit_seq = degrade()?;
+                return Ok(CatalogBuildOutcome::InitialSourceUnavailable { commit_seq });
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("nonzero catalog retry policy always returns from its bounded loop")
+}
+
+fn wait_for_catalog_retry(
+    cancellation: &QueryCancellationToken,
+    delay: Duration,
+) -> Result<(), EngineError> {
+    let deadline = Instant::now() + delay;
+    loop {
+        check_cancelled(cancellation)?;
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Ok(());
+        };
+        thread::sleep(remaining.min(Duration::from_millis(25)));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -561,6 +641,127 @@ mod tests {
     use crate::source::{AppendDelimitedConfig, IngestPriority, SourceRecord};
 
     use super::*;
+
+    #[test]
+    fn cold_catalog_retry_policy_recovers_or_publishes_terminal_degraded_state() {
+        let mut publish_calls = 0;
+        let mut retry_marks = 0;
+        let mut waits = 0;
+        let mut degrades = 0;
+        let recovered = run_startup_catalog_retry_policy(
+            3,
+            || {
+                publish_calls += 1;
+                if publish_calls < 3 {
+                    Err(EngineError::Observation {
+                        operation: "test cold catalog source",
+                        detail: "retryable".to_string(),
+                    })
+                } else {
+                    Ok(CatalogBuildOutcome::Published {
+                        kind: crate::engine::catalog_build::CatalogPublicationKind::Initial,
+                        commit_seq: Some(19),
+                        source_count: 1,
+                        member_count: 2,
+                    })
+                }
+            },
+            || {
+                retry_marks += 1;
+                Ok(())
+            },
+            || {
+                degrades += 1;
+                Ok(Some(20))
+            },
+            || {
+                waits += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            recovered,
+            CatalogBuildOutcome::Published {
+                kind: crate::engine::catalog_build::CatalogPublicationKind::Initial,
+                commit_seq: Some(19),
+                ..
+            }
+        ));
+        assert_eq!((publish_calls, retry_marks, waits, degrades), (3, 2, 2, 0));
+
+        let mut publish_calls = 0;
+        let mut retry_marks = 0;
+        let mut waits = 0;
+        let mut degrades = 0;
+        let degraded = run_startup_catalog_retry_policy(
+            3,
+            || {
+                publish_calls += 1;
+                Err(EngineError::Observation {
+                    operation: "test cold catalog source",
+                    detail: "unavailable".to_string(),
+                })
+            },
+            || {
+                retry_marks += 1;
+                Ok(())
+            },
+            || {
+                degrades += 1;
+                Ok(Some(29))
+            },
+            || {
+                waits += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            degraded,
+            CatalogBuildOutcome::InitialSourceUnavailable {
+                commit_seq: Some(29)
+            }
+        );
+        assert_eq!((publish_calls, retry_marks, waits, degrades), (3, 2, 2, 1));
+    }
+
+    #[test]
+    fn cold_catalog_retry_policy_never_reclassifies_integrity_or_empty_policy() {
+        let mut retry_marks = 0;
+        let mut degrades = 0;
+        let error = run_startup_catalog_retry_policy(
+            3,
+            || {
+                Err(EngineError::CatalogIntegrity {
+                    operation: "test cold catalog assembly",
+                })
+            },
+            || {
+                retry_marks += 1;
+                Ok(())
+            },
+            || {
+                degrades += 1;
+                Ok(Some(1))
+            },
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, EngineError::CatalogIntegrity { .. }));
+        assert_eq!((retry_marks, degrades), (0, 0));
+
+        assert!(matches!(
+            run_startup_catalog_retry_policy(
+                0,
+                || Ok(CatalogBuildOutcome::LastCompleteRetained),
+                || Ok(()),
+                || Ok(None),
+                || Ok(()),
+            ),
+            Err(EngineError::InvalidConfig(_))
+        ));
+    }
 
     struct OrderedStartupAdapter {
         manifest: AdapterManifest,

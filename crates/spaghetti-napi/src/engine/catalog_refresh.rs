@@ -12,15 +12,13 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TrySendError};
 
-use super::catalog_build::{
-    CatalogBuildIntent, CatalogBuildOutcome, CatalogConfiguredSource, CatalogPublicationKind,
-};
+use super::catalog_build::{CatalogBuildIntent, CatalogBuildOutcome, CatalogConfiguredSource};
 use super::{EngineError, QueryCancellationToken, SpaghettiEngineCore};
 
 const CATALOG_REFRESH_WAKE_CAPACITY: usize = 1;
 const CATALOG_REFRESH_COALESCE_WINDOW: Duration = Duration::from_millis(50);
-const CATALOG_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(1);
-const MAX_AUTOMATIC_REFRESH_ATTEMPTS: usize = 3;
+pub(super) const CATALOG_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(1);
+pub(super) const MAX_AUTOMATIC_REFRESH_ATTEMPTS: usize = 3;
 
 type RefreshOperation =
     Box<dyn Fn(&QueryCancellationToken) -> Result<(), EngineError> + Send + 'static>;
@@ -71,18 +69,15 @@ impl CatalogRefreshScheduler {
                     CatalogBuildIntent::Refresh,
                     cancellation.clone(),
                 )? {
-                    CatalogBuildOutcome::Published {
-                        kind: CatalogPublicationKind::Refresh,
-                        ..
-                    } => Ok(()),
+                    CatalogBuildOutcome::Published { .. } => Ok(()),
                     CatalogBuildOutcome::AuthorizationUnavailable { .. }
                     | CatalogBuildOutcome::LastCompleteRetained
-                    | CatalogBuildOutcome::Published {
-                        kind: CatalogPublicationKind::Initial,
-                        ..
-                    } => Err(EngineError::InvalidCommit(
-                        "configured catalog refresh lost its active promoted lineage".to_string(),
-                    )),
+                    | CatalogBuildOutcome::InitialSourceUnavailable { .. } => {
+                        Err(EngineError::InvalidCommit(
+                            "configured catalog refresh lost its active promoted lineage"
+                                .to_string(),
+                        ))
+                    }
                 }
             },
             CATALOG_REFRESH_COALESCE_WINDOW,
@@ -91,13 +86,13 @@ impl CatalogRefreshScheduler {
             move |error, terminal| match error {
                 EngineError::Observation { .. } if terminal => {
                     let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
-                    engine.degrade_active_catalog_refresh("catalog_source_refresh_exhausted")?;
+                    engine.degrade_active_catalog_source("catalog_source_refresh_exhausted")?;
                     Ok(CatalogRefreshFailureControl::Stop)
                 }
                 EngineError::Observation { .. } => {
                     let engine = failure_engine.upgrade().ok_or(EngineError::ShuttingDown)?;
                     engine
-                        .mark_active_catalog_refresh_retrying("catalog_source_refresh_retrying")?;
+                        .mark_active_catalog_source_retrying("catalog_source_refresh_retrying")?;
                     Ok(CatalogRefreshFailureControl::FollowRetryPolicy)
                 }
                 EngineError::CatalogIntegrity { .. } => {

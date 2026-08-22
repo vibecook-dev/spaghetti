@@ -69,6 +69,10 @@ pub(crate) enum CatalogBuildOutcome {
     /// Startup retained the restart-authenticated last complete publication
     /// without manufacturing a refresh or consuming native catalog sources.
     LastCompleteRetained,
+    /// A cold build exhausted its bounded source policy and durably published
+    /// an explicitly degraded no-snapshot aggregate. It grants no query
+    /// authority; a later configured-source signal may start a new attempt.
+    InitialSourceUnavailable { commit_seq: Option<u64> },
     Published {
         kind: CatalogPublicationKind,
         commit_seq: Option<u64>,
@@ -77,6 +81,7 @@ pub(crate) enum CatalogBuildOutcome {
     },
 }
 
+#[derive(Clone)]
 struct PreparedCatalogSource {
     instance: SourceInstance,
     authorization: crate::adapter::TypedAccessAuthorization,
@@ -98,6 +103,7 @@ pub(crate) enum CatalogBuildPreparation {
     Prepared(PreparedCatalogBuild),
 }
 
+#[derive(Clone)]
 pub(crate) struct PreparedCatalogBuild {
     plan: CatalogCoveragePlan,
     selection: ContractVersionSelection,
@@ -329,8 +335,22 @@ impl SpaghettiEngineCore {
             Some(CatalogReadinessPhase::Error) => {
                 publish_refresh(self, plan, selection, &sources, &cancellation)
             }
-            Some(CatalogReadinessPhase::Degraded) if intent == CatalogBuildIntent::Startup => {
+            Some(CatalogReadinessPhase::Degraded)
+                if intent == CatalogBuildIntent::Startup
+                    && durable_state
+                        .as_ref()
+                        .and_then(|state| state.readiness.last_complete_snapshot)
+                        .is_some() =>
+            {
                 Ok(CatalogBuildOutcome::LastCompleteRetained)
+            }
+            Some(CatalogReadinessPhase::Degraded)
+                if durable_state
+                    .as_ref()
+                    .and_then(|state| state.readiness.last_complete_snapshot)
+                    .is_none() =>
+            {
+                publish_initial(self, plan, selection, &sources, &cancellation)
             }
             Some(CatalogReadinessPhase::Degraded) => {
                 publish_refresh(self, plan, selection, &sources, &cancellation)
@@ -378,7 +398,7 @@ fn publish_initial(
         for (index, source) in sources.iter().enumerate() {
             check_cancelled(cancellation)?;
             let projection = produce_projection(source, None)?;
-            if index + 1 < sources.len() {
+            if context.can_record_partial() && index + 1 < sources.len() {
                 if let Some(progress) = merge_partial_coverage(
                     context.progress_coverage(),
                     projection.source_coverage(),
@@ -985,6 +1005,92 @@ mod tests {
         let ready = engine.load_catalog_build_state().unwrap().unwrap();
         assert_eq!(ready.readiness.state, CatalogReadinessPhase::Ready);
         assert_eq!(ready.readiness.attempt, 2);
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cold_source_dispatch_degrades_without_query_authority_and_recovers() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("catalog-cold-source.db");
+        let plan = CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new())
+            .unwrap();
+        let engine = non_authorizing_engine(database_path.clone());
+        let first = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        assert!(first.can_record_partial());
+
+        engine
+            .mark_active_catalog_source_retrying("catalog_source_initial_retrying")
+            .unwrap()
+            .unwrap();
+        let retrying = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        assert!(!retrying.can_record_partial());
+        assert!(!engine.status().catalog_query_ready);
+
+        engine
+            .degrade_active_catalog_source("catalog_source_initial_exhausted")
+            .unwrap()
+            .unwrap();
+        let degraded = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(degraded.readiness.state, CatalogReadinessPhase::Degraded);
+        assert_eq!(degraded.readiness.attempt, 1);
+        assert_eq!(degraded.readiness.last_complete_snapshot, None);
+        assert!(!engine.status().catalog_query_ready);
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let engine = non_authorizing_engine(database_path);
+        let valid = PreparedCatalogBuild {
+            plan,
+            selection: empty_catalog_selection(Some(
+                crate::catalog_contract::CATALOG_QUERY_PACK_CONTRACT_VERSION,
+            )),
+            sources: Vec::new(),
+            intent: CatalogBuildIntent::Refresh,
+        };
+        let outcome = engine
+            .publish_prepared_catalog(valid, QueryCancellationToken::default())
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            CatalogBuildOutcome::Published {
+                kind: CatalogPublicationKind::Initial,
+                ..
+            }
+        ));
+        let ready = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(ready.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(ready.readiness.attempt, 2);
+        assert!(engine.status().catalog_query_ready);
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn cold_source_retry_can_fail_integrity_and_restart_as_a_new_attempt() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("catalog-cold-retry-integrity.db");
+        let plan = CatalogCoveragePlan::new(CatalogCoverageScope::Library, Vec::new(), Vec::new())
+            .unwrap();
+        let engine = non_authorizing_engine(database_path.clone());
+        engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        engine
+            .mark_active_catalog_source_retrying("catalog_source_initial_retrying")
+            .unwrap()
+            .unwrap();
+        engine
+            .fail_active_initial_catalog_integrity("catalog_initial_integrity_failed")
+            .unwrap()
+            .unwrap();
+        let failed = engine.load_catalog_build_state().unwrap().unwrap();
+        assert_eq!(failed.readiness.state, CatalogReadinessPhase::Error);
+        assert_eq!(failed.readiness.last_complete_snapshot, None);
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let engine = non_authorizing_engine(database_path);
+        let recovered = engine.begin_initial_catalog_build(plan).unwrap();
+        assert_eq!(recovered.readiness.attempt, 2);
+        assert_eq!(recovered.readiness.state, CatalogReadinessPhase::Building);
+        assert!(recovered.can_record_partial());
         engine.shutdown().unwrap();
     }
 }

@@ -138,6 +138,7 @@ pub(crate) struct CatalogInitialBuildIntegrityExpectation {
     attempt: u64,
     state: CatalogDurableBuildPhase,
     build_started_commit_seq: u64,
+    retry_reason_code: Option<String>,
 }
 
 /// Non-transferable authority for one exact no-snapshot source pass. Unlike a
@@ -183,6 +184,7 @@ impl std::fmt::Debug for CatalogInitialBuildIntegrityExpectation {
             .field("attempt", &self.attempt)
             .field("state", &self.state)
             .field("build_started_commit_seq", &self.build_started_commit_seq)
+            .field("source_retrying", &self.retry_reason_code.is_some())
             .finish()
     }
 }
@@ -673,6 +675,16 @@ impl DurableCatalogBuildState {
     pub(crate) fn initial_integrity_expectation(
         &self,
     ) -> Result<CatalogInitialBuildIntegrityExpectation, EngineError> {
+        let retry_reason_code = match self.readiness.reason.as_ref() {
+            None => None,
+            Some(CatalogReadinessReason::SourceRetrying { code }) => Some(code.clone()),
+            Some(_) => {
+                return Err(EngineError::InvalidCommit(
+                    "catalog initial integrity failure cannot replace terminal readiness"
+                        .to_string(),
+                ));
+            }
+        };
         if self.readiness.scope != CatalogCoverageScope::Library
             || !matches!(
                 self.readiness.state,
@@ -682,7 +694,6 @@ impl DurableCatalogBuildState {
             || self.readiness.complete_through_commit.is_some()
             || self.readiness.last_complete_snapshot.is_some()
             || self.readiness.refreshing_from_snapshot.is_some()
-            || self.readiness.reason.is_some()
         {
             return Err(EngineError::InvalidCommit(
                 "catalog initial integrity failure requires one exact no-snapshot active-build lineage"
@@ -697,6 +708,7 @@ impl DurableCatalogBuildState {
             attempt: self.readiness.attempt,
             state: durable_phase(self.readiness.state)?,
             build_started_commit_seq: self.last_commit_seq,
+            retry_reason_code,
         })
     }
 
@@ -6035,6 +6047,7 @@ fn load_latest_integrity_failure_evidence(
                                   AND refresh.reason IN (
                                       'catalog.library.build.scheduled',
                                       'catalog.library.build.partial',
+                                      'catalog.library.build.source_retrying',
                                       'catalog.library.refresh.started',
                                       'catalog.library.refresh.source_retrying',
                                       'catalog.library.refresh.recovery_started',
@@ -6166,14 +6179,16 @@ fn validate_integrity_failure_ledger(connection: &Connection) -> Result<(), Engi
                          AND f.attempt = 1
                          AND refresh.reason IN (
                            'catalog.library.build.scheduled',
-                           'catalog.library.build.partial'
+                           'catalog.library.build.partial',
+                           'catalog.library.build.source_retrying'
                          ))
                         OR
                         (f.readiness_epoch > 1
                          AND f.attempt = 1
                          AND refresh.reason IN (
                            'catalog.library.source_generation.invalidated',
-                           'catalog.library.build.partial'
+                           'catalog.library.build.partial',
+                           'catalog.library.build.source_retrying'
                          )
                          AND EXISTS(
                            SELECT 1 FROM catalog_epoch_invalidations AS invalidation
@@ -6186,7 +6201,8 @@ fn validate_integrity_failure_ledger(connection: &Connection) -> Result<(), Engi
                         (f.attempt > 1
                          AND refresh.reason IN (
                            'catalog.library.refresh.recovery_started',
-                           'catalog.library.build.partial'
+                           'catalog.library.build.partial',
+                           'catalog.library.build.source_retrying'
                          ))
                       )
                     )
@@ -6311,8 +6327,11 @@ fn exact_initial_integrity_failure_exists(
     let Some(stored) = load_latest_integrity_failure_evidence(connection)? else {
         return Ok(false);
     };
-    let expected_execution_reason =
-        initial_build_execution_reason(expected.epoch, expected.attempt, expected.state);
+    let expected_execution_reason = if expected.retry_reason_code.is_some() {
+        INITIAL_SOURCE_RETRYING_REASON
+    } else {
+        initial_build_execution_reason(expected.epoch, expected.attempt, expected.state)
+    };
     Ok(current.readiness.state == CatalogReadinessPhase::Error
         && current.readiness.scope == expected.scope
         && current.readiness.coverage_plan_id == expected.coverage_plan_id
@@ -6966,7 +6985,10 @@ fn validate_discarded_integrity_failure_for_restart(
         || stored.refresh_source.is_some()
         || !matches!(
             stored.refresh_reason.as_deref(),
-            Some(reason) if reason == base_execution_reason || reason == PARTIAL_REASON
+            Some(reason)
+                if reason == base_execution_reason
+                    || reason == PARTIAL_REASON
+                    || reason == INITIAL_SOURCE_RETRYING_REASON
         )
         || stored.refresh_committed_at.is_none()
         || stored.refresh_fact_count != 0
@@ -7456,8 +7478,8 @@ fn write_build_state(
                       AND complete_through_commit IS NULL
                       AND last_complete_snapshot_commit IS NULL
                       AND refreshing_from_snapshot_commit IS NULL
-                      AND reason_code IS NULL
-                      AND last_commit_seq = ?10
+                      AND reason_code IS ?10
+                      AND last_commit_seq = ?11
                     "#,
                     params![
                         reason_code,
@@ -7469,6 +7491,7 @@ fn write_build_state(
                         to_i64(snapshot.epoch, "catalog readiness epoch")?,
                         to_i64(snapshot.attempt, "catalog readiness attempt")?,
                         expected.state.as_str(),
+                        expected.retry_reason_code.as_deref(),
                         to_i64(
                             expected.build_started_commit_seq,
                             "catalog failed initial-build commit",
