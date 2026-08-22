@@ -134,10 +134,10 @@ prerequisite for early vertical slices.
 | B3. Durable catalog/query snapshots      | 012B                | In progress | private pack/pagination; public policy/query lifecycle open                             |
 | B4. Progressive host and UX              | 012B                | In progress | partial host readiness; selected hydration and UI flow open                             |
 | B5. Catalog performance calibration      | 012B                | In progress | partial experiment; complete report and ratification open                               |
-| C1. Runtime semantic contracts           | 012C                | In progress | broad fixture set; remaining families/reducer parity open                               |
+| C1. Runtime semantic contracts           | 012C                | In progress | compiled reducer parity complete; portable specialists/durable unknown query open       |
 | C2. Usage-v2 shadow projection           | 012C                | In progress | private parity; complete coverage/topology gate open                                    |
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof                          |
-| C4. Runtime semantic downstream suite    | 012C                | In progress | usage merge landed; all-family reducer/digest suite open                                |
+| C4. Runtime semantic downstream suite    | 012C                | In progress | Rust all-family merge/digests landed; remaining integration matrices open                |
 | D1. Store-free observer kernel           | 012D                | In progress | substantial internal kernel; public/multi-object surface open                           |
 | D2. Claude scope composition             | 012D                | In progress | bounded internal directory membership; runtime promotion open                           |
 | D3. Control lane and epoch replacement   | 012D                | In progress | internal interaction replacement; six-family portable union; interaction wire open      |
@@ -1575,10 +1575,17 @@ consumers merge durable and scoped usage-v2 by `SemanticRevisionRef`, dedupe
 delivery by occurrence-scoped event ID, and retire overlays only when both
 coverage vectors are complete and durable coverage is equal to or ahead of the
 observer. Partial, unavailable, incomparable, and observer-ahead evidence is
-retained. The remaining runtime families, catalog/base-session equality,
-snapshot expiration/reset matrices, multi-run identity, and all-family reduced
-and replacement-state digest comparison are not implemented. C4 remains
-`In progress`.
+retained. The Rust engine reference consumer now extends that law across all
+eleven compiled RFC 012C fact families. It recomputes every typed semantic
+revision, rejects mixed family coverage and conflicting event IDs, applies the
+same family reducer against durable current state, preserves partial non-
+retraction, rejects stable-identity drift, and emits one canonical replacement-
+state digest. The matrix compares durable and scoped replacement digests for
+every family and reaches the consumer through `SpaghettiEngineCore`; the
+per-family common reducer suites retain the corresponding reduced-state digest
+equality. Portable TypeScript remains usage-v2-only. Catalog/base-session
+equality, fixed-snapshot expiration/reset during pagination, and multi-run
+identity remain open, so C4 stays `In progress`.
 
 ## 9. RFC 012D workstream
 
