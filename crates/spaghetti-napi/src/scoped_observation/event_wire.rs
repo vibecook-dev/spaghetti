@@ -12,11 +12,8 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::adapter::{
-    CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey, ContractCompleteness,
-    CoverageObjectKey, CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
-    EffectiveStateQualifiedValue, ExternalEntityRef, MessageRevisionRole, NativeIdentityClaim,
-    TaskLifecycleState, ToolRevisionKind, UserInputKind, UserInputLifecycleState,
-    UserInputQuestion,
+    CanonicalEntityKey, CanonicalSourceInstanceKey, CoverageObjectKey, CoverageStreamKey,
+    ExternalEntityRef, NativeIdentityClaim,
 };
 use crate::observation_contract::unknown_wire::ObservationUnknownWireContractSelection;
 use crate::observation_contract::ObservationContractSelection;
@@ -42,88 +39,10 @@ use super::{
 pub(crate) const SCOPED_OBSERVATION_KNOWN_ENVELOPE_CONTRACT_VERSION: u32 = 1;
 pub(crate) const SCOPED_OBSERVATION_EVENT_UNION_CONTRACT_VERSION: u32 = 1;
 
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct InteractionEnvelopeWire {
-    fact_family: &'static str,
-    fact_id: CanonicalFactId,
-    operation: &'static str,
-    native_tool_use_id: String,
-    kind: UserInputKind,
-    state: UserInputLifecycleState,
-    completeness: ContractCompleteness,
-    result_reference: Option<String>,
-    questions: Vec<UserInputQuestion>,
-}
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct MessageEnvelopeWire {
-    fact_family: &'static str,
-    fact_id: CanonicalFactId,
-    operation: &'static str,
-    native_message_id: String,
-    role: MessageRevisionRole,
-    ordered_content_block_keys: Vec<String>,
-    completeness: ContractCompleteness,
-}
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct PlanEnvelopeWire {
-    fact_family: &'static str,
-    fact_id: CanonicalFactId,
-    operation: &'static str,
-    native_plan_id: String,
-    subject: String,
-    ordered_step_keys: Vec<String>,
-    completeness: ContractCompleteness,
-    owned_set: Option<Vec<String>>,
-}
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct TaskEnvelopeWire {
-    fact_family: &'static str,
-    fact_id: CanonicalFactId,
-    operation: &'static str,
-    native_task_id: String,
-    subject: String,
-    state: TaskLifecycleState,
-    completeness: ContractCompleteness,
-    owned_set: Option<Vec<String>>,
-}
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct ToolEnvelopeWire {
-    fact_family: &'static str,
-    fact_id: CanonicalFactId,
-    operation: &'static str,
-    native_tool_id: String,
-    kind: ToolRevisionKind,
-    tool_name: String,
-    correlated_native_id: Option<String>,
-    completeness: ContractCompleteness,
-}
-
-#[derive(Serialize)]
-#[serde(deny_unknown_fields)]
-struct EffectiveStateEnvelopeWire {
-    fact_family: &'static str,
-    fact_id: CanonicalFactId,
-    operation: &'static str,
-    dimension: EffectiveStateDimension,
-    value: EffectiveStateQualifiedValue<String>,
-    evidence_kind: EffectiveStateEvidenceKind,
-    completeness: ContractCompleteness,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopedObservationKnownEventFamily {
     Usage,
     Actor,
-    Interaction,
     Source,
     ArtifactAvailability,
     Completion,
@@ -135,7 +54,6 @@ impl ScopedObservationKnownEventFamily {
         match self {
             Self::Usage => "usage",
             Self::Actor => "actor",
-            Self::Interaction => "interaction",
             Self::Source => "source",
             Self::ArtifactAvailability => "artifact_availability",
             Self::Completion => "completion",
@@ -260,154 +178,14 @@ impl ScopedObservationKnownEnvelope {
                     common_context()?,
                 )
             }
-            ScopedObservationEvent::UserInputRequest {
-                fact_id,
-                operation,
-                revision,
-                ..
-            } => {
+            ScopedObservationEvent::UserInputRequest { .. }
+            | ScopedObservationEvent::Message { .. }
+            | ScopedObservationEvent::Plan { .. }
+            | ScopedObservationEvent::Task { .. }
+            | ScopedObservationEvent::Tool { .. }
+            | ScopedObservationEvent::EffectiveState { .. } => {
                 require_no_specialized_contexts(&contexts)?;
-                (
-                    ScopedObservationKnownEventFamily::Interaction,
-                    serialize_wire(InteractionEnvelopeWire {
-                        fact_family: "runtime.user-input-request",
-                        fact_id: *fact_id,
-                        operation: match operation {
-                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
-                            super::ScopedRevisionedEntityOperation::Retract => "retract",
-                        },
-                        native_tool_use_id: revision.native_tool_use_id.clone(),
-                        kind: revision.kind,
-                        state: revision.state,
-                        completeness: revision.completeness,
-                        result_reference: revision.result_reference.clone(),
-                        questions: revision.questions.clone(),
-                    })?,
-                    common_context()?,
-                )
-            }
-            ScopedObservationEvent::Message {
-                fact_id,
-                operation,
-                revision,
-                ..
-            } => {
-                require_no_specialized_contexts(&contexts)?;
-                (
-                    ScopedObservationKnownEventFamily::Interaction,
-                    serialize_wire(MessageEnvelopeWire {
-                        fact_family: "runtime.message",
-                        fact_id: *fact_id,
-                        operation: match operation {
-                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
-                            super::ScopedRevisionedEntityOperation::Retract => "retract",
-                        },
-                        native_message_id: revision.native_message_id.clone(),
-                        role: revision.role,
-                        ordered_content_block_keys: revision.ordered_content_block_keys.clone(),
-                        completeness: revision.completeness,
-                    })?,
-                    common_context()?,
-                )
-            }
-            ScopedObservationEvent::Plan {
-                fact_id,
-                operation,
-                revision,
-                ..
-            } => {
-                require_no_specialized_contexts(&contexts)?;
-                (
-                    ScopedObservationKnownEventFamily::Interaction,
-                    serialize_wire(PlanEnvelopeWire {
-                        fact_family: "runtime.plan",
-                        fact_id: *fact_id,
-                        operation: match operation {
-                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
-                            super::ScopedRevisionedEntityOperation::Retract => "retract",
-                        },
-                        native_plan_id: revision.native_plan_id.clone(),
-                        subject: revision.subject.clone(),
-                        ordered_step_keys: revision.ordered_step_keys.clone(),
-                        completeness: revision.completeness,
-                        owned_set: revision.owned_set.clone(),
-                    })?,
-                    common_context()?,
-                )
-            }
-            ScopedObservationEvent::Task {
-                fact_id,
-                operation,
-                revision,
-                ..
-            } => {
-                require_no_specialized_contexts(&contexts)?;
-                (
-                    ScopedObservationKnownEventFamily::Interaction,
-                    serialize_wire(TaskEnvelopeWire {
-                        fact_family: "runtime.task",
-                        fact_id: *fact_id,
-                        operation: match operation {
-                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
-                            super::ScopedRevisionedEntityOperation::Retract => "retract",
-                        },
-                        native_task_id: revision.native_task_id.clone(),
-                        subject: revision.subject.clone(),
-                        state: revision.state,
-                        completeness: revision.completeness,
-                        owned_set: revision.owned_set.clone(),
-                    })?,
-                    common_context()?,
-                )
-            }
-            ScopedObservationEvent::Tool {
-                fact_id,
-                operation,
-                revision,
-                ..
-            } => {
-                require_no_specialized_contexts(&contexts)?;
-                (
-                    ScopedObservationKnownEventFamily::Interaction,
-                    serialize_wire(ToolEnvelopeWire {
-                        fact_family: "runtime.tool",
-                        fact_id: *fact_id,
-                        operation: match operation {
-                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
-                            super::ScopedRevisionedEntityOperation::Retract => "retract",
-                        },
-                        native_tool_id: revision.native_tool_id.clone(),
-                        kind: revision.kind,
-                        tool_name: revision.tool_name.clone(),
-                        correlated_native_id: revision.correlated_native_id.clone(),
-                        completeness: revision.completeness,
-                    })?,
-                    common_context()?,
-                )
-            }
-            ScopedObservationEvent::EffectiveState {
-                fact_id,
-                operation,
-                revision,
-                ..
-            } => {
-                require_no_specialized_contexts(&contexts)?;
-                (
-                    ScopedObservationKnownEventFamily::Interaction,
-                    serialize_wire(EffectiveStateEnvelopeWire {
-                        fact_family: "runtime.effective-state",
-                        fact_id: *fact_id,
-                        operation: match operation {
-                            super::ScopedRevisionedEntityOperation::Upsert => "upsert",
-                            super::ScopedRevisionedEntityOperation::Retract => "retract",
-                        },
-                        dimension: revision.dimension,
-                        value: revision.value.clone(),
-                        evidence_kind: revision.evidence_kind,
-                        completeness: revision.completeness,
-                    })?,
-                    common_context()?,
-                )
+                return Err(ScopedEnvelopeError::PortableEventContractUnavailable);
             }
             ScopedObservationEvent::SourcePresence { .. }
             | ScopedObservationEvent::SourceReset { .. }

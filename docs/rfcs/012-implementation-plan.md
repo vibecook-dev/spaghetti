@@ -140,7 +140,7 @@ prerequisite for early vertical slices.
 | C4. Runtime semantic downstream suite    | 012C                | In progress | usage merge landed; all-family reducer/digest suite open                                |
 | D1. Store-free observer kernel           | 012D                | In progress | substantial internal kernel; public/multi-object surface open                           |
 | D2. Claude scope composition             | 012D                | In progress | bounded internal directory membership; runtime promotion open                           |
-| D3. Control lane and epoch replacement   | 012D                | In progress | shared pool; user-input/message/task/effective-state/plan/tool replacement; no Gate met |
+| D3. Control lane and epoch replacement   | 012D                | In progress | internal interaction replacement; six-family portable union; interaction wire open      |
 | D4. SDK and Chopsticks migration         | 012D                | In progress | injected-source shadow only; public observer transport open                             |
 | D5. Observer performance calibration     | 012D                | In progress | partial timings; memory/access/slow-consumer report open                                |
 | X1. Search/finalization separation       | 012B integration    | In progress | strategy harness landed; required report fields open                                    |
@@ -2309,9 +2309,15 @@ Current landing status (2026-08-20):
   separate contextual contract. This adds no unified event union,
   typed-unknown preservation, public iterator/N-API method, native source
   access, or portable attachment authority; and
-- the known-envelope dispatch slice (`612e680`) now projects every currently
-  implemented ordered event through its existing strict usage, actor, source,
-  artifact-availability, completion, or continuity contract before dequeue.
+- the known-envelope dispatch slice (`612e680`, corrected after audit) now
+  projects every ordered event that has a frozen specialist contract through
+  its strict usage, actor, source, artifact-availability, completion, or
+  continuity contract before dequeue. Selected user-input, message, plan,
+  task, tool, and effective-state events remain valid internal replacement
+  state but fail with an explicit portable-contract-unavailable error before
+  dequeue; the earlier reduced `interaction` projection was neither part of
+  the frozen six-family TypeScript union nor sufficient to carry the complete
+  contextual semantic identity.
   The non-Serde, non-cloneable wrapper retains the exact process-local
   attachment authority, redacts both wire and context values from diagnostics,
   and binds common-family values to the selected contracts, resolved root, and

@@ -8464,6 +8464,8 @@ pub enum ScopedEnvelopeError {
     RootSessionMismatch,
     #[error("scoped typed event family was not selected for this attachment")]
     EventFamilyNotSelected,
+    #[error("scoped typed event has no frozen portable envelope contract")]
+    PortableEventContractUnavailable,
     #[error("scoped delivered source occurrence is malformed")]
     InvalidSourceOccurrence,
 }
@@ -26299,6 +26301,69 @@ mod projection_tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn scoped_interaction_event_without_a_frozen_portable_contract_stays_queued() {
+        let wire = crate::semantic_contract::decode_rfc012c_interaction_v1(include_str!(
+            "../fixtures/contracts/rfc012c-interaction-v1.json"
+        ))
+        .unwrap();
+        let selection = observation_contract_selection_for("runtime.user-input-request");
+        let record = record_with_observed_at(1, 0, 1, 44);
+        let mut batch = FactBatch::new_with_semantic_context(2, 1, semantic_context()).unwrap();
+        let fact = UserInputRequestRevisionFact {
+            session: batch
+                .canonical_entity_key("session", b"native-session")
+                .unwrap(),
+            actor_run: batch
+                .canonical_entity_key("actor-run", b"native-run")
+                .unwrap(),
+            native_tool_use_id: wire.native_tool_use_id.clone(),
+            kind: wire.kind,
+            questions: wire.questions,
+            state: UserInputLifecycleState::Pending,
+            operation: UserInputOperation::Upsert,
+            completeness: ContractCompleteness::Complete,
+            result_reference: None,
+        };
+        batch
+            .push_native(
+                &record,
+                wire.native_tool_use_id.as_bytes(),
+                Fact::UserInputRequestRevision(fact),
+            )
+            .unwrap();
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let projected = projection
+            .project(&decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Live,
+                &record,
+                batch,
+            ))
+            .unwrap();
+        assert_eq!(projected.len(), 1);
+
+        let mut drain = consumer_drain_for_selection(root_identity(), selection, 1, 1);
+        drain.delivery_lane_mut().offer(projected).unwrap();
+        let queued = drain.delivery_lane().state();
+
+        assert!(matches!(
+            drain.next(),
+            Err(ScopedObservationDrainError::Envelope(
+                ScopedEnvelopeError::PortableEventContractUnavailable
+            ))
+        ));
+        assert_eq!(drain.delivery_lane().state(), queued);
+        assert_eq!(drain.state().delivered_through_sequence, 0);
+        assert_eq!(drain.state().pending_sequence, None);
     }
 
     #[test]
