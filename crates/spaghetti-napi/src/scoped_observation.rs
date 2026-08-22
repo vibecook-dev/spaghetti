@@ -10390,7 +10390,7 @@ impl ScopedScopeCoverage {
             || decode.scope.root_entity_key != Some(root.session_key)
             || decode.completeness != self.completeness
             || decode.points.len() + decode.explicit_absence_or_deletion.len()
-                != self.relations.len()
+                < self.relations.len()
         {
             return false;
         }
@@ -10433,9 +10433,9 @@ impl ScopedScopeCoverage {
                 return false;
             }
         }
-        if !decode_coordinates.is_empty() {
-            return false;
-        }
+        // Decode coverage also contains the exact selected members beneath a
+        // dynamic relation. Scope coverage intentionally consumes only the
+        // one membership-source coordinate for each declared relation.
         self.scope_revision
             == derive_scoped_scope_coverage_revision(
                 &self.program_id,
@@ -23314,7 +23314,7 @@ fn assemble_scoped_scope_coverage(
         || decode.scope.adapter_id != root.adapter_id.as_str()
         || decode.scope.source_instance_key != root.source_instance_key
         || decode.scope.root_entity_key != Some(root.session_key)
-        || decode.points.len() + decode.explicit_absence_or_deletion.len() != scope_relations.len()
+        || decode.points.len() + decode.explicit_absence_or_deletion.len() < scope_relations.len()
     {
         return Err(ScopedCoverageAssemblyError::InvalidScopeCoverage);
     }
@@ -23323,6 +23323,7 @@ fn assemble_scoped_scope_coverage(
     for (source, membership) in admission
         .known_coverage_objects
         .iter()
+        .filter(|(_, membership)| known_objects.contains_key(membership.relation_id.as_ref()))
         .chain(admission.relation_membership_objects.iter())
     {
         let coverage = admission
@@ -23487,17 +23488,30 @@ fn validate_scoped_relation_coverage(
     known_objects: &BTreeMap<String, ScopedKnownObjectGrant>,
     admission: &ScopedObservationAdmissionLane,
 ) -> Result<(), ScopedCoverageAssemblyError> {
-    if known_objects.len() != admission.known_coverage_objects.len()
-        || known_objects.keys().any(|relation_id| {
-            !admission
-                .known_coverage_objects
+    let mut observed_known_relations = BTreeSet::new();
+    for (source, membership) in &admission.known_coverage_objects {
+        let relation_id = membership.relation_id.as_ref();
+        if known_objects.contains_key(relation_id) {
+            if admission
+                .dynamic_relation_members
                 .values()
-                .any(|membership| membership.relation_id.as_ref() == relation_id)
-        })
-        || admission
-            .known_coverage_objects
-            .values()
-            .any(|membership| !known_objects.contains_key(membership.relation_id.as_ref()))
+                .any(|members| members.contains(source))
+                || !observed_known_relations.insert(relation_id)
+            {
+                return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+            }
+        } else if !admission
+            .dynamic_relation_members
+            .get(relation_id)
+            .is_some_and(|members| members.contains(source))
+        {
+            return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+        }
+    }
+    if observed_known_relations.len() != known_objects.len()
+        || known_objects
+            .keys()
+            .any(|relation_id| !observed_known_relations.contains(relation_id.as_str()))
     {
         return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
     }
@@ -23530,6 +23544,52 @@ fn validate_observation_relation_coverage(
             .known_coverage_objects
             .keys()
             .any(|source| admission.relation_membership_objects.contains_key(source))
+        || admission.dynamic_relation_members.len() != admission.relation_membership_objects.len()
+        || admission.dynamic_relation_listings.len() != admission.dynamic_relation_members.len()
+        || admission
+            .dynamic_member_decoder_states
+            .keys()
+            .any(|source| {
+                !admission
+                    .dynamic_relation_members
+                    .values()
+                    .any(|members| members.contains(source))
+            })
+    {
+        return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+    }
+
+    for (relation_id, members) in &admission.dynamic_relation_members {
+        if known_objects.contains_key(relation_id.as_ref())
+            || scope_relations.get(relation_id.as_ref()) != Some(&false)
+            || admission
+                .dynamic_relation_listings
+                .get(relation_id)
+                .is_none_or(|listing| listing.relation_id() != relation_id.as_ref())
+            || admission
+                .relation_membership_objects
+                .values()
+                .filter(|membership| membership.relation_id == *relation_id)
+                .count()
+                != 1
+            || members.iter().any(|source| {
+                admission
+                    .known_coverage_objects
+                    .get(source)
+                    .is_none_or(|membership| membership.relation_id != *relation_id)
+            })
+        {
+            return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
+        }
+    }
+    if admission
+        .relation_membership_objects
+        .values()
+        .any(|membership| {
+            !admission
+                .dynamic_relation_members
+                .contains_key(&membership.relation_id)
+        })
     {
         return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
     }
@@ -23538,6 +23598,7 @@ fn validate_observation_relation_coverage(
     for membership in admission
         .known_coverage_objects
         .values()
+        .filter(|membership| known_objects.contains_key(membership.relation_id.as_ref()))
         .chain(admission.relation_membership_objects.values())
     {
         if !observed.insert(membership.relation_id.as_ref())

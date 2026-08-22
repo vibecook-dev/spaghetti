@@ -612,6 +612,8 @@ def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
         "dynamic_member_decoder_states",
         "directory_member_decoder_state(",
         "decoder_state: Option<&[u8]>",
+        "dynamic_relation_listings.len() != admission.dynamic_relation_members.len()",
+        "known_objects.contains_key(membership.relation_id.as_ref())",
         "source_reserved_for_dynamic_relation",
         "extend_coverage_sources_bounded(",
         ".chain(member_sources.iter())",

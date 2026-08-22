@@ -3139,11 +3139,12 @@ pub(crate) mod tests {
             ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
                 .unwrap();
         let mut admission = admission_lane_for_objects(8);
-        let projection = ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
-            max_usage_v2_entities: 1,
-        })
-        .unwrap();
-        let drain = host
+        let mut projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            })
+            .unwrap();
+        let mut drain = host
             .open_consumer_drain(ScopedObservationDeliveryLimits {
                 max_semantic_events: 4,
                 max_retained_native_bytes: 0,
@@ -3181,8 +3182,25 @@ pub(crate) mod tests {
             other => panic!("expected a directory snapshot, got {other:?}"),
         };
         assert!(listing.selected_entry_count() >= 1);
-        while listing.read_next_member().unwrap().is_some() {}
+        let mut contents = Vec::new();
+        while let Some(read) = listing.read_next_member().unwrap() {
+            match read {
+                ScopedObservationDirectoryMemberRead::Stable(content) => contents.push(content),
+                other => panic!("expected a stable directory member, got {other:?}"),
+            }
+        }
         assert!(listing.member_reads_complete());
+        let mut lifecycles = Vec::with_capacity(contents.len());
+        for content in contents {
+            let mut member_origin = origin.clone();
+            member_origin.source_instance_id = content.source_instance_for_test().id;
+            let input = content.bootstrap_for_test().unwrap();
+            lifecycles.push(
+                listing
+                    .observe_bootstrapped_member(input, &member_origin, None)
+                    .unwrap(),
+            );
+        }
         let verification_binding = host
             .bind_directory_relation_source("descendant-objects", &identity, AccessPhase::Initial)
             .unwrap();
@@ -3203,6 +3221,21 @@ pub(crate) mod tests {
                 membership,
             )
             .unwrap();
+        for lifecycle in lifecycles {
+            admission
+                .admit_directory_member(
+                    lease.access_pass().pass_id(),
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                    lifecycle,
+                )
+                .unwrap();
+        }
+        while !admission.is_empty() {
+            assert!(host
+                .offer_consumer_next(&mut admission, &mut projection, &mut drain)
+                .unwrap()
+                .is_some());
+        }
         let watermark = host
             .complete_bootstrap_poll(lease, &admission, &projection, &drain)
             .unwrap();
@@ -3210,6 +3243,17 @@ pub(crate) mod tests {
             ticket.wait(),
             ScopedObservationPollResolution::Ready(ready) if Arc::ptr_eq(&ready, &watermark)
         ));
+        let decode = watermark
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            decode.points.len() + decode.explicit_absence_or_deletion.len(),
+            3,
+            "root, membership source, and selected child must all remain covered"
+        );
+        assert_eq!(watermark.scope_coverage.relations().len(), 2);
         let rendered = format!("{watermark:?}");
         assert!(!rendered.contains("fixture-session"));
         assert!(!rendered.contains("child.jsonl"));
