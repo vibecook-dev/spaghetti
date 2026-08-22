@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, BoundedNativeEvidence,
     CapabilityId, DecodeContext, DecodeDisposition, DecoderId, FactBatch, FactSemanticContext,
-    RawRetentionPolicy, SourceAccess, SourceInstance, SourceObjectDescriptor,
+    RawRetentionPolicy, RecordMappingDisposition, SourceAccess, SourceInstance,
+    SourceObjectDescriptor,
 };
 use crate::source::SourceRecord;
 
@@ -41,34 +42,6 @@ pub(crate) struct DecodedFactBatch {
     pub quarantined: bool,
     pub unscoped_permanent_diagnostic: bool,
     pub diagnostic_coverage_gaps: Vec<CapabilityId>,
-}
-
-/// RFC 012A's topology-independent outcome for one complete source record.
-///
-/// Adapters still return the smaller legacy enum while the remaining native
-/// decoders migrate.  This common boundary turns that value into the exact
-/// structured contract consumed by durable and scoped execution, so neither
-/// topology invents its own classification or exposes unbounded native data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RecordMappingDisposition {
-    Mapped {
-        fact_count: u32,
-    },
-    IgnoredKnown {
-        reason_code: String,
-    },
-    RetainedUnknown {
-        family_hint: Option<String>,
-        bounded_evidence: BoundedNativeEvidence,
-    },
-    BufferedIncomplete,
-    Malformed {
-        reason_code: String,
-        bounded_diagnostic: Vec<u8>,
-    },
-    UnsupportedVersion {
-        observed_version: String,
-    },
 }
 
 /// A decode attempt always reports timing, including controlled failures.
@@ -172,6 +145,7 @@ fn finish_decode(
     }
 
     let mapping_disposition = record_mapping_disposition(record, disposition, &batch)?;
+    batch.add_record_mapping_disposition(mapping_disposition.clone())?;
 
     match retention {
         RawRetentionPolicy::Full => {}
@@ -718,6 +692,10 @@ mod tests {
             mapped.mapping_disposition,
             RecordMappingDisposition::Mapped { fact_count: 1 }
         );
+        assert_eq!(
+            mapped.batch.record_mapping_dispositions(),
+            std::slice::from_ref(&mapped.mapping_disposition)
+        );
 
         let ignored = finish_decode(
             &record,
@@ -731,6 +709,10 @@ mod tests {
             RecordMappingDisposition::IgnoredKnown {
                 reason_code: "known_record_ignored".to_string(),
             }
+        );
+        assert_eq!(
+            ignored.batch.record_mapping_dispositions(),
+            std::slice::from_ref(&ignored.mapping_disposition)
         );
 
         let buffered = finish_decode(
@@ -764,6 +746,10 @@ mod tests {
             unknown,
         )
         .unwrap();
+        assert_eq!(
+            unknown.batch.record_mapping_dispositions(),
+            std::slice::from_ref(&unknown.mapping_disposition)
+        );
         let RecordMappingDisposition::RetainedUnknown {
             family_hint,
             bounded_evidence,
@@ -804,6 +790,26 @@ mod tests {
             )
             .is_err());
         }
+
+        let mut merged = FactBatch::new_with_semantic_context(2, 2, semantic_context()).unwrap();
+        for _ in 0..2 {
+            let decoded = finish_decode(
+                &record,
+                RawRetentionPolicy::None,
+                DecodeDisposition::IgnoredKnown,
+                FactBatch::new_with_semantic_context(1, 1, semantic_context()).unwrap(),
+            )
+            .unwrap();
+            merged.append(decoded.batch).unwrap();
+        }
+        assert_eq!(merged.record_mapping_dispositions().len(), 2);
+        assert!(merged.record_mapping_dispositions().iter().all(|mapping| {
+            matches!(
+                mapping,
+                RecordMappingDisposition::IgnoredKnown { reason_code }
+                    if reason_code == "known_record_ignored"
+            )
+        }));
     }
 
     #[test]

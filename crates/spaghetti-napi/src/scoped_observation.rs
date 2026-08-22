@@ -25,20 +25,19 @@ use crate::adapter::{
     FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision,
     MessageRevisionFact, MessageRevisionRole, NativeArtifactProbe, NativeIdentityClaim,
     NativeRuntimeMarkerRevisionFact, PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality,
-    RawRetentionPolicy, ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess,
-    SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceObjectList,
-    SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
-    SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
-    ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact, UserInputKind,
-    UserInputLifecycleState, UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
-    EXTERNAL_ENTITY_REFERENCE_VERSION,
+    RawRetentionPolicy, RecordMappingDisposition, ScopeRelationPrimitive, SemanticRevisionRef,
+    Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
+    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
+    SourceSnapshot, SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality,
+    ToolRevisionFact, ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact,
+    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
+    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
 };
 use crate::decode_runtime::{
     decode_record, diagnostic_excerpt, DecodeRuntimeLimits, DecodeRuntimeRequest,
-    RecordMappingDisposition,
 };
 use crate::observation_contract::unknown_wire::{
     negotiate_observation_unknown_wire, ObservationUnknownWireContractError,
@@ -765,7 +764,7 @@ pub enum ScopedDecodedAppendItem {
         evidence: Box<ScopedDecodedRecordEvidence>,
         disposition: DecodeDisposition,
         mapping_disposition: Box<RecordMappingDisposition>,
-        batch: FactBatch,
+        batch: Box<FactBatch>,
         quarantined: bool,
     },
     DriverQuarantine(DriverQuarantine),
@@ -1569,7 +1568,7 @@ impl ScopedObservationAdmissionLane {
                     evidence: Box::new(scoped_record_evidence(&record, retention)),
                     disposition,
                     mapping_disposition: Box::new(mapping_disposition),
-                    batch,
+                    batch: Box::new(batch),
                     quarantined,
                 };
                 let lane_ordinal = self.next_lane_ordinal;
@@ -22391,7 +22390,7 @@ impl ScopedKnownAppendObject {
                             )),
                             disposition: decoded.disposition,
                             mapping_disposition: Box::new(decoded.mapping_disposition),
-                            batch: decoded.batch,
+                            batch: Box::new(decoded.batch),
                             quarantined: decoded.quarantined,
                         });
                     }
@@ -24564,7 +24563,7 @@ mod projection_tests {
                 evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&batch)),
-                batch,
+                batch: Box::new(batch),
                 quarantined: false,
             }),
         }
@@ -24622,7 +24621,7 @@ mod projection_tests {
                 evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
                 disposition: DecodeDisposition::PreservedUnknown,
                 mapping_disposition: Box::new(mapping_disposition),
-                batch,
+                batch: Box::new(batch),
                 quarantined: false,
             }),
         }
@@ -27074,7 +27073,7 @@ mod projection_tests {
                 evidence: Box::new(scoped_record_evidence(record, RawRetentionPolicy::None)),
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&batch)),
-                batch,
+                batch: Box::new(batch),
                 quarantined: false,
             }),
         }
@@ -31143,7 +31142,7 @@ mod projection_tests {
                 evidence: Box::new(scoped_record_evidence(&record, RawRetentionPolicy::None)),
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&batch)),
-                batch,
+                batch: Box::new(batch),
                 quarantined: false,
             }),
         };
@@ -33508,7 +33507,7 @@ mod projection_tests {
                 )),
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&first_batch)),
-                batch: first_batch,
+                batch: Box::new(first_batch),
                 quarantined: false,
             }),
         };
@@ -33528,7 +33527,7 @@ mod projection_tests {
                 )),
                 disposition: DecodeDisposition::Applied,
                 mapping_disposition: Box::new(mapped_record_disposition(&sibling_batch)),
-                batch: sibling_batch,
+                batch: Box::new(sibling_batch),
                 quarantined: false,
             }),
         };

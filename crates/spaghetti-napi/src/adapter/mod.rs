@@ -29,7 +29,6 @@ pub use contract::{
     SourceObjectListRequest, SourceQuery, SourceQueryBounds, SourceRoot, SourceRows,
     SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
-pub(crate) use facts::BoundedNativeEvidence;
 pub use facts::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, ArtifactCapture, ArtifactContentFact,
@@ -56,6 +55,7 @@ pub use facts::{
     ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
     WorkflowStatus,
 };
+pub(crate) use facts::{BoundedNativeEvidence, RecordMappingDisposition};
 #[cfg(test)]
 pub(crate) use registry::tests::{
     scoped_access_request as fixture_scoped_access_request, supported_fixture_registry_with_scope,

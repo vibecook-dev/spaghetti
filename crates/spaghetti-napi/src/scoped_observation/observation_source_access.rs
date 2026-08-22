@@ -16,13 +16,13 @@ use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AgentAdapter,
     CanonicalSourceInstanceKey, CoverageAbsenceKind, CoverageObjectKey, CoverageStreamKey,
     DecodeDisposition, DriverSpec, Fact, FactBatch, FactSemanticContext, RawRetentionPolicy,
-    ScopeRelationPrimitive, SourceAccess, SourceInstance, SourceInstanceKey,
-    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
-    SourceSnapshot, StreamSpec,
+    RecordMappingDisposition, ScopeRelationPrimitive, SourceAccess, SourceInstance,
+    SourceInstanceKey, SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest,
+    SourceQuery, SourceRows, SourceSnapshot, StreamSpec,
 };
 use crate::decode_runtime::{
     bootstrap_object_without_source_access, decode_record, diagnostic_excerpt, DecodeRuntimeLimits,
-    DecodeRuntimeRequest, RecordMappingDisposition,
+    DecodeRuntimeRequest,
 };
 use crate::source::{
     confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,

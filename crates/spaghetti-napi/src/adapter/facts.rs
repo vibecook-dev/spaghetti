@@ -26,6 +26,7 @@ const MAX_RUNTIME_SEMANTIC_TEXT_BYTES: usize = 8 * 1024;
 const MAX_CANONICAL_ARTIFACTS_PER_FACT: usize = 4 * 1024;
 const MAX_USER_INPUT_QUESTIONS: usize = 32;
 const MAX_USER_INPUT_OPTIONS: usize = 32;
+const MAX_RECORD_MAPPINGS_PER_BATCH: usize = 65_536;
 
 mod base64_bytes {
     use base64::engine::general_purpose::STANDARD;
@@ -2958,6 +2959,33 @@ pub(crate) struct BoundedNativeEvidence {
     pub sanitized_excerpt: Vec<u8>,
 }
 
+/// RFC 012A's topology-independent outcome for one complete source record.
+///
+/// The common decode boundary constructs these values after adapter return.
+/// They live beside `FactBatch` so a durable batch cannot lose or reorder the
+/// record-level classification while append slices are merged for commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RecordMappingDisposition {
+    Mapped {
+        fact_count: u32,
+    },
+    IgnoredKnown {
+        reason_code: String,
+    },
+    RetainedUnknown {
+        family_hint: Option<String>,
+        bounded_evidence: BoundedNativeEvidence,
+    },
+    BufferedIncomplete,
+    Malformed {
+        reason_code: String,
+        bounded_diagnostic: Vec<u8>,
+    },
+    UnsupportedVersion {
+        observed_version: String,
+    },
+}
+
 impl Fact {
     pub fn kind(&self) -> &'static str {
         match self {
@@ -3115,6 +3143,7 @@ pub struct FactBatch {
     next_record_ordinals: BTreeMap<RecordFactKey, u32>,
     semantic_context: Option<FactSemanticContext>,
     semantic_revisions: std::collections::BTreeSet<FactRevisionId>,
+    record_mapping_dispositions: Vec<RecordMappingDisposition>,
     semantic_record_cache: Option<Box<SemanticRecordCache>>,
     fact_build_time: Duration,
 }
@@ -3200,6 +3229,7 @@ impl FactBatch {
             next_record_ordinals: BTreeMap::new(),
             semantic_context: None,
             semantic_revisions: std::collections::BTreeSet::new(),
+            record_mapping_dispositions: Vec::new(),
             semantic_record_cache: None,
             fact_build_time: Duration::ZERO,
         })
@@ -3597,12 +3627,17 @@ impl FactBatch {
                 .len()
                 .checked_add(other.diagnostics.len())
                 .is_some_and(|count| count <= self.max_diagnostics)
+            && self
+                .record_mapping_dispositions
+                .len()
+                .checked_add(other.record_mapping_dispositions.len())
+                .is_some_and(|count| count <= MAX_RECORD_MAPPINGS_PER_BATCH)
     }
 
     pub(crate) fn append(&mut self, mut other: Self) -> Result<(), AdapterError> {
         if !self.can_append(&other) {
             return Err(AdapterError::invalid_contract(format!(
-                "fact batch exceeds {} facts or {} diagnostics",
+                "fact batch exceeds {} facts, {} diagnostics, or the record-mapping bound",
                 self.max_facts, self.max_diagnostics
             )));
         }
@@ -3698,6 +3733,8 @@ impl FactBatch {
             .append(&mut other.diagnostic_coverage_gaps);
         self.semantic_revisions
             .append(&mut other.semantic_revisions);
+        self.record_mapping_dispositions
+            .append(&mut other.record_mapping_dispositions);
         for dependency in other.dependency_reads {
             self.add_dependency_read(dependency)?;
         }
@@ -3726,6 +3763,23 @@ impl FactBatch {
 
     pub(crate) fn diagnostic_coverage_gaps(&self) -> &BTreeSet<CapabilityId> {
         &self.diagnostic_coverage_gaps
+    }
+
+    pub(crate) fn record_mapping_dispositions(&self) -> &[RecordMappingDisposition] {
+        &self.record_mapping_dispositions
+    }
+
+    pub(crate) fn add_record_mapping_disposition(
+        &mut self,
+        disposition: RecordMappingDisposition,
+    ) -> Result<(), AdapterError> {
+        if self.record_mapping_dispositions.len() == MAX_RECORD_MAPPINGS_PER_BATCH {
+            return Err(AdapterError::invalid_contract(
+                "fact batch exceeds the record-mapping bound",
+            ));
+        }
+        self.record_mapping_dispositions.push(disposition);
+        Ok(())
     }
 
     pub fn dependency_reads(&self) -> &[DependencyRevision] {

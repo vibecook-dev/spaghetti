@@ -248,7 +248,7 @@ fn active_with_content_evidence(
             mapping_disposition: Box::new(crate::scoped_observation::mapped_record_disposition(
                 &batch,
             )),
-            batch,
+            batch: Box::new(batch),
             quarantined: false,
         }),
     };
