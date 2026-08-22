@@ -3251,10 +3251,42 @@ pub(crate) mod tests {
             &mut admission,
             named_relation_request("root-object", &identity, &origin, AccessPhase::Initial),
         );
-        let binding = host
-            .bind_directory_relation_source("descendant-objects", &identity, AccessPhase::Initial)
-            .unwrap();
-        let mut listing = match host.scan_directory_membership(binding, None).unwrap() {
+        let foreign_host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let foreign_pass = foreign_host.begin_pass().unwrap();
+        assert!(matches!(
+            host.scan_directory_relation_membership(
+                &foreign_pass,
+                "descendant-objects",
+                &identity,
+                AccessPhase::Initial,
+                None,
+            ),
+            Err(ScopedObservationAccessError::InvalidGrant(_))
+        ));
+        assert_eq!(
+            foreign_pass
+                .report()
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "descendant-objects")
+                .unwrap()
+                .attempts,
+            0
+        );
+        drop(foreign_pass);
+        drop(foreign_host);
+        let mut listing = match host
+            .scan_directory_relation_membership(
+                lease.access_pass(),
+                "descendant-objects",
+                &identity,
+                AccessPhase::Initial,
+                None,
+            )
+            .unwrap()
+        {
             ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
             other => panic!("expected a directory snapshot, got {other:?}"),
         };
@@ -3278,11 +3310,14 @@ pub(crate) mod tests {
                     .unwrap(),
             );
         }
-        let verification_binding = host
-            .bind_directory_relation_source("descendant-objects", &identity, AccessPhase::Initial)
-            .unwrap();
         let verification = match host
-            .scan_directory_membership(verification_binding, Some(&listing))
+            .scan_directory_relation_membership(
+                lease.access_pass(),
+                "descendant-objects",
+                &identity,
+                AccessPhase::Initial,
+                Some(&listing),
+            )
             .unwrap()
         {
             ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
@@ -3313,6 +3348,15 @@ pub(crate) mod tests {
                 .unwrap()
                 .is_some());
         }
+        let report = lease.access_pass().report();
+        let directory = report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "descendant-objects")
+            .unwrap();
+        assert_eq!(directory.attempts, 7);
+        assert_eq!(directory.completed, 7);
+        assert_eq!(directory.abandoned, 0);
         let watermark = host
             .complete_bootstrap_poll(lease, &admission, &projection, &drain)
             .unwrap();

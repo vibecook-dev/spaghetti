@@ -104,7 +104,6 @@ use observation_source_access::{
 };
 pub(crate) use observation_source_access::{
     ScopedObservationDirectoryMemberLifecycle, ScopedObservationDirectoryScan,
-    ScopedObservationRuntimeSourceBinding,
 };
 
 pub type ScopedArtifactAvailabilityEntry = artifact_availability::ScopedArtifactAvailabilityEntry;
@@ -19615,35 +19614,36 @@ impl ScopedObservationAccessHost {
         &self.compatibility
     }
 
-    /// Reserve and bind one declared `ChildDirectoryByNativeId` observation
-    /// relation onto this attachment. Membership is not implied by KnownObject
-    /// grants; the caller must scan and record it before bootstrap completion.
-    pub(crate) fn bind_directory_relation_source(
+    /// Scan one declared `ChildDirectoryByNativeId` relation through the exact
+    /// active reconciliation pass. Membership is not implied by KnownObject
+    /// grants: the caller must retain and admit the resulting listing before
+    /// pass completion. A fresh plan may not be minted outside `pass`, because
+    /// that would let the pass certify I/O absent from its own access report.
+    pub(crate) fn scan_directory_relation_membership(
         &self,
+        pass: &ScopedObservationAccessPass,
         relation_id: &str,
         identity_inputs: &[ScopeIdentityInput<'_>],
         phase: AccessPhase,
-    ) -> Result<ScopedObservationRuntimeSourceBinding, ScopedObservationAccessError> {
+        previous: Option<&ScopedObservationDirectoryListing>,
+    ) -> Result<ScopedObservationDirectoryScan, ScopedObservationAccessError> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(ScopedObservationAccessError::Closed);
         }
-        if !self
-            .dynamic_observation_relations
-            .iter()
-            .any(|id| id.as_ref() == relation_id)
+        if !Arc::ptr_eq(&self.state, &pass.state)
+            || !Arc::ptr_eq(&self.attachment_authority, &pass.attachment_authority)
+            || self.root_identity != pass.root_identity
+            || !self
+                .dynamic_observation_relations
+                .iter()
+                .any(|id| id.as_ref() == relation_id)
         {
             return Err(ScopedObservationAccessError::InvalidGrant(
                 "relation is not a composed directory observation".to_string(),
             ));
         }
-        let program = self
-            .authorization
-            .select_scope_program(&self.program_id)
-            .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
-        let plan = AuthorizedScopeAccessPlan::from_authorized_program(program)
-            .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
-        let reservation = plan
-            .reserve_observation_source(ScopeAccessRequest {
+        let reservation = pass
+            .reserve_observation_runtime_source(ScopeAccessRequest {
                 relation_id,
                 operation: AccessOperation::ObjectListing,
                 phase,
@@ -19654,36 +19654,12 @@ impl ScopedObservationAccessHost {
                 max_rows: 0,
             })
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
-        let runtime = reservation
-            .bind_runtime_stream(self.adapter.as_ref(), &self.source_instance)
+        let contract = reservation
+            .into_directory_membership_contract()
             .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))?;
-        let access_root = runtime.access_root().to_string();
-        let approved = self.access_roots.get(&access_root).ok_or_else(|| {
-            ScopedObservationAccessError::InvalidGrant(
-                "directory relation access root is not granted".to_string(),
-            )
-        })?;
-        observation_source_access::ScopedObservationRuntimeSourceBinding::bind(
-            runtime,
-            Arc::clone(&self.adapter),
-            Arc::clone(&self.source_instance),
-            approved,
-            &self.root_identity.source_instance_key,
-        )
-        .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))
-    }
-
-    pub(crate) fn scan_directory_membership(
-        &self,
-        binding: ScopedObservationRuntimeSourceBinding,
-        previous: Option<&ScopedObservationDirectoryListing>,
-    ) -> Result<ScopedObservationDirectoryScan, ScopedObservationAccessError> {
-        observation_source_access::scan_directory_membership_with_authority(
-            binding,
-            Arc::clone(&self.attachment_authority),
-            previous,
-        )
-        .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))
+        contract
+            .scan(previous)
+            .map_err(|error| ScopedObservationAccessError::Authorization(error.to_string()))
     }
 
     /// Exact pre-access contract selection retained for the future portable
