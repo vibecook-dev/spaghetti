@@ -57,6 +57,9 @@ use rusqlite::{Connection, OpenFlags};
 use crate::adapter::{
     AdapterId, AdapterRegistry, FactBatch, SourceCoverageSet, TypedAccessAuthorization,
 };
+use crate::catalog_contract::publication::CatalogPublicationLimits;
+use crate::catalog_contract::{CatalogCoveragePlan, CatalogReadinessPhase};
+use crate::source::catalog_projection::CatalogInitialProjectionBatch;
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanDetail, PlanPage, PlanPageRequest, TaskCollectionPage,
@@ -540,6 +543,38 @@ pub struct SpaghettiEngineCore {
     commit_notifications: CommitNotifications,
     stopped: Condvar,
     source_pass_pool: Option<crate::source::SharedSourcePassPool>,
+}
+
+/// Restart-safe handle for the exact durable initial Library build that was
+/// frozen before source reads. It carries no source paths, policy-view choice,
+/// or authority to manufacture a projection.
+#[derive(Clone)]
+pub(crate) struct CatalogInitialBuildContext {
+    plan: CatalogCoveragePlan,
+    readiness: crate::catalog_contract::CatalogReadinessSnapshot,
+    expected_build_commit_seq: u64,
+}
+
+impl CatalogInitialBuildContext {
+    pub(crate) fn plan(&self) -> &CatalogCoveragePlan {
+        &self.plan
+    }
+
+    pub(crate) fn observation_commit(&self) -> u64 {
+        self.expected_build_commit_seq
+    }
+}
+
+impl std::fmt::Debug for CatalogInitialBuildContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CatalogInitialBuildContext")
+            .field("coverage_plan_id", &self.plan.coverage_plan_id)
+            .field("readiness_epoch", &self.readiness.epoch)
+            .field("readiness_attempt", &self.readiness.attempt)
+            .field("expected_build_commit_seq", &self.expected_build_commit_seq)
+            .finish()
+    }
 }
 
 impl SpaghettiEngineCore {
@@ -1488,6 +1523,91 @@ impl SpaghettiEngineCore {
         }
     }
 
+    /// Freeze and schedule the exact initial Library plan before any producer
+    /// reads native objects. Exact replay resumes the same Building lineage;
+    /// a conflicting or already-published plan fails closed.
+    pub(crate) fn begin_initial_catalog_build(
+        &self,
+        plan: CatalogCoveragePlan,
+    ) -> Result<CatalogInitialBuildContext, EngineError> {
+        let now = engine_now_unix_ms()?;
+        self.commit_catalog_build_state(CatalogBuildStateCommand::register(
+            plan.clone(),
+            crate::catalog_contract::CATALOG_QUERY_PACK_CONTRACT_VERSION,
+            now,
+            now,
+        ))?;
+        let mut state = self.load_catalog_build_state()?.ok_or_else(|| {
+            EngineError::InvalidCommit(
+                "catalog plan registration did not produce durable state".to_string(),
+            )
+        })?;
+        if state.plan != plan {
+            return Err(EngineError::InvalidCommit(
+                "catalog initial build resumed a different frozen plan".to_string(),
+            ));
+        }
+        if state.readiness.state == CatalogReadinessPhase::Pending {
+            self.commit_catalog_build_state(CatalogBuildStateCommand::schedule(
+                state.expectation()?,
+                now,
+                now,
+            ))?;
+            state = self.load_catalog_build_state()?.ok_or_else(|| {
+                EngineError::InvalidCommit(
+                    "catalog build scheduling lost its durable state".to_string(),
+                )
+            })?;
+        }
+        if state.plan != plan || state.readiness.state != CatalogReadinessPhase::Building {
+            return Err(EngineError::InvalidCommit(
+                "catalog initial build requires the exact durable Building lineage".to_string(),
+            ));
+        }
+        Ok(CatalogInitialBuildContext {
+            plan,
+            readiness: state.readiness,
+            expected_build_commit_seq: state.last_commit_seq,
+        })
+    }
+
+    /// Consume one checked all-source projection and atomically publish it
+    /// against the pre-read Building context. Exact lost-ack replay is handled
+    /// by the existing writer publication contract.
+    pub(crate) fn commit_initial_catalog_projection(
+        &self,
+        context: CatalogInitialBuildContext,
+        batch: CatalogInitialProjectionBatch,
+    ) -> Result<Option<CatalogInitialPublicationReceipt>, EngineError> {
+        if batch.plan() != context.plan() {
+            return Err(EngineError::InvalidCommit(
+                "catalog projection batch does not match the frozen pre-read plan".to_string(),
+            ));
+        }
+        let assembly = batch
+            .into_publication(&context.readiness, CatalogPublicationLimits::default())
+            .map_err(|error| EngineError::InvalidCommit(error.to_string()))?;
+        let now = engine_now_unix_ms()?;
+        self.commit_initial_catalog_publication(CatalogInitialPublicationCommand::new(
+            assembly,
+            context.expected_build_commit_seq,
+            now,
+            now,
+        ))
+    }
+
+    fn load_catalog_build_state(
+        &self,
+    ) -> Result<Option<catalog_state::DurableCatalogBuildState>, EngineError> {
+        let connection =
+            Connection::open_with_flags(&self.database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|error| EngineError::Sqlite {
+                    operation: "open catalog build-state reader",
+                    detail: error.to_string(),
+                })?;
+        catalog_state::load_catalog_build_state(&connection)
+    }
+
     /// Atomically publish the checked initial RFC 012B Library snapshot and
     /// transition its exact durable Building lineage to Ready. The command is
     /// crate-private and carries no public query or N-API authority.
@@ -2281,7 +2401,11 @@ fn duration_ms(value: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::{ContractVersionSelection, CONTRACT_VERSION_SELECTION_VERSION};
+    use crate::catalog_contract::CATALOG_QUERY_PACK_CONTRACT_VERSION;
+    use crate::source::catalog_projection::CatalogInitialProjectionBatch;
     use crate::source::SharedSourcePassPool;
+    use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::thread;
     use tempfile::tempdir;
@@ -2294,6 +2418,68 @@ mod tests {
             defer_query_structures: false,
             source_pass_pool: None,
         }
+    }
+
+    fn catalog_selection() -> ContractVersionSelection {
+        ContractVersionSelection {
+            selection_contract_version: CONTRACT_VERSION_SELECTION_VERSION,
+            model_major: 1,
+            external_entity_reference_version: 1,
+            semantic_revision_reference_version: 1,
+            coverage_contract_version: 1,
+            fact_family_versions: BTreeMap::from([
+                ("catalog.project".to_owned(), 1),
+                ("catalog.session".to_owned(), 1),
+            ]),
+            query_pack_version: Some(CATALOG_QUERY_PACK_CONTRACT_VERSION),
+            observation_contract_version: None,
+        }
+    }
+
+    #[test]
+    fn initial_catalog_pipeline_freezes_before_projection_and_replays_exactly() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("catalog-pipeline.db");
+        let engine = SpaghettiEngineCore::open(options(database.clone())).unwrap();
+        let plan = CatalogCoveragePlan::new(
+            crate::catalog_contract::CatalogCoverageScope::Library,
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let first_context = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        let frozen_observation_commit = first_context.observation_commit();
+        engine.shutdown().unwrap();
+        drop(engine);
+
+        let engine = SpaghettiEngineCore::open(options(database)).unwrap();
+        let context = engine.begin_initial_catalog_build(plan.clone()).unwrap();
+        assert_eq!(context.plan(), &plan);
+        assert_eq!(context.observation_commit(), frozen_observation_commit);
+        let batch = CatalogInitialProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            context.observation_commit(),
+        )
+        .unwrap();
+        let receipt = engine
+            .commit_initial_catalog_projection(context.clone(), batch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.snapshot_id.complete_commit, receipt.commit_seq);
+        assert!(engine.status().catalog_query_ready);
+
+        let replay = CatalogInitialProjectionBatch::assemble(
+            Vec::new(),
+            catalog_selection(),
+            context.observation_commit(),
+        )
+        .unwrap();
+        assert!(engine
+            .commit_initial_catalog_projection(context, replay)
+            .unwrap()
+            .is_none());
+        engine.shutdown().unwrap();
     }
 
     #[test]
