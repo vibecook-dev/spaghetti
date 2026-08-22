@@ -1082,7 +1082,7 @@ semantic replay is occurrence-independent, partial retract cannot erase known
 state, complete retract is dimension-local, and a durable `FactBatch` view and
 selected scoped projection produce the same canonical reduced-state digest.
 The topology-neutral `CurrentGenerationLog` law now also reduces parent
-messages and typed content blocks. A partial parent list may extend but cannot
+messages and typed content blocks. An incomplete parent list may extend but cannot
 remove or reorder known blocks, retarget the message, change its role, or
 retract it; complete parent snapshots retract omitted native block IDs.
 Block correction replaces one stable block, exact semantic replay is
@@ -1094,9 +1094,9 @@ in either fact order. The content-block observer family, event union, and
 replacement-manifest entry remain unexposed until their portable contracts are
 frozen.
 The topology-neutral `CorrelatedLifecycle` law now also owns structured
-user-input reduction. A partial observation may enrich typed questions and
+user-input reduction. An incomplete observation may enrich typed questions and
 options, but cannot resolve, fail, cancel, retract, retarget, or change the
-interaction kind; a partial terminal observation without current state fails
+interaction kind; an incomplete terminal observation without current state fails
 closed. The durable `FactBatch` view and selected scoped projection share the
 same reduced revision and path-free digest across pending, complete terminal
 correction, complete retraction, restoration, partial enrichment, and partial

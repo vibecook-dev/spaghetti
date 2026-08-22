@@ -260,9 +260,9 @@ fn merge_user_input_questions(
 /// Reduce one correlated user-input lifecycle revision without depending on
 /// durable-store or scoped-observer coordinates.
 ///
-/// Partial evidence may add typed question detail, but cannot change a known
+/// Incomplete evidence may add typed question detail, but cannot change a known
 /// lifecycle state, result, correlation identity, or interaction kind. A
-/// partial terminal observation without a current entity is therefore not
+/// incomplete terminal observation without a current entity is therefore not
 /// sufficient to create terminal state.
 pub(crate) fn reduce_user_input_revision(
     current: Option<(&FactSemanticRevision, &UserInputRequestRevisionFact)>,
@@ -299,7 +299,7 @@ pub(crate) fn reduce_user_input_revision(
         }
         UserInputOperation::Retract => Ok(RevisionedEntityValueReduction::Retract),
         UserInputOperation::Upsert
-            if incoming_revision.completeness == ContractCompleteness::Partial =>
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
         {
             let Some((current_semantic, current_revision)) = current else {
                 if incoming_revision.state != UserInputLifecycleState::Pending
@@ -352,7 +352,7 @@ fn merge_ordered_message_keys(current: &[String], incoming: &[String]) -> Vec<St
     merged
 }
 
-/// Reduce one current-generation message revision. A partial block list may
+/// Reduce one current-generation message revision. An incomplete block list may
 /// extend the current ordered set but cannot remove or reorder known blocks,
 /// retarget the message, change its role, or retract it.
 pub(crate) fn reduce_message_revision(
@@ -387,7 +387,7 @@ pub(crate) fn reduce_message_revision(
         }
         UserInputOperation::Retract => Ok(RevisionedEntityValueReduction::Retract),
         UserInputOperation::Upsert
-            if incoming_revision.completeness == ContractCompleteness::Partial =>
+            if incoming_revision.completeness != ContractCompleteness::Complete =>
         {
             let Some((current_semantic, current_revision)) = current else {
                 return Ok(RevisionedEntityValueReduction::Upsert(

@@ -28679,7 +28679,7 @@ mod projection_tests {
             &rejected_partial_batch,
             UserInputOperation::Upsert,
             UserInputLifecycleState::Resolved,
-            ContractCompleteness::Partial,
+            ContractCompleteness::Unknown,
             Some("partial-result-cannot-create-terminal-state"),
         );
         rejected_partial_batch
@@ -28888,7 +28888,7 @@ mod projection_tests {
         assert_user_input_topology_parity(&durable, &projection);
 
         let mut partial_upsert = pending.clone();
-        partial_upsert.completeness = ContractCompleteness::Partial;
+        partial_upsert.completeness = ContractCompleteness::Unknown;
         partial_upsert.state = UserInputLifecycleState::Resolved;
         partial_upsert.result_reference = Some("partial-result-must-not-resolve".to_owned());
         partial_upsert.questions[0].header = None;
@@ -29657,6 +29657,7 @@ mod projection_tests {
         let mut role_drift_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
         let mut role_drift = fact_for(&role_drift_batch, &fixture.partial_blocks);
+        role_drift.completeness = ContractCompleteness::Unknown;
         role_drift.role = MessageRevisionRole::User;
         role_drift_batch
             .push_native(
@@ -29679,11 +29680,13 @@ mod projection_tests {
         let partial_blocks_record = rfc012c_record(1, 2, 11);
         let mut partial_blocks_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let mut unknown_blocks = fact_for(&partial_blocks_batch, &fixture.partial_blocks);
+        unknown_blocks.completeness = ContractCompleteness::Unknown;
         partial_blocks_batch
             .push_native(
                 &partial_blocks_record,
                 fixture.native_message_id.as_bytes(),
-                Fact::MessageRevision(fact_for(&partial_blocks_batch, &fixture.partial_blocks)),
+                Fact::MessageRevision(unknown_blocks),
             )
             .unwrap();
         assert_eq!(
