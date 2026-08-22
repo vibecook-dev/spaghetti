@@ -205,7 +205,9 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// v59: append-only RFC 012B Partial coverage milestones with exact
 /// predecessor ownership and restart validation.
 /// v60: immutable RFC 012B source-generation epoch invalidation lineage.
-pub const SCHEMA_VERSION: u32 = 60;
+/// v61: append-only RFC 012B required-source failure evidence for an initial
+/// no-snapshot catalog build, kept separate from retained-refresh authority.
+pub const SCHEMA_VERSION: u32 = 61;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -514,6 +516,8 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
         'catalog.library.source_generation.invalidated',
         'catalog.library.initial_snapshot.published',
         'catalog.library.build.integrity_failed',
+        'catalog.library.build.source_retrying',
+        'catalog.library.build.source_unavailable',
         'catalog.library.refresh.started',
         'catalog.library.refresh_snapshot.published',
         'catalog.library.refresh.integrity_failed',
@@ -726,6 +730,34 @@ BEFORE DELETE ON catalog_refresh_source_failures BEGIN
   SELECT RAISE(ABORT, 'catalog refresh source-failure evidence is immutable');
 END;
 
+CREATE TABLE IF NOT EXISTS catalog_initial_source_failures (
+  failure_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  failed_build_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
+  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
+  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
+  attempt INTEGER NOT NULL CHECK (attempt > 0),
+  previous_state TEXT NOT NULL CHECK (previous_state IN ('building', 'partial')),
+  reason_code TEXT NOT NULL CHECK (
+    typeof(reason_code) = 'text'
+    AND length(CAST(reason_code AS BLOB)) BETWEEN 1 AND 64
+    AND length(reason_code) = length(CAST(reason_code AS BLOB))
+    AND substr(reason_code, 1, 1) GLOB '[a-z]'
+    AND reason_code NOT GLOB '*[^a-z0-9_]*'
+  ),
+  failed_at INTEGER NOT NULL,
+  CHECK (failed_build_commit_seq < failure_commit_seq)
+);
+
+CREATE TRIGGER IF NOT EXISTS catalog_initial_source_failures_no_update
+BEFORE UPDATE ON catalog_initial_source_failures BEGIN
+  SELECT RAISE(ABORT, 'catalog initial source-failure evidence is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS catalog_initial_source_failures_no_delete
+BEFORE DELETE ON catalog_initial_source_failures BEGIN
+  SELECT RAISE(ABORT, 'catalog initial source-failure evidence is immutable');
+END;
+
 CREATE TABLE IF NOT EXISTS catalog_partial_builds (
   partial_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
   predecessor_state_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
@@ -820,12 +852,20 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
   updated_at INTEGER NOT NULL,
   CHECK (
     (
-      state IN ('pending', 'building')
+      state = 'pending'
       AND completed_contract_version IS NULL
       AND complete_through_commit IS NULL
       AND last_complete_snapshot_commit IS NULL
       AND refreshing_from_snapshot_commit IS NULL
       AND reason_code IS NULL
+    )
+    OR
+    (
+      state = 'building'
+      AND completed_contract_version IS NULL
+      AND complete_through_commit IS NULL
+      AND last_complete_snapshot_commit IS NULL
+      AND refreshing_from_snapshot_commit IS NULL
     )
     OR
     (
@@ -846,7 +886,6 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
         (
           completed_contract_version IS NULL
           AND last_complete_snapshot_commit IS NULL
-          AND reason_code IS NULL
         )
         OR
         (
@@ -881,13 +920,23 @@ CREATE TABLE IF NOT EXISTS catalog_build_state (
     OR
     (
       state = 'degraded'
-      AND completed_contract_version IS NOT NULL
-      AND last_complete_snapshot_commit IS NOT NULL
       AND refreshing_from_snapshot_commit IS NULL
       AND reason_code IS NOT NULL
-      AND completed_contract_version = desired_contract_version
-      AND (complete_through_commit IS NULL OR complete_through_commit = last_complete_snapshot_commit)
-      AND last_commit_seq > last_complete_snapshot_commit
+      AND (
+        (
+          completed_contract_version IS NULL
+          AND complete_through_commit IS NULL
+          AND last_complete_snapshot_commit IS NULL
+        )
+        OR
+        (
+          completed_contract_version IS NOT NULL
+          AND last_complete_snapshot_commit IS NOT NULL
+          AND completed_contract_version = desired_contract_version
+          AND (complete_through_commit IS NULL OR complete_through_commit = last_complete_snapshot_commit)
+          AND last_commit_seq > last_complete_snapshot_commit
+        )
+      )
     )
     OR
     (
@@ -2669,6 +2718,7 @@ const CURRENT_TABLES: &[&str] = &[
     "source_coverage_sets",
     "query_pack_selections",
     "projection_versions",
+    "catalog_initial_source_failures",
     "catalog_refresh_source_failures",
     "catalog_refresh_integrity_failures",
     "catalog_snapshot_retirements",
@@ -3680,6 +3730,11 @@ mod tests {
             "table",
             "catalog_refresh_source_failures"
         ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "catalog_initial_source_failures"
+        ));
         assert!(object_exists(&conn, "table", "catalog_epoch_invalidations"));
         assert!(object_exists(&conn, "table", "catalog_build_state"));
         let refreshing_snapshot_column: i64 = conn
@@ -4064,6 +4119,16 @@ mod tests {
         assert!(object_exists(
             &conn,
             "trigger",
+            "catalog_initial_source_failures_no_update"
+        ));
+        assert!(object_exists(
+            &conn,
+            "trigger",
+            "catalog_initial_source_failures_no_delete"
+        ));
+        assert!(object_exists(
+            &conn,
+            "trigger",
             "catalog_epoch_invalidations_no_update"
         ));
         assert!(object_exists(
@@ -4120,6 +4185,10 @@ mod tests {
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.initial_snapshot.published', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.integrity_failed', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.integrity_failed', 1, 2, 1)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_retrying', 1, NULL, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_retrying', 1, 2, 1)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_unavailable', 1, NULL, 0)",
+            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_unavailable', 1, 2, 1)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.started', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.integrity_failed', 1, NULL, 0)",
             "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.integrity_failed', 1, 2, 1)",
@@ -4145,6 +4214,8 @@ mod tests {
             "catalog.library.source_generation.invalidated",
             "catalog.library.initial_snapshot.published",
             "catalog.library.build.integrity_failed",
+            "catalog.library.build.source_retrying",
+            "catalog.library.build.source_unavailable",
             "catalog.library.refresh.started",
             "catalog.library.refresh_snapshot.published",
             "catalog.library.refresh.integrity_failed",
@@ -4163,7 +4234,7 @@ mod tests {
             conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
-            13
+            15
         );
     }
 

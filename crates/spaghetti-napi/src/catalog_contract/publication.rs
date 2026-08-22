@@ -2385,7 +2385,10 @@ fn validate_initial_build(
         || readiness.complete_through_commit.is_some()
         || readiness.last_complete_snapshot.is_some()
         || readiness.refreshing_from_snapshot.is_some()
-        || readiness.reason.is_some()
+        || !matches!(
+            readiness.reason.as_ref(),
+            None | Some(CatalogReadinessReason::SourceRetrying { .. })
+        )
     {
         return Err(CatalogContractError::invalid(
             "initial catalog publication requires one exact durable Library Building/Partial expectation",

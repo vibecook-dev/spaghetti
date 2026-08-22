@@ -1070,6 +1070,7 @@ fn write_ready_state(
             SET state = 'ready', completed_contract_version = ?1,
                 complete_through_commit = ?2,
                 last_complete_snapshot_commit = ?2,
+                reason_code = NULL,
                 last_commit_seq = ?2, updated_at = ?3
             WHERE scope_kind = ?4
               AND coverage_plan_id = ?5
@@ -2473,6 +2474,7 @@ fn validate_snapshot_lineage(
                 &[
                     "catalog.library.build.scheduled",
                     catalog_state::PARTIAL_REASON,
+                    catalog_state::INITIAL_SOURCE_RETRYING_REASON,
                     catalog_state::REFRESH_RECOVERY_STARTED_REASON,
                     catalog_state::SOURCE_GENERATION_INVALIDATED_REASON,
                 ],
@@ -3483,6 +3485,129 @@ mod tests {
                 .contains("missing source-generation invalidation evidence"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn cold_source_recovery_publishes_initial_snapshot_from_exact_retry_attempt() {
+        let mut connection = database();
+        let coverage_plan = plan();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::register(coverage_plan.clone(), 1, 10, 11),
+        )
+        .unwrap()
+        .unwrap();
+        let pending = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::schedule(pending.expectation().unwrap(), 20, 21),
+        )
+        .unwrap()
+        .unwrap();
+        let building = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::degrade_initial_build_source(
+                building.initial_source_expectation().unwrap(),
+                "catalog_source_retry_exhausted",
+                30,
+                31,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let degraded = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::retry_terminal_refresh(
+                degraded.expectation().unwrap(),
+                40,
+                41,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let retry = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.readiness.attempt, 2);
+        let command = CatalogInitialPublicationCommand::new(
+            assemble(&coverage_plan, &retry.readiness, b"source-recovered"),
+            retry.last_commit_seq,
+            50,
+            51,
+        );
+        let published = apply_initial_catalog_publication(&mut connection, &command)
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(published.readiness.attempt, 2);
+        assert!(published.readiness.reason.is_none());
+        let restarted = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restarted.readiness, published.readiness);
+        assert!(restarted.ready_read_authority().is_ok());
+    }
+
+    #[test]
+    fn temporary_cold_source_retry_publishes_without_relabeling_the_attempt() {
+        let mut connection = database();
+        let coverage_plan = plan();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::register(coverage_plan.clone(), 1, 10, 11),
+        )
+        .unwrap()
+        .unwrap();
+        let pending = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::schedule(pending.expectation().unwrap(), 20, 21),
+        )
+        .unwrap()
+        .unwrap();
+        let building = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        catalog_state::apply_catalog_build_state_commit(
+            &mut connection,
+            &CatalogBuildStateCommand::mark_initial_build_source_retrying(
+                building.initial_source_expectation().unwrap(),
+                "catalog_source_temporarily_unavailable",
+                30,
+                31,
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        let retrying = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        let command = CatalogInitialPublicationCommand::new(
+            assemble(&coverage_plan, &retrying.readiness, b"source-returned"),
+            retrying.last_commit_seq,
+            40,
+            41,
+        );
+        let published = apply_initial_catalog_publication(&mut connection, &command)
+            .unwrap()
+            .unwrap();
+        assert_eq!(published.readiness.state, CatalogReadinessPhase::Ready);
+        assert_eq!(published.readiness.attempt, 1);
+        assert!(published.readiness.reason.is_none());
+        let restarted = catalog_state::load_catalog_build_state(&connection)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restarted.readiness, published.readiness);
     }
 
     #[test]
@@ -4683,6 +4808,7 @@ mod tests {
                     epoch: 1,
                     attempt: 1,
                     state: catalog_state::CatalogDurableBuildPhase::Pending,
+                    state_commit_seq: 1,
                 },
                 20,
                 21,
@@ -4822,6 +4948,7 @@ mod tests {
             epoch: 1,
             attempt: 1,
             state: catalog_state::CatalogDurableBuildPhase::Pending,
+            state_commit_seq: 1,
         };
         assert_eq!(
             engine
