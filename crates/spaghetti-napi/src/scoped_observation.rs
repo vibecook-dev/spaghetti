@@ -23,14 +23,14 @@ use crate::adapter::{
     CoverageProvenance, CoverageScope, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
     DecodeDisposition, DecoderId, EffectiveStateRevisionFact, ExternalEntityRef, Fact, FactBatch,
     FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision,
-    MessageRevisionFact, MessageRevisionRole, NativeArtifactProbe, NativeIdentityClaim,
-    NativeRuntimeMarkerRevisionFact, PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality,
-    RawRetentionPolicy, RecordMappingDisposition, ScopeRelationPrimitive, SemanticRevisionRef,
-    Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
-    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
-    SourceSnapshot, SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality,
-    ToolRevisionFact, ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact,
-    UserInputOperation, UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    MessageRevisionFact, NativeArtifactProbe, NativeIdentityClaim, NativeRuntimeMarkerRevisionFact,
+    PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy,
+    RecordMappingDisposition, ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest,
+    SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance, SourceObjectList,
+    SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows, SourceSnapshot,
+    SupportOperation, TaskLifecycleState, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
+    ToolRevisionKind, TypedAccessAuthorization, UsageRevisionV2Fact, UserInputOperation,
+    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -51,9 +51,10 @@ use crate::observation_contract::{
 };
 use crate::runtime_semantic_reducer::{
     effective_state_reduced_state_digest, reduce_content_block_revision,
-    reduce_effective_state_revision, reduce_native_marker_revision, reduce_user_input_revision,
-    EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RevisionedEntityValueReduction,
-    RuntimeSemanticReductionError, RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
+    reduce_effective_state_revision, reduce_message_revision, reduce_native_marker_revision,
+    reduce_user_input_revision, EffectiveStateReducedDigestEntity, MessageReducedDigestEntity,
+    RevisionedEntityReduction, RevisionedEntityValueReduction, RuntimeSemanticReductionError,
+    RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
     RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
@@ -13473,21 +13474,35 @@ impl ScopedObservationProjectionSink {
                                 &state.revision,
                             ),
                         )?;
-                        if current.semantic.fact_revision_id == state.semantic.fact_revision_id {
-                            continue;
-                        }
-                        if state.revision.operation == UserInputOperation::Retract
-                            && state.revision.completeness != ContractCompleteness::Complete
-                        {
-                            continue;
-                        }
-                        if state.revision.completeness == ContractCompleteness::Partial
-                            && state.revision.operation == UserInputOperation::Upsert
-                        {
-                            state.revision.ordered_content_block_keys = merge_ordered_keys(
-                                &current.revision.ordered_content_block_keys,
-                                &state.revision.ordered_content_block_keys,
+                    }
+                    match reduce_message_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(runtime_semantic_projection_error)?
+                    {
+                        RevisionedEntityValueReduction::Unchanged => continue,
+                        RevisionedEntityValueReduction::Retract => {
+                            queue_projection_retraction(
+                                &self.messages,
+                                &mut mutation.message_upserts,
+                                &mut mutation.message_retractions,
+                                key,
                             );
+                            if self.families.message {
+                                message_events.push(ScopedProjectedObservation::Message {
+                                    lane_ordinal,
+                                    event: Box::new(message_event(
+                                        &state,
+                                        ScopedRevisionedEntityOperation::Retract,
+                                        phase,
+                                    )),
+                                });
+                            }
+                            continue;
+                        }
+                        RevisionedEntityValueReduction::Upsert(reduced) => {
+                            state.revision = reduced;
                             rebind_reduced_semantic_revision(
                                 &mut state.semantic,
                                 state
@@ -13495,34 +13510,7 @@ impl ScopedObservationProjectionSink {
                                     .semantic_revision_key()
                                     .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?,
                             )?;
-                            if current.semantic.fact_revision_id == state.semantic.fact_revision_id
-                            {
-                                continue;
-                            }
                         }
-                    } else if state.revision.operation == UserInputOperation::Retract
-                        && state.revision.completeness != ContractCompleteness::Complete
-                    {
-                        continue;
-                    }
-                    if state.revision.operation == UserInputOperation::Retract {
-                        queue_projection_retraction(
-                            &self.messages,
-                            &mut mutation.message_upserts,
-                            &mut mutation.message_retractions,
-                            key,
-                        );
-                        if self.families.message {
-                            message_events.push(ScopedProjectedObservation::Message {
-                                lane_ordinal,
-                                event: Box::new(message_event(
-                                    &state,
-                                    ScopedRevisionedEntityOperation::Retract,
-                                    phase,
-                                )),
-                            });
-                        }
-                        continue;
                     }
                     mutation.message_upserts.insert(key, state);
                 }
@@ -16065,45 +16053,15 @@ fn omitted_owned_set_task_ids(
 fn message_replacement_digest(
     entities: &[ScopedMessageReplacementEntity],
 ) -> Result<ScopedReplacementSemanticDigest, ScopedProjectionError> {
-    let entity_count = u64::try_from(entities.len())
-        .map_err(|_| ScopedProjectionError::ReplacementCapacityExhausted)?;
-    let mut hasher = replacement_family_digest(
-        b"runtime.message",
-        RUNTIME_MESSAGE_FACT_FAMILY_CONTRACT_VERSION,
-        entity_count,
-    );
-    for entity in entities {
-        validate_and_hash_replacement_source(
-            &mut hasher,
-            &entity.semantic,
-            entity.generation,
-            &entity.source,
-        )?;
-        hash_event_component(&mut hasher, entity.revision.session.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.actor_run.as_bytes());
-        hash_event_component(&mut hasher, entity.revision.native_message_id.as_bytes());
-        hasher.update(&[match entity.revision.role {
-            MessageRevisionRole::User => 1,
-            MessageRevisionRole::Assistant => 2,
-            MessageRevisionRole::System => 3,
-        }]);
-        hasher.update(&(entity.revision.ordered_content_block_keys.len() as u64).to_be_bytes());
-        for key in &entity.revision.ordered_content_block_keys {
-            hash_event_component(&mut hasher, key.as_bytes());
-        }
-        hasher.update(&[match entity.revision.operation {
-            UserInputOperation::Upsert => 1,
-            UserInputOperation::Retract => 2,
-        }]);
-        hasher.update(&[match entity.revision.completeness {
-            ContractCompleteness::Complete => 1,
-            ContractCompleteness::Partial => 2,
-            ContractCompleteness::Unknown => 3,
-        }]);
-    }
-    Ok(ScopedReplacementSemanticDigest(
-        *hasher.finalize().as_bytes(),
-    ))
+    let digest = crate::runtime_semantic_reducer::message_reduced_state_digest(
+        entities.iter().map(|entity| MessageReducedDigestEntity {
+            semantic: &entity.semantic,
+            source: runtime_semantic_source_ref(entity.generation, &entity.source),
+            revision: &entity.revision,
+        }),
+    )
+    .map_err(runtime_semantic_projection_error)?;
+    Ok(ScopedReplacementSemanticDigest(digest))
 }
 
 fn message_replacement_snapshot_is_valid(
@@ -23943,17 +23901,19 @@ mod projection_tests {
     use crate::adapter::{
         AdapterManifest, AdapterSupportBinding, ContractCompleteness, ContractVersionOffer,
         ContractVersionRequest, CoverageMembershipRevision, EffectiveStateDimension,
-        EffectiveStateEvidenceKind, NativeIdentity, QualifiedTimestamp, QualifiedValue,
-        QualifiedValueQuality, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
-        UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance, UserInputLifecycleState,
+        EffectiveStateEvidenceKind, MessageRevisionRole, NativeIdentity, QualifiedTimestamp,
+        QualifiedValue, QualifiedValueQuality, TimestampQuality, UsageBucketsV2,
+        UsageQualifiedValue, UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
+        UserInputLifecycleState,
     };
     use crate::runtime_semantic_reducer::{
         content_block_reduced_state_digest, effective_state_reduced_state_digest,
-        native_marker_reduced_state_digest, reduce_content_block_revision,
-        reduce_effective_state_revision, reduce_native_marker_revision,
-        user_input_reduced_state_digest, ContentBlockReducedDigestEntity,
-        EffectiveStateReducedDigestEntity, NativeMarkerReducedDigestEntity,
-        RevisionedEntityReduction, RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
+        message_reduced_state_digest, native_marker_reduced_state_digest,
+        reduce_content_block_revision, reduce_effective_state_revision,
+        reduce_native_marker_revision, user_input_reduced_state_digest,
+        ContentBlockReducedDigestEntity, EffectiveStateReducedDigestEntity,
+        MessageReducedDigestEntity, NativeMarkerReducedDigestEntity, RevisionedEntityReduction,
+        RuntimeSemanticSourceRef, UserInputReducedDigestEntity,
     };
     use crate::semantic_contract::{
         content_block_revision, effective_state_revision, native_marker_revision,
@@ -27104,6 +27064,13 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurableMessageEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
     fn reduce_durable_user_input(
         current: &mut BTreeMap<CanonicalFactId, DurableUserInputEntity>,
         source: ScopedSourceObjectIdentity,
@@ -27205,6 +27172,115 @@ mod projection_tests {
             let scoped_entity = scoped.user_input_requests.get(fact_id).unwrap();
             let Fact::UserInputRequestRevision(durable_revision) = &durable_entity.envelope.value
             else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn reduce_durable_message(
+        current: &mut BTreeMap<CanonicalFactId, DurableMessageEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        mut envelope: FactEnvelope,
+    ) -> RevisionedEntityReduction {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("message durable fact has semantic identity");
+        let Fact::MessageRevision(revision) = &envelope.value else {
+            panic!("durable message reducer received another family");
+        };
+        let decision = reduce_message_revision(
+            current.get(&semantic.fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::MessageRevision(current_revision) = &entity.envelope.value else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )
+        .unwrap();
+        match decision {
+            RevisionedEntityValueReduction::Unchanged => RevisionedEntityReduction::Unchanged,
+            RevisionedEntityValueReduction::Retract => {
+                current.remove(&semantic.fact_id);
+                RevisionedEntityReduction::Retract
+            }
+            RevisionedEntityValueReduction::Upsert(reduced) => {
+                envelope.value = Fact::MessageRevision(reduced.clone());
+                let semantic = envelope.semantic_revision.as_mut().unwrap();
+                rebind_reduced_semantic_revision(
+                    semantic,
+                    reduced.semantic_revision_key().unwrap(),
+                )
+                .unwrap();
+                current.insert(
+                    semantic.fact_id,
+                    DurableMessageEntity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+                RevisionedEntityReduction::Upsert
+            }
+        }
+    }
+
+    fn durable_message_digest(
+        current: &BTreeMap<CanonicalFactId, DurableMessageEntity>,
+    ) -> [u8; 32] {
+        message_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::MessageRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            MessageReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_message_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurableMessageEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        let snapshot = scoped
+            .message_replacement_snapshot(ScopedAppendDeliveryPhase::Correction)
+            .unwrap();
+        assert_eq!(snapshot.entity_count as usize, durable.len());
+        assert_eq!(
+            snapshot.semantic_digest.as_bytes(),
+            &durable_message_digest(durable),
+            "durable and scoped message reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.messages.get(fact_id).unwrap();
+            let Fact::MessageRevision(durable_revision) = &durable_entity.envelope.value else {
                 unreachable!();
             };
             assert_eq!(
@@ -29267,6 +29343,7 @@ mod projection_tests {
             &selection.contract_versions,
         )
         .unwrap();
+        let mut durable = BTreeMap::new();
         let fact_for =
             |batch: &FactBatch, slot: &crate::semantic_contract::MessageRevisionSlotWire| {
                 MessageRevisionFact {
@@ -29295,6 +29372,15 @@ mod projection_tests {
                 Fact::MessageRevision(current.clone()),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_message(
+                &mut durable,
+                rfc012c_source_identity(),
+                current_record.clone(),
+                current_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         let events = projection
             .project(&rfc012c_decoded_frame(
                 1,
@@ -29304,6 +29390,7 @@ mod projection_tests {
             ))
             .unwrap();
         assert_eq!(events.len(), 1);
+        assert_message_topology_parity(&durable, &projection);
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(
             projection
@@ -29315,6 +29402,30 @@ mod projection_tests {
                 .ordered_content_block_keys,
             ["block-a", "block-b"]
         );
+
+        let role_drift_record = rfc012c_record(1, 2, 10);
+        let mut role_drift_batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        let mut role_drift = fact_for(&role_drift_batch, &fixture.partial_blocks);
+        role_drift.role = MessageRevisionRole::User;
+        role_drift_batch
+            .push_native(
+                &role_drift_record,
+                fixture.native_message_id.as_bytes(),
+                Fact::MessageRevision(role_drift),
+            )
+            .unwrap();
+        assert_eq!(
+            projection.project(&rfc012c_decoded_frame(
+                2,
+                ScopedAppendDeliveryPhase::Live,
+                &role_drift_record,
+                role_drift_batch,
+            )),
+            Err(ScopedProjectionError::InvalidSemanticRevision)
+        );
+        assert_message_topology_parity(&durable, &projection);
+
         let partial_blocks_record = rfc012c_record(1, 2, 11);
         let mut partial_blocks_batch =
             FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
@@ -29325,6 +29436,15 @@ mod projection_tests {
                 Fact::MessageRevision(fact_for(&partial_blocks_batch, &fixture.partial_blocks)),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_message(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_blocks_record.clone(),
+                partial_blocks_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 3,
@@ -29333,6 +29453,7 @@ mod projection_tests {
                 partial_blocks_batch,
             ))
             .unwrap();
+        assert_message_topology_parity(&durable, &projection);
         assert_eq!(
             projection
                 .messages
@@ -29358,6 +29479,15 @@ mod projection_tests {
                 Fact::MessageRevision(fact_for(&complete_blocks_batch, &fixture.complete_blocks)),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_message(
+                &mut durable,
+                rfc012c_source_identity(),
+                complete_blocks_record.clone(),
+                complete_blocks_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 4,
@@ -29366,6 +29496,7 @@ mod projection_tests {
                 complete_blocks_batch,
             ))
             .unwrap();
+        assert_message_topology_parity(&durable, &projection);
         assert_eq!(projection.messages.len(), 1);
         assert_eq!(
             projection
@@ -29403,6 +29534,15 @@ mod projection_tests {
             )
             .unwrap();
         assert_eq!(
+            reduce_durable_message(
+                &mut durable,
+                rfc012c_source_identity(),
+                retract_record.clone(),
+                retract_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Retract
+        );
+        assert_eq!(
             projection
                 .project(&rfc012c_decoded_frame(
                     5,
@@ -29414,6 +29554,7 @@ mod projection_tests {
                 .len(),
             1
         );
+        assert_message_topology_parity(&durable, &projection);
         assert!(projection.messages.is_empty());
         assert_eq!(
             projection
@@ -29433,6 +29574,15 @@ mod projection_tests {
                 Fact::MessageRevision(current),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_message(
+                &mut durable,
+                rfc012c_source_identity(),
+                restored_record.clone(),
+                restored_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Upsert
+        );
         projection
             .project(&rfc012c_decoded_frame(
                 6,
@@ -29441,6 +29591,7 @@ mod projection_tests {
                 restored_batch,
             ))
             .unwrap();
+        assert_message_topology_parity(&durable, &projection);
         let mut partial_retract = fact_for(
             &FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap(),
             &fixture.retract,
@@ -29456,6 +29607,15 @@ mod projection_tests {
                 Fact::MessageRevision(partial_retract),
             )
             .unwrap();
+        assert_eq!(
+            reduce_durable_message(
+                &mut durable,
+                rfc012c_source_identity(),
+                partial_record.clone(),
+                partial_batch.facts()[0].clone(),
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
         assert!(projection
             .project(&rfc012c_decoded_frame(
                 7,
@@ -29466,6 +29626,7 @@ mod projection_tests {
             .unwrap()
             .is_empty());
         assert_eq!(projection.messages.len(), 1);
+        assert_message_topology_parity(&durable, &projection);
     }
 
     #[test]

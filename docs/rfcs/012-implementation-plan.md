@@ -1081,15 +1081,18 @@ binds each qualification into semantic identity. One topology-neutral
 semantic replay is occurrence-independent, partial retract cannot erase known
 state, complete retract is dimension-local, and a durable `FactBatch` view and
 selected scoped projection produce the same canonical reduced-state digest.
-The topology-neutral `CurrentGenerationLog` law now also reduces typed content
-blocks: correction replaces one stable block, exact semantic replay is
-occurrence-independent, partial retract and partial parent block lists cannot
-prove absence, complete parent snapshots retract omitted native block IDs, and
+The topology-neutral `CurrentGenerationLog` law now also reduces parent
+messages and typed content blocks. A partial parent list may extend but cannot
+remove or reorder known blocks, retarget the message, change its role, or
+retract it; complete parent snapshots retract omitted native block IDs.
+Block correction replaces one stable block, exact semantic replay is
+occurrence-independent, partial block retract cannot prove absence, and
 explicit parent/block retraction plus generation reset remove retained state.
-A durable `FactBatch` view and the private scoped reducer produce the same
-canonical content-block digest after every transition and in either fact
-order. The observer family, event union, and replacement-manifest entry remain
-unexposed until their portable contracts are frozen.
+Durable `FactBatch` views and the private scoped reducer produce the same
+canonical parent-message and content-block digests after every transition and
+in either fact order. The content-block observer family, event union, and
+replacement-manifest entry remain unexposed until their portable contracts are
+frozen.
 The topology-neutral `CorrelatedLifecycle` law now also owns structured
 user-input reduction. A partial observation may enrich typed questions and
 options, but cannot resolve, fail, cancel, retract, retarget, or change the
