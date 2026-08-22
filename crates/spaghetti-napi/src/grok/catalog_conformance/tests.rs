@@ -557,6 +557,20 @@ fn synthetic_producer_matches_frozen_identity_and_complete_coverage() {
 }
 
 #[test]
+fn forward_catalog_authority_fails_before_complete_source_access() {
+    let empty_root = TempDir::new().unwrap();
+    let error = produce_catalog_from_root(
+        empty_root.path(),
+        b"forward-source-instance",
+        CompatibilityClass::RecognizedUnverified,
+        b"forward-policy",
+    )
+    .unwrap_err();
+    assert!(error.contains("cannot publish normal complete coverage"));
+    assert!(!error.contains(empty_root.path().to_string_lossy().as_ref()));
+}
+
+#[test]
 fn planned_composition_cannot_authorize_synthetic_producer() {
     let selection = catalog_contract_selection();
     let planned = grok_planned_catalog_composition().unwrap();

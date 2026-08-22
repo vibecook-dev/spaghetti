@@ -889,6 +889,17 @@ retained source contract before execution. Planned compositions and Candidate
 releases still cannot authorize catalog discovery; this closes an authority
 binding gap without changing support status or promoting a release.
 
+The host registry now has a separate catalog-operation selector that negotiates
+the catalog project/session families and query-pack contract instead of
+reusing durable runtime-family coordinates. It returns no token for the
+built-in Candidate bundles. Forward-catalog-only releases may retain their
+bounded catalog classification, but every current complete-only vendor
+producer validates exact/range compatibility and the coverage/query-pack
+selection before its first native source access; it cannot read a source and
+reject only when attempting to label the result Complete. No engine catalog
+runner, public transport, release promotion, or forward-degraded producer is
+added by this correction.
+
 The follow-up common-runtime correction (`9189065`, `53f43a3`, `9a279e8`,
 `ff5a5f4`, 2026-08-21) removes every direct adapter decode from the Claude,
 Codex, and Grok candidate catalog paths and freezes regression guards against

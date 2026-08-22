@@ -1323,6 +1323,32 @@ impl<'composition, 'authorization> CatalogExecutableComposition<'composition, 'a
         self.authorization.contracts()
     }
 
+    /// Fail before native source access when this complete-only execution path
+    /// cannot truthfully publish normal Library coverage. A future degraded
+    /// forward-catalog producer must use a distinct checked path rather than
+    /// reading through this authority and failing only during assembly.
+    pub(crate) fn validate_complete_coverage_authority(
+        &self,
+    ) -> Result<(), CatalogCompositionError> {
+        if !matches!(
+            self.authorization.compatibility_class(),
+            CompatibilityClass::ExactSupported | CompatibilityClass::RangeSupported
+        ) {
+            return Err(CatalogCompositionError::invalid(
+                "forward or incompatible catalog authorization cannot publish normal complete coverage",
+            ));
+        }
+        let selection = self.authorization.contracts();
+        if selection.coverage_contract_version != SOURCE_COVERAGE_CONTRACT_VERSION
+            || selection.query_pack_version != Some(CATALOG_QUERY_PACK_CONTRACT_VERSION)
+        {
+            return Err(CatalogCompositionError::invalid(
+                "catalog coverage requires the exact selected RFC 012A coverage and RFC 012B query-pack v1 contracts",
+            ));
+        }
+        Ok(())
+    }
+
     /// Bind one source instance whose declared roots cover every composition
     /// `root_id`. Missing or unusable roots fail closed without reading the
     /// filesystem. Extra usable roots are retained for adapter stream loading.
@@ -1396,22 +1422,7 @@ impl<'composition, 'authorization> CatalogExecutableComposition<'composition, 'a
         source_instance_key: CanonicalSourceInstanceKey,
         access_policy_digest: CatalogAccessPolicyDigest,
     ) -> Result<CatalogCoveragePlanSource, CatalogCompositionError> {
-        if !matches!(
-            self.authorization.compatibility_class(),
-            CompatibilityClass::ExactSupported | CompatibilityClass::RangeSupported
-        ) {
-            return Err(CatalogCompositionError::invalid(
-                "forward or incompatible catalog authorization cannot publish normal complete coverage",
-            ));
-        }
-        let selection = self.authorization.contracts();
-        if selection.coverage_contract_version != SOURCE_COVERAGE_CONTRACT_VERSION
-            || selection.query_pack_version != Some(CATALOG_QUERY_PACK_CONTRACT_VERSION)
-        {
-            return Err(CatalogCompositionError::invalid(
-                "catalog coverage requires the exact selected RFC 012A coverage and RFC 012B query-pack v1 contracts",
-            ));
-        }
+        self.validate_complete_coverage_authority()?;
         let declaration_digest = CoverageDeclarationDigest::derive(
             self.authorization.source_declaration_digest().as_bytes(),
         )

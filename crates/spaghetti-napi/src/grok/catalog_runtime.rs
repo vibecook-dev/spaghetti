@@ -219,6 +219,7 @@ fn produce_grok_library_coverage_after_summaries(
     after_summaries: impl FnOnce(&Path) -> Result<(), CatalogCompositionError>,
 ) -> Result<GrokCatalogProduction, CatalogCompositionError> {
     let executable = access.executable();
+    executable.validate_complete_coverage_authority()?;
     let composition = executable.composition();
     require_exact_conformance_composition(composition)?;
     let membership_component = expect_component(composition, MEMBERSHIP_COMPONENT_ID)?;

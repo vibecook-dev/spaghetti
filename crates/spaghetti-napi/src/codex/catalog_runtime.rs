@@ -190,6 +190,7 @@ fn produce_codex_library_coverage_after_heads(
     after_heads: impl FnOnce(&Path) -> Result<(), CatalogCompositionError>,
 ) -> Result<CodexCatalogProduction, CatalogCompositionError> {
     let executable = access.executable();
+    executable.validate_complete_coverage_authority()?;
     let composition = executable.composition();
     require_exact_conformance_composition(composition)?;
     let component = composition

@@ -229,21 +229,61 @@ impl AdapterRegistry {
         adapter_id: &AdapterId,
         probe: &NativeArtifactProbe,
     ) -> Result<Option<TypedAccessAuthorization>, AdapterError> {
+        self.authorize_supported_operation(
+            adapter_id,
+            probe,
+            SupportOperation::DurableHistoryRuntime,
+            &[
+                "runtime.actor-run",
+                "runtime.actor-affiliation",
+                "runtime.usage-v2",
+            ],
+        )
+    }
+
+    /// Select a promoted or explicitly forward-catalog-only contract without
+    /// granting durable or scoped source authority. Complete-only catalog
+    /// producers separately reject forward-recognized authority before I/O.
+    pub(crate) fn authorize_catalog_if_supported(
+        &self,
+        adapter_id: &AdapterId,
+        probe: &NativeArtifactProbe,
+    ) -> Result<Option<TypedAccessAuthorization>, AdapterError> {
+        self.authorize_supported_operation(
+            adapter_id,
+            probe,
+            SupportOperation::CatalogDiscovery,
+            &["catalog.project", "catalog.session"],
+        )
+    }
+
+    fn authorize_supported_operation(
+        &self,
+        adapter_id: &AdapterId,
+        probe: &NativeArtifactProbe,
+        operation: SupportOperation,
+        fact_families: &[&str],
+    ) -> Result<Option<TypedAccessAuthorization>, AdapterError> {
         let Some(catalog) = self.support_catalog.as_ref() else {
             return Ok(None);
         };
         let decision = catalog
             .classify(probe)
             .map_err(|error| AdapterError::invalid_contract(error.to_string()))?;
-        if !decision.permissions().durable {
+        let permitted = match operation {
+            SupportOperation::CatalogDiscovery => decision.permissions().catalog,
+            SupportOperation::DurableHistoryRuntime => decision.permissions().durable,
+            _ => {
+                return Err(AdapterError::invalid_contract(
+                    "registry supported-operation selector received an unsupported operation",
+                ));
+            }
+        };
+        if !permitted {
             return Ok(None);
         }
         let mut fact_family_versions = BTreeMap::new();
-        for family in [
-            "runtime.actor-run",
-            "runtime.actor-affiliation",
-            "runtime.usage-v2",
-        ] {
+        for family in fact_families {
             fact_family_versions.insert(family.to_string(), vec![1]);
         }
         let request = ContractVersionRequest {
@@ -266,14 +306,8 @@ impl AdapterRegistry {
             query_pack_versions: vec![1],
             observation_contract_versions: Vec::new(),
         };
-        self.authorize_typed_access(
-            adapter_id,
-            probe,
-            SupportOperation::DurableHistoryRuntime,
-            &request,
-            &offer,
-        )
-        .map(|(_, authorization)| Some(authorization))
+        self.authorize_typed_access(adapter_id, probe, operation, &request, &offer)
+            .map(|(_, authorization)| Some(authorization))
     }
 
     pub fn authorize_typed_access(
@@ -1752,6 +1786,39 @@ pub(crate) mod tests {
             .unwrap();
         assert!(registry.enforces_promoted_support());
 
+        let probe = NativeArtifactProbe {
+            family: "fixture".to_string(),
+            platform: "test".to_string(),
+            version: Some("1.0.0".to_string()),
+            markers: vec!["fixture.marker".to_string()],
+            contradictory_markers: false,
+        };
+        let catalog_authorization = registry
+            .authorize_catalog_if_supported(&AdapterId::new("fixture").unwrap(), &probe)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            catalog_authorization.operation().operation(),
+            SupportOperation::CatalogDiscovery
+        );
+        let catalog_selection = catalog_authorization.select_catalog_access().unwrap();
+        assert_eq!(catalog_selection.contracts().query_pack_version, Some(1));
+        assert_eq!(
+            catalog_selection.contracts().fact_family_versions,
+            BTreeMap::from([
+                ("catalog.project".to_string(), 1),
+                ("catalog.session".to_string(), 1),
+            ])
+        );
+        let durable_authorization = registry
+            .authorize_durable_if_supported(&AdapterId::new("fixture").unwrap(), &probe)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable_authorization.operation().operation(),
+            SupportOperation::DurableHistoryRuntime
+        );
+
         let request = ContractVersionRequest {
             selection_contract_version: 1,
             model_major: 1,
@@ -1775,13 +1842,7 @@ pub(crate) mod tests {
         let (decision, authorization) = registry
             .authorize_typed_access(
                 &AdapterId::new("fixture").unwrap(),
-                &NativeArtifactProbe {
-                    family: "fixture".to_string(),
-                    platform: "test".to_string(),
-                    version: Some("1.0.0".to_string()),
-                    markers: vec!["fixture.marker".to_string()],
-                    contradictory_markers: false,
-                },
+                &probe,
                 SupportOperation::DurableHistoryRuntime,
                 &request,
                 &offer,

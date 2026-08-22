@@ -290,6 +290,7 @@ fn produce_claude_library_coverage_after_heads(
     after_heads: impl FnOnce(&Path) -> Result<(), CatalogCompositionError>,
 ) -> Result<ClaudeCatalogProduction, CatalogCompositionError> {
     let executable = access.executable();
+    executable.validate_complete_coverage_authority()?;
     let composition = executable.composition();
     require_exact_conformance_composition(composition)?;
     let source_instance_key = access.source_instance_key()?;
