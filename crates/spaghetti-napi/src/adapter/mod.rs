@@ -29,6 +29,7 @@ pub use contract::{
     SourceObjectListRequest, SourceQuery, SourceQueryBounds, SourceRoot, SourceRows,
     SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
+pub(crate) use facts::BoundedNativeEvidence;
 pub use facts::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, ArtifactCapture, ArtifactContentFact,

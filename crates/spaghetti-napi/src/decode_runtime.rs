@@ -9,8 +9,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::time::{Duration, Instant};
 
 use crate::adapter::{
-    AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, CapabilityId,
-    DecodeContext, DecodeDisposition, DecoderId, FactBatch, FactSemanticContext,
+    AdapterError, AdapterErrorClass, AdapterObjectContext, AgentAdapter, BoundedNativeEvidence,
+    CapabilityId, DecodeContext, DecodeDisposition, DecoderId, FactBatch, FactSemanticContext,
     RawRetentionPolicy, SourceAccess, SourceInstance, SourceObjectDescriptor,
 };
 use crate::source::SourceRecord;
@@ -69,16 +69,6 @@ pub(crate) enum RecordMappingDisposition {
     UnsupportedVersion {
         observed_version: String,
     },
-}
-
-/// Value-free evidence retained for an unknown source record regardless of
-/// the selected raw-retention policy.  The excerpt contains only hashed JSON
-/// keys, value kinds, sizes, and a digest; it never contains native values.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BoundedNativeEvidence {
-    pub observed_bytes: u64,
-    pub payload_digest: [u8; 32],
-    pub sanitized_excerpt: Vec<u8>,
 }
 
 /// A decode attempt always reports timing, including controlled failures.
@@ -270,6 +260,7 @@ fn record_mapping_disposition(
                     .filter(|value| is_safe_family_hint(value))
                     .map(ToOwned::to_owned),
                 bounded_evidence: BoundedNativeEvidence {
+                    source_record_id: batch.source_record_id(record)?,
                     observed_bytes,
                     payload_digest: *record.payload_hash.as_bytes(),
                     sanitized_excerpt: diagnostic_excerpt(&record.payload),
@@ -660,6 +651,10 @@ mod tests {
             panic!("expected structured retained-unknown disposition");
         };
         assert_eq!(family_hint.as_deref(), Some("fixture"));
+        assert_eq!(
+            bounded_evidence.source_record_id,
+            semantic_context().source_record_id(&record).unwrap()
+        );
         assert_eq!(bounded_evidence.observed_bytes, 10);
         assert_eq!(
             bounded_evidence.payload_digest,

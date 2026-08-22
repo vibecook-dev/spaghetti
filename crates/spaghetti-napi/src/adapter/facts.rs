@@ -2947,6 +2947,17 @@ pub(crate) const MAX_UNKNOWN_NATIVE_KIND_BYTES: usize = 128;
 pub(crate) const MAX_UNKNOWN_REASON_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_UNKNOWN_RAW_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
+/// Value-free RFC 012A evidence retained for an unknown source record
+/// regardless of the selected raw-retention policy. The excerpt is produced
+/// by the common decode boundary and contains no native values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BoundedNativeEvidence {
+    pub source_record_id: SourceRecordId,
+    pub observed_bytes: u64,
+    pub payload_digest: [u8; 32],
+    pub sanitized_excerpt: Vec<u8>,
+}
+
 impl Fact {
     pub fn kind(&self) -> &'static str {
         match self {
@@ -3719,6 +3730,20 @@ impl FactBatch {
 
     pub fn dependency_reads(&self) -> &[DependencyRevision] {
         &self.dependency_reads
+    }
+
+    pub(crate) fn source_record_id(
+        &self,
+        record: &SourceRecord,
+    ) -> Result<SourceRecordId, AdapterError> {
+        self.semantic_context
+            .as_ref()
+            .ok_or_else(|| {
+                AdapterError::invalid_contract(
+                    "source-record identity requires a bound semantic decode context",
+                )
+            })?
+            .source_record_id(record)
     }
 
     pub fn add_dependency_read(

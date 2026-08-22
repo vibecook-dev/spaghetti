@@ -41,6 +41,7 @@ mod scoped_observation;
 mod semantic_contract;
 mod semantic_contract_napi;
 pub mod source;
+mod unknown_evidence_reducer;
 
 pub use napi_engine::{
     open_spaghetti_engine, EngineCommitWaitOptions, EngineCommitWaitResult, EngineHealth,

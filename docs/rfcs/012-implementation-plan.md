@@ -1117,8 +1117,16 @@ a closed machine-code grammar; its always-bounded evidence contains byte count,
 payload digest, and a value-free shape excerpt, so path-shaped native kinds and
 payload values cannot enter the common disposition. The legacy adapter return
 enum remains during migration, so decoder-specific ignore/malformed/version
-codes and deterministic cross-record unknown-evidence aggregation are still
-open.
+codes remain open. The topology-neutral unknown-evidence reducer now supplies
+that bounded aggregation primitive: it caps the complete current-generation
+set, replaces corrections by `SourceRecordId`, suppresses exact replay,
+computes an ordered digest and exact count/byte totals over every retained
+occurrence, and selects transport samples by a domain-separated source-identity
+rank rather than arrival order. Complete replacement, duplicate identity,
+capacity, correction, retraction, reset, and unsampled-digest behavior are
+covered atomically. Wiring
+that reducer into durable/scoped projection ownership and freezing its portable
+fact/replacement carrier remain open.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
 does not close C1: capability and bounded unknown-evidence families, complete
