@@ -15,10 +15,12 @@ use crate::adapter::{
     CanonicalFactId, CanonicalSourceInstanceKey, ContentBlockRevisionFact,
     ContentBlockRevisionValue, ContractCompleteness, CoverageComparison,
     EffectiveStateQualifiedValue, EffectiveStateRevisionFact, ExternalEntityRef, FactRevisionId,
-    MessageRevisionFact, NativeIdentityClaim, PlanRevisionFact, QualifiedTimestamp, QualifiedValue,
-    SemanticRevisionRef, SourceCoverageSet, SourceRecordId, TaskRevisionFact, TimestampQuality,
-    ToolRevisionFact, UsageBucketsV2, UsageResponseIdentity, UsageRevisionV2Fact,
-    UsageValueAuthority, UsageValueProvenance, UserInputRequestRevisionFact,
+    MessageRevisionFact, NativeIdentityClaim, NativeRuntimeMarkerProvenance,
+    NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PlanRevisionFact,
+    QualifiedTimestamp, QualifiedValue, QualifiedValueQuality, SemanticRevisionRef,
+    SourceCoverageSet, SourceRecordId, TaskRevisionFact, TimestampQuality, ToolRevisionFact,
+    UsageBucketsV2, UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority,
+    UsageValueProvenance, UserInputRequestRevisionFact,
 };
 
 pub(crate) const MAX_SEMANTIC_FIXTURE_JSON_BYTES: usize = 1024 * 1024;
@@ -35,6 +37,7 @@ const EFFECTIVE_STATE_FAMILY: &str = "runtime.effective-state";
 const USER_INPUT_FAMILY: &str = "runtime.user-input-request";
 const MESSAGE_FAMILY: &str = "runtime.message";
 const CONTENT_BLOCK_FAMILY: &str = "runtime.content-block";
+const NATIVE_MARKER_FAMILY: &str = "runtime.native-marker";
 const PLAN_FAMILY: &str = "runtime.plan";
 const TASK_FAMILY: &str = "runtime.task";
 const TOOL_FAMILY: &str = "runtime.tool";
@@ -365,6 +368,48 @@ pub(crate) struct MessageFixtureWire {
     pub runtime_semantic_contract_version: u32,
     pub session: CanonicalEntityKey,
     pub source_instance_key: CanonicalSourceInstanceKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeMarkerRevisionSlotWire {
+    pub correlated_native_id: Option<String>,
+    pub value: NativeRuntimeMarkerValue,
+    pub quality: QualifiedValueQuality,
+    pub effective_at: Option<i64>,
+    pub provenance: NativeRuntimeMarkerProvenance,
+    pub completeness: ContractCompleteness,
+    pub operation: UserInputOperation,
+    pub semantic_revision_key_hex: String,
+    pub semantic_revision_ref: SemanticRevisionRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeMarkerExampleWire {
+    pub native_marker_id: String,
+    pub fact_id: CanonicalFactId,
+    pub current: NativeMarkerRevisionSlotWire,
+    pub correction: NativeMarkerRevisionSlotWire,
+    pub retract: NativeMarkerRevisionSlotWire,
+    pub partial: NativeMarkerRevisionSlotWire,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeMarkerFixtureWire {
+    pub adapter_id: String,
+    pub actor_run: CanonicalEntityKey,
+    pub family: String,
+    pub family_version: u32,
+    pub fixture_contract_version: u32,
+    pub runtime_semantic_contract_version: u32,
+    pub session: CanonicalEntityKey,
+    pub source_instance_key: CanonicalSourceInstanceKey,
+    pub source_record_id: SourceRecordId,
+    pub compaction: NativeMarkerExampleWire,
+    pub progress: NativeMarkerExampleWire,
+    pub queue: NativeMarkerExampleWire,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1310,6 +1355,25 @@ pub(crate) fn content_block_revision(
     }
 }
 
+pub(crate) fn native_marker_revision(
+    fixture: &NativeMarkerFixtureWire,
+    example: &NativeMarkerExampleWire,
+    slot: &NativeMarkerRevisionSlotWire,
+) -> NativeRuntimeMarkerRevisionFact {
+    NativeRuntimeMarkerRevisionFact {
+        session: fixture.session,
+        actor_run: fixture.actor_run,
+        native_marker_id: example.native_marker_id.clone(),
+        correlated_native_id: slot.correlated_native_id.clone(),
+        value: slot.value.clone(),
+        quality: slot.quality,
+        effective_at: slot.effective_at,
+        provenance: slot.provenance.clone(),
+        completeness: slot.completeness,
+        operation: slot.operation,
+    }
+}
+
 fn task_revision(
     fixture: &TaskFixtureWire,
     native_task_id: &str,
@@ -1941,6 +2005,182 @@ fn validate_rfc012c_message_fixture(
     Ok(())
 }
 
+fn native_marker_kind(value: &NativeRuntimeMarkerValue) -> &'static str {
+    match value {
+        NativeRuntimeMarkerValue::Compaction { .. } => "compaction",
+        NativeRuntimeMarkerValue::Progress { .. } => "progress",
+        NativeRuntimeMarkerValue::Queue { .. } => "queue",
+    }
+}
+
+fn validate_native_marker_slot(
+    fixture: &NativeMarkerFixtureWire,
+    example: &NativeMarkerExampleWire,
+    slot_name: &str,
+    slot: &NativeMarkerRevisionSlotWire,
+    expected_kind: &str,
+    expected_operation: UserInputOperation,
+    expected_completeness: ContractCompleteness,
+) -> Result<(), SemanticFixtureError> {
+    if native_marker_kind(&slot.value) != expected_kind {
+        return Err(SemanticFixtureError::invalid(format!(
+            "native-marker {slot_name} value kind does not match its fixture example"
+        )));
+    }
+    if slot.operation != expected_operation {
+        return Err(SemanticFixtureError::invalid(format!(
+            "native-marker {slot_name} operation does not match its fixture slot"
+        )));
+    }
+    if slot.completeness != expected_completeness {
+        return Err(SemanticFixtureError::invalid(format!(
+            "native-marker {slot_name} completeness does not match its fixture slot"
+        )));
+    }
+    let revision = native_marker_revision(fixture, example, slot);
+    revision
+        .validate()
+        .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
+    verify_fact_revision_identity(
+        NATIVE_MARKER_FAMILY,
+        &example.fact_id,
+        &slot.semantic_revision_key_hex,
+        &slot.semantic_revision_ref,
+        revision.semantic_revision_key(),
+    )
+}
+
+fn validate_native_marker_example(
+    fixture: &NativeMarkerFixtureWire,
+    example: &NativeMarkerExampleWire,
+    expected_id: &str,
+    expected_kind: &str,
+) -> Result<(), SemanticFixtureError> {
+    if example.native_marker_id != expected_id {
+        return Err(SemanticFixtureError::invalid(format!(
+            "native-marker {expected_kind} identity does not match its declared fixture slot"
+        )));
+    }
+    validate_canonical_runtime_text("native_marker_id", &example.native_marker_id)?;
+    let current_revision = native_marker_revision(fixture, example, &example.current);
+    let stable_native_key = current_revision
+        .stable_native_fact_key()
+        .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
+    verify_committed_fact_id(
+        &fixture.adapter_id,
+        &fixture.source_instance_key,
+        NATIVE_MARKER_FAMILY,
+        &stable_native_key,
+        &example.fact_id,
+    )?;
+    validate_native_marker_slot(
+        fixture,
+        example,
+        "current",
+        &example.current,
+        expected_kind,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+    )?;
+    validate_native_marker_slot(
+        fixture,
+        example,
+        "correction",
+        &example.correction,
+        expected_kind,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Complete,
+    )?;
+    validate_native_marker_slot(
+        fixture,
+        example,
+        "retract",
+        &example.retract,
+        expected_kind,
+        UserInputOperation::Retract,
+        ContractCompleteness::Complete,
+    )?;
+    validate_native_marker_slot(
+        fixture,
+        example,
+        "partial",
+        &example.partial,
+        expected_kind,
+        UserInputOperation::Upsert,
+        ContractCompleteness::Partial,
+    )?;
+    if example.current.value == example.correction.value {
+        return Err(SemanticFixtureError::invalid(format!(
+            "native-marker {expected_kind} correction must change the typed value"
+        )));
+    }
+    if example.retract.value != example.correction.value
+        || example.retract.correlated_native_id != example.correction.correlated_native_id
+        || example.retract.quality != example.correction.quality
+        || example.retract.provenance != example.correction.provenance
+    {
+        return Err(SemanticFixtureError::invalid(format!(
+            "native-marker {expected_kind} retract must retain the corrected native value"
+        )));
+    }
+    for slot in [&example.correction, &example.retract, &example.partial] {
+        let stable = native_marker_revision(fixture, example, slot)
+            .stable_native_fact_key()
+            .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
+        if stable != stable_native_key {
+            return Err(SemanticFixtureError::invalid(format!(
+                "native-marker {expected_kind} revisions must retain one fact identity"
+            )));
+        }
+    }
+    let refs = [
+        &example.current.semantic_revision_ref,
+        &example.correction.semantic_revision_ref,
+        &example.retract.semantic_revision_ref,
+        &example.partial.semantic_revision_ref,
+    ];
+    for (index, left) in refs.iter().enumerate() {
+        for right in refs.iter().skip(index + 1) {
+            if left == right {
+                return Err(SemanticFixtureError::invalid(format!(
+                    "native-marker {expected_kind} revision slots must have distinct semantic identity"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_rfc012c_native_marker_fixture(
+    fixture: &NativeMarkerFixtureWire,
+) -> Result<(), SemanticFixtureError> {
+    if fixture.fixture_contract_version != RFC012C_FIXTURE_CONTRACT_VERSION
+        || fixture.runtime_semantic_contract_version != RUNTIME_SEMANTIC_CONTRACT_VERSION
+    {
+        return Err(SemanticFixtureError::invalid(
+            "unsupported native-marker fixture contract version",
+        ));
+    }
+    if fixture.family != NATIVE_MARKER_FAMILY || fixture.family_version != FAMILY_VERSION {
+        return Err(SemanticFixtureError::invalid(
+            "native-marker fixture family must be runtime.native-marker@1",
+        ));
+    }
+    validate_canonical_source_string("adapter_id", &fixture.adapter_id, MAX_ADAPTER_ID_BYTES)?;
+    validate_native_marker_example(fixture, &fixture.compaction, "compaction-1", "compaction")?;
+    validate_native_marker_example(fixture, &fixture.progress, "progress-1", "progress")?;
+    validate_native_marker_example(fixture, &fixture.queue, "queue-1", "queue")?;
+    if fixture.compaction.fact_id == fixture.progress.fact_id
+        || fixture.compaction.fact_id == fixture.queue.fact_id
+        || fixture.progress.fact_id == fixture.queue.fact_id
+    {
+        return Err(SemanticFixtureError::invalid(
+            "native-marker fixture examples must have distinct fact identities",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_task_slot(
     fixture: &TaskFixtureWire,
     slot_name: &str,
@@ -2317,6 +2557,20 @@ pub(crate) fn parse_rfc012c_message_v1_json(json: &str) -> Result<String, Semant
     encode_json(&decode_rfc012c_message_v1(json)?)
 }
 
+pub(crate) fn decode_rfc012c_native_marker_v1(
+    json: &str,
+) -> Result<NativeMarkerFixtureWire, SemanticFixtureError> {
+    let fixture: NativeMarkerFixtureWire = decode_json(json)?;
+    validate_rfc012c_native_marker_fixture(&fixture)?;
+    Ok(fixture)
+}
+
+pub(crate) fn parse_rfc012c_native_marker_v1_json(
+    json: &str,
+) -> Result<String, SemanticFixtureError> {
+    encode_json(&decode_rfc012c_native_marker_v1(json)?)
+}
+
 pub(crate) fn decode_rfc012c_task_v1(json: &str) -> Result<TaskFixtureWire, SemanticFixtureError> {
     let fixture: TaskFixtureWire = decode_json(json)?;
     validate_rfc012c_task_fixture(&fixture)?;
@@ -2519,6 +2773,7 @@ pub(crate) fn parse_rfc012c_tool_v1_json(json: &str) -> Result<String, SemanticF
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::{NativeCompactionPhase, NativeProgressState, NativeQueueOperation};
 
     const RFC012A_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012a-v1.json");
     const RFC012C_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-runtime-v1.json");
@@ -2534,6 +2789,8 @@ mod tests {
         include_str!("../fixtures/contracts/rfc012c-interaction-v1.json");
     const RFC012C_MESSAGE_FIXTURE: &str =
         include_str!("../fixtures/contracts/rfc012c-message-v1.json");
+    const RFC012C_NATIVE_MARKER_FIXTURE: &str =
+        include_str!("../fixtures/contracts/rfc012c-native-marker-v1.json");
     const RFC012C_TASK_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-task-v1.json");
     const RFC012C_PLAN_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-plan-v1.json");
     const RFC012C_TOOL_FIXTURE: &str = include_str!("../fixtures/contracts/rfc012c-tool-v1.json");
@@ -2545,6 +2802,250 @@ mod tests {
         assert!(!json.contains("C:\\\\"));
         assert!(!json.contains(".db"));
         assert!(!json.contains("sqlite"));
+    }
+
+    fn committed_native_marker_slot(
+        fact_id: &CanonicalFactId,
+        revision: NativeRuntimeMarkerRevisionFact,
+    ) -> NativeMarkerRevisionSlotWire {
+        let semantic_revision_key = revision.semantic_revision_key().unwrap();
+        NativeMarkerRevisionSlotWire {
+            correlated_native_id: revision.correlated_native_id,
+            value: revision.value,
+            quality: revision.quality,
+            effective_at: revision.effective_at,
+            provenance: revision.provenance,
+            completeness: revision.completeness,
+            operation: revision.operation,
+            semantic_revision_key_hex: hex_digest(&semantic_revision_key),
+            semantic_revision_ref: SemanticRevisionRef::new(
+                FactRevisionId::derive(fact_id, 1, &semantic_revision_key).unwrap(),
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn committed_native_marker_example(
+        adapter_id: &str,
+        source_instance_key: &CanonicalSourceInstanceKey,
+        session: CanonicalEntityKey,
+        actor_run: CanonicalEntityKey,
+        native_marker_id: &str,
+        correlated_native_id: Option<&str>,
+        current_value: NativeRuntimeMarkerValue,
+        correction_value: NativeRuntimeMarkerValue,
+        partial_value: NativeRuntimeMarkerValue,
+        quality: QualifiedValueQuality,
+        native_field: &str,
+        base_time: i64,
+    ) -> NativeMarkerExampleWire {
+        let revision = |value: NativeRuntimeMarkerValue,
+                        completeness: ContractCompleteness,
+                        operation: UserInputOperation,
+                        effective_at: i64| NativeRuntimeMarkerRevisionFact {
+            session,
+            actor_run,
+            native_marker_id: native_marker_id.to_owned(),
+            correlated_native_id: correlated_native_id.map(str::to_owned),
+            value,
+            quality,
+            effective_at: Some(effective_at),
+            provenance: NativeRuntimeMarkerProvenance {
+                native_field: native_field.to_owned(),
+                normalization_contract_version: 1,
+            },
+            completeness,
+            operation,
+        };
+        let current_revision = revision(
+            current_value,
+            ContractCompleteness::Complete,
+            UserInputOperation::Upsert,
+            base_time,
+        );
+        let stable_native_key = current_revision.stable_native_fact_key().unwrap();
+        let fact_id = CanonicalFactId::native(
+            adapter_id,
+            source_instance_key,
+            NATIVE_MARKER_FAMILY,
+            &stable_native_key,
+        )
+        .unwrap();
+        let correction_revision = revision(
+            correction_value.clone(),
+            ContractCompleteness::Complete,
+            UserInputOperation::Upsert,
+            base_time + 1,
+        );
+        let retract_revision = revision(
+            correction_value,
+            ContractCompleteness::Complete,
+            UserInputOperation::Retract,
+            base_time + 2,
+        );
+        let partial_revision = revision(
+            partial_value,
+            ContractCompleteness::Partial,
+            UserInputOperation::Upsert,
+            base_time + 3,
+        );
+        NativeMarkerExampleWire {
+            native_marker_id: native_marker_id.to_owned(),
+            fact_id,
+            current: committed_native_marker_slot(&fact_id, current_revision),
+            correction: committed_native_marker_slot(&fact_id, correction_revision),
+            retract: committed_native_marker_slot(&fact_id, retract_revision),
+            partial: committed_native_marker_slot(&fact_id, partial_revision),
+        }
+    }
+
+    #[test]
+    fn rfc012c_native_marker_fixture_is_rust_generated_and_strict() {
+        let context = decode_rfc012c_effective_state_v1(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
+        let fixture = NativeMarkerFixtureWire {
+            adapter_id: context.adapter_id,
+            actor_run: context.actor_run,
+            family: NATIVE_MARKER_FAMILY.to_owned(),
+            family_version: FAMILY_VERSION,
+            fixture_contract_version: RFC012C_FIXTURE_CONTRACT_VERSION,
+            runtime_semantic_contract_version: RUNTIME_SEMANTIC_CONTRACT_VERSION,
+            session: context.session,
+            source_instance_key: context.source_instance_key,
+            source_record_id: context.source_record_id,
+            compaction: committed_native_marker_example(
+                "fixture-adapter",
+                &context.source_instance_key,
+                context.session,
+                context.actor_run,
+                "compaction-1",
+                None,
+                NativeRuntimeMarkerValue::Compaction {
+                    phase: NativeCompactionPhase::Started,
+                    trigger: Some("auto".to_owned()),
+                    pre_tokens: Some(1_000),
+                },
+                NativeRuntimeMarkerValue::Compaction {
+                    phase: NativeCompactionPhase::Completed,
+                    trigger: Some("auto".to_owned()),
+                    pre_tokens: Some(900),
+                },
+                NativeRuntimeMarkerValue::Compaction {
+                    phase: NativeCompactionPhase::Boundary,
+                    trigger: Some("manual".to_owned()),
+                    pre_tokens: Some(950),
+                },
+                QualifiedValueQuality::Exact,
+                "runtime.compaction",
+                1_776_211_200_000,
+            ),
+            progress: committed_native_marker_example(
+                "fixture-adapter",
+                &context.source_instance_key,
+                context.session,
+                context.actor_run,
+                "progress-1",
+                Some("tool-1"),
+                NativeRuntimeMarkerValue::Progress {
+                    state: NativeProgressState::Pending,
+                    completed: Some(0),
+                    total: Some(2),
+                    detail_digest: Some([7; 32]),
+                },
+                NativeRuntimeMarkerValue::Progress {
+                    state: NativeProgressState::Completed,
+                    completed: Some(2),
+                    total: Some(2),
+                    detail_digest: Some([8; 32]),
+                },
+                NativeRuntimeMarkerValue::Progress {
+                    state: NativeProgressState::Active,
+                    completed: Some(1),
+                    total: Some(2),
+                    detail_digest: Some([9; 32]),
+                },
+                QualifiedValueQuality::NativeClaimed,
+                "progress.data",
+                1_776_211_200_100,
+            ),
+            queue: committed_native_marker_example(
+                "fixture-adapter",
+                &context.source_instance_key,
+                context.session,
+                context.actor_run,
+                "queue-1",
+                Some("tool-1"),
+                NativeRuntimeMarkerValue::Queue {
+                    operation: NativeQueueOperation::Enqueue,
+                    depth: Some(1),
+                    item_digest: Some([10; 32]),
+                },
+                NativeRuntimeMarkerValue::Queue {
+                    operation: NativeQueueOperation::Dequeue,
+                    depth: Some(0),
+                    item_digest: Some([10; 32]),
+                },
+                NativeRuntimeMarkerValue::Queue {
+                    operation: NativeQueueOperation::Enqueue,
+                    depth: Some(2),
+                    item_digest: Some([11; 32]),
+                },
+                QualifiedValueQuality::Exact,
+                "queue.operation",
+                1_776_211_200_200,
+            ),
+        };
+        let committed = decode_rfc012c_native_marker_v1(RFC012C_NATIVE_MARKER_FIXTURE).unwrap();
+        assert_eq!(committed, fixture);
+        let parsed = parse_rfc012c_native_marker_v1_json(RFC012C_NATIVE_MARKER_FIXTURE).unwrap();
+        assert_privacy_safe(&parsed);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&parsed).unwrap(),
+            serde_json::from_str::<serde_json::Value>(RFC012C_NATIVE_MARKER_FIXTURE).unwrap()
+        );
+    }
+
+    #[test]
+    fn rfc012c_native_marker_fixture_rejects_drift_and_non_native_claims() {
+        let fixture =
+            || serde_json::from_str::<serde_json::Value>(RFC012C_NATIVE_MARKER_FIXTURE).unwrap();
+
+        let mut semantic_drift = fixture();
+        semantic_drift["progress"]["current"]["value"]["state"] = serde_json::json!("completed");
+        assert!(parse_rfc012c_native_marker_v1_json(&semantic_drift.to_string()).is_err());
+
+        let mut host_assessment = fixture();
+        host_assessment["progress"]["current"]["quality"] = serde_json::json!("derived");
+        assert!(parse_rfc012c_native_marker_v1_json(&host_assessment.to_string()).is_err());
+
+        let mut impossible_progress = fixture();
+        impossible_progress["progress"]["current"]["value"]["completed"] = serde_json::json!(3);
+        assert!(parse_rfc012c_native_marker_v1_json(&impossible_progress.to_string()).is_err());
+
+        let mut zero_digest = fixture();
+        zero_digest["queue"]["current"]["value"]["item_digest"] = serde_json::json!(vec![0; 32]);
+        assert!(parse_rfc012c_native_marker_v1_json(&zero_digest.to_string()).is_err());
+
+        let mut wrong_kind = fixture();
+        wrong_kind["compaction"]["current"]["value"] =
+            wrong_kind["progress"]["current"]["value"].clone();
+        assert!(parse_rfc012c_native_marker_v1_json(&wrong_kind.to_string()).is_err());
+
+        let mut identity_drift = fixture();
+        identity_drift["queue"]["fact_id"] = identity_drift["progress"]["fact_id"].clone();
+        assert!(parse_rfc012c_native_marker_v1_json(&identity_drift.to_string()).is_err());
+
+        let mut unknown = fixture();
+        unknown["queue"]["current"]["value"]["future"] = serde_json::json!(true);
+        assert!(parse_rfc012c_native_marker_v1_json(&unknown.to_string()).is_err());
+
+        assert!(
+            parse_rfc012c_native_marker_v1_json(&RFC012C_NATIVE_MARKER_FIXTURE.replacen(
+                "\"completed\": 0",
+                "\"completed\": 0.0",
+                1,
+            ),)
+            .is_err()
+        );
     }
 
     #[test]
