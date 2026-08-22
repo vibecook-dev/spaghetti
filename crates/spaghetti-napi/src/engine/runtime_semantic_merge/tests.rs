@@ -2,8 +2,15 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::*;
-use crate::adapter::CoverageComparison;
+use crate::adapter::{
+    ContentBlockRevisionFact, CoverageComparison, EffectiveStateDimension,
+    EffectiveStateEvidenceKind, EffectiveStateRevisionFact, MessageRevisionFact,
+    MessageRevisionRole, NativeRuntimeMarkerRevisionFact, PlanRevisionFact, TaskLifecycleState,
+    TaskRevisionFact, ToolRevisionFact, UserInputRequestRevisionFact,
+};
 use crate::semantic_contract::{
+    decode_rfc012c_effective_state_v1, decode_rfc012c_message_v1, decode_rfc012c_native_marker_v1,
+    decode_rfc012c_plan_v1, decode_rfc012c_task_v1, decode_rfc012c_tool_v1,
     parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire, UsageExampleWire,
 };
 
@@ -11,6 +18,14 @@ const RFC012A: &str = include_str!("../../../fixtures/contracts/rfc012a-v1.json"
 const RFC012C: &str = include_str!("../../../fixtures/contracts/rfc012c-runtime-v1.json");
 const RFC012C_INTERACTION: &str =
     include_str!("../../../fixtures/contracts/rfc012c-interaction-v1.json");
+const RFC012C_EFFECTIVE_STATE: &str =
+    include_str!("../../../fixtures/contracts/rfc012c-effective-state-v1.json");
+const RFC012C_MESSAGE: &str = include_str!("../../../fixtures/contracts/rfc012c-message-v1.json");
+const RFC012C_NATIVE_MARKER: &str =
+    include_str!("../../../fixtures/contracts/rfc012c-native-marker-v1.json");
+const RFC012C_TASK: &str = include_str!("../../../fixtures/contracts/rfc012c-task-v1.json");
+const RFC012C_PLAN: &str = include_str!("../../../fixtures/contracts/rfc012c-plan-v1.json");
+const RFC012C_TOOL: &str = include_str!("../../../fixtures/contracts/rfc012c-tool-v1.json");
 const RFC012D_USAGE: &str =
     include_str!("../../../fixtures/contracts/rfc012d-scoped-usage-envelope-v1.json");
 
@@ -106,6 +121,502 @@ fn observer_event_from_envelope(envelope: &EnvelopeExtract) -> ScopedUsageObserv
 
 fn usage_envelopes() -> UsageEnvelopeFixtureFile {
     serde_json::from_str(RFC012D_USAGE).expect("rfc012d usage envelope fixture")
+}
+
+fn semantic_revision(
+    fact_id: CanonicalFactId,
+    source_record_id: crate::adapter::SourceRecordId,
+    semantic_revision_ref: SemanticRevisionRef,
+) -> FactSemanticRevision {
+    FactSemanticRevision {
+        source_record_id,
+        fact_id,
+        fact_revision_id: semantic_revision_ref.fact_revision_id,
+        semantic_revision_ref,
+    }
+}
+
+fn rebind_semantic_revision(
+    semantic: FactSemanticRevision,
+    revision_key: [u8; 32],
+) -> FactSemanticRevision {
+    let fact_revision_id = crate::adapter::FactRevisionId::derive(
+        &semantic.fact_id,
+        RuntimeSemanticFamily::VERSION,
+        &revision_key,
+    )
+    .expect("semantic revision identity");
+    FactSemanticRevision {
+        fact_revision_id,
+        semantic_revision_ref: SemanticRevisionRef::new(fact_revision_id),
+        ..semantic
+    }
+}
+
+fn coverage_for_family(family: RuntimeSemanticFamily, completeness: &str) -> SourceCoverageSet {
+    let (baseline, _, _) = coverage_sets();
+    let mut value = serde_json::to_value(baseline).expect("coverage json");
+    let domain = json!({
+        "kind": "fact_family",
+        "family": family.as_str(),
+        "version": RuntimeSemanticFamily::VERSION,
+    });
+    value["coverage_domain"] = domain.clone();
+    for point in value["points"].as_array_mut().expect("coverage points") {
+        point["coverage_domain"] = domain.clone();
+    }
+    value["completeness"] = json!(completeness);
+    serde_json::from_value(value).expect("family coverage")
+}
+
+fn all_runtime_family_contributions() -> Vec<(RuntimeSemanticFamily, DurableRuntimeContribution)> {
+    let runtime = runtime_fixture();
+    let actor = &runtime.actors.root;
+    let affiliation = &runtime.affiliations.child_team_present;
+    let usage = &runtime.usage.native_message;
+
+    let interaction = decode_rfc012c_interaction_v1(RFC012C_INTERACTION).expect("interaction");
+    let interaction_fact = UserInputRequestRevisionFact {
+        session: interaction.session,
+        actor_run: interaction.actor_run,
+        native_tool_use_id: interaction.native_tool_use_id.clone(),
+        kind: interaction.kind,
+        questions: interaction.questions.clone(),
+        state: interaction.pending.state,
+        operation: interaction.pending.operation,
+        completeness: interaction.pending.completeness,
+        result_reference: interaction.pending.result_reference.clone(),
+    };
+
+    let message = decode_rfc012c_message_v1(RFC012C_MESSAGE).expect("message");
+    let message_role = match message.role {
+        crate::semantic_contract::MessageRevisionRole::User => MessageRevisionRole::User,
+        crate::semantic_contract::MessageRevisionRole::Assistant => MessageRevisionRole::Assistant,
+        crate::semantic_contract::MessageRevisionRole::System => MessageRevisionRole::System,
+    };
+    let message_fact = MessageRevisionFact {
+        session: message.session,
+        actor_run: message.actor_run,
+        native_message_id: message.native_message_id.clone(),
+        role: message_role,
+        ordered_content_block_keys: message.current.ordered_content_block_keys.clone(),
+        completeness: message.current.completeness,
+        operation: message.current.operation,
+    };
+    let content_block = message
+        .content_block
+        .as_ref()
+        .expect("message fixture content block");
+    let content_block_fact = ContentBlockRevisionFact {
+        session: message.session,
+        actor_run: message.actor_run,
+        message: message.fact_id,
+        native_content_block_id: Some(content_block.native_content_block_id.clone()),
+        ordinal: content_block.current.ordinal,
+        content: content_block.current.content.clone(),
+        native_tool_call_or_result_id: content_block.current.native_tool_call_or_result_id.clone(),
+        completeness: content_block.current.completeness,
+        operation: content_block.current.operation,
+    };
+
+    let marker = decode_rfc012c_native_marker_v1(RFC012C_NATIVE_MARKER).expect("marker");
+    let marker_example = &marker.progress;
+    let marker_fact = NativeRuntimeMarkerRevisionFact {
+        session: marker.session,
+        actor_run: marker.actor_run,
+        native_marker_id: marker_example.native_marker_id.clone(),
+        correlated_native_id: marker_example.current.correlated_native_id.clone(),
+        value: marker_example.current.value.clone(),
+        quality: marker_example.current.quality,
+        effective_at: marker_example.current.effective_at,
+        provenance: marker_example.current.provenance.clone(),
+        completeness: marker_example.current.completeness,
+        operation: marker_example.current.operation,
+    };
+
+    let task = decode_rfc012c_task_v1(RFC012C_TASK).expect("task");
+    let task_state = match task.created.state {
+        crate::semantic_contract::TaskLifecycleState::Created => TaskLifecycleState::Created,
+        crate::semantic_contract::TaskLifecycleState::Updated => TaskLifecycleState::Updated,
+        crate::semantic_contract::TaskLifecycleState::Completed => TaskLifecycleState::Completed,
+        crate::semantic_contract::TaskLifecycleState::Failed => TaskLifecycleState::Failed,
+        crate::semantic_contract::TaskLifecycleState::Cancelled => TaskLifecycleState::Cancelled,
+        crate::semantic_contract::TaskLifecycleState::Removed => TaskLifecycleState::Removed,
+    };
+    let task_fact = TaskRevisionFact {
+        session: task.session,
+        actor_run: task.actor_run,
+        native_task_id: task.native_task_id.clone(),
+        subject: task.subject.clone(),
+        state: task_state,
+        completeness: task.created.completeness,
+        operation: task.created.operation,
+        owned_set: task.created.owned_set.clone(),
+    };
+
+    let plan = decode_rfc012c_plan_v1(RFC012C_PLAN).expect("plan");
+    let plan_fact = PlanRevisionFact {
+        session: plan.session,
+        actor_run: plan.actor_run,
+        native_plan_id: plan.native_plan_id.clone(),
+        subject: plan.subject.clone(),
+        ordered_step_keys: plan.current.ordered_step_keys.clone(),
+        completeness: plan.current.completeness,
+        operation: plan.current.operation,
+        owned_set: plan.current.owned_set.clone(),
+    };
+
+    let tool = decode_rfc012c_tool_v1(RFC012C_TOOL).expect("tool");
+    let tool_fact = ToolRevisionFact {
+        session: tool.session,
+        actor_run: tool.actor_run,
+        native_tool_id: tool.native_call_id.clone(),
+        kind: tool.call.kind,
+        tool_name: tool.tool_name.clone(),
+        correlated_native_id: tool.call.correlated_native_id.clone(),
+        completeness: tool.call.completeness,
+        operation: tool.call.operation,
+    };
+
+    let effective =
+        decode_rfc012c_effective_state_v1(RFC012C_EFFECTIVE_STATE).expect("effective state");
+    let effective_dimension = match effective.dimension {
+        crate::semantic_contract::EffectiveStateDimension::Model => EffectiveStateDimension::Model,
+        crate::semantic_contract::EffectiveStateDimension::Effort => {
+            EffectiveStateDimension::Effort
+        }
+        crate::semantic_contract::EffectiveStateDimension::SessionMode => {
+            EffectiveStateDimension::SessionMode
+        }
+        crate::semantic_contract::EffectiveStateDimension::PermissionMode => {
+            EffectiveStateDimension::PermissionMode
+        }
+    };
+    let effective_kind = match effective.configured.evidence_kind {
+        crate::semantic_contract::EffectiveStateEvidenceKind::ConfiguredIntent => {
+            EffectiveStateEvidenceKind::ConfiguredIntent
+        }
+        crate::semantic_contract::EffectiveStateEvidenceKind::ResponseObserved => {
+            EffectiveStateEvidenceKind::ResponseObserved
+        }
+        crate::semantic_contract::EffectiveStateEvidenceKind::NativeTransition => {
+            EffectiveStateEvidenceKind::NativeTransition
+        }
+    };
+    let effective_operation = match effective.configured.operation {
+        crate::semantic_contract::EffectiveStateOperation::Upsert => {
+            crate::adapter::UserInputOperation::Upsert
+        }
+        crate::semantic_contract::EffectiveStateOperation::Retract => {
+            crate::adapter::UserInputOperation::Retract
+        }
+    };
+    let effective_fact = EffectiveStateRevisionFact {
+        session: effective.session,
+        actor_run: effective.actor_run,
+        dimension: effective_dimension,
+        value: effective.configured.value.clone(),
+        evidence_kind: effective_kind,
+        completeness: effective.configured.completeness,
+        operation: effective_operation,
+    };
+
+    let contribution =
+        |fact_id, source_record_id, semantic_revision_ref, revision| DurableRuntimeContribution {
+            semantic: semantic_revision(fact_id, source_record_id, semantic_revision_ref),
+            revision,
+        };
+    vec![
+        (
+            RuntimeSemanticFamily::ActorRun,
+            contribution(
+                actor.fact_id,
+                actor.source_record_id,
+                actor.semantic_revision_ref,
+                Fact::ActorRunRevision(actor.revision.clone()),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::ActorAffiliation,
+            contribution(
+                affiliation.fact_id,
+                affiliation.source_record_id,
+                affiliation.semantic_revision_ref,
+                Fact::ActorAffiliationRevision(affiliation.revision.clone()),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::UsageV2,
+            contribution(
+                usage.fact_id,
+                usage.source_record_id,
+                usage.semantic_revision_ref,
+                Fact::UsageRevisionV2(usage.revision.clone()),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::UserInputRequest,
+            contribution(
+                interaction.fact_id,
+                interaction.source_record_id,
+                interaction.pending.semantic_revision_ref,
+                Fact::UserInputRequestRevision(interaction_fact),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::Message,
+            contribution(
+                message.fact_id,
+                message.source_record_id,
+                message.current.semantic_revision_ref,
+                Fact::MessageRevision(message_fact),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::ContentBlock,
+            contribution(
+                content_block.fact_id,
+                message.source_record_id,
+                content_block.current.semantic_revision_ref,
+                Fact::ContentBlockRevision(content_block_fact),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::NativeMarker,
+            contribution(
+                marker_example.fact_id,
+                marker.source_record_id,
+                marker_example.current.semantic_revision_ref,
+                Fact::NativeRuntimeMarkerRevision(marker_fact),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::Task,
+            contribution(
+                task.fact_id,
+                task.source_record_id,
+                task.created.semantic_revision_ref,
+                Fact::TaskRevision(task_fact),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::Plan,
+            contribution(
+                plan.fact_id,
+                plan.source_record_id,
+                plan.current.semantic_revision_ref,
+                Fact::PlanRevision(plan_fact),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::Tool,
+            contribution(
+                tool.fact_id,
+                tool.source_record_id,
+                tool.call.semantic_revision_ref,
+                Fact::ToolRevision(tool_fact),
+            ),
+        ),
+        (
+            RuntimeSemanticFamily::EffectiveState,
+            contribution(
+                effective.fact_id,
+                effective.source_record_id,
+                effective.configured.semantic_revision_ref,
+                Fact::EffectiveStateRevision(effective_fact),
+            ),
+        ),
+    ]
+}
+
+#[test]
+fn all_runtime_families_reconcile_with_equal_replacement_state_digests() {
+    let contributions = all_runtime_family_contributions();
+    assert_eq!(contributions.len(), 11, "closed runtime family inventory");
+
+    for (family, contribution) in contributions {
+        let expected_digest = runtime_replacement_state_digest(
+            family,
+            [RuntimeReplacementDigestEntity {
+                semantic: &contribution.semantic,
+                revision: &contribution.revision,
+            }],
+        )
+        .expect("typed replacement digest");
+        let partial = coverage_for_family(family, "partial");
+        let event = ScopedRuntimeObserverEvent {
+            event_id: format!("evt-{}", family.as_str()),
+            semantic: contribution.semantic,
+            operation: ScopedRuntimeOperation::Upsert,
+            retraction: None,
+            revision: contribution.revision.clone(),
+        };
+
+        let overlay = merge_durable_and_scoped_runtime(
+            &[],
+            &partial,
+            &[event.clone(), event.clone()],
+            &partial,
+        )
+        .expect("partial overlay merge");
+        assert_eq!(overlay.family, family);
+        assert_eq!(
+            overlay.overlay,
+            OverlayDisposition::Retained { stale: true }
+        );
+        assert_eq!(overlay.contributions.len(), 1);
+        assert_eq!(
+            overlay.contributions[0].origin,
+            MergedContributionOrigin::Overlay
+        );
+        assert_eq!(overlay.replacement_state_digest, expected_digest);
+        assert_eq!(overlay.delivered_observer_occurrences.len(), 1);
+
+        let complete = coverage_for_family(family, "complete");
+        let retired = merge_durable_and_scoped_runtime(
+            std::slice::from_ref(&contribution),
+            &complete,
+            &[event],
+            &complete,
+        )
+        .expect("complete durable merge");
+        assert_eq!(retired.overlay, OverlayDisposition::Retired);
+        assert_eq!(retired.contributions.len(), 1);
+        assert_eq!(
+            retired.contributions[0].origin,
+            MergedContributionOrigin::Durable
+        );
+        assert_eq!(retired.replacement_state_digest, expected_digest);
+    }
+}
+
+#[test]
+fn all_family_merge_rejects_family_and_operation_drift() {
+    let mut contributions = all_runtime_family_contributions();
+    let (_, actor) = contributions.remove(0);
+    let usage_coverage = coverage_for_family(RuntimeSemanticFamily::UsageV2, "partial");
+    assert!(
+        merge_durable_and_scoped_runtime(&[actor], &usage_coverage, &[], &usage_coverage,).is_err()
+    );
+
+    let (_, task) = contributions
+        .into_iter()
+        .find(|(family, _)| *family == RuntimeSemanticFamily::Task)
+        .expect("task contribution");
+    let task_coverage = coverage_for_family(RuntimeSemanticFamily::Task, "partial");
+    let mismatched = ScopedRuntimeObserverEvent {
+        event_id: "evt-task-mismatched-operation".to_string(),
+        semantic: task.semantic,
+        operation: ScopedRuntimeOperation::Retract,
+        retraction: None,
+        revision: task.revision,
+    };
+    assert!(
+        merge_durable_and_scoped_runtime(&[], &task_coverage, &[mismatched], &task_coverage,)
+            .is_err()
+    );
+}
+
+#[test]
+fn all_family_merge_applies_stable_identity_and_partial_retraction_laws() {
+    let contributions = all_runtime_family_contributions();
+    let (_, actor) = contributions
+        .iter()
+        .find(|(family, _)| *family == RuntimeSemanticFamily::ActorRun)
+        .expect("actor contribution");
+    let Fact::ActorRunRevision(mut drifted_actor) = actor.revision.clone() else {
+        panic!("actor fact")
+    };
+    drifted_actor.session = drifted_actor.actor_run;
+    let drifted_actor_semantic = rebind_semantic_revision(
+        actor.semantic,
+        drifted_actor.semantic_revision_key().expect("actor key"),
+    );
+    let actor_coverage = coverage_for_family(RuntimeSemanticFamily::ActorRun, "partial");
+    let drifted_actor_event = ScopedRuntimeObserverEvent {
+        event_id: "evt-actor-retarget".to_string(),
+        semantic: drifted_actor_semantic,
+        operation: ScopedRuntimeOperation::Upsert,
+        retraction: None,
+        revision: Fact::ActorRunRevision(drifted_actor),
+    };
+    assert!(merge_durable_and_scoped_runtime(
+        std::slice::from_ref(actor),
+        &actor_coverage,
+        &[drifted_actor_event],
+        &actor_coverage,
+    )
+    .is_err());
+
+    let (_, task) = contributions
+        .iter()
+        .find(|(family, _)| *family == RuntimeSemanticFamily::Task)
+        .expect("task contribution");
+    let Fact::TaskRevision(mut partial_retract) = task.revision.clone() else {
+        panic!("task fact")
+    };
+    partial_retract.operation = crate::adapter::UserInputOperation::Retract;
+    partial_retract.completeness = ContractCompleteness::Partial;
+    partial_retract.owned_set = None;
+    let partial_retract_semantic = rebind_semantic_revision(
+        task.semantic,
+        partial_retract.semantic_revision_key().expect("task key"),
+    );
+    let task_coverage = coverage_for_family(RuntimeSemanticFamily::Task, "partial");
+    let partial_retract_event = ScopedRuntimeObserverEvent {
+        event_id: "evt-task-partial-retract".to_string(),
+        semantic: partial_retract_semantic,
+        operation: ScopedRuntimeOperation::Retract,
+        retraction: None,
+        revision: Fact::TaskRevision(partial_retract),
+    };
+    let retained = merge_durable_and_scoped_runtime(
+        std::slice::from_ref(task),
+        &task_coverage,
+        &[partial_retract_event],
+        &task_coverage,
+    )
+    .expect("partial retraction is non-authoritative");
+    assert_eq!(retained.contributions.len(), 1);
+    assert_eq!(
+        retained.contributions[0].origin,
+        MergedContributionOrigin::Durable
+    );
+    assert_eq!(retained.contributions[0].semantic, task.semantic);
+
+    let Fact::TaskRevision(mut complete_retract) = task.revision.clone() else {
+        panic!("task fact")
+    };
+    complete_retract.operation = crate::adapter::UserInputOperation::Retract;
+    complete_retract.completeness = ContractCompleteness::Complete;
+    complete_retract.owned_set = None;
+    let complete_retract_semantic = rebind_semantic_revision(
+        task.semantic,
+        complete_retract.semantic_revision_key().expect("task key"),
+    );
+    let complete_retract_event = ScopedRuntimeObserverEvent {
+        event_id: "evt-task-complete-retract".to_string(),
+        semantic: complete_retract_semantic,
+        operation: ScopedRuntimeOperation::Retract,
+        retraction: None,
+        revision: Fact::TaskRevision(complete_retract),
+    };
+    let retracted = merge_durable_and_scoped_runtime(
+        std::slice::from_ref(task),
+        &task_coverage,
+        &[complete_retract_event],
+        &task_coverage,
+    )
+    .expect("complete retraction is authoritative");
+    assert!(retracted.contributions.is_empty());
+    assert_eq!(
+        retracted.replacement_state_digest,
+        runtime_replacement_state_digest(
+            RuntimeSemanticFamily::Task,
+            std::iter::empty::<RuntimeReplacementDigestEntity<'_>>(),
+        )
+        .expect("empty task digest")
+    );
 }
 
 #[test]
@@ -542,5 +1053,23 @@ fn engine_query_service_is_the_durable_live_merge_consumer() {
         merged.delivered_observer_occurrences[0].event_id,
         "evt-live-1"
     );
+
+    let (family, actor) = all_runtime_family_contributions()
+        .into_iter()
+        .find(|(family, _)| *family == RuntimeSemanticFamily::ActorRun)
+        .expect("actor contribution");
+    let actor_coverage = coverage_for_family(family, "partial");
+    let actor_event = ScopedRuntimeObserverEvent {
+        event_id: "evt-live-actor".to_string(),
+        semantic: actor.semantic,
+        operation: ScopedRuntimeOperation::Upsert,
+        retraction: None,
+        revision: actor.revision,
+    };
+    let all_family = engine
+        .merge_runtime_semantic_live(&[], &actor_coverage, &[actor_event], &actor_coverage)
+        .expect("engine reaches all-family typed merge");
+    assert_eq!(all_family.family, RuntimeSemanticFamily::ActorRun);
+    assert_eq!(all_family.contributions.len(), 1);
     engine.shutdown().unwrap();
 }

@@ -1047,6 +1047,26 @@ impl SpaghettiEngineCore {
         .map_err(|error| EngineError::InvalidQuery(error.to_string()))
     }
 
+    /// Reconcile any closed RFC 012C family through the same common reducer
+    /// used by durable ingestion and scoped projection. This remains a typed,
+    /// crate-private reference consumer while public family event contracts
+    /// are frozen; it accepts no native payload representation.
+    pub(crate) fn merge_runtime_semantic_live(
+        &self,
+        durable: &[runtime_semantic_merge::DurableRuntimeContribution],
+        durable_coverage: &SourceCoverageSet,
+        observer_events: &[runtime_semantic_merge::ScopedRuntimeObserverEvent],
+        observer_coverage: &SourceCoverageSet,
+    ) -> Result<runtime_semantic_merge::DurableLiveRuntimeMerge, EngineError> {
+        runtime_semantic_merge::merge_durable_and_scoped_runtime(
+            durable,
+            durable_coverage,
+            observer_events,
+            observer_coverage,
+        )
+        .map_err(|error| EngineError::InvalidQuery(error.to_string()))
+    }
+
     /// Resolve a complete source-selection vector and return exactly one
     /// labeled aggregate arm under the same durable read snapshot.
     pub fn runtime_usage_totals_cancellable(

@@ -12,7 +12,7 @@ use crate::adapter::{
     ActorRunRevisionFact, ActorRunRole, AdapterId, CanonicalEntityKey, CanonicalSourceInstanceKey,
     ContentBlockRevisionFact, ContentBlockRevisionValue, ContractCompleteness, CoverageObjectKey,
     CoverageStreamKey, EffectiveStateDimension, EffectiveStateEvidenceKind,
-    EffectiveStateRevisionFact, EffectiveStateValueAuthority, FactProvenance, FactRevisionId,
+    EffectiveStateRevisionFact, EffectiveStateValueAuthority, Fact, FactProvenance, FactRevisionId,
     FactSemanticRevision, MessageRevisionFact, MessageRevisionRole, NativeCompactionPhase,
     NativeProgressState, NativeQueueOperation, NativeRuntimeMarkerRevisionFact,
     NativeRuntimeMarkerValue, PlanRevisionFact, QualifiedUnknownReason, QualifiedValueQuality,
@@ -1013,6 +1013,466 @@ struct ActorAffiliationDigestContext<'a> {
 fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
     hasher.update(&(value.len() as u64).to_be_bytes());
     hasher.update(value);
+}
+
+/// Closed set of RFC 012C fact families accepted by the topology-neutral
+/// reducer and downstream reconciliation boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum RuntimeSemanticFamily {
+    ActorRun,
+    ActorAffiliation,
+    UsageV2,
+    UserInputRequest,
+    Message,
+    ContentBlock,
+    NativeMarker,
+    Task,
+    Plan,
+    Tool,
+    EffectiveState,
+}
+
+impl RuntimeSemanticFamily {
+    pub(crate) const VERSION: u32 = 1;
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ActorRun => "runtime.actor-run",
+            Self::ActorAffiliation => "runtime.actor-affiliation",
+            Self::UsageV2 => "runtime.usage-v2",
+            Self::UserInputRequest => "runtime.user-input-request",
+            Self::Message => "runtime.message",
+            Self::ContentBlock => "runtime.content-block",
+            Self::NativeMarker => "runtime.native-marker",
+            Self::Task => "runtime.task",
+            Self::Plan => "runtime.plan",
+            Self::Tool => "runtime.tool",
+            Self::EffectiveState => "runtime.effective-state",
+        }
+    }
+
+    pub(crate) fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "runtime.actor-run" => Some(Self::ActorRun),
+            "runtime.actor-affiliation" => Some(Self::ActorAffiliation),
+            "runtime.usage-v2" => Some(Self::UsageV2),
+            "runtime.user-input-request" => Some(Self::UserInputRequest),
+            "runtime.message" => Some(Self::Message),
+            "runtime.content-block" => Some(Self::ContentBlock),
+            "runtime.native-marker" => Some(Self::NativeMarker),
+            "runtime.task" => Some(Self::Task),
+            "runtime.plan" => Some(Self::Plan),
+            "runtime.tool" => Some(Self::Tool),
+            "runtime.effective-state" => Some(Self::EffectiveState),
+            _ => None,
+        }
+    }
+}
+
+/// One already-typed current revision used to compute a topology-neutral
+/// replacement-state digest. Native payloads and delivery/storage coordinates
+/// are deliberately absent.
+#[derive(Clone, Copy)]
+pub(crate) struct RuntimeReplacementDigestEntity<'a> {
+    pub semantic: &'a FactSemanticRevision,
+    pub revision: &'a Fact,
+}
+
+fn runtime_fact_revision_key(
+    semantic: &FactSemanticRevision,
+    revision: &Fact,
+) -> Result<(RuntimeSemanticFamily, [u8; 32]), RuntimeSemanticReductionError> {
+    let (family, key) = match revision {
+        Fact::ActorRunRevision(revision) => {
+            validate_actor_run_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::ActorRun,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::ActorAffiliationRevision(revision) => {
+            validate_actor_affiliation_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::ActorAffiliation,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::UsageRevisionV2(revision) => {
+            validate_usage_v2_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::UsageV2,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::UserInputRequestRevision(revision) => {
+            validate_user_input_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::UserInputRequest,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::MessageRevision(revision) => {
+            validate_message_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::Message,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::ContentBlockRevision(revision) => {
+            validate_content_block_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::ContentBlock,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::NativeRuntimeMarkerRevision(revision) => {
+            validate_native_marker_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::NativeMarker,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::TaskRevision(revision) => {
+            validate_task_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::Task,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::PlanRevision(revision) => {
+            validate_plan_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::Plan,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::ToolRevision(revision) => {
+            validate_tool_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::Tool,
+                revision.semantic_revision_key(),
+            )
+        }
+        Fact::EffectiveStateRevision(revision) => {
+            validate_effective_state_entity(semantic, revision)?;
+            (
+                RuntimeSemanticFamily::EffectiveState,
+                revision.semantic_revision_key(),
+            )
+        }
+        _ => return Err(RuntimeSemanticReductionError::InvalidRevision),
+    };
+    let key = key.map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    Ok((family, key))
+}
+
+pub(crate) fn validate_runtime_fact_revision(
+    semantic: &FactSemanticRevision,
+    revision: &Fact,
+) -> Result<RuntimeSemanticFamily, RuntimeSemanticReductionError> {
+    runtime_fact_revision_key(semantic, revision).map(|(family, _)| family)
+}
+
+/// Some runtime families carry their own upsert/retract operation. Actor,
+/// affiliation, and usage retractions are topology controls and therefore
+/// return `None` rather than inventing an operation inside their value shape.
+pub(crate) fn runtime_fact_declares_retraction(
+    revision: &Fact,
+) -> Result<Option<bool>, RuntimeSemanticReductionError> {
+    let operation = match revision {
+        Fact::UserInputRequestRevision(revision) => Some(revision.operation),
+        Fact::MessageRevision(revision) => Some(revision.operation),
+        Fact::ContentBlockRevision(revision) => Some(revision.operation),
+        Fact::NativeRuntimeMarkerRevision(revision) => Some(revision.operation),
+        Fact::TaskRevision(revision) => Some(revision.operation),
+        Fact::PlanRevision(revision) => Some(revision.operation),
+        Fact::ToolRevision(revision) => Some(revision.operation),
+        Fact::EffectiveStateRevision(revision) => Some(revision.operation),
+        Fact::ActorRunRevision(_)
+        | Fact::ActorAffiliationRevision(_)
+        | Fact::UsageRevisionV2(_) => None,
+        _ => return Err(RuntimeSemanticReductionError::InvalidRevision),
+    };
+    Ok(operation.map(|operation| operation == UserInputOperation::Retract))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RuntimeFactReduction {
+    Unchanged,
+    Upsert {
+        semantic: FactSemanticRevision,
+        revision: Box<Fact>,
+    },
+    Retract,
+}
+
+fn rebind_runtime_fact_revision(
+    incoming_semantic: &FactSemanticRevision,
+    revision: Fact,
+) -> Result<(FactSemanticRevision, Fact), RuntimeSemanticReductionError> {
+    let revision_key = match &revision {
+        Fact::ActorRunRevision(revision) => revision.semantic_revision_key(),
+        Fact::ActorAffiliationRevision(revision) => revision.semantic_revision_key(),
+        Fact::UsageRevisionV2(revision) => revision.semantic_revision_key(),
+        Fact::UserInputRequestRevision(revision) => revision.semantic_revision_key(),
+        Fact::MessageRevision(revision) => revision.semantic_revision_key(),
+        Fact::ContentBlockRevision(revision) => revision.semantic_revision_key(),
+        Fact::NativeRuntimeMarkerRevision(revision) => revision.semantic_revision_key(),
+        Fact::TaskRevision(revision) => revision.semantic_revision_key(),
+        Fact::PlanRevision(revision) => revision.semantic_revision_key(),
+        Fact::ToolRevision(revision) => revision.semantic_revision_key(),
+        Fact::EffectiveStateRevision(revision) => revision.semantic_revision_key(),
+        _ => return Err(RuntimeSemanticReductionError::InvalidRevision),
+    }
+    .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let fact_revision_id = FactRevisionId::derive(
+        &incoming_semantic.fact_id,
+        RuntimeSemanticFamily::VERSION,
+        &revision_key,
+    )
+    .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let semantic = FactSemanticRevision {
+        source_record_id: incoming_semantic.source_record_id,
+        fact_id: incoming_semantic.fact_id,
+        fact_revision_id,
+        semantic_revision_ref: SemanticRevisionRef::new(fact_revision_id),
+    };
+    validate_runtime_fact_revision(&semantic, &revision)?;
+    Ok((semantic, revision))
+}
+
+fn simple_runtime_reduction(
+    reduction: RevisionedEntityReduction,
+    incoming_semantic: &FactSemanticRevision,
+    incoming_revision: Fact,
+) -> RuntimeFactReduction {
+    match reduction {
+        RevisionedEntityReduction::Unchanged => RuntimeFactReduction::Unchanged,
+        RevisionedEntityReduction::Upsert => RuntimeFactReduction::Upsert {
+            semantic: *incoming_semantic,
+            revision: Box::new(incoming_revision),
+        },
+        RevisionedEntityReduction::Retract => RuntimeFactReduction::Retract,
+    }
+}
+
+fn value_runtime_reduction<T>(
+    reduction: RevisionedEntityValueReduction<T>,
+    incoming_semantic: &FactSemanticRevision,
+    wrap: impl FnOnce(T) -> Fact,
+) -> Result<RuntimeFactReduction, RuntimeSemanticReductionError> {
+    match reduction {
+        RevisionedEntityValueReduction::Unchanged => Ok(RuntimeFactReduction::Unchanged),
+        RevisionedEntityValueReduction::Retract => Ok(RuntimeFactReduction::Retract),
+        RevisionedEntityValueReduction::Upsert(revision) => {
+            let (semantic, revision) =
+                rebind_runtime_fact_revision(incoming_semantic, wrap(revision))?;
+            Ok(RuntimeFactReduction::Upsert {
+                semantic,
+                revision: Box::new(revision),
+            })
+        }
+    }
+}
+
+/// Apply the same typed family law used by durable ingestion and scoped
+/// projection to one downstream transition. A partial enrichment may produce
+/// a newly bound merged revision; partial retractions remain unchanged.
+pub(crate) fn reduce_runtime_fact_revision(
+    current: Option<(&FactSemanticRevision, &Fact)>,
+    incoming: (&FactSemanticRevision, &Fact),
+) -> Result<RuntimeFactReduction, RuntimeSemanticReductionError> {
+    let (incoming_semantic, incoming_revision) = incoming;
+    match incoming_revision {
+        Fact::ActorRunRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::ActorRunRevision(revision))) => Some((semantic, revision)),
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            Ok(simple_runtime_reduction(
+                reduce_actor_run_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::ActorRunRevision(incoming_revision.clone()),
+            ))
+        }
+        Fact::ActorAffiliationRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::ActorAffiliationRevision(revision))) => {
+                    Some((semantic, revision))
+                }
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            Ok(simple_runtime_reduction(
+                reduce_actor_affiliation_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::ActorAffiliationRevision(incoming_revision.clone()),
+            ))
+        }
+        Fact::UsageRevisionV2(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::UsageRevisionV2(revision))) => Some((semantic, revision)),
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            Ok(simple_runtime_reduction(
+                reduce_usage_v2_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::UsageRevisionV2(incoming_revision.clone()),
+            ))
+        }
+        Fact::UserInputRequestRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::UserInputRequestRevision(revision))) => {
+                    Some((semantic, revision))
+                }
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            value_runtime_reduction(
+                reduce_user_input_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::UserInputRequestRevision,
+            )
+        }
+        Fact::MessageRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::MessageRevision(revision))) => Some((semantic, revision)),
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            value_runtime_reduction(
+                reduce_message_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::MessageRevision,
+            )
+        }
+        Fact::ContentBlockRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::ContentBlockRevision(revision))) => {
+                    Some((semantic, revision))
+                }
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            Ok(simple_runtime_reduction(
+                reduce_content_block_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::ContentBlockRevision(incoming_revision.clone()),
+            ))
+        }
+        Fact::NativeRuntimeMarkerRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::NativeRuntimeMarkerRevision(revision))) => {
+                    Some((semantic, revision))
+                }
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            Ok(simple_runtime_reduction(
+                reduce_native_marker_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::NativeRuntimeMarkerRevision(incoming_revision.clone()),
+            ))
+        }
+        Fact::TaskRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::TaskRevision(revision))) => Some((semantic, revision)),
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            value_runtime_reduction(
+                reduce_task_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::TaskRevision,
+            )
+        }
+        Fact::PlanRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::PlanRevision(revision))) => Some((semantic, revision)),
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            value_runtime_reduction(
+                reduce_plan_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::PlanRevision,
+            )
+        }
+        Fact::ToolRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::ToolRevision(revision))) => Some((semantic, revision)),
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            value_runtime_reduction(
+                reduce_tool_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::ToolRevision,
+            )
+        }
+        Fact::EffectiveStateRevision(incoming_revision) => {
+            let current = match current {
+                Some((semantic, Fact::EffectiveStateRevision(revision))) => {
+                    Some((semantic, revision))
+                }
+                Some(_) => return Err(RuntimeSemanticReductionError::InvalidRevision),
+                None => None,
+            };
+            Ok(simple_runtime_reduction(
+                reduce_effective_state_revision(current, (incoming_semantic, incoming_revision))?,
+                incoming_semantic,
+                Fact::EffectiveStateRevision(incoming_revision.clone()),
+            ))
+        }
+        _ => Err(RuntimeSemanticReductionError::InvalidRevision),
+    }
+}
+
+/// Digest the current replacement set for one runtime family. The revision
+/// key already binds the complete typed value; this outer digest binds the
+/// canonical fact/source/revision identities and rejects mixed families or
+/// duplicate fact identities.
+pub(crate) fn runtime_replacement_state_digest<'a>(
+    family: RuntimeSemanticFamily,
+    entities: impl IntoIterator<Item = RuntimeReplacementDigestEntity<'a>>,
+) -> Result<[u8; 32], RuntimeSemanticReductionError> {
+    let mut entities = entities.into_iter().collect::<Vec<_>>();
+    entities.sort_unstable_by_key(|entity| entity.semantic.fact_id);
+    if entities
+        .windows(2)
+        .any(|pair| pair[0].semantic.fact_id == pair[1].semantic.fact_id)
+    {
+        return Err(RuntimeSemanticReductionError::DuplicateFact);
+    }
+    let entity_count = u64::try_from(entities.len())
+        .map_err(|_| RuntimeSemanticReductionError::CapacityExhausted)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012c/runtime-replacement-state-v1\0");
+    hasher.update(&RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION.to_be_bytes());
+    hash_component(&mut hasher, family.as_str().as_bytes());
+    hasher.update(&RuntimeSemanticFamily::VERSION.to_be_bytes());
+    hasher.update(&entity_count.to_be_bytes());
+    for entity in entities {
+        let (entity_family, revision_key) =
+            runtime_fact_revision_key(entity.semantic, entity.revision)?;
+        if entity_family != family {
+            return Err(RuntimeSemanticReductionError::InvalidRevision);
+        }
+        hash_component(&mut hasher, entity.semantic.fact_id.as_bytes());
+        hasher.update(
+            &entity
+                .semantic
+                .semantic_revision_ref
+                .semantic_reference_contract_version
+                .to_be_bytes(),
+        );
+        hash_component(&mut hasher, entity.semantic.fact_revision_id.as_bytes());
+        hash_component(&mut hasher, entity.semantic.source_record_id.as_bytes());
+        hash_component(&mut hasher, &revision_key);
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 fn hash_optional_component(hasher: &mut blake3::Hasher, value: Option<&[u8]>) {

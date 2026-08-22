@@ -1,17 +1,24 @@
-//! Crate-private RFC 012C durable/scoped usage merge.
+//! Crate-private RFC 012C durable/scoped semantic merge.
 //!
-//! Reconciles a durable usage-v2 contribution list with ordered scoped observer
-//! upsert/retract events. Overlay replacement is grouped by canonical fact
-//! identity; SemanticRevisionRef is the revision join; event_id deduplicates
-//! delivery. Overlay retirement is coverage-gated. Consumers never parse native
-//! JSON payloads.
+//! Reconciles durable current state with ordered scoped observer upsert/retract
+//! events. Overlay replacement is grouped by canonical fact identity;
+//! `SemanticRevisionRef` is the revision join; `event_id` deduplicates delivery.
+//! Overlay retirement is coverage-gated. The original usage-v2 adapter remains
+//! while callers migrate to the closed all-family boundary. Consumers never
+//! parse native JSON payloads.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::adapter::{
     compare_coverage, CanonicalEntityKey, CanonicalFactId, ContractCompleteness,
-    CoverageComparison, CoverageDomain, CoverageSetCompleteness, FactRevisionId,
-    SemanticContractError, SemanticRevisionRef, SourceCoverageSet, UsageRevisionV2Fact,
+    CoverageComparison, CoverageDomain, CoverageSetCompleteness, Fact, FactRevisionId,
+    FactSemanticRevision, SemanticContractError, SemanticRevisionRef, SourceCoverageSet,
+    UsageRevisionV2Fact,
+};
+use crate::runtime_semantic_reducer::{
+    reduce_runtime_fact_revision, runtime_fact_declares_retraction,
+    runtime_replacement_state_digest, validate_runtime_fact_revision, RuntimeFactReduction,
+    RuntimeReplacementDigestEntity, RuntimeSemanticFamily,
 };
 use crate::semantic_contract::{
     decode_rfc012c_interaction_v1, InteractionFixtureWire, InteractionLifecycleSlotWire,
@@ -19,7 +26,7 @@ use crate::semantic_contract::{
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum SemanticMergeError {
-    #[error("invalid durable/live usage merge: {0}")]
+    #[error("invalid durable/live runtime semantic merge: {0}")]
     Invalid(String),
 }
 
@@ -349,6 +356,367 @@ pub(crate) fn merge_durable_and_scoped_usage(
     let disposition = overlay_disposition(observer_coverage, durable_coverage)?;
     Ok(DurableLiveUsageMerge {
         contributions: assemble_contributions(durable, &overlay, disposition),
+        overlay: disposition,
+        delivered_observer_occurrences: overlay.delivered,
+    })
+}
+
+/// One current durable revision on the closed RFC 012C semantic boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DurableRuntimeContribution {
+    pub semantic: FactSemanticRevision,
+    pub revision: Fact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScopedRuntimeOperation {
+    Upsert,
+    Retract,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScopedRuntimeRetraction {
+    Reset {
+        old_generation: u64,
+        new_generation: u64,
+    },
+    SourceDeleted {
+        generation: u64,
+    },
+}
+
+/// One occurrence-scoped, already-typed observer event. The common fact value
+/// is accepted only after its semantic revision identity is recomputed.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScopedRuntimeObserverEvent {
+    pub event_id: String,
+    pub semantic: FactSemanticRevision,
+    pub operation: ScopedRuntimeOperation,
+    pub retraction: Option<ScopedRuntimeRetraction>,
+    pub revision: Fact,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MergedRuntimeContribution {
+    pub semantic: FactSemanticRevision,
+    pub revision: Fact,
+    pub origin: MergedContributionOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DurableLiveRuntimeMerge {
+    pub family: RuntimeSemanticFamily,
+    pub contributions: Vec<MergedRuntimeContribution>,
+    pub replacement_state_digest: [u8; 32],
+    pub overlay: OverlayDisposition,
+    pub delivered_observer_occurrences: Vec<DeliveredObserverOccurrence>,
+}
+
+struct RuntimeOverlayReduction {
+    current: BTreeMap<CanonicalFactId, (FactSemanticRevision, Fact)>,
+    retracted: BTreeSet<CanonicalFactId>,
+    overlay_order: Vec<CanonicalFactId>,
+    delivered: Vec<DeliveredObserverOccurrence>,
+}
+
+fn runtime_coverage_family(
+    coverage: &SourceCoverageSet,
+) -> Result<RuntimeSemanticFamily, SemanticMergeError> {
+    coverage.validate()?;
+    let CoverageDomain::FactFamily { family, version } = &coverage.coverage_domain else {
+        return Err(SemanticMergeError::invalid(
+            "runtime semantic merge requires fact-family coverage",
+        ));
+    };
+    if *version != RuntimeSemanticFamily::VERSION {
+        return Err(SemanticMergeError::invalid(
+            "runtime semantic merge requires the selected family version",
+        ));
+    }
+    RuntimeSemanticFamily::from_str(family).ok_or_else(|| {
+        SemanticMergeError::invalid("runtime semantic merge coverage names an unsupported family")
+    })
+}
+
+fn validate_runtime_contribution(
+    family: RuntimeSemanticFamily,
+    contribution: &DurableRuntimeContribution,
+) -> Result<(), SemanticMergeError> {
+    let actual = validate_runtime_fact_revision(&contribution.semantic, &contribution.revision)
+        .map_err(|_| SemanticMergeError::invalid("runtime contribution is invalid"))?;
+    if actual != family {
+        return Err(SemanticMergeError::invalid(
+            "runtime contribution does not match its coverage family",
+        ));
+    }
+    if runtime_fact_declares_retraction(&contribution.revision)
+        .map_err(|_| SemanticMergeError::invalid("runtime contribution is invalid"))?
+        == Some(true)
+    {
+        return Err(SemanticMergeError::invalid(
+            "durable current state cannot contain a retraction revision",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_runtime_event(
+    family: RuntimeSemanticFamily,
+    event: &ScopedRuntimeObserverEvent,
+) -> Result<(), SemanticMergeError> {
+    if event.event_id.is_empty() {
+        return Err(SemanticMergeError::invalid(
+            "observer event_id must be a non-empty occurrence identity",
+        ));
+    }
+    let actual = validate_runtime_fact_revision(&event.semantic, &event.revision)
+        .map_err(|_| SemanticMergeError::invalid("runtime observer event is invalid"))?;
+    if actual != family {
+        return Err(SemanticMergeError::invalid(
+            "runtime observer event does not match its coverage family",
+        ));
+    }
+    let operation_is_retract = event.operation == ScopedRuntimeOperation::Retract;
+    if runtime_fact_declares_retraction(&event.revision)
+        .map_err(|_| SemanticMergeError::invalid("runtime observer event is invalid"))?
+        .is_some_and(|declared| declared != operation_is_retract)
+    {
+        return Err(SemanticMergeError::invalid(
+            "runtime observer operation does not match its typed revision",
+        ));
+    }
+    match (event.operation, event.retraction) {
+        (ScopedRuntimeOperation::Upsert, Some(_)) => Err(SemanticMergeError::invalid(
+            "runtime upsert cannot carry retraction metadata",
+        )),
+        (
+            ScopedRuntimeOperation::Retract,
+            Some(ScopedRuntimeRetraction::Reset {
+                old_generation,
+                new_generation,
+            }),
+        ) if old_generation == 0 || new_generation <= old_generation => {
+            Err(SemanticMergeError::invalid(
+                "runtime reset retraction requires an increasing nonzero generation",
+            ))
+        }
+        (
+            ScopedRuntimeOperation::Retract,
+            Some(ScopedRuntimeRetraction::SourceDeleted { generation: 0 }),
+        ) => Err(SemanticMergeError::invalid(
+            "runtime deletion retraction requires a nonzero generation",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn is_runtime_generation_retraction(event: &ScopedRuntimeObserverEvent) -> bool {
+    event.operation == ScopedRuntimeOperation::Retract
+        && matches!(
+            event.retraction,
+            Some(
+                ScopedRuntimeRetraction::Reset { .. }
+                    | ScopedRuntimeRetraction::SourceDeleted { .. }
+            )
+        )
+}
+
+fn reduce_runtime_observer_events(
+    family: RuntimeSemanticFamily,
+    durable: &[DurableRuntimeContribution],
+    events: &[ScopedRuntimeObserverEvent],
+) -> Result<RuntimeOverlayReduction, SemanticMergeError> {
+    let mut seen_event_ids = BTreeMap::new();
+    let mut unique = Vec::new();
+    for event in events {
+        validate_runtime_event(family, event)?;
+        match seen_event_ids.get(event.event_id.as_str()) {
+            Some(previous) if *previous != event => {
+                return Err(SemanticMergeError::invalid(
+                    "one observer event_id cannot identify different event content",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                seen_event_ids.insert(event.event_id.as_str(), event);
+                unique.push(event);
+            }
+        }
+    }
+
+    let mut resets = Vec::new();
+    let mut replay = Vec::new();
+    for event in unique {
+        if is_runtime_generation_retraction(event) {
+            resets.push(event);
+        } else {
+            replay.push(event);
+        }
+    }
+
+    let mut current = BTreeMap::new();
+    let mut retracted = BTreeSet::new();
+    let mut overlay_order = Vec::new();
+    let mut delivered = Vec::new();
+    let durable_by_fact_id = durable
+        .iter()
+        .map(|contribution| (contribution.semantic.fact_id, contribution))
+        .collect::<BTreeMap<_, _>>();
+    for event in resets.into_iter().chain(replay) {
+        delivered.push(DeliveredObserverOccurrence {
+            event_id: event.event_id.clone(),
+            fact_id: event.semantic.fact_id,
+            semantic_revision_ref: event.semantic.semantic_revision_ref,
+        });
+        let fact_id = event.semantic.fact_id;
+        let topology_retraction = is_runtime_generation_retraction(event)
+            || event.operation == ScopedRuntimeOperation::Retract
+                && runtime_fact_declares_retraction(&event.revision)
+                    .map_err(|_| SemanticMergeError::invalid("runtime observer event is invalid"))?
+                    .is_none();
+        let reduction = if topology_retraction {
+            RuntimeFactReduction::Retract
+        } else {
+            let current_entity = if let Some((semantic, revision)) = current.get(&fact_id) {
+                Some((semantic, revision))
+            } else if retracted.contains(&fact_id) {
+                None
+            } else {
+                durable_by_fact_id
+                    .get(&fact_id)
+                    .map(|contribution| (&contribution.semantic, &contribution.revision))
+            };
+            reduce_runtime_fact_revision(current_entity, (&event.semantic, &event.revision))
+                .map_err(|_| {
+                    SemanticMergeError::invalid(
+                        "runtime observer transition violates its family reducer",
+                    )
+                })?
+        };
+        match reduction {
+            RuntimeFactReduction::Retract => {
+                current.remove(&fact_id);
+                retracted.insert(fact_id);
+            }
+            RuntimeFactReduction::Unchanged => {}
+            RuntimeFactReduction::Upsert { semantic, revision } => {
+                if semantic != event.semantic {
+                    return Err(SemanticMergeError::invalid(
+                        "runtime observer event must carry its post-reducer semantic revision",
+                    ));
+                }
+                retracted.remove(&event.semantic.fact_id);
+                if !current.contains_key(&event.semantic.fact_id) {
+                    overlay_order.push(event.semantic.fact_id);
+                }
+                current.insert(event.semantic.fact_id, (semantic, *revision));
+            }
+        }
+    }
+    Ok(RuntimeOverlayReduction {
+        current,
+        retracted,
+        overlay_order,
+        delivered,
+    })
+}
+
+fn assemble_runtime_contributions(
+    durable: &[DurableRuntimeContribution],
+    overlay: &RuntimeOverlayReduction,
+    disposition: OverlayDisposition,
+) -> Vec<MergedRuntimeContribution> {
+    if disposition == OverlayDisposition::Retired {
+        return durable
+            .iter()
+            .map(|contribution| MergedRuntimeContribution {
+                semantic: contribution.semantic,
+                revision: contribution.revision.clone(),
+                origin: MergedContributionOrigin::Durable,
+            })
+            .collect();
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut contributions = Vec::new();
+    for contribution in durable {
+        let fact_id = contribution.semantic.fact_id;
+        if overlay.retracted.contains(&fact_id) && !overlay.current.contains_key(&fact_id) {
+            continue;
+        }
+        if let Some((semantic, revision)) = overlay.current.get(&fact_id) {
+            contributions.push(MergedRuntimeContribution {
+                semantic: *semantic,
+                revision: revision.clone(),
+                origin: MergedContributionOrigin::Overlay,
+            });
+        } else {
+            contributions.push(MergedRuntimeContribution {
+                semantic: contribution.semantic,
+                revision: contribution.revision.clone(),
+                origin: MergedContributionOrigin::Durable,
+            });
+        }
+        seen.insert(fact_id);
+    }
+    for fact_id in &overlay.overlay_order {
+        if seen.contains(fact_id) {
+            continue;
+        }
+        let Some((semantic, revision)) = overlay.current.get(fact_id) else {
+            continue;
+        };
+        contributions.push(MergedRuntimeContribution {
+            semantic: *semantic,
+            revision: revision.clone(),
+            origin: MergedContributionOrigin::Overlay,
+        });
+    }
+    contributions
+}
+
+/// Reference downstream reconciliation for every closed RFC 012C fact family.
+/// Inputs are already-typed common facts; native payloads have no representation
+/// here. Coverage decides overlay retirement, `event_id` deduplicates delivery,
+/// and canonical fact/revision identities decide replacement.
+pub(crate) fn merge_durable_and_scoped_runtime(
+    durable: &[DurableRuntimeContribution],
+    durable_coverage: &SourceCoverageSet,
+    observer_events: &[ScopedRuntimeObserverEvent],
+    observer_coverage: &SourceCoverageSet,
+) -> Result<DurableLiveRuntimeMerge, SemanticMergeError> {
+    let family = runtime_coverage_family(durable_coverage)?;
+    if runtime_coverage_family(observer_coverage)? != family {
+        return Err(SemanticMergeError::invalid(
+            "durable and observer coverage name different runtime families",
+        ));
+    }
+    let mut durable_fact_ids = BTreeSet::new();
+    for contribution in durable {
+        if !durable_fact_ids.insert(contribution.semantic.fact_id) {
+            return Err(SemanticMergeError::invalid(
+                "durable runtime state contains a duplicate canonical fact identity",
+            ));
+        }
+        validate_runtime_contribution(family, contribution)?;
+    }
+    let overlay = reduce_runtime_observer_events(family, durable, observer_events)?;
+    let disposition = overlay_disposition(observer_coverage, durable_coverage)?;
+    let contributions = assemble_runtime_contributions(durable, &overlay, disposition);
+    let replacement_state_digest = runtime_replacement_state_digest(
+        family,
+        contributions
+            .iter()
+            .map(|contribution| RuntimeReplacementDigestEntity {
+                semantic: &contribution.semantic,
+                revision: &contribution.revision,
+            }),
+    )
+    .map_err(|_| SemanticMergeError::invalid("merged runtime state is invalid"))?;
+    Ok(DurableLiveRuntimeMerge {
+        family,
+        contributions,
+        replacement_state_digest,
         overlay: disposition,
         delivered_observer_occurrences: overlay.delivered,
     })
