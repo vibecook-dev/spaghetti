@@ -17,20 +17,21 @@ use crate::adapter::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, AdapterError, AdapterErrorClass, AdapterId,
     AdapterObjectContext, AdapterRegistry, AgentAdapter, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, CompatibilityDecision, ContractCompleteness, CoverageAbsence,
-    CoverageAbsenceKind, CoverageDeclarationDigest, CoverageDomain, CoverageError,
-    CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoverageProvenance, CoverageScope,
-    CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeDisposition, DecoderId,
-    EffectiveStateRevisionFact, ExternalEntityRef, Fact, FactBatch, FactEnvelope, FactProvenance,
-    FactRevisionId, FactSemanticContext, FactSemanticRevision, MessageRevisionFact,
-    MessageRevisionRole, NativeArtifactProbe, NativeIdentityClaim, PlanRevisionFact,
-    QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy, ScopeRelationPrimitive,
-    SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet,
-    SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId,
-    SourceRows, SourceSnapshot, SupportOperation, TaskLifecycleState, TaskRevisionFact,
-    TimestampQuality, ToolRevisionFact, ToolRevisionKind, TypedAccessAuthorization,
-    UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState, UserInputOperation,
-    UserInputQuestion, UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    CanonicalSourceInstanceKey, CompatibilityDecision, ContentBlockRevisionFact,
+    ContractCompleteness, CoverageAbsence, CoverageAbsenceKind, CoverageDeclarationDigest,
+    CoverageDomain, CoverageError, CoverageObjectKey, CoveragePosition, CoveragePositionKind,
+    CoverageProvenance, CoverageScope, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
+    DecodeDisposition, DecoderId, EffectiveStateRevisionFact, ExternalEntityRef, Fact, FactBatch,
+    FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision,
+    MessageRevisionFact, MessageRevisionRole, NativeArtifactProbe, NativeIdentityClaim,
+    PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy,
+    ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint,
+    SourceCoverageSet, SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery,
+    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TaskLifecycleState,
+    TaskRevisionFact, TimestampQuality, ToolRevisionFact, ToolRevisionKind,
+    TypedAccessAuthorization, UsageRevisionV2Fact, UserInputKind, UserInputLifecycleState,
+    UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
+    EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -49,10 +50,15 @@ use crate::observation_contract::{
     ObservationContractOffer, ObservationContractRequest, ObservationContractSelection,
     ObservationNegotiationError,
 };
+#[cfg(test)]
 use crate::runtime_semantic_reducer::{
-    effective_state_reduced_state_digest, reduce_effective_state_revision,
-    EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticReductionError,
-    RuntimeSemanticSourceRef, RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
+    content_block_reduced_state_digest, ContentBlockReducedDigestEntity,
+};
+use crate::runtime_semantic_reducer::{
+    effective_state_reduced_state_digest, reduce_content_block_revision,
+    reduce_effective_state_revision, EffectiveStateReducedDigestEntity, RevisionedEntityReduction,
+    RuntimeSemanticReductionError, RuntimeSemanticSourceRef,
+    RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION,
 };
 use crate::source::{
     confined_relative_path_key, read_stable_file_confined, validate_relation_id, AccessBudgetError,
@@ -11096,6 +11102,8 @@ pub enum ScopedProjectionError {
     UserInputCapacityFull,
     #[error("scoped message projection entity capacity is full")]
     MessageCapacityFull,
+    #[error("scoped content-block projection entity capacity is full")]
+    ContentBlockCapacityFull,
     #[error("scoped plan projection entity capacity is full")]
     PlanCapacityFull,
     #[error("scoped task projection entity capacity is full")]
@@ -11290,6 +11298,15 @@ struct ScopedMessageProjectionState {
 }
 
 #[derive(Clone)]
+struct ScopedContentBlockProjectionState {
+    object_token: u64,
+    generation: u64,
+    semantic: FactSemanticRevision,
+    source: ScopedUsageV2Source,
+    revision: ContentBlockRevisionFact,
+}
+
+#[derive(Clone)]
 struct ScopedPlanProjectionState {
     object_token: u64,
     generation: u64,
@@ -11392,6 +11409,61 @@ fn queue_projection_retraction<K: Ord + Copy, Current, Upsert>(
     upserts.remove(&key);
 }
 
+fn apply_message_content_block_replacement(
+    current_messages: &BTreeMap<CanonicalFactId, ScopedMessageProjectionState>,
+    current_blocks: &BTreeMap<CanonicalFactId, ScopedContentBlockProjectionState>,
+    mutation: &mut ScopedProjectionMutation,
+) {
+    let retracted_messages = mutation
+        .message_retractions
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut complete_snapshots = BTreeMap::<CanonicalFactId, Vec<String>>::new();
+    for (fact_id, state) in current_messages
+        .iter()
+        .filter(|(fact_id, _)| {
+            !mutation.message_upserts.contains_key(fact_id) && !retracted_messages.contains(fact_id)
+        })
+        .chain(mutation.message_upserts.iter())
+    {
+        if state.revision.operation == UserInputOperation::Upsert
+            && state.revision.completeness == ContractCompleteness::Complete
+        {
+            complete_snapshots.insert(*fact_id, state.revision.ordered_content_block_keys.clone());
+        }
+    }
+
+    let candidates = current_blocks
+        .iter()
+        .filter(|(fact_id, _)| !mutation.content_block_upserts.contains_key(fact_id))
+        .chain(mutation.content_block_upserts.iter())
+        .map(|(fact_id, state)| {
+            (
+                *fact_id,
+                state.revision.message,
+                state.revision.native_content_block_id.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (fact_id, message, native_id) in candidates {
+        let parent_retracted = retracted_messages.contains(&message);
+        let omitted_from_complete_snapshot = native_id.as_ref().is_some_and(|native_id| {
+            complete_snapshots
+                .get(&message)
+                .is_some_and(|keys| !keys.contains(native_id))
+        });
+        if parent_retracted || omitted_from_complete_snapshot {
+            queue_projection_retraction(
+                current_blocks,
+                &mut mutation.content_block_upserts,
+                &mut mutation.content_block_retractions,
+                fact_id,
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct ScopedProjectionMutation {
     usage_upserts: BTreeMap<CanonicalFactId, ScopedUsageV2ProjectionState>,
@@ -11404,6 +11476,8 @@ struct ScopedProjectionMutation {
     user_input_retractions: Vec<CanonicalFactId>,
     message_upserts: BTreeMap<CanonicalFactId, ScopedMessageProjectionState>,
     message_retractions: Vec<CanonicalFactId>,
+    content_block_upserts: BTreeMap<CanonicalFactId, ScopedContentBlockProjectionState>,
+    content_block_retractions: Vec<CanonicalFactId>,
     plan_upserts: BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     plan_retractions: Vec<CanonicalFactId>,
     task_upserts: BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
@@ -11444,6 +11518,7 @@ pub struct ScopedObservationProjectionSink {
     actor_affiliations: BTreeMap<CanonicalEntityKey, ScopedActorAffiliationProjectionState>,
     user_input_requests: BTreeMap<CanonicalFactId, ScopedUserInputProjectionState>,
     messages: BTreeMap<CanonicalFactId, ScopedMessageProjectionState>,
+    content_blocks: BTreeMap<CanonicalFactId, ScopedContentBlockProjectionState>,
     plans: BTreeMap<CanonicalFactId, ScopedPlanProjectionState>,
     tasks: BTreeMap<CanonicalFactId, ScopedTaskProjectionState>,
     tools: BTreeMap<CanonicalFactId, ScopedToolProjectionState>,
@@ -11496,6 +11571,7 @@ impl ScopedObservationProjectionSink {
             actor_affiliations: BTreeMap::new(),
             user_input_requests: BTreeMap::new(),
             messages: BTreeMap::new(),
+            content_blocks: BTreeMap::new(),
             plans: BTreeMap::new(),
             tasks: BTreeMap::new(),
             tools: BTreeMap::new(),
@@ -11608,6 +11684,13 @@ impl ScopedObservationProjectionSink {
             let removed = self.messages.remove(&fact_id);
             debug_assert!(removed.is_some(), "prepared message retraction must exist");
         }
+        for fact_id in mutation.content_block_retractions {
+            let removed = self.content_blocks.remove(&fact_id);
+            debug_assert!(
+                removed.is_some(),
+                "prepared content-block retraction must exist"
+            );
+        }
         for fact_id in mutation.plan_retractions {
             let removed = self.plans.remove(&fact_id);
             debug_assert!(removed.is_some(), "prepared plan retraction must exist");
@@ -11628,6 +11711,7 @@ impl ScopedObservationProjectionSink {
             );
         }
         self.messages.extend(mutation.message_upserts);
+        self.content_blocks.extend(mutation.content_block_upserts);
         self.plans.extend(mutation.plan_upserts);
         self.tasks.extend(mutation.task_upserts);
         self.tools.extend(mutation.tool_upserts);
@@ -11660,6 +11744,8 @@ impl ScopedObservationProjectionSink {
         self.user_input_requests
             .retain(|_, state| state.object_token != object_token);
         self.messages
+            .retain(|_, state| state.object_token != object_token);
+        self.content_blocks
             .retain(|_, state| state.object_token != object_token);
         self.plans
             .retain(|_, state| state.object_token != object_token);
@@ -11891,6 +11977,22 @@ impl ScopedObservationProjectionSink {
         })
     }
 
+    /// Freeze the internal content-block reducer without advertising a
+    /// selectable observer family. This lets durable and scoped topologies
+    /// compare the RFC 012C `CurrentGenerationLog` law before its portable
+    /// event/replacement contract is exposed.
+    #[cfg(test)]
+    fn content_block_reduced_digest(&self) -> Result<[u8; 32], ScopedProjectionError> {
+        content_block_reduced_state_digest(self.content_blocks.values().map(|entity| {
+            ContentBlockReducedDigestEntity {
+                semantic: &entity.semantic,
+                source: runtime_semantic_source_ref(entity.generation, &entity.source),
+                revision: &entity.revision,
+            }
+        }))
+        .map_err(runtime_semantic_projection_error)
+    }
+
     fn plan_replacement_snapshot(
         &self,
         phase: ScopedAppendDeliveryPhase,
@@ -12069,6 +12171,11 @@ impl ScopedObservationProjectionSink {
             ScopedRevisionedEntityRetractionCause::Reset(reset),
             ScopedProjectionError::InvalidResetState,
         )?;
+        let content_block_retractions = self.prepare_content_block_retractions(
+            object_token,
+            reset.old_generation,
+            ScopedProjectionError::InvalidResetState,
+        )?;
         let (plan_projected, plan_retractions) = self.prepare_plan_retractions(
             object_token,
             reset.old_generation,
@@ -12151,6 +12258,7 @@ impl ScopedObservationProjectionSink {
                 affiliation_retractions: context_retractions.affiliations,
                 user_input_retractions,
                 message_retractions,
+                content_block_retractions,
                 plan_retractions,
                 task_retractions,
                 tool_retractions,
@@ -12190,6 +12298,10 @@ impl ScopedObservationProjectionSink {
                         .any(|state| state.object_token == object_token)
                     || self
                         .messages
+                        .values()
+                        .any(|state| state.object_token == object_token)
+                    || self
+                        .content_blocks
                         .values()
                         .any(|state| state.object_token == object_token)
                     || self
@@ -12288,6 +12400,15 @@ impl ScopedObservationProjectionSink {
                     ScopedProjectionError::InvalidPresenceState,
                 )?,
         };
+        let content_block_retractions = match change {
+            ScopedAppendPresenceChange::Created { .. } => Vec::new(),
+            ScopedAppendPresenceChange::Deleted { generation } => self
+                .prepare_content_block_retractions(
+                    object_token,
+                    generation,
+                    ScopedProjectionError::InvalidPresenceState,
+                )?,
+        };
         let (plan_projected, plan_retractions) = match change {
             ScopedAppendPresenceChange::Created { .. } => (Vec::new(), Vec::new()),
             ScopedAppendPresenceChange::Deleted { generation } => self.prepare_plan_retractions(
@@ -12382,6 +12503,7 @@ impl ScopedObservationProjectionSink {
                 affiliation_retractions: context_retractions.affiliations,
                 user_input_retractions,
                 message_retractions,
+                content_block_retractions,
                 plan_retractions,
                 task_retractions,
                 tool_retractions,
@@ -12674,6 +12796,29 @@ impl ScopedObservationProjectionSink {
             }
         }
         Ok((projected, fact_ids))
+    }
+
+    fn prepare_content_block_retractions(
+        &self,
+        object_token: u64,
+        generation: u64,
+        mismatch_error: ScopedProjectionError,
+    ) -> Result<Vec<CanonicalFactId>, ScopedProjectionError> {
+        if self
+            .content_blocks
+            .values()
+            .any(|state| state.object_token == object_token && state.generation != generation)
+        {
+            return Err(mismatch_error);
+        }
+        Ok(self
+            .content_blocks
+            .iter()
+            .filter_map(|(fact_id, state)| {
+                (state.object_token == object_token && state.generation == generation)
+                    .then_some(*fact_id)
+            })
+            .collect())
     }
 
     fn prepare_plan_retractions(
@@ -13162,10 +13307,57 @@ impl ScopedObservationProjectionSink {
                     }
                     mutation.message_upserts.insert(key, state);
                 }
-                // Contract-only until the content-block CurrentGenerationLog
-                // reducer is selected below; portable values must not silently
-                // enter a scoped complete-replacement claim.
-                Fact::ContentBlockRevision(_) => {}
+                Fact::ContentBlockRevision(revision) => {
+                    let state = scoped_content_block_state(
+                        object_token,
+                        source,
+                        evidence,
+                        envelope,
+                        revision,
+                    )?;
+                    let key = state.semantic.fact_id;
+                    let current = mutation
+                        .content_block_upserts
+                        .get(&key)
+                        .or_else(|| self.content_blocks.get(&key));
+                    if let Some(current) = current {
+                        validate_actor_revision_progress(
+                            (
+                                current.object_token,
+                                current.generation,
+                                &current.semantic,
+                                &current.source,
+                                &current.revision,
+                            ),
+                            (
+                                state.object_token,
+                                state.generation,
+                                &state.semantic,
+                                &state.source,
+                                &state.revision,
+                            ),
+                        )?;
+                    }
+                    match reduce_content_block_revision(
+                        current.map(|current| (&current.semantic, &current.revision)),
+                        (&state.semantic, &state.revision),
+                    )
+                    .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+                    {
+                        RevisionedEntityReduction::Unchanged => continue,
+                        RevisionedEntityReduction::Retract => {
+                            queue_projection_retraction(
+                                &self.content_blocks,
+                                &mut mutation.content_block_upserts,
+                                &mut mutation.content_block_retractions,
+                                key,
+                            );
+                        }
+                        RevisionedEntityReduction::Upsert => {
+                            mutation.content_block_upserts.insert(key, state);
+                        }
+                    }
+                }
                 Fact::PlanRevision(revision) => {
                     let mut state =
                         scoped_plan_state(object_token, source, evidence, envelope, revision)?;
@@ -13544,6 +13736,11 @@ impl ScopedObservationProjectionSink {
                 _ => {}
             }
         }
+        apply_message_content_block_replacement(
+            &self.messages,
+            &self.content_blocks,
+            &mut mutation,
+        );
         if projected_entity_count(
             &self.actor_runs,
             &mutation.actor_upserts,
@@ -13579,6 +13776,15 @@ impl ScopedObservationProjectionSink {
         .is_none_or(|count| count > self.limits.max_usage_v2_entities)
         {
             return Err(ScopedProjectionError::MessageCapacityFull);
+        }
+        if projected_entity_count(
+            &self.content_blocks,
+            &mutation.content_block_upserts,
+            &mutation.content_block_retractions,
+        )
+        .is_none_or(|count| count > self.limits.max_usage_v2_entities)
+        {
+            return Err(ScopedProjectionError::ContentBlockCapacityFull);
         }
         if projected_entity_count(
             &self.plans,
@@ -15947,24 +16153,38 @@ fn effective_state_replacement_digest(
     let digest = effective_state_reduced_state_digest(entities.iter().map(|entity| {
         EffectiveStateReducedDigestEntity {
             semantic: &entity.semantic,
-            source: RuntimeSemanticSourceRef {
-                adapter_id: &entity.source.object.adapter_id,
-                source_instance_key: &entity.source.object.source_instance_key,
-                stream_key: &entity.source.object.stream_key,
-                object_key: &entity.source.object.object_key,
-                source_record_id: entity.source.source_record_id,
-                provenance: &entity.source.provenance,
-                generation: entity.generation,
-                cursor_start: entity.source.cursor_start.as_bytes(),
-                cursor_end: entity.source.cursor_end.as_bytes(),
-                payload_hash: entity.source.payload_hash.as_bytes(),
-                media_type: entity.source.media_type.as_str(),
-                state: entity.source.state,
-            },
+            source: runtime_semantic_source_ref(entity.generation, &entity.source),
             revision: &entity.revision,
         }
     }))
-    .map_err(|error| match error {
+    .map_err(runtime_semantic_projection_error)?;
+    Ok(ScopedReplacementSemanticDigest(digest))
+}
+
+fn runtime_semantic_source_ref(
+    generation: u64,
+    source: &ScopedUsageV2Source,
+) -> RuntimeSemanticSourceRef<'_> {
+    RuntimeSemanticSourceRef {
+        adapter_id: &source.object.adapter_id,
+        source_instance_key: &source.object.source_instance_key,
+        stream_key: &source.object.stream_key,
+        object_key: &source.object.object_key,
+        source_record_id: source.source_record_id,
+        provenance: &source.provenance,
+        generation,
+        cursor_start: source.cursor_start.as_bytes(),
+        cursor_end: source.cursor_end.as_bytes(),
+        payload_hash: source.payload_hash.as_bytes(),
+        media_type: source.media_type.as_str(),
+        state: source.state,
+    }
+}
+
+fn runtime_semantic_projection_error(
+    error: RuntimeSemanticReductionError,
+) -> ScopedProjectionError {
+    match error {
         RuntimeSemanticReductionError::InvalidSource => ScopedProjectionError::ProvenanceMismatch,
         RuntimeSemanticReductionError::CapacityExhausted => {
             ScopedProjectionError::ReplacementCapacityExhausted
@@ -15973,8 +16193,7 @@ fn effective_state_replacement_digest(
         | RuntimeSemanticReductionError::DuplicateFact => {
             ScopedProjectionError::InvalidSemanticRevision
         }
-    })?;
-    Ok(ScopedReplacementSemanticDigest(digest))
+    }
 }
 
 fn effective_state_replacement_snapshot_is_valid(
@@ -16028,6 +16247,35 @@ fn scoped_message_state(
         return Err(ScopedProjectionError::InvalidSemanticRevision);
     }
     Ok(ScopedMessageProjectionState {
+        object_token,
+        generation: evidence.generation,
+        semantic,
+        source,
+        revision: revision.clone(),
+    })
+}
+
+fn scoped_content_block_state(
+    object_token: u64,
+    source: &ScopedSourceObjectIdentity,
+    evidence: &ScopedDecodedRecordEvidence,
+    envelope: &FactEnvelope,
+    revision: &ContentBlockRevisionFact,
+) -> Result<ScopedContentBlockProjectionState, ScopedProjectionError> {
+    revision
+        .validate()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    let (semantic, source) = scoped_context_semantic_source(source, evidence, envelope)?;
+    let revision_key = revision
+        .semantic_revision_key()
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?;
+    if FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
+        .map_err(|_| ScopedProjectionError::InvalidSemanticRevision)?
+        != semantic.fact_revision_id
+    {
+        return Err(ScopedProjectionError::InvalidSemanticRevision);
+    }
+    Ok(ScopedContentBlockProjectionState {
         object_token,
         generation: evidence.generation,
         semantic,
@@ -23416,12 +23664,15 @@ mod projection_tests {
         UsageResponseIdentity, UsageValueAuthority, UsageValueProvenance,
     };
     use crate::runtime_semantic_reducer::{
-        effective_state_reduced_state_digest, reduce_effective_state_revision,
-        EffectiveStateReducedDigestEntity, RevisionedEntityReduction, RuntimeSemanticSourceRef,
+        content_block_reduced_state_digest, effective_state_reduced_state_digest,
+        reduce_content_block_revision, reduce_effective_state_revision,
+        ContentBlockReducedDigestEntity, EffectiveStateReducedDigestEntity,
+        RevisionedEntityReduction, RuntimeSemanticSourceRef,
     };
     use crate::semantic_contract::{
-        effective_state_revision, parse_rfc012c_runtime_v1_json, EffectiveStateFixtureWire,
-        EffectiveStateSlotWire, RuntimeContractFixtureWire,
+        content_block_revision, effective_state_revision, parse_rfc012c_runtime_v1_json,
+        ContentBlockRevisionSlotWire, EffectiveStateFixtureWire, EffectiveStateSlotWire,
+        MessageFixtureWire, MessageRevisionSlotWire, RuntimeContractFixtureWire,
     };
     use crate::source::{DirectoryCheckpoint, FileIdentity, RecordOrigin};
 
@@ -26283,6 +26534,191 @@ mod projection_tests {
         record: SourceRecord,
     }
 
+    #[derive(Clone)]
+    struct DurableContentBlockEntity {
+        envelope: FactEnvelope,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+    }
+
+    fn content_block_batch(
+        record: &SourceRecord,
+        fixture: &MessageFixtureWire,
+        slot: &ContentBlockRevisionSlotWire,
+    ) -> (FactBatch, FactEnvelope) {
+        let content_block = fixture
+            .content_block
+            .as_ref()
+            .expect("content-block fixture is present");
+        let revision = content_block_revision(fixture, content_block, slot);
+        let stable_key = revision.stable_native_fact_key().unwrap();
+        let mut batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        batch
+            .push_native(record, &stable_key, Fact::ContentBlockRevision(revision))
+            .unwrap();
+        let envelope = batch.facts()[0].clone();
+        assert_eq!(
+            envelope.semantic_revision.unwrap().fact_id,
+            content_block.fact_id,
+            "fixture and durable content-block identity must match"
+        );
+        (batch, envelope)
+    }
+
+    fn synthetic_content_block_batch(
+        record: &SourceRecord,
+        fixture: &MessageFixtureWire,
+        native_content_block_id: &str,
+        ordinal: u32,
+    ) -> (FactBatch, FactEnvelope) {
+        let template = fixture
+            .content_block
+            .as_ref()
+            .expect("content-block fixture is present");
+        let mut revision = content_block_revision(fixture, template, &template.current);
+        revision.native_content_block_id = Some(native_content_block_id.to_string());
+        revision.ordinal = ordinal;
+        let stable_key = revision.stable_native_fact_key().unwrap();
+        let mut batch =
+            FactBatch::new_with_semantic_context(2, 1, rfc012c_semantic_context()).unwrap();
+        batch
+            .push_native(record, &stable_key, Fact::ContentBlockRevision(revision))
+            .unwrap();
+        let envelope = batch.facts()[0].clone();
+        (batch, envelope)
+    }
+
+    fn reduce_durable_content_block(
+        current: &mut BTreeMap<CanonicalFactId, DurableContentBlockEntity>,
+        source: ScopedSourceObjectIdentity,
+        record: SourceRecord,
+        envelope: FactEnvelope,
+    ) -> RevisionedEntityReduction {
+        let semantic = envelope
+            .semantic_revision
+            .as_ref()
+            .expect("content-block durable fact has semantic identity");
+        let Fact::ContentBlockRevision(revision) = &envelope.value else {
+            panic!("durable content-block reducer received another family");
+        };
+        let decision = reduce_content_block_revision(
+            current.get(&semantic.fact_id).map(|entity| {
+                let current_semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+                let Fact::ContentBlockRevision(current_revision) = &entity.envelope.value else {
+                    unreachable!();
+                };
+                (current_semantic, current_revision)
+            }),
+            (semantic, revision),
+        )
+        .unwrap();
+        match decision {
+            RevisionedEntityReduction::Unchanged => {}
+            RevisionedEntityReduction::Upsert => {
+                current.insert(
+                    semantic.fact_id,
+                    DurableContentBlockEntity {
+                        envelope,
+                        source,
+                        record,
+                    },
+                );
+            }
+            RevisionedEntityReduction::Retract => {
+                current.remove(&semantic.fact_id);
+            }
+        }
+        decision
+    }
+
+    fn durable_content_block_digest(
+        current: &BTreeMap<CanonicalFactId, DurableContentBlockEntity>,
+    ) -> [u8; 32] {
+        content_block_reduced_state_digest(current.values().rev().map(|entity| {
+            let semantic = entity.envelope.semantic_revision.as_ref().unwrap();
+            let Fact::ContentBlockRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            ContentBlockReducedDigestEntity {
+                semantic,
+                source: RuntimeSemanticSourceRef {
+                    adapter_id: &entity.source.adapter_id,
+                    source_instance_key: &entity.source.source_instance_key,
+                    stream_key: &entity.source.stream_key,
+                    object_key: &entity.source.object_key,
+                    source_record_id: rfc012c_semantic_context()
+                        .source_record_id(&entity.record)
+                        .unwrap(),
+                    provenance: &entity.envelope.provenance,
+                    generation: entity.record.generation,
+                    cursor_start: entity.record.cursor_start.as_bytes(),
+                    cursor_end: entity.record.cursor_end.as_bytes(),
+                    payload_hash: entity.record.payload_hash.as_bytes(),
+                    media_type: entity.record.media_type.as_str(),
+                    state: entity.record.state,
+                },
+                revision,
+            }
+        }))
+        .unwrap()
+    }
+
+    fn assert_content_block_topology_parity(
+        durable: &BTreeMap<CanonicalFactId, DurableContentBlockEntity>,
+        scoped: &ScopedObservationProjectionSink,
+    ) {
+        assert_eq!(scoped.content_blocks.len(), durable.len());
+        assert_eq!(
+            scoped.content_block_reduced_digest().unwrap(),
+            durable_content_block_digest(durable),
+            "durable and scoped content-block reduced digests diverged"
+        );
+        for (fact_id, durable_entity) in durable {
+            let scoped_entity = scoped.content_blocks.get(fact_id).unwrap();
+            let Fact::ContentBlockRevision(durable_revision) = &durable_entity.envelope.value
+            else {
+                unreachable!();
+            };
+            assert_eq!(
+                scoped_entity.semantic,
+                durable_entity.envelope.semantic_revision.unwrap()
+            );
+            assert_eq!(&scoped_entity.revision, durable_revision);
+        }
+    }
+
+    fn apply_content_block_to_topologies(
+        durable: &mut BTreeMap<CanonicalFactId, DurableContentBlockEntity>,
+        scoped: &mut ScopedObservationProjectionSink,
+        fixture: &MessageFixtureWire,
+        slot: &ContentBlockRevisionSlotWire,
+        record: SourceRecord,
+        lane_ordinal: u64,
+    ) -> RevisionedEntityReduction {
+        let (batch, envelope) = content_block_batch(&record, fixture, slot);
+        let decision = reduce_durable_content_block(
+            durable,
+            rfc012c_source_identity(),
+            record.clone(),
+            envelope,
+        );
+        let projected = scoped
+            .project(&rfc012c_decoded_frame(
+                lane_ordinal,
+                ScopedAppendDeliveryPhase::Live,
+                &record,
+                batch,
+            ))
+            .unwrap();
+        assert!(
+            projected.is_empty(),
+            "content-block reduction must not expose an unnegotiated event family"
+        );
+        assert_content_block_topology_parity(durable, scoped);
+        decision
+    }
+
     fn effective_state_batch(
         record: &SourceRecord,
         fixture: &EffectiveStateFixtureWire,
@@ -27277,6 +27713,347 @@ mod projection_tests {
             .unwrap()
             .is_empty());
         assert_eq!(projection.user_input_requests.len(), 1);
+    }
+
+    #[test]
+    fn rfc012c_content_block_current_generation_log_matches_durable_and_scoped_digests() {
+        let fixture = crate::semantic_contract::decode_rfc012c_message_v1(include_str!(
+            "../fixtures/contracts/rfc012c-message-v1.json"
+        ))
+        .unwrap();
+        let content_block = fixture.content_block.as_ref().unwrap();
+        let selection = observation_contract_selection_for("runtime.message");
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let message_fact = |slot: &MessageRevisionSlotWire| MessageRevisionFact {
+            session: fixture.session,
+            actor_run: fixture.actor_run,
+            native_message_id: fixture.native_message_id.clone(),
+            role: MessageRevisionRole::Assistant,
+            ordered_content_block_keys: slot.ordered_content_block_keys.clone(),
+            completeness: slot.completeness,
+            operation: slot.operation,
+        };
+        let message_batch = |record: &SourceRecord, slot: &MessageRevisionSlotWire| {
+            let mut batch =
+                FactBatch::new_with_semantic_context(4, 1, rfc012c_semantic_context()).unwrap();
+            batch
+                .push_native(
+                    record,
+                    fixture.native_message_id.as_bytes(),
+                    Fact::MessageRevision(message_fact(slot)),
+                )
+                .unwrap();
+            assert_eq!(
+                batch.facts()[0].semantic_revision.unwrap().fact_id,
+                fixture.fact_id
+            );
+            batch
+        };
+
+        let initial_record = rfc012c_record(0, 10, 10);
+        let mut initial_batch = message_batch(&initial_record, &fixture.current);
+        let (block_a_batch, block_a_envelope) =
+            content_block_batch(&initial_record, &fixture, &content_block.current);
+        let (block_b_batch, block_b_envelope) =
+            synthetic_content_block_batch(&initial_record, &fixture, "block-b", 1);
+        initial_batch.append(block_a_batch).unwrap();
+        initial_batch.append(block_b_batch).unwrap();
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    1,
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                    &initial_record,
+                    initial_batch,
+                ))
+                .unwrap()
+                .len(),
+            1,
+            "only the negotiated parent-message family is delivered"
+        );
+        let mut durable = BTreeMap::new();
+        assert_eq!(
+            reduce_durable_content_block(
+                &mut durable,
+                rfc012c_source_identity(),
+                initial_record.clone(),
+                block_a_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_eq!(
+            reduce_durable_content_block(
+                &mut durable,
+                rfc012c_source_identity(),
+                initial_record,
+                block_b_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_content_block_topology_parity(&durable, &projection);
+        assert_eq!(durable.len(), 2);
+
+        let mut reverse_projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let mut reverse_batch =
+            FactBatch::new_with_semantic_context(4, 1, rfc012c_semantic_context()).unwrap();
+        reverse_batch
+            .append(
+                synthetic_content_block_batch(&rfc012c_record(0, 10, 10), &fixture, "block-b", 1).0,
+            )
+            .unwrap();
+        reverse_batch
+            .append(
+                content_block_batch(&rfc012c_record(0, 10, 10), &fixture, &content_block.current).0,
+            )
+            .unwrap();
+        reverse_batch
+            .push_native(
+                &rfc012c_record(0, 10, 10),
+                fixture.native_message_id.as_bytes(),
+                Fact::MessageRevision(message_fact(&fixture.current)),
+            )
+            .unwrap();
+        reverse_projection
+            .project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &rfc012c_record(0, 10, 10),
+                reverse_batch,
+            ))
+            .unwrap();
+        assert_eq!(
+            reverse_projection.content_block_reduced_digest().unwrap(),
+            projection.content_block_reduced_digest().unwrap(),
+            "fact order must not perturb the reduced current-generation log"
+        );
+
+        let correction_record = rfc012c_record(10, 20, 20);
+        assert_eq!(
+            apply_content_block_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &content_block.correction,
+                correction_record,
+                2,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        let corrected_digest = durable_content_block_digest(&durable);
+
+        let exact_replay_record = rfc012c_record(20, 30, 30);
+        assert_eq!(
+            apply_content_block_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &content_block.correction,
+                exact_replay_record,
+                3,
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert_eq!(durable_content_block_digest(&durable), corrected_digest);
+
+        let partial_retract_record = rfc012c_record(30, 40, 40);
+        assert_eq!(
+            apply_content_block_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &content_block.partial_retract,
+                partial_retract_record,
+                4,
+            ),
+            RevisionedEntityReduction::Unchanged
+        );
+        assert_eq!(durable.len(), 2);
+
+        let partial_parent_record = rfc012c_record(40, 50, 50);
+        assert_eq!(
+            projection
+                .project(&rfc012c_decoded_frame(
+                    5,
+                    ScopedAppendDeliveryPhase::Live,
+                    &partial_parent_record,
+                    message_batch(&partial_parent_record, &fixture.partial_blocks),
+                ))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(projection.content_blocks.len(), 2);
+        assert_content_block_topology_parity(&durable, &projection);
+
+        let complete_parent_record = rfc012c_record(50, 60, 60);
+        projection
+            .project(&rfc012c_decoded_frame(
+                6,
+                ScopedAppendDeliveryPhase::Live,
+                &complete_parent_record,
+                message_batch(&complete_parent_record, &fixture.complete_blocks),
+            ))
+            .unwrap();
+        durable.retain(|_, entity| {
+            let Fact::ContentBlockRevision(revision) = &entity.envelope.value else {
+                unreachable!();
+            };
+            revision
+                .native_content_block_id
+                .as_ref()
+                .is_none_or(|native_id| {
+                    fixture
+                        .complete_blocks
+                        .ordered_content_block_keys
+                        .contains(native_id)
+                })
+        });
+        assert_eq!(durable.len(), 1);
+        assert_content_block_topology_parity(&durable, &projection);
+
+        let retract_record = rfc012c_record(60, 70, 70);
+        assert_eq!(
+            apply_content_block_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &content_block.retract,
+                retract_record,
+                7,
+            ),
+            RevisionedEntityReduction::Retract
+        );
+        assert!(durable.is_empty());
+
+        let restore_record = rfc012c_record(70, 80, 80);
+        assert_eq!(
+            apply_content_block_to_topologies(
+                &mut durable,
+                &mut projection,
+                &fixture,
+                &content_block.current,
+                restore_record,
+                8,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        let parent_retract_record = rfc012c_record(80, 90, 90);
+        projection
+            .project(&rfc012c_decoded_frame(
+                9,
+                ScopedAppendDeliveryPhase::Live,
+                &parent_retract_record,
+                message_batch(&parent_retract_record, &fixture.retract),
+            ))
+            .unwrap();
+        durable.clear();
+        assert_content_block_topology_parity(&durable, &projection);
+
+        let restored_parent_record = rfc012c_record(90, 100, 100);
+        let mut restored_batch = message_batch(&restored_parent_record, &fixture.current);
+        let (restored_block_batch, restored_envelope) =
+            content_block_batch(&restored_parent_record, &fixture, &content_block.current);
+        restored_batch.append(restored_block_batch).unwrap();
+        projection
+            .project(&rfc012c_decoded_frame(
+                10,
+                ScopedAppendDeliveryPhase::Live,
+                &restored_parent_record,
+                restored_batch,
+            ))
+            .unwrap();
+        assert_eq!(
+            reduce_durable_content_block(
+                &mut durable,
+                rfc012c_source_identity(),
+                restored_parent_record,
+                restored_envelope,
+            ),
+            RevisionedEntityReduction::Upsert
+        );
+        assert_content_block_topology_parity(&durable, &projection);
+
+        let reset = ScopedAppendReset {
+            old_generation: 1,
+            new_generation: 2,
+            reason: AppendTransition::Truncated,
+        };
+        projection
+            .project(&ScopedQueuedObservationFrame::Reset {
+                object_token: OBJECT_TOKEN,
+                source: rfc012c_source_identity(),
+                lane_ordinal: 11,
+                observed_at: 110,
+                phase: ScopedAppendDeliveryPhase::Correction,
+                reset,
+            })
+            .unwrap();
+        durable.clear();
+        assert_content_block_topology_parity(&durable, &projection);
+    }
+
+    #[test]
+    fn content_block_capacity_rejects_the_whole_decoded_record_atomically() {
+        let fixture = crate::semantic_contract::decode_rfc012c_message_v1(include_str!(
+            "../fixtures/contracts/rfc012c-message-v1.json"
+        ))
+        .unwrap();
+        let content_block = fixture.content_block.as_ref().unwrap();
+        let selection = observation_contract_selection_for("runtime.message");
+        let mut projection = ScopedObservationProjectionSink::new_for_contracts(
+            ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 1,
+            },
+            &selection.contract_versions,
+        )
+        .unwrap();
+        let record = rfc012c_record(0, 10, 10);
+        let mut batch =
+            FactBatch::new_with_semantic_context(4, 1, rfc012c_semantic_context()).unwrap();
+        batch
+            .push_native(
+                &record,
+                fixture.native_message_id.as_bytes(),
+                Fact::MessageRevision(MessageRevisionFact {
+                    session: fixture.session,
+                    actor_run: fixture.actor_run,
+                    native_message_id: fixture.native_message_id.clone(),
+                    role: MessageRevisionRole::Assistant,
+                    ordered_content_block_keys: fixture.current.ordered_content_block_keys.clone(),
+                    completeness: ContractCompleteness::Complete,
+                    operation: UserInputOperation::Upsert,
+                }),
+            )
+            .unwrap();
+        batch
+            .append(content_block_batch(&record, &fixture, &content_block.current).0)
+            .unwrap();
+        batch
+            .append(synthetic_content_block_batch(&record, &fixture, "block-b", 1).0)
+            .unwrap();
+        assert_eq!(
+            projection.project(&rfc012c_decoded_frame(
+                1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                &record,
+                batch,
+            )),
+            Err(ScopedProjectionError::ContentBlockCapacityFull)
+        );
+        assert!(projection.messages.is_empty());
+        assert!(projection.content_blocks.is_empty());
     }
 
     #[test]

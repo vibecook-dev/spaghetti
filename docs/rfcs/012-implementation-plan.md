@@ -1081,13 +1081,21 @@ binds each qualification into semantic identity. One topology-neutral
 semantic replay is occurrence-independent, partial retract cannot erase known
 state, complete retract is dimension-local, and a durable `FactBatch` view and
 selected scoped projection produce the same canonical reduced-state digest.
+The topology-neutral `CurrentGenerationLog` law now also reduces typed content
+blocks: correction replaces one stable block, exact semantic replay is
+occurrence-independent, partial retract and partial parent block lists cannot
+prove absence, complete parent snapshots retract omitted native block IDs, and
+explicit parent/block retraction plus generation reset remove retained state.
+A durable `FactBatch` view and the private scoped reducer produce the same
+canonical content-block digest after every transition and in either fact
+order. The observer family, event union, and replacement-manifest entry remain
+unexposed until their portable contracts are frozen.
 Interaction covers Pending | Resolved | Failed | Cancelled plus complete
 retract and partial non-retraction. The fixture breadth is substantial, but it
-does not close C1: content-block CurrentGenerationLog reduction, progress and
-capability families, complete remaining family-by-family
-replacement/retraction cases, full semantic reduction, tier/view
-compositionality, and remaining-family durable/scoped reducer digest equality
-remain open.
+does not close C1: progress and capability families, complete remaining
+family-by-family replacement/retraction cases, full semantic reduction,
+tier/view compositionality, and remaining-family durable/scoped reducer digest
+equality remain open.
 
 ### C2. Usage-v2 shadow projection
 
