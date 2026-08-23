@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::adapter::{
+    CatalogDiscoveryLimits, SourceCatalogDiscovery,
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
     CapabilityGranularity, CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock,
@@ -207,6 +208,14 @@ impl AgentAdapter for GrokAdapter {
                 })
             })
             .collect()
+    }
+
+    fn discover_catalog(
+        &self,
+        instance: &SourceInstance,
+        limits: &CatalogDiscoveryLimits,
+    ) -> Result<SourceCatalogDiscovery, AdapterError> {
+        super::catalog_discovery::discover(instance, limits)
     }
 
     fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
@@ -507,48 +516,6 @@ struct GrokSessionContext {
     events_revision: Option<[u8; 32]>,
     clock: Vec<ClockTurn>,
     clock_truncated: bool,
-}
-
-/// Crate-private, privacy-sensitive coordinates shared by the bounded catalog
-/// producer and its independent oracle. They never enter a public contract or
-/// derive `Debug`.
-#[derive(Clone, PartialEq, Eq)]
-pub(super) struct GrokCatalogCoordinates {
-    pub(super) cwd: String,
-    pub(super) native_project_key: String,
-    pub(super) session_id: String,
-}
-
-pub(super) fn catalog_path_coordinates(
-    relative_path: &Path,
-) -> Result<GrokCatalogCoordinates, AdapterError> {
-    Ok(catalog_coordinates(session_context_from_path(
-        relative_path,
-    )?))
-}
-
-pub(super) fn catalog_summary_coordinates(
-    relative_path: &Path,
-    summary: &Value,
-) -> Result<GrokCatalogCoordinates, AdapterError> {
-    if !summary.is_object() {
-        return Err(AdapterError::new(
-            AdapterErrorClass::RecordPermanent,
-            "grok_catalog_summary_shape",
-            "Grok catalog summary must be an object",
-        ));
-    }
-    let mut context = session_context_from_path(relative_path)?;
-    apply_summary(&mut context, summary);
-    Ok(catalog_coordinates(context))
-}
-
-fn catalog_coordinates(context: GrokSessionContext) -> GrokCatalogCoordinates {
-    GrokCatalogCoordinates {
-        cwd: context.cwd,
-        native_project_key: context.native_project_key,
-        session_id: context.session_id,
-    }
 }
 
 impl GrokSessionContext {
@@ -1553,6 +1520,10 @@ fn push_key_component(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(value);
 }
 
+pub(super) fn grok_percent_decode(input: &str) -> Option<String> {
+    percent_decode(input)
+}
+
 fn percent_decode(input: &str) -> Option<String> {
     let bytes = input.as_bytes();
     let mut output = Vec::with_capacity(bytes.len());
@@ -1576,6 +1547,10 @@ fn from_hex(value: u8) -> Option<u8> {
         b'A'..=b'F' => Some(value - b'A' + 10),
         _ => None,
     }
+}
+
+pub(super) fn grok_project_key(cwd: &str) -> String {
+    encode_project_key(cwd)
 }
 
 fn encode_project_key(cwd: &str) -> String {

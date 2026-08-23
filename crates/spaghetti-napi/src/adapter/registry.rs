@@ -242,8 +242,10 @@ impl AdapterRegistry {
     }
 
     /// Select a promoted or explicitly forward-catalog-only contract without
-    /// granting durable or scoped source authority. Complete-only catalog
-    /// producers separately reject forward-recognized authority before I/O.
+    /// granting durable or scoped source authority. Catalog discovery itself
+    /// runs through `AgentAdapter::discover_catalog`, which needs no typed
+    /// authority; this remains as the support-contract fixture seam.
+    #[cfg(test)]
     pub(crate) fn authorize_catalog_if_supported(
         &self,
         adapter_id: &AdapterId,

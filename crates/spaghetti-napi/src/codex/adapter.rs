@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::adapter::{
+    CatalogDiscoveryLimits, SourceCatalogDiscovery,
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
     CapabilityGranularity, CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock,
@@ -185,6 +186,14 @@ impl AgentAdapter for CodexAdapter {
                 })
             })
             .collect()
+    }
+
+    fn discover_catalog(
+        &self,
+        instance: &SourceInstance,
+        limits: &CatalogDiscoveryLimits,
+    ) -> Result<SourceCatalogDiscovery, AdapterError> {
+        super::catalog_discovery::discover(instance, limits)
     }
 
     fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {

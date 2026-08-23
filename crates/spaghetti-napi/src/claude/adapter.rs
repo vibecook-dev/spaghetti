@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::adapter::{
+    CatalogDiscoveryLimits, SourceCatalogDiscovery,
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, AdapterDiagnostic, AdapterError, AdapterErrorClass,
     AdapterId, AdapterManifest, AdapterObjectContext, AdapterSupportBinding, AgentAdapter,
@@ -313,6 +314,14 @@ impl AgentAdapter for ClaudeCodeAdapter {
             });
         }
         Ok(instances)
+    }
+
+    fn discover_catalog(
+        &self,
+        instance: &SourceInstance,
+        limits: &CatalogDiscoveryLimits,
+    ) -> Result<SourceCatalogDiscovery, AdapterError> {
+        super::catalog_discovery::discover(instance, limits)
     }
 
     fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
@@ -1273,46 +1282,6 @@ struct ClaudeTranscriptContext {
     session_id: String,
     agent_id: Option<String>,
     workflow_id: Option<String>,
-}
-
-/// Candidate-only catalog path coordinates. RFC 012B conformance tests use
-/// this seam so their membership oracle exercises the same native path rules
-/// as durable bootstrap without making those planned catalog components part
-/// of the production adapter surface.
-#[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ClaudeCatalogCoordinates {
-    pub project_slug: String,
-    pub session_id: String,
-}
-
-#[cfg(test)]
-pub(super) fn candidate_catalog_parent_coordinates(
-    relative_path: &Path,
-) -> Result<ClaudeCatalogCoordinates, AdapterError> {
-    let context = ClaudeTranscriptContext::parent(relative_path)?;
-    Ok(ClaudeCatalogCoordinates {
-        project_slug: context.project_slug,
-        session_id: context.session_id,
-    })
-}
-
-#[cfg(test)]
-pub(super) fn candidate_catalog_nested_parent_coordinates(
-    relative_path: &Path,
-) -> Result<ClaudeCatalogCoordinates, AdapterError> {
-    let context = ClaudeTranscriptContext::subagent(relative_path)?;
-    Ok(ClaudeCatalogCoordinates {
-        project_slug: context.project_slug,
-        session_id: context.session_id,
-    })
-}
-
-#[cfg(test)]
-pub(super) fn candidate_catalog_index_project(
-    relative_path: &Path,
-) -> Result<String, AdapterError> {
-    Ok(ClaudeSessionIndexContext::from_path(relative_path)?.project_slug)
 }
 
 impl ClaudeTranscriptContext {

@@ -5,9 +5,6 @@
 
 mod access;
 mod append_delimited;
-pub(crate) mod catalog_composition;
-pub(crate) mod catalog_projection;
-pub(crate) mod catalog_runtime_registry;
 mod directory_snapshot;
 mod file;
 mod key_value_snapshot;
@@ -50,7 +47,7 @@ pub use directory_snapshot::{
 };
 pub use file::platform_path_key;
 pub(crate) use file::{confined_relative_path_from_key, confined_relative_path_key};
-pub(crate) use file::{read_stable_file_confined, FileStamp, StableRead};
+pub(crate) use file::{read_prefix_confined, read_stable_file_confined, FileStamp, StableRead};
 pub use key_value_snapshot::{
     KeyValueCheckpoint, KeyValueRead, KeyValueRecord, KeyValueSnapshot, KeyValueSnapshotConfig,
 };

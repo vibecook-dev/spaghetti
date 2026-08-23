@@ -6,9 +6,7 @@
 //! context, expands embedded calls and pairs tool results.
 
 mod adapter;
-#[cfg(test)]
-mod catalog_conformance;
-pub(crate) mod catalog_runtime;
+mod catalog_discovery;
 #[cfg(feature = "legacy-oracle")]
 pub mod message_extractor;
 #[cfg(feature = "legacy-oracle")]

@@ -209,7 +209,12 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// no-snapshot catalog build, kept separate from retained-refresh authority.
 /// v62: immutable RFC 012B coverage-plan replacement lineage, retaining an
 /// independently safe prior-plan snapshot while the successor builds.
-pub const SCHEMA_VERSION: u32 = 62;
+/// v63: RFC 012B catalog rows replace the publication/epoch/lineage tables.
+/// Discovery upserts projects/sessions with their RFC 012A external
+/// references, association evidence, and conflicts; readiness and
+/// `catalog_state` are derived from committed rows instead of a durable
+/// state machine.
+pub const SCHEMA_VERSION: u32 = 63;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -508,31 +513,7 @@ CREATE TABLE IF NOT EXISTS ingest_commits (
   started_at INTEGER NOT NULL,
   committed_at INTEGER,
   fact_count INTEGER NOT NULL DEFAULT 0,
-  CHECK (
-    source_instance_id IS NOT NULL
-    OR (
-      reason IN (
-        'catalog.library.plan.registered',
-        'catalog.library.build.scheduled',
-        'catalog.library.build.partial',
-        'catalog.library.source_generation.invalidated',
-        'catalog.library.coverage_plan.replaced',
-        'catalog.library.initial_snapshot.published',
-        'catalog.library.build.integrity_failed',
-        'catalog.library.build.source_retrying',
-        'catalog.library.build.source_unavailable',
-        'catalog.library.refresh.started',
-        'catalog.library.refresh_snapshot.published',
-        'catalog.library.refresh.integrity_failed',
-        'catalog.library.refresh.source_retrying',
-        'catalog.library.refresh.source_unavailable',
-        'catalog.library.refresh.recovery_started',
-        'catalog.library.snapshot.retired'
-      )
-      AND committed_at IS NOT NULL
-      AND fact_count = 0
-    )
-  )
+  CHECK (source_instance_id IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS change_log (
@@ -559,439 +540,91 @@ INSERT OR IGNORE INTO change_log_retention_state (
   retained_payload_bytes, last_pruned_at
 ) VALUES (1, 0, 0, 0, NULL);
 
-CREATE TABLE IF NOT EXISTS catalog_coverage_plans (
-  coverage_plan_id BLOB PRIMARY KEY CHECK (length(coverage_plan_id) = 32),
-  coverage_plan_contract_version INTEGER NOT NULL CHECK (coverage_plan_contract_version > 0),
-  scope_kind TEXT NOT NULL CHECK (scope_kind = 'library'),
-  plan_json BLOB NOT NULL CHECK (length(plan_json) BETWEEN 1 AND 4194304),
-  content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
-  created_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT
+-- RFC 012B catalog: what is DISCOVERABLE, independent of what is decoded.
+--
+-- A catalog row is bounded native evidence that a project or session exists.
+-- It never asserts decoded history: `catalog_state` (discovered ->
+-- transcript_backed -> hydrated -> searchable) is derived at read time by
+-- joining these rows against the RFC 011 canonical tables inside one snapshot,
+-- so each fact keeps exactly one authority and the two cannot drift.
+--
+-- `project_key`/`session_key` are the same `EntityKey::native` bytes the
+-- adapter decoders emit, so a discovered row and its later transcript-backed
+-- history are one entity. `external_ref` is the RFC 012A `ExternalEntityRef`
+-- digest that downstream consumers persist.
+CREATE TABLE IF NOT EXISTS catalog_sources (
+  source_instance_id INTEGER PRIMARY KEY REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  adapter_id TEXT NOT NULL,
+  degraded INTEGER NOT NULL DEFAULT 0 CHECK (degraded IN (0, 1)),
+  degraded_reason TEXT CHECK (degraded_reason IS NULL OR length(degraded_reason) BETWEEN 1 AND 512),
+  project_count INTEGER NOT NULL DEFAULT 0 CHECK (project_count >= 0),
+  session_count INTEGER NOT NULL DEFAULT 0 CHECK (session_count >= 0),
+  scanned_at_commit_seq INTEGER NOT NULL,
+  scanned_at INTEGER NOT NULL,
+  CHECK ((degraded = 0) = (degraded_reason IS NULL))
 );
 
-CREATE TABLE IF NOT EXISTS catalog_snapshots (
-  snapshot_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  build_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  durable_publication_contract_version INTEGER NOT NULL CHECK (durable_publication_contract_version > 0),
-  pack_contract_version INTEGER NOT NULL CHECK (pack_contract_version > 0),
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (length(coverage_plan_id) = 32),
-  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
-  attempt INTEGER NOT NULL CHECK (attempt > 0),
-  contract_selection_json BLOB NOT NULL CHECK (length(contract_selection_json) BETWEEN 1 AND 4194304),
-  member_identity_contract_id TEXT,
-  publication_digest BLOB NOT NULL CHECK (length(publication_digest) = 32),
-  reducer_revision BLOB NOT NULL CHECK (length(reducer_revision) = 32),
-  entries_digest BLOB NOT NULL CHECK (length(entries_digest) = 32),
-  content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
-  entry_count INTEGER NOT NULL CHECK (entry_count BETWEEN 1 AND 2100000),
-  encoded_bytes INTEGER NOT NULL CHECK (encoded_bytes BETWEEN 1 AND 536870912),
-  source_count INTEGER NOT NULL CHECK (source_count BETWEEN 0 AND 4096),
-  member_count INTEGER NOT NULL CHECK (member_count BETWEEN 0 AND 1000000),
-  project_row_count INTEGER NOT NULL CHECK (project_row_count BETWEEN 0 AND 1000000),
-  session_row_count INTEGER NOT NULL CHECK (session_row_count BETWEEN 0 AND 1000000),
-  tombstone_count INTEGER NOT NULL CHECK (tombstone_count BETWEEN 0 AND 1000000),
-  replaces_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  replaces_publication_digest BLOB,
-  replaces_content_digest BLOB,
-  published_at INTEGER NOT NULL,
-  CHECK (member_identity_contract_id IS NULL OR length(CAST(member_identity_contract_id AS BLOB)) BETWEEN 1 AND 256),
-  CHECK (
-    (source_count = 0 AND member_identity_contract_id IS NULL)
-    OR (source_count > 0 AND member_identity_contract_id IS NOT NULL)
+CREATE TABLE IF NOT EXISTS catalog_projects (
+  project_key BLOB PRIMARY KEY CHECK (length(project_key) BETWEEN 1 AND 4096),
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  adapter_id TEXT NOT NULL,
+  external_ref BLOB NOT NULL CHECK (length(external_ref) = 32),
+  native_project_key TEXT NOT NULL,
+  display_name TEXT,
+  display_path TEXT,
+  first_seen_commit_seq INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS catalog_projects_source
+  ON catalog_projects(source_instance_id);
+
+CREATE TABLE IF NOT EXISTS catalog_sessions (
+  session_key BLOB PRIMARY KEY CHECK (length(session_key) BETWEEN 1 AND 4096),
+  project_key BLOB NOT NULL,
+  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
+  adapter_id TEXT NOT NULL,
+  external_ref BLOB NOT NULL CHECK (length(external_ref) = 32),
+  native_session_key TEXT NOT NULL,
+  native_session_id TEXT,
+  title TEXT,
+  association_basis TEXT NOT NULL CHECK (
+    association_basis IN ('native_project_index', 'session_directory', 'rollout_header', 'transcript_cwd')
   ),
-  CHECK (
-    (
-      replaces_snapshot_commit_seq IS NULL
-      AND replaces_publication_digest IS NULL
-      AND replaces_content_digest IS NULL
-      AND durable_publication_contract_version = 1
-    )
-    OR
-    (
-      replaces_snapshot_commit_seq IS NOT NULL
-      AND replaces_snapshot_commit_seq < snapshot_commit_seq
-      AND typeof(replaces_publication_digest) = 'blob'
-      AND length(replaces_publication_digest) = 32
-      AND typeof(replaces_content_digest) = 'blob'
-      AND length(replaces_content_digest) = 32
-      AND durable_publication_contract_version = 2
-    )
+  association_quality TEXT NOT NULL CHECK (
+    association_quality IN ('exact', 'native_claimed', 'derived')
   ),
-  CHECK (snapshot_commit_seq > build_commit_seq),
-  UNIQUE (replaces_snapshot_commit_seq),
-  UNIQUE (pack_contract_version, coverage_plan_id, readiness_epoch, snapshot_commit_seq)
+  association_provenance TEXT NOT NULL,
+  native_created_at TEXT,
+  native_updated_at TEXT,
+  native_message_count INTEGER CHECK (native_message_count IS NULL OR native_message_count >= 0),
+  transcript_present INTEGER NOT NULL DEFAULT 0 CHECK (transcript_present IN (0, 1)),
+  transcript_locator TEXT,
+  source_size_bytes INTEGER CHECK (source_size_bytes IS NULL OR source_size_bytes >= 0),
+  source_modified_ms INTEGER,
+  sort_time TEXT NOT NULL DEFAULT '',
+  first_seen_commit_seq INTEGER NOT NULL,
+  last_commit_seq INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS catalog_snapshot_entries (
-  snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE CASCADE,
-  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-  entry_kind TEXT NOT NULL CHECK (entry_kind IN ('source', 'member_binding', 'member_history', 'reducer_state', 'project_row', 'session_row', 'tombstone')),
-  entry_key BLOB NOT NULL CHECK (length(entry_key) = 32),
-  payload BLOB NOT NULL CHECK (length(payload) BETWEEN 1 AND 536870912),
-  payload_digest BLOB NOT NULL CHECK (length(payload_digest) = 32),
-  PRIMARY KEY (snapshot_commit_seq, entry_kind, entry_key),
-  UNIQUE (snapshot_commit_seq, ordinal)
-);
+CREATE INDEX IF NOT EXISTS catalog_sessions_project
+  ON catalog_sessions(project_key, sort_time DESC, session_key DESC);
 
-CREATE TABLE IF NOT EXISTS catalog_snapshot_retirements (
-  snapshot_commit_seq INTEGER PRIMARY KEY REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  snapshot_publication_digest BLOB NOT NULL CHECK (typeof(snapshot_publication_digest) = 'blob' AND length(snapshot_publication_digest) = 32),
-  snapshot_content_digest BLOB NOT NULL CHECK (typeof(snapshot_content_digest) = 'blob' AND length(snapshot_content_digest) = 32),
-  successor_snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  successor_publication_digest BLOB NOT NULL CHECK (typeof(successor_publication_digest) = 'blob' AND length(successor_publication_digest) = 32),
-  successor_content_digest BLOB NOT NULL CHECK (typeof(successor_content_digest) = 'blob' AND length(successor_content_digest) = 32),
-  retirement_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  retired_at INTEGER NOT NULL,
-  CHECK (snapshot_commit_seq < successor_snapshot_commit_seq),
-  CHECK (retirement_commit_seq > successor_snapshot_commit_seq)
-);
+CREATE INDEX IF NOT EXISTS catalog_sessions_source
+  ON catalog_sessions(source_instance_id);
 
-CREATE TRIGGER IF NOT EXISTS catalog_snapshot_retirements_no_update
-BEFORE UPDATE ON catalog_snapshot_retirements BEGIN
-  SELECT RAISE(ABORT, 'catalog snapshot retirement evidence is immutable');
-END;
+CREATE INDEX IF NOT EXISTS catalog_sessions_activity
+  ON catalog_sessions(sort_time DESC, session_key DESC);
 
-CREATE TRIGGER IF NOT EXISTS catalog_snapshot_retirements_no_delete
-BEFORE DELETE ON catalog_snapshot_retirements BEGIN
-  SELECT RAISE(ABORT, 'catalog snapshot retirement evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_refresh_integrity_failures (
-  failure_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  failed_refresh_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
-  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
-  attempt INTEGER NOT NULL CHECK (attempt > 0),
-  retained_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  retained_publication_digest BLOB CHECK (retained_publication_digest IS NULL OR (typeof(retained_publication_digest) = 'blob' AND length(retained_publication_digest) = 32)),
-  retained_content_digest BLOB CHECK (retained_content_digest IS NULL OR (typeof(retained_content_digest) = 'blob' AND length(retained_content_digest) = 32)),
-  reason_code TEXT NOT NULL CHECK (
-    typeof(reason_code) = 'text'
-    AND length(CAST(reason_code AS BLOB)) BETWEEN 1 AND 64
-    AND length(reason_code) = length(CAST(reason_code AS BLOB))
-    AND substr(reason_code, 1, 1) GLOB '[a-z]'
-    AND reason_code NOT GLOB '*[^a-z0-9_]*'
-  ),
-  snapshot_disposition TEXT NOT NULL CHECK (snapshot_disposition IN ('independently_safe', 'discarded')),
-  failed_at INTEGER NOT NULL,
-  CHECK (
-    (
-      snapshot_disposition = 'independently_safe'
-      AND retained_snapshot_commit_seq IS NOT NULL
-      AND retained_publication_digest IS NOT NULL
-      AND retained_content_digest IS NOT NULL
-    )
-    OR
-    (
-      snapshot_disposition = 'discarded'
-      AND retained_snapshot_commit_seq IS NULL
-      AND retained_publication_digest IS NULL
-      AND retained_content_digest IS NULL
-    )
-  ),
-  CHECK (retained_snapshot_commit_seq IS NULL OR retained_snapshot_commit_seq < failed_refresh_commit_seq),
-  CHECK (failed_refresh_commit_seq < failure_commit_seq)
-);
-
-CREATE TRIGGER IF NOT EXISTS catalog_refresh_integrity_failures_no_update
-BEFORE UPDATE ON catalog_refresh_integrity_failures BEGIN
-  SELECT RAISE(ABORT, 'catalog refresh integrity-failure evidence is immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_refresh_integrity_failures_no_delete
-BEFORE DELETE ON catalog_refresh_integrity_failures BEGIN
-  SELECT RAISE(ABORT, 'catalog refresh integrity-failure evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_refresh_source_failures (
-  failure_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  failed_refresh_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
-  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
-  attempt INTEGER NOT NULL CHECK (attempt > 0),
-  retained_snapshot_commit_seq INTEGER NOT NULL REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  retained_publication_digest BLOB NOT NULL CHECK (typeof(retained_publication_digest) = 'blob' AND length(retained_publication_digest) = 32),
-  retained_content_digest BLOB NOT NULL CHECK (typeof(retained_content_digest) = 'blob' AND length(retained_content_digest) = 32),
-  reason_code TEXT NOT NULL CHECK (
-    typeof(reason_code) = 'text'
-    AND length(CAST(reason_code AS BLOB)) BETWEEN 1 AND 64
-    AND length(reason_code) = length(CAST(reason_code AS BLOB))
-    AND substr(reason_code, 1, 1) GLOB '[a-z]'
-    AND reason_code NOT GLOB '*[^a-z0-9_]*'
-  ),
-  failed_at INTEGER NOT NULL,
-  CHECK (retained_snapshot_commit_seq < failed_refresh_commit_seq),
-  CHECK (failed_refresh_commit_seq < failure_commit_seq)
-);
-
-CREATE TRIGGER IF NOT EXISTS catalog_refresh_source_failures_no_update
-BEFORE UPDATE ON catalog_refresh_source_failures BEGIN
-  SELECT RAISE(ABORT, 'catalog refresh source-failure evidence is immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_refresh_source_failures_no_delete
-BEFORE DELETE ON catalog_refresh_source_failures BEGIN
-  SELECT RAISE(ABORT, 'catalog refresh source-failure evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_initial_source_failures (
-  failure_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  failed_build_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
-  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
-  attempt INTEGER NOT NULL CHECK (attempt > 0),
-  previous_state TEXT NOT NULL CHECK (previous_state IN ('building', 'partial')),
-  reason_code TEXT NOT NULL CHECK (
-    typeof(reason_code) = 'text'
-    AND length(CAST(reason_code AS BLOB)) BETWEEN 1 AND 64
-    AND length(reason_code) = length(CAST(reason_code AS BLOB))
-    AND substr(reason_code, 1, 1) GLOB '[a-z]'
-    AND reason_code NOT GLOB '*[^a-z0-9_]*'
-  ),
-  failed_at INTEGER NOT NULL,
-  CHECK (failed_build_commit_seq < failure_commit_seq)
-);
-
-CREATE TRIGGER IF NOT EXISTS catalog_initial_source_failures_no_update
-BEFORE UPDATE ON catalog_initial_source_failures BEGIN
-  SELECT RAISE(ABORT, 'catalog initial source-failure evidence is immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_initial_source_failures_no_delete
-BEFORE DELETE ON catalog_initial_source_failures BEGIN
-  SELECT RAISE(ABORT, 'catalog initial source-failure evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_partial_builds (
-  partial_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  predecessor_state_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
-  readiness_epoch INTEGER NOT NULL CHECK (readiness_epoch > 0),
-  attempt INTEGER NOT NULL CHECK (attempt > 0),
-  source_count INTEGER NOT NULL CHECK (source_count BETWEEN 1 AND 4096),
-  encoded_bytes INTEGER NOT NULL CHECK (encoded_bytes BETWEEN 1 AND 536870912),
-  entries_digest BLOB NOT NULL CHECK (typeof(entries_digest) = 'blob' AND length(entries_digest) = 32),
-  committed_at INTEGER NOT NULL,
-  CHECK (predecessor_state_commit_seq < partial_commit_seq)
-);
-
-CREATE TRIGGER IF NOT EXISTS catalog_partial_builds_no_update
-BEFORE UPDATE ON catalog_partial_builds BEGIN
-  SELECT RAISE(ABORT, 'catalog partial-build evidence is immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_partial_builds_no_delete
-BEFORE DELETE ON catalog_partial_builds BEGIN
-  SELECT RAISE(ABORT, 'catalog partial-build evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_partial_sources (
-  partial_commit_seq INTEGER NOT NULL REFERENCES catalog_partial_builds(partial_commit_seq) ON DELETE RESTRICT,
-  ordinal INTEGER NOT NULL CHECK (ordinal BETWEEN 0 AND 4095),
-  adapter_id TEXT NOT NULL CHECK (typeof(adapter_id) = 'text' AND length(CAST(adapter_id AS BLOB)) BETWEEN 1 AND 128),
-  canonical_source_instance_key BLOB NOT NULL CHECK (typeof(canonical_source_instance_key) = 'blob' AND length(canonical_source_instance_key) = 32),
-  payload BLOB NOT NULL CHECK (typeof(payload) = 'blob' AND length(payload) BETWEEN 1 AND 67108864),
-  payload_digest BLOB NOT NULL CHECK (typeof(payload_digest) = 'blob' AND length(payload_digest) = 32),
-  PRIMARY KEY (partial_commit_seq, ordinal),
-  UNIQUE (partial_commit_seq, adapter_id, canonical_source_instance_key)
-);
-
-CREATE TRIGGER IF NOT EXISTS catalog_partial_sources_no_update
-BEFORE UPDATE ON catalog_partial_sources BEGIN
-  SELECT RAISE(ABORT, 'catalog partial-source evidence is immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_partial_sources_no_delete
-BEFORE DELETE ON catalog_partial_sources BEGIN
-  SELECT RAISE(ABORT, 'catalog partial-source evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_epoch_invalidations (
-  invalidation_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  predecessor_state_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
-  previous_epoch INTEGER NOT NULL CHECK (previous_epoch > 0),
-  epoch INTEGER NOT NULL CHECK (epoch > 1),
-  previous_attempt INTEGER NOT NULL CHECK (previous_attempt > 0),
-  previous_state TEXT NOT NULL CHECK (previous_state IN ('pending', 'building', 'partial', 'ready', 'degraded')),
-  retained_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  committed_at INTEGER NOT NULL,
-  CHECK (epoch = previous_epoch + 1),
-  CHECK (predecessor_state_commit_seq < invalidation_commit_seq),
-  CHECK (retained_snapshot_commit_seq IS NULL OR retained_snapshot_commit_seq <= predecessor_state_commit_seq),
-  UNIQUE (coverage_plan_id, epoch)
-);
-
-CREATE TRIGGER IF NOT EXISTS catalog_epoch_invalidations_no_update
-BEFORE UPDATE ON catalog_epoch_invalidations BEGIN
-  SELECT RAISE(ABORT, 'catalog epoch-invalidation evidence is immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_epoch_invalidations_no_delete
-BEFORE DELETE ON catalog_epoch_invalidations BEGIN
-  SELECT RAISE(ABORT, 'catalog epoch-invalidation evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_plan_replacements (
-  replacement_commit_seq INTEGER PRIMARY KEY REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  predecessor_state_commit_seq INTEGER NOT NULL UNIQUE REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  previous_coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(previous_coverage_plan_id) = 'blob' AND length(previous_coverage_plan_id) = 32),
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT CHECK (typeof(coverage_plan_id) = 'blob' AND length(coverage_plan_id) = 32),
-  desired_contract_version INTEGER NOT NULL CHECK (desired_contract_version > 0),
-  previous_epoch INTEGER NOT NULL CHECK (previous_epoch > 0),
-  epoch INTEGER NOT NULL CHECK (epoch > 1),
-  previous_attempt INTEGER NOT NULL CHECK (previous_attempt > 0),
-  previous_state TEXT NOT NULL CHECK (previous_state IN ('pending', 'building', 'partial', 'ready', 'degraded', 'error')),
-  retained_snapshot_commit_seq INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  committed_at INTEGER NOT NULL,
-  CHECK (previous_coverage_plan_id != coverage_plan_id),
-  CHECK (epoch = previous_epoch + 1),
-  CHECK (predecessor_state_commit_seq < replacement_commit_seq),
-  CHECK (retained_snapshot_commit_seq IS NULL OR retained_snapshot_commit_seq <= predecessor_state_commit_seq),
-  UNIQUE (coverage_plan_id, epoch)
-);
-
-CREATE TRIGGER IF NOT EXISTS catalog_plan_replacements_no_update
-BEFORE UPDATE ON catalog_plan_replacements BEGIN
-  SELECT RAISE(ABORT, 'catalog plan-replacement evidence is immutable');
-END;
-
-CREATE TRIGGER IF NOT EXISTS catalog_plan_replacements_no_delete
-BEFORE DELETE ON catalog_plan_replacements BEGIN
-  SELECT RAISE(ABORT, 'catalog plan-replacement evidence is immutable');
-END;
-
-CREATE TABLE IF NOT EXISTS catalog_build_state (
-  scope_kind TEXT PRIMARY KEY CHECK (scope_kind = 'library'),
-  coverage_plan_id BLOB NOT NULL REFERENCES catalog_coverage_plans(coverage_plan_id) ON DELETE RESTRICT,
-  desired_contract_version INTEGER NOT NULL CHECK (desired_contract_version > 0),
-  epoch INTEGER NOT NULL CHECK (epoch > 0),
-  attempt INTEGER NOT NULL CHECK (attempt > 0),
-  state TEXT NOT NULL CHECK (state IN ('pending', 'building', 'partial', 'ready', 'degraded', 'error')),
-  completed_contract_version INTEGER CHECK (completed_contract_version > 0),
-  complete_through_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  last_complete_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  refreshing_from_snapshot_commit INTEGER REFERENCES catalog_snapshots(snapshot_commit_seq) ON DELETE RESTRICT,
-  reason_code TEXT CHECK (
-    reason_code IS NULL OR (
-      typeof(reason_code) = 'text'
-      AND length(CAST(reason_code AS BLOB)) BETWEEN 1 AND 64
-      AND length(reason_code) = length(CAST(reason_code AS BLOB))
-      AND substr(reason_code, 1, 1) GLOB '[a-z]'
-      AND reason_code NOT GLOB '*[^a-z0-9_]*'
-    )
-  ),
-  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  updated_at INTEGER NOT NULL,
-  CHECK (
-    (
-      state = 'pending'
-      AND completed_contract_version IS NULL
-      AND complete_through_commit IS NULL
-      AND last_complete_snapshot_commit IS NULL
-      AND refreshing_from_snapshot_commit IS NULL
-      AND reason_code IS NULL
-    )
-    OR
-    (
-      state = 'building'
-      AND completed_contract_version IS NULL
-      AND complete_through_commit IS NULL
-      AND last_complete_snapshot_commit IS NULL
-      AND refreshing_from_snapshot_commit IS NULL
-    )
-    OR
-    (
-      state = 'building'
-      AND completed_contract_version IS NOT NULL
-      AND complete_through_commit IS NULL
-      AND last_complete_snapshot_commit IS NOT NULL
-      AND refreshing_from_snapshot_commit IS NULL
-      AND completed_contract_version = desired_contract_version
-      AND last_commit_seq > last_complete_snapshot_commit
-    )
-    OR
-    (
-      state = 'partial'
-      AND complete_through_commit IS NULL
-      AND refreshing_from_snapshot_commit IS NULL
-      AND (
-        (
-          completed_contract_version IS NULL
-          AND last_complete_snapshot_commit IS NULL
-        )
-        OR
-        (
-          completed_contract_version IS NOT NULL
-          AND last_complete_snapshot_commit IS NOT NULL
-          AND completed_contract_version = desired_contract_version
-          AND last_commit_seq > last_complete_snapshot_commit
-        )
-      )
-    )
-    OR
-    (
-      state = 'ready'
-      AND completed_contract_version IS NOT NULL
-      AND complete_through_commit IS NOT NULL
-      AND last_complete_snapshot_commit IS NOT NULL
-      AND completed_contract_version = desired_contract_version
-      AND complete_through_commit = last_complete_snapshot_commit
-      AND (
-        (
-          refreshing_from_snapshot_commit IS NULL
-          AND reason_code IS NULL
-          AND last_commit_seq = complete_through_commit
-        )
-        OR
-        (
-          refreshing_from_snapshot_commit = last_complete_snapshot_commit
-          AND last_commit_seq > last_complete_snapshot_commit
-        )
-      )
-    )
-    OR
-    (
-      state = 'degraded'
-      AND refreshing_from_snapshot_commit IS NULL
-      AND reason_code IS NOT NULL
-      AND (
-        (
-          completed_contract_version IS NULL
-          AND complete_through_commit IS NULL
-          AND last_complete_snapshot_commit IS NULL
-        )
-        OR
-        (
-          completed_contract_version IS NOT NULL
-          AND last_complete_snapshot_commit IS NOT NULL
-          AND completed_contract_version = desired_contract_version
-          AND (complete_through_commit IS NULL OR complete_through_commit = last_complete_snapshot_commit)
-          AND last_commit_seq > last_complete_snapshot_commit
-        )
-      )
-    )
-    OR
-    (
-      state = 'error'
-      AND refreshing_from_snapshot_commit IS NULL
-      AND reason_code IS NOT NULL
-      AND (
-        (
-          completed_contract_version IS NOT NULL
-          AND last_complete_snapshot_commit IS NOT NULL
-          AND completed_contract_version = desired_contract_version
-          AND (complete_through_commit IS NULL OR complete_through_commit = last_complete_snapshot_commit)
-          AND last_commit_seq > last_complete_snapshot_commit
-        )
-        OR
-        (
-          completed_contract_version IS NULL
-          AND complete_through_commit IS NULL
-          AND last_complete_snapshot_commit IS NULL
-        )
-      )
-    )
-  )
+-- Competing project associations that lost precedence. RFC 012B forbids
+-- merging them away, so they stay queryable next to the selected one.
+CREATE TABLE IF NOT EXISTS catalog_association_conflicts (
+  session_key BLOB NOT NULL REFERENCES catalog_sessions(session_key) ON DELETE CASCADE,
+  competing_native_project_key TEXT NOT NULL,
+  basis TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  last_commit_seq INTEGER NOT NULL,
+  PRIMARY KEY (session_key, competing_native_project_key, basis)
 );
 
 CREATE TABLE IF NOT EXISTS projection_versions (
@@ -2112,7 +1745,6 @@ CREATE TABLE IF NOT EXISTS canonical_workflow_members (
   last_commit_seq INTEGER NOT NULL
 );
 
-
 CREATE TABLE IF NOT EXISTS usage_contributions (
   fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
   subject_key BLOB NOT NULL,
@@ -2750,18 +2382,10 @@ const CURRENT_TABLES: &[&str] = &[
     "source_coverage_sets",
     "query_pack_selections",
     "projection_versions",
-    "catalog_initial_source_failures",
-    "catalog_refresh_source_failures",
-    "catalog_refresh_integrity_failures",
-    "catalog_snapshot_retirements",
-    "catalog_snapshot_entries",
-    "catalog_partial_sources",
-    "catalog_partial_builds",
-    "catalog_epoch_invalidations",
-    "catalog_plan_replacements",
-    "catalog_build_state",
-    "catalog_snapshots",
-    "catalog_coverage_plans",
+    "catalog_association_conflicts",
+    "catalog_sessions",
+    "catalog_projects",
+    "catalog_sources",
     "source_objects",
     "source_streams",
     "ingest_commits",
@@ -3745,39 +3369,32 @@ mod tests {
             )
             .expect("inspect source-neutral commit ownership");
         assert_eq!(source_commit_nullable, 0);
-        assert!(object_exists(&conn, "table", "catalog_coverage_plans"));
-        assert!(object_exists(&conn, "table", "catalog_snapshots"));
-        assert!(object_exists(&conn, "table", "catalog_snapshot_entries"));
-        assert!(object_exists(
-            &conn,
-            "table",
-            "catalog_snapshot_retirements"
-        ));
-        assert!(object_exists(
-            &conn,
-            "table",
-            "catalog_refresh_integrity_failures"
-        ));
-        assert!(object_exists(
-            &conn,
-            "table",
-            "catalog_refresh_source_failures"
-        ));
-        assert!(object_exists(
-            &conn,
-            "table",
-            "catalog_initial_source_failures"
-        ));
-        assert!(object_exists(&conn, "table", "catalog_epoch_invalidations"));
-        assert!(object_exists(&conn, "table", "catalog_build_state"));
-        let refreshing_snapshot_column: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('catalog_build_state') WHERE name = 'refreshing_from_snapshot_commit'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("inspect catalog refresh lineage");
-        assert_eq!(refreshing_snapshot_column, 1);
+        for table in [
+            "catalog_sources",
+            "catalog_projects",
+            "catalog_sessions",
+            "catalog_association_conflicts",
+        ] {
+            assert!(object_exists(&conn, "table", table), "missing {table}");
+        }
+        for column in [
+            "external_ref",
+            "association_basis",
+            "association_quality",
+            "association_provenance",
+            "transcript_present",
+            "source_modified_ms",
+            "sort_time",
+        ] {
+            let present: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('catalog_sessions') WHERE name = ?1",
+                    [column],
+                    |row| row.get(0),
+                )
+                .expect("inspect catalog session columns");
+            assert_eq!(present, 1, "missing catalog_sessions.{column}");
+        }
         assert!(object_exists(&conn, "table", "projection_versions"));
         assert!(object_exists(&conn, "table", "query_pack_selections"));
         for table in [
@@ -4119,89 +3736,14 @@ mod tests {
             "trigger",
             "session_summary_messages_ai"
         ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_snapshot_retirements_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_snapshot_retirements_no_delete"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_refresh_integrity_failures_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_refresh_integrity_failures_no_delete"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_refresh_source_failures_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_refresh_source_failures_no_delete"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_initial_source_failures_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_initial_source_failures_no_delete"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_epoch_invalidations_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_epoch_invalidations_no_delete"
-        ));
-        assert!(object_exists(&conn, "table", "catalog_plan_replacements"));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_plan_replacements_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_plan_replacements_no_delete"
-        ));
-        assert!(object_exists(&conn, "table", "catalog_partial_builds"));
-        assert!(object_exists(&conn, "table", "catalog_partial_sources"));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_partial_builds_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_partial_builds_no_delete"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_partial_sources_no_update"
-        ));
-        assert!(object_exists(
-            &conn,
-            "trigger",
-            "catalog_partial_sources_no_delete"
-        ));
+        for index in [
+            "catalog_projects_source",
+            "catalog_sessions_project",
+            "catalog_sessions_source",
+            "catalog_sessions_activity",
+        ] {
+            assert!(object_exists(&conn, "index", index), "missing {index}");
+        }
 
         let raw_index_columns: i64 = conn
             .query_row(
@@ -4211,78 +3753,6 @@ mod tests {
             )
             .expect("inspect timeline schema");
         assert_eq!(raw_index_columns, 1);
-    }
-
-    #[test]
-    fn source_neutral_commits_are_reserved_for_completed_zero_fact_catalog_admin_work() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        initialize_schema(&conn).expect("initialize schema");
-
-        for invalid in [
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'observation', 1, 2, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.plan.registered', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.coverage_plan.replaced', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.coverage_plan.replaced', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.scheduled', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.partial', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.partial', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.source_generation.invalidated', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.source_generation.invalidated', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.initial_snapshot.published', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.integrity_failed', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.integrity_failed', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_retrying', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_retrying', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_unavailable', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.build.source_unavailable', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.started', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.integrity_failed', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.integrity_failed', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.source_retrying', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.source_unavailable', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.refresh.recovery_started', 1, 2, 1)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.snapshot.retired', 1, NULL, 0)",
-            "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, 'catalog.library.snapshot.retired', 1, 2, 1)",
-        ] {
-            assert!(conn.execute(invalid, []).is_err(), "accepted {invalid}");
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
-
-        for reason in [
-            "catalog.library.plan.registered",
-            "catalog.library.coverage_plan.replaced",
-            "catalog.library.build.scheduled",
-            "catalog.library.build.partial",
-            "catalog.library.source_generation.invalidated",
-            "catalog.library.initial_snapshot.published",
-            "catalog.library.build.integrity_failed",
-            "catalog.library.build.source_retrying",
-            "catalog.library.build.source_unavailable",
-            "catalog.library.refresh.started",
-            "catalog.library.refresh_snapshot.published",
-            "catalog.library.refresh.integrity_failed",
-            "catalog.library.refresh.source_retrying",
-            "catalog.library.refresh.source_unavailable",
-            "catalog.library.refresh.recovery_started",
-            "catalog.library.snapshot.retired",
-        ] {
-            conn.execute(
-                "INSERT INTO ingest_commits (source_instance_id, reason, started_at, committed_at, fact_count) VALUES (NULL, ?1, 1, 2, 0)",
-                [reason],
-            )
-            .unwrap();
-        }
-        assert_eq!(
-            conn.query_row("SELECT COUNT(*) FROM ingest_commits", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            16
-        );
     }
 
     #[test]

@@ -76,6 +76,30 @@ pub(crate) fn read_stable_file_confined(
     read_stable_file_confined_with_hook(root, relative_path, max_bytes, || {})
 }
 
+/// Read at most `max_bytes` from the head of a confined file.
+///
+/// Unlike [`read_stable_file_confined`], an object larger than the bound is
+/// not rejected: catalog discovery deliberately wants the head of a large
+/// transcript and nothing else. Confinement, symlink refusal, and the
+/// directory-walk guarantees are identical.
+pub(crate) fn read_prefix_confined(
+    root: &Path,
+    relative_path: &Path,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, SourceDriverError> {
+    use std::io::Read as _;
+
+    let path = root.join(relative_path);
+    let Some(file) = open_confined_file(root, relative_path)? else {
+        return Ok(None);
+    };
+    let mut buffer = Vec::new();
+    file.take(max_bytes as u64)
+        .read_to_end(&mut buffer)
+        .map_err(|error| io_error("reading the head of", &path, error))?;
+    Ok(Some(buffer))
+}
+
 pub(crate) fn read_stable_file_confined_with_hook<F>(
     root: &Path,
     relative_path: &Path,

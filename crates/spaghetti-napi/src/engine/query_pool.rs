@@ -13,7 +13,6 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::catalog_contract::page::CatalogEntityResolutionResponse;
 use crate::core::schema;
 use crate::source::SharedSourcePassPool;
 
@@ -24,12 +23,6 @@ use super::capability_query::{
     validate_tool_result_page, ArtifactPage, ArtifactPageRequest, MemoryDocumentPage,
     MemoryDocumentPageRequest, PlanPage, PlanPageRequest, TaskCollectionPage,
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
-};
-use super::catalog_query::{
-    execute_catalog_page_query, execute_catalog_readiness_query, execute_catalog_resolution_query,
-    prepare_catalog_hydration, CatalogHydrationPreparationRequest, CatalogPageQueryRequest,
-    CatalogReadinessQueryRequest, CatalogReadinessQueryResult, CatalogResolutionQueryRequest,
-    CatalogRetainedPageOutcome, PreparedCatalogHydration,
 };
 use super::coverage_query::{
     read_fact_family_coverage_page, read_fact_family_replay_target,
@@ -52,6 +45,11 @@ use super::orchestration_query::{
 use super::performance::{
     atomic_max, atomic_saturating_add, duration_ns, LatencyHistogram, NamedLatencySnapshot,
     QueryPerformanceSnapshot, RuntimeUsageCompatibilityTelemetrySnapshot,
+};
+use super::catalog::{
+    read_project_page, read_readiness, read_session_page, resolve_catalog_entity,
+    CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest, CatalogSessionPage,
+    CatalogSessionPageRequest, Readiness,
 };
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
@@ -552,29 +550,32 @@ enum QueryCommand {
         request: ChangeReplayRequest,
         response: Sender<Result<ChangeReplay, EngineError>>,
     },
-    CatalogPage {
+    CatalogProjects {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
-        request: CatalogPageQueryRequest,
-        response: Sender<Result<CatalogRetainedPageOutcome, EngineError>>,
+        request: Box<CatalogProjectPageRequest>,
+        search_ready: bool,
+        response: Sender<Result<CatalogProjectPage, EngineError>>,
+    },
+    CatalogSessions {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        request: Box<CatalogSessionPageRequest>,
+        search_ready: bool,
+        response: Sender<Result<CatalogSessionPage, EngineError>>,
+    },
+    CatalogResolve {
+        cancellation_epoch: u64,
+        cancellation: QueryCancellationToken,
+        external_ref: String,
+        search_ready: bool,
+        response: Sender<Result<CatalogEntityResolution, EngineError>>,
     },
     CatalogReadiness {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
-        request: CatalogReadinessQueryRequest,
-        response: Sender<Result<CatalogReadinessQueryResult, EngineError>>,
-    },
-    CatalogResolution {
-        cancellation_epoch: u64,
-        cancellation: QueryCancellationToken,
-        request: CatalogResolutionQueryRequest,
-        response: Sender<Result<CatalogEntityResolutionResponse, EngineError>>,
-    },
-    CatalogHydrationPreparation {
-        cancellation_epoch: u64,
-        cancellation: QueryCancellationToken,
-        request: CatalogHydrationPreparationRequest,
-        response: Sender<Result<PreparedCatalogHydration, EngineError>>,
+        search_ready: bool,
+        response: Sender<Result<Readiness, EngineError>>,
     },
     SourceCatalog {
         cancellation_epoch: u64,
@@ -1638,68 +1639,65 @@ impl QueryClient {
         )
     }
 
-    pub(crate) fn catalog_page(
+    pub(crate) fn catalog_projects(
         &self,
-        request: CatalogPageQueryRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<CatalogRetainedPageOutcome, EngineError> {
+        request: CatalogProjectPageRequest,
+        search_ready: bool,
+    ) -> Result<CatalogProjectPage, EngineError> {
         self.send_cancellable(
-            cancellation,
-            |cancellation_epoch, cancellation, response| QueryCommand::CatalogPage {
+            QueryCancellationToken::default(),
+            |cancellation_epoch, cancellation, response| QueryCommand::CatalogProjects {
                 cancellation_epoch,
                 cancellation,
-                request,
+                request: Box::new(request),
+                search_ready,
                 response,
             },
         )
     }
 
-    pub(crate) fn catalog_readiness(
+    pub(crate) fn catalog_sessions(
         &self,
-        request: CatalogReadinessQueryRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<CatalogReadinessQueryResult, EngineError> {
+        request: CatalogSessionPageRequest,
+        search_ready: bool,
+    ) -> Result<CatalogSessionPage, EngineError> {
         self.send_cancellable(
-            cancellation,
+            QueryCancellationToken::default(),
+            |cancellation_epoch, cancellation, response| QueryCommand::CatalogSessions {
+                cancellation_epoch,
+                cancellation,
+                request: Box::new(request),
+                search_ready,
+                response,
+            },
+        )
+    }
+
+    pub(crate) fn resolve_catalog_entity(
+        &self,
+        external_ref: String,
+        search_ready: bool,
+    ) -> Result<CatalogEntityResolution, EngineError> {
+        self.send_cancellable(
+            QueryCancellationToken::default(),
+            |cancellation_epoch, cancellation, response| QueryCommand::CatalogResolve {
+                cancellation_epoch,
+                cancellation,
+                external_ref,
+                search_ready,
+                response,
+            },
+        )
+    }
+
+    pub(crate) fn readiness(&self, search_ready: bool) -> Result<Readiness, EngineError> {
+        self.send_cancellable(
+            QueryCancellationToken::default(),
             |cancellation_epoch, cancellation, response| QueryCommand::CatalogReadiness {
                 cancellation_epoch,
                 cancellation,
-                request,
+                search_ready,
                 response,
-            },
-        )
-    }
-
-    pub(crate) fn catalog_resolution(
-        &self,
-        request: CatalogResolutionQueryRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<CatalogEntityResolutionResponse, EngineError> {
-        self.send_cancellable(
-            cancellation,
-            |cancellation_epoch, cancellation, response| QueryCommand::CatalogResolution {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            },
-        )
-    }
-
-    pub(crate) fn prepare_catalog_hydration(
-        &self,
-        request: CatalogHydrationPreparationRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<PreparedCatalogHydration, EngineError> {
-        self.send_cancellable(
-            cancellation,
-            |cancellation_epoch, cancellation, response| {
-                QueryCommand::CatalogHydrationPreparation {
-                    cancellation_epoch,
-                    cancellation,
-                    request,
-                    response,
-                }
             },
         )
     }
@@ -2603,10 +2601,11 @@ fn query_thread(
                 );
                 let _ = response.send(result);
             }
-            QueryCommand::CatalogPage {
+            QueryCommand::CatalogProjects {
                 cancellation_epoch,
                 cancellation,
                 request,
+                search_ready,
                 response,
             } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -2615,14 +2614,48 @@ fn query_thread(
                     &control,
                     cancellation_epoch,
                     &cancellation,
-                    || execute_catalog_page_query(&connection, &request),
+                    || read_project_page(&connection, &request, search_ready),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::CatalogSessions {
+                cancellation_epoch,
+                cancellation,
+                request,
+                search_ready,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || read_session_page(&connection, &request, search_ready),
+                );
+                let _ = response.send(result);
+            }
+            QueryCommand::CatalogResolve {
+                cancellation_epoch,
+                cancellation,
+                external_ref,
+                search_ready,
+                response,
+            } => {
+                let _in_flight = InFlightGuard::enter(&control.in_flight);
+                let result = run_cancellable_query(
+                    &connection,
+                    &control,
+                    cancellation_epoch,
+                    &cancellation,
+                    || resolve_catalog_entity(&connection, &external_ref, search_ready),
                 );
                 let _ = response.send(result);
             }
             QueryCommand::CatalogReadiness {
                 cancellation_epoch,
                 cancellation,
-                request,
+                search_ready,
                 response,
             } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -2631,39 +2664,7 @@ fn query_thread(
                     &control,
                     cancellation_epoch,
                     &cancellation,
-                    || execute_catalog_readiness_query(&connection, &request),
-                );
-                let _ = response.send(result);
-            }
-            QueryCommand::CatalogResolution {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            } => {
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = run_cancellable_query(
-                    &connection,
-                    &control,
-                    cancellation_epoch,
-                    &cancellation,
-                    || execute_catalog_resolution_query(&connection, &request),
-                );
-                let _ = response.send(result);
-            }
-            QueryCommand::CatalogHydrationPreparation {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            } => {
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = run_cancellable_query(
-                    &connection,
-                    &control,
-                    cancellation_epoch,
-                    &cancellation,
-                    || prepare_catalog_hydration(&connection, &request),
+                    || read_readiness(&connection, search_ready),
                 );
                 let _ = response.send(result);
             }

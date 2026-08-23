@@ -25,10 +25,10 @@ use super::performance::{
     atomic_max, atomic_saturating_add, duration_ns, CheckpointPerformanceSnapshot,
     LatencyHistogram, NamedLatencySnapshot, WriterPerformanceSnapshot,
 };
+use super::catalog::{commit_source_scan, CatalogScanReceipt, SourceScan};
 use super::projection;
 use super::query_pool::{read_source_catalog, SourceCatalogSnapshot};
 use super::EngineError;
-use super::{catalog_publication, catalog_retention, catalog_state};
 
 const MIN_DISK_RESERVE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DISK_RESERVE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -61,36 +61,15 @@ enum WriterCommand {
         queued_at: Instant,
         response: Sender<Result<Option<commit::ProjectionVersionReceipt>, EngineError>>,
     },
-    CommitCatalogBuildState {
-        command: Box<catalog_state::CatalogBuildStateCommand>,
-        queued_at: Instant,
-        response: Sender<Result<Option<catalog_state::CatalogBuildStateReceipt>, EngineError>>,
-    },
-    CommitInitialCatalogPublication {
-        command: Box<catalog_publication::CatalogInitialPublicationCommand>,
-        queued_at: Instant,
-        response: Sender<
-            Result<Option<catalog_publication::CatalogInitialPublicationReceipt>, EngineError>,
-        >,
-    },
-    CommitRefreshCatalogPublication {
-        command: Box<catalog_publication::CatalogRefreshPublicationCommand>,
-        queued_at: Instant,
-        response: Sender<
-            Result<Option<catalog_publication::CatalogRefreshPublicationReceipt>, EngineError>,
-        >,
-    },
-    RetireCatalogSnapshot {
-        command: Box<catalog_retention::CatalogSnapshotRetirementCommand>,
-        queued_at: Instant,
-        response: Sender<
-            Result<Option<catalog_retention::CatalogSnapshotRetirementReceipt>, EngineError>,
-        >,
-    },
     SourceCatalog {
         adapter_id: String,
         stable_key: Vec<u8>,
         response: Sender<Result<SourceCatalogSnapshot, EngineError>>,
+    },
+    CommitCatalogScan {
+        scan: Box<SourceScan>,
+        now_ms: i64,
+        response: Sender<Result<CatalogScanReceipt, EngineError>>,
     },
     BeginQueryBootstrap {
         response: Sender<Result<bool, EngineError>>,
@@ -194,86 +173,6 @@ impl WriterClient {
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
     }
 
-    pub(crate) fn commit_catalog_build_state(
-        &self,
-        command: catalog_state::CatalogBuildStateCommand,
-    ) -> Result<Option<catalog_state::CatalogBuildStateReceipt>, EngineError> {
-        if !self.alive.load(Ordering::Acquire) {
-            return Err(EngineError::WorkerUnavailable { worker: "writer" });
-        }
-        let (response_tx, response_rx) = bounded(1);
-        self.commands
-            .send(WriterCommand::CommitCatalogBuildState {
-                command: Box::new(command),
-                queued_at: Instant::now(),
-                response: response_tx,
-            })
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
-    }
-
-    pub(crate) fn commit_initial_catalog_publication(
-        &self,
-        command: catalog_publication::CatalogInitialPublicationCommand,
-    ) -> Result<Option<catalog_publication::CatalogInitialPublicationReceipt>, EngineError> {
-        if !self.alive.load(Ordering::Acquire) {
-            return Err(EngineError::WorkerUnavailable { worker: "writer" });
-        }
-        let (response_tx, response_rx) = bounded(1);
-        self.commands
-            .send(WriterCommand::CommitInitialCatalogPublication {
-                command: Box::new(command),
-                queued_at: Instant::now(),
-                response: response_tx,
-            })
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
-    }
-
-    pub(crate) fn commit_refresh_catalog_publication(
-        &self,
-        command: catalog_publication::CatalogRefreshPublicationCommand,
-    ) -> Result<Option<catalog_publication::CatalogRefreshPublicationReceipt>, EngineError> {
-        if !self.alive.load(Ordering::Acquire) {
-            return Err(EngineError::WorkerUnavailable { worker: "writer" });
-        }
-        let (response_tx, response_rx) = bounded(1);
-        self.commands
-            .send(WriterCommand::CommitRefreshCatalogPublication {
-                command: Box::new(command),
-                queued_at: Instant::now(),
-                response: response_tx,
-            })
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
-    }
-
-    pub(crate) fn retire_catalog_snapshot(
-        &self,
-        command: catalog_retention::CatalogSnapshotRetirementCommand,
-    ) -> Result<Option<catalog_retention::CatalogSnapshotRetirementReceipt>, EngineError> {
-        if !self.alive.load(Ordering::Acquire) {
-            return Err(EngineError::WorkerUnavailable { worker: "writer" });
-        }
-        let (response_tx, response_rx) = bounded(1);
-        self.commands
-            .send(WriterCommand::RetireCatalogSnapshot {
-                command: Box::new(command),
-                queued_at: Instant::now(),
-                response: response_tx,
-            })
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
-    }
-
     pub(crate) fn source_catalog(
         &self,
         adapter_id: &str,
@@ -292,6 +191,29 @@ impl WriterClient {
             .send(WriterCommand::SourceCatalog {
                 adapter_id: adapter_id.to_string(),
                 stable_key: stable_key.to_vec(),
+                response: response_tx,
+            })
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
+        response_rx
+            .recv()
+            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
+    }
+
+    /// Commit one catalog discovery pass. The writer owns the connection, so
+    /// the whole pass lands in one transaction on the single-writer thread.
+    pub(crate) fn commit_catalog_scan(
+        &self,
+        scan: SourceScan,
+        now_ms: i64,
+    ) -> Result<CatalogScanReceipt, EngineError> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(EngineError::WorkerUnavailable { worker: "writer" });
+        }
+        let (response_tx, response_rx) = bounded(1);
+        self.commands
+            .send(WriterCommand::CommitCatalogScan {
+                scan: Box::new(scan),
+                now_ms,
                 response: response_tx,
             })
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
@@ -621,163 +543,13 @@ fn writer_thread(
                     checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
                 }
             }
-            WriterCommand::CommitCatalogBuildState {
-                command,
-                queued_at,
+            WriterCommand::CommitCatalogScan {
+                scan,
+                now_ms,
                 response,
             } => {
-                telemetry.queue_wait.record(queued_at.elapsed());
-                let reserve_started = Instant::now();
-                let reserve = ensure_disk_reserve(&database_path);
-                telemetry.disk_reserve.record(reserve_started.elapsed());
-                let rows_before = sqlite_total_changes(&connection);
-                let started = Instant::now();
-                let result = reserve.and_then(|()| {
-                    catalog_state::apply_catalog_build_state_commit(&mut connection, &command)
-                });
-                let elapsed = started.elapsed();
-                telemetry.writer_total.record(elapsed);
-                let committed = matches!(result, Ok(Some(_)));
-                match &result {
-                    Ok(Some(_)) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.committed, 1);
-                        atomic_saturating_add(
-                            &telemetry.sqlite_rows_changed,
-                            sqlite_total_changes(&connection).saturating_sub(rows_before),
-                        );
-                        telemetry.physical_transaction.record(elapsed);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.failed, 1);
-                    }
-                }
+                let result = commit_source_scan(&mut connection, &scan, now_ms);
                 let _ = response.send(result);
-                if committed {
-                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
-                }
-            }
-            WriterCommand::CommitInitialCatalogPublication {
-                command,
-                queued_at,
-                response,
-            } => {
-                telemetry.queue_wait.record(queued_at.elapsed());
-                let reserve_started = Instant::now();
-                let reserve = ensure_disk_reserve(&database_path);
-                telemetry.disk_reserve.record(reserve_started.elapsed());
-                let rows_before = sqlite_total_changes(&connection);
-                let started = Instant::now();
-                let result = reserve.and_then(|()| {
-                    catalog_publication::apply_initial_catalog_publication(
-                        &mut connection,
-                        &command,
-                    )
-                });
-                let elapsed = started.elapsed();
-                telemetry.writer_total.record(elapsed);
-                let committed = matches!(result, Ok(Some(_)));
-                match &result {
-                    Ok(Some(_)) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.committed, 1);
-                        atomic_saturating_add(
-                            &telemetry.sqlite_rows_changed,
-                            sqlite_total_changes(&connection).saturating_sub(rows_before),
-                        );
-                        telemetry.physical_transaction.record(elapsed);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.failed, 1);
-                    }
-                }
-                let _ = response.send(result);
-                if committed {
-                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
-                }
-            }
-            WriterCommand::CommitRefreshCatalogPublication {
-                command,
-                queued_at,
-                response,
-            } => {
-                telemetry.queue_wait.record(queued_at.elapsed());
-                let reserve_started = Instant::now();
-                let reserve = ensure_disk_reserve(&database_path);
-                telemetry.disk_reserve.record(reserve_started.elapsed());
-                let rows_before = sqlite_total_changes(&connection);
-                let started = Instant::now();
-                let result = reserve.and_then(|()| {
-                    catalog_publication::apply_refresh_catalog_publication(
-                        &mut connection,
-                        &command,
-                    )
-                });
-                let elapsed = started.elapsed();
-                telemetry.writer_total.record(elapsed);
-                let committed = matches!(result, Ok(Some(_)));
-                match &result {
-                    Ok(Some(_)) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.committed, 1);
-                        atomic_saturating_add(
-                            &telemetry.sqlite_rows_changed,
-                            sqlite_total_changes(&connection).saturating_sub(rows_before),
-                        );
-                        telemetry.physical_transaction.record(elapsed);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.failed, 1);
-                    }
-                }
-                let _ = response.send(result);
-                if committed {
-                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
-                }
-            }
-            WriterCommand::RetireCatalogSnapshot {
-                command,
-                queued_at,
-                response,
-            } => {
-                telemetry.queue_wait.record(queued_at.elapsed());
-                let reserve_started = Instant::now();
-                let reserve = ensure_disk_reserve(&database_path);
-                telemetry.disk_reserve.record(reserve_started.elapsed());
-                let rows_before = sqlite_total_changes(&connection);
-                let started = Instant::now();
-                let result = reserve.and_then(|()| {
-                    catalog_retention::apply_catalog_snapshot_retirement(&mut connection, &command)
-                });
-                let elapsed = started.elapsed();
-                telemetry.writer_total.record(elapsed);
-                let committed = matches!(result, Ok(Some(_)));
-                match &result {
-                    Ok(Some(_)) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.committed, 1);
-                        atomic_saturating_add(
-                            &telemetry.sqlite_rows_changed,
-                            sqlite_total_changes(&connection).saturating_sub(rows_before),
-                        );
-                        telemetry.physical_transaction.record(elapsed);
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        atomic_saturating_add(&telemetry.commit_attempts, 1);
-                        atomic_saturating_add(&telemetry.failed, 1);
-                    }
-                }
-                let _ = response.send(result);
-                if committed {
-                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
-                }
             }
             WriterCommand::SourceCatalog {
                 adapter_id,
@@ -1879,7 +1651,6 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
         operation: "initialize schema",
         detail: error.to_string(),
     })?;
-    catalog_state::load_catalog_build_state(&connection)?;
     if query_bootstrap_active(&connection)? {
         let checkpoint = reader_free_checkpoint(&connection)?;
         require_reader_free_checkpoint(checkpoint)?;
