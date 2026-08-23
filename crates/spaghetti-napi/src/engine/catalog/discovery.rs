@@ -79,9 +79,30 @@ impl SourceScan {
             projects: Vec::new(),
             sessions: Vec::new(),
             conflicts: Vec::new(),
-            degraded_reason: Some(reason.into()),
+            degraded_reason: Some(clamp_reason(reason.into())),
         }
     }
+}
+
+/// Longest `catalog_sources.degraded_reason` the schema accepts.
+const MAX_DEGRADED_REASON_CHARS: usize = 512;
+
+/// Keep a reason inside the column it is stored in.
+///
+/// The reason quotes an adapter error, and an adapter error can quote a long
+/// native path. Storing it unclamped would fail the row's `CHECK`, which would
+/// abort the whole commit — turning "this source is degraded" into "this
+/// source has no catalog at all", which is exactly the outcome a degraded pass
+/// exists to avoid.
+fn clamp_reason(reason: String) -> String {
+    if reason.chars().count() <= MAX_DEGRADED_REASON_CHARS {
+        return reason;
+    }
+    reason
+        .chars()
+        .take(MAX_DEGRADED_REASON_CHARS - 1)
+        .chain(std::iter::once('\u{2026}'))
+        .collect()
 }
 
 /// Run one discovery pass and derive both identities for every row.
@@ -196,7 +217,7 @@ pub(crate) fn scan_source<A: AgentAdapter + ?Sized>(
         projects,
         sessions,
         conflicts,
-        degraded_reason: discovery.degraded_reason,
+        degraded_reason: discovery.degraded_reason.map(clamp_reason),
     })
 }
 

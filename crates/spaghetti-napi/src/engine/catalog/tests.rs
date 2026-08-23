@@ -283,6 +283,31 @@ fn a_source_that_cannot_be_read_is_marked_degraded_and_keeps_its_rows() {
 }
 
 #[test]
+fn a_long_failure_reason_still_fits_the_row_that_records_it() {
+    // The reason quotes an adapter error, which can quote a long native path.
+    // `catalog_sources.degraded_reason` accepts at most 512 characters, and a
+    // rejected row would abort the commit — losing the whole catalog for a
+    // source whose only problem was that it could not be read.
+    let reason = "\u{00e9}".repeat(4_000);
+    let scan = super::SourceScan::degraded(1, "claude-code", reason);
+    let stored = scan
+        .degraded_reason
+        .expect("a degraded pass names a reason");
+
+    assert_eq!(stored.chars().count(), 512);
+    assert!(
+        stored.ends_with('\u{2026}'),
+        "truncation is visible to the reader"
+    );
+    assert!(
+        stored
+            .chars()
+            .all(|character| character == '\u{00e9}' || character == '\u{2026}'),
+        "truncation lands on a character boundary"
+    );
+}
+
+#[test]
 fn a_rescan_picks_up_a_new_transcript_and_retracts_a_deleted_one() {
     let temp = TempDir::new().unwrap();
     let root = claude_tree(temp.path());
