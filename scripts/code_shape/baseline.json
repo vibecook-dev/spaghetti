@@ -2,8 +2,8 @@
   "crate_level_allow_dead_code": [],
   "inline_test_blocks_over_cap": {
     "crates/spaghetti-napi/src/adapter/facts.rs": 1419,
-    "crates/spaghetti-napi/src/adapter/semantic.rs": 628,
-    "crates/spaghetti-napi/src/adapter/support.rs": 4670,
+    "crates/spaghetti-napi/src/adapter/semantic.rs": 592,
+    "crates/spaghetti-napi/src/adapter/support.rs": 2504,
     "crates/spaghetti-napi/src/claude/adapter.rs": 4529,
     "crates/spaghetti-napi/src/claude/fingerprint.rs": 635,
     "crates/spaghetti-napi/src/claude/project_parser.rs": 1799,
@@ -11,7 +11,7 @@
     "crates/spaghetti-napi/src/core/writer.rs": 2240,
     "crates/spaghetti-napi/src/decode_runtime.rs": 672,
     "crates/spaghetti-napi/src/engine/capability_query.rs": 663,
-    "crates/spaghetti-napi/src/engine/coordinator.rs": 7522,
+    "crates/spaghetti-napi/src/engine/coordinator.rs": 4954,
     "crates/spaghetti-napi/src/engine/projection.rs": 10284,
     "crates/spaghetti-napi/src/engine/query_pool.rs": 3977,
     "crates/spaghetti-napi/src/engine/search_query.rs": 523,
@@ -22,7 +22,7 @@
   },
   "prod_cap": 3000,
   "prod_files_over_cap": {
-    "crates/spaghetti-napi/src/adapter/facts.rs": 3835,
+    "crates/spaghetti-napi/src/adapter/facts.rs": 3825,
     "crates/spaghetti-napi/src/core/schema.rs": 3076,
     "crates/spaghetti-napi/src/engine/projection.rs": 3666
   },
