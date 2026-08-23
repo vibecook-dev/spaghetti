@@ -13,9 +13,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::locator::{
-    render_confined_locator, validate_evidence_locator_template, ScopeIdentityInput,
-};
+use super::locator::ScopeIdentityInput;
 use crate::adapter::{
     AuthorizedScopeProgram, ScopeProgramManifest, ScopeProgramStatus, ScopeRelationDeclaration,
     ScopeRelationPrimitive, ScopeUnavailableBehavior,
@@ -794,10 +792,10 @@ impl ScopeAccessReservation {
         &self,
         identity_inputs: &[ScopeIdentityInput<'_>],
     ) -> Result<PathBuf, AccessBudgetError> {
-        validate_evidence_locator_template(&self.declaration)
+        super::locator::validate_evidence_locator_template(&self.declaration)
             .map_err(|_| invalid_locator_template())?;
         self.validate_locator_identity_binding(identity_inputs)?;
-        render_confined_locator(&self.declaration.locator, identity_inputs)
+        super::locator::render_confined_locator(&self.declaration.locator, identity_inputs)
             .map_err(|_| invalid_locator_template())
     }
 
