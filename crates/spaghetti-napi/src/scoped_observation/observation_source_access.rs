@@ -33,7 +33,8 @@ use crate::source::{
     DirectoryEntryAuditReservation, DirectoryEntryAuditor, DirectoryEntryKind, DirectoryEntryState,
     DirectoryScan, DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig,
     DriverQuarantine, FileStamp, GlobPattern, RecordOrigin, ReplaceCheckpoint, ReplaceDocument,
-    ReplaceDocumentConfig, ReplaceRead, Revision, ScopeAccessRequest, SourceRecord, StableRead,
+    ReplaceDocumentConfig, ReplaceRead, Revision, ScopeAccessRequest, SourceRecord,
+    SourceRecordState, StableRead,
 };
 
 use super::{
@@ -477,12 +478,15 @@ pub(crate) struct ScopedObservationRelatedObjectBinding {
 pub(crate) enum ScopedObservationRelatedObjectInitialObservation {
     Unavailable {
         binding: Box<ScopedObservationRelatedObjectBinding>,
+        object_context: AdapterObjectContext,
     },
     RetryTransient {
         binding: Box<ScopedObservationRelatedObjectBinding>,
+        object_context: AdapterObjectContext,
     },
     Oversized {
         binding: Box<ScopedObservationRelatedObjectBinding>,
+        object_context: AdapterObjectContext,
         checkpoint: ReplaceCheckpoint,
         quarantine: Box<DriverQuarantine>,
     },
@@ -503,6 +507,43 @@ pub(crate) struct ScopedObservationRelatedObjectDecodedSnapshot {
     scope_join_updates: Vec<ScopeJoinUpdate>,
     next_decoder_state: Option<Vec<u8>>,
     quarantined: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopedObservationRelatedObjectStateKind {
+    Absent,
+    Present,
+    Oversized,
+}
+
+/// Nonconstructible refresh state for one exact related source. It contains no
+/// native path and can only be produced from a successfully accounted initial
+/// or refresh observation. Pointer-bound attachment authority prevents an
+/// otherwise equal checkpoint from crossing host lifetimes.
+#[derive(Clone)]
+pub(crate) struct ScopedObservationRelatedObjectState {
+    identity: ScopedObservationRelatedObjectIdentity,
+    checkpoint: Option<ReplaceCheckpoint>,
+    object_context: AdapterObjectContext,
+    decoder_state: Option<Vec<u8>>,
+    kind: ScopedObservationRelatedObjectStateKind,
+}
+
+pub(crate) enum ScopedObservationRelatedObjectRefreshObservation {
+    RetryTransient {
+        binding: Box<ScopedObservationRelatedObjectBinding>,
+        object_context: AdapterObjectContext,
+    },
+    Unchanged(Box<ScopedObservationRelatedObjectState>),
+    Oversized {
+        binding: Box<ScopedObservationRelatedObjectBinding>,
+        object_context: AdapterObjectContext,
+        checkpoint: ReplaceCheckpoint,
+        quarantine: Box<DriverQuarantine>,
+        retained_decoder_state: Option<Vec<u8>>,
+    },
+    Present(Box<ScopedObservationRelatedObjectDecodedSnapshot>),
+    Removed(Box<ScopedObservationRelatedObjectDecodedSnapshot>),
 }
 
 struct DirectoryMemberSourceAccessDenied;
@@ -794,6 +835,50 @@ impl fmt::Debug for ScopedObservationRelatedObjectInitialObservation {
                 .field("has_binding", &true)
                 .finish_non_exhaustive(),
             Self::Present(snapshot) => formatter.debug_tuple("Present").field(snapshot).finish(),
+        }
+    }
+}
+
+impl fmt::Debug for ScopedObservationRelatedObjectState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationRelatedObjectState")
+            .field("identity", &self.identity)
+            .field("kind", &self.kind)
+            .field("has_checkpoint", &self.checkpoint.is_some())
+            .field("object_context_version", &self.object_context.version())
+            .field("object_context_bytes", &self.object_context.payload().len())
+            .field("has_decoder_state", &self.decoder_state.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationRelatedObjectRefreshObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RetryTransient { .. } => formatter
+                .debug_struct("RetryTransient")
+                .field("has_binding", &true)
+                .finish_non_exhaustive(),
+            Self::Unchanged(state) => formatter.debug_tuple("Unchanged").field(state).finish(),
+            Self::Oversized {
+                checkpoint,
+                quarantine,
+                retained_decoder_state,
+                ..
+            } => formatter
+                .debug_struct("Oversized")
+                .field("generation", &checkpoint.generation)
+                .field("has_checkpoint_revision", &true)
+                .field("observed_bytes", &quarantine.payload_len)
+                .field(
+                    "has_retained_decoder_state",
+                    &retained_decoder_state.is_some(),
+                )
+                .field("has_binding", &true)
+                .finish_non_exhaustive(),
+            Self::Present(snapshot) => formatter.debug_tuple("Present").field(snapshot).finish(),
+            Self::Removed(snapshot) => formatter.debug_tuple("Removed").field(snapshot).finish(),
         }
     }
 }
@@ -2009,28 +2094,38 @@ impl ScopedObservationRelatedObjectBinding {
         )
     }
 
-    fn decode_initial_record(
-        self,
-        checkpoint: ReplaceCheckpoint,
-        record: SourceRecord,
-    ) -> Result<ScopedObservationRelatedObjectInitialObservation, ScopedObservationRuntimeSourceError>
-    {
-        if !self.valid_for_dependency_free_bootstrap()
-            || record.source_instance_id != self.source_instance.id
-            || checkpoint.generation == 0
-            || !checkpoint.present
-            || record.generation != checkpoint.generation
-        {
+    fn bootstrap_object_context(
+        &self,
+    ) -> Result<AdapterObjectContext, ScopedObservationRuntimeSourceError> {
+        if !self.valid_for_dependency_free_bootstrap() {
             return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
         }
-        let object_context = bootstrap_object_without_source_access(
+        bootstrap_object_without_source_access(
             self.adapter.as_ref(),
             self.source_instance.as_ref(),
             &self.descriptor,
         )
         .map_err(|error| {
             ScopedObservationRuntimeSourceError::RelatedDecode(super::decode_failure_class(&error))
-        })?;
+        })
+    }
+
+    fn decode_replace_record(
+        self,
+        object_context: AdapterObjectContext,
+        checkpoint: ReplaceCheckpoint,
+        record: SourceRecord,
+        decoder_state: Option<&[u8]>,
+    ) -> Result<ScopedObservationRelatedObjectDecodedSnapshot, ScopedObservationRuntimeSourceError>
+    {
+        if !self.valid_for_dependency_free_bootstrap()
+            || record.source_instance_id != self.source_instance.id
+            || checkpoint.generation == 0
+            || record.generation != checkpoint.generation
+            || checkpoint.present != (record.state == SourceRecordState::Present)
+        {
+            return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+        }
         let attempt = decode_record(DecodeRuntimeRequest {
             adapter: self.adapter.as_ref(),
             decoder: &self.runtime_stream.decoder,
@@ -2038,7 +2133,7 @@ impl ScopedObservationRelatedObjectBinding {
             source_access: &DirectoryMemberSourceAccessDenied,
             record: &record,
             semantic_context: &self.identity.semantic_context,
-            decoder_state: None,
+            decoder_state,
             retention: self.runtime_stream.retention,
             limits: DecodeRuntimeLimits {
                 max_facts: DIRECTORY_MEMBER_MAX_FACTS,
@@ -2058,20 +2153,18 @@ impl ScopedObservationRelatedObjectBinding {
                 ));
             }
         };
-        Ok(ScopedObservationRelatedObjectInitialObservation::Present(
-            Box::new(ScopedObservationRelatedObjectDecodedSnapshot {
-                binding: self,
-                object_context,
-                checkpoint,
-                record,
-                disposition: decoded.disposition,
-                mapping_disposition: decoded.mapping_disposition,
-                batch: decoded.batch,
-                scope_join_updates: decoded.scope_join_updates,
-                next_decoder_state: decoded.next_decoder_state,
-                quarantined: decoded.quarantined,
-            }),
-        ))
+        Ok(ScopedObservationRelatedObjectDecodedSnapshot {
+            binding: self,
+            object_context,
+            checkpoint,
+            record,
+            disposition: decoded.disposition,
+            mapping_disposition: decoded.mapping_disposition,
+            batch: decoded.batch,
+            scope_join_updates: decoded.scope_join_updates,
+            next_decoder_state: decoded.next_decoder_state,
+            quarantined: decoded.quarantined,
+        })
     }
 
     #[cfg(test)]
@@ -2165,8 +2258,8 @@ impl ScopedObservationRelatedObjectDecodedSnapshot {
 impl ScopedObservationRelatedObjectInitialObservation {
     pub(crate) fn identity(&self) -> &ScopedObservationRelatedObjectIdentity {
         match self {
-            Self::Unavailable { binding }
-            | Self::RetryTransient { binding }
+            Self::Unavailable { binding, .. }
+            | Self::RetryTransient { binding, .. }
             | Self::Oversized { binding, .. } => binding.identity(),
             Self::Present(snapshot) => snapshot.identity(),
         }
@@ -2198,6 +2291,146 @@ impl ScopedObservationRelatedObjectInitialObservation {
             } => Some((quarantine.payload_len, checkpoint.revision)),
             Self::Unavailable { .. } | Self::RetryTransient { .. } | Self::Present(_) => None,
         }
+    }
+
+    pub(crate) fn refresh_state(&self) -> Option<ScopedObservationRelatedObjectState> {
+        match self {
+            Self::Unavailable {
+                binding,
+                object_context,
+            } => Some(ScopedObservationRelatedObjectState {
+                identity: binding.identity.clone(),
+                checkpoint: None,
+                object_context: object_context.clone(),
+                decoder_state: None,
+                kind: ScopedObservationRelatedObjectStateKind::Absent,
+            }),
+            Self::RetryTransient { .. } => None,
+            Self::Oversized {
+                binding,
+                object_context,
+                checkpoint,
+                ..
+            } => Some(ScopedObservationRelatedObjectState {
+                identity: binding.identity.clone(),
+                checkpoint: Some(checkpoint.clone()),
+                object_context: object_context.clone(),
+                decoder_state: None,
+                kind: ScopedObservationRelatedObjectStateKind::Oversized,
+            }),
+            Self::Present(snapshot) => Some(snapshot.refresh_state()),
+        }
+    }
+}
+
+impl ScopedObservationRelatedObjectDecodedSnapshot {
+    pub(crate) fn refresh_state(&self) -> ScopedObservationRelatedObjectState {
+        ScopedObservationRelatedObjectState {
+            identity: self.binding.identity.clone(),
+            checkpoint: Some(self.checkpoint.clone()),
+            object_context: self.object_context.clone(),
+            decoder_state: self.next_decoder_state.clone(),
+            kind: match self.record.state {
+                SourceRecordState::Present => ScopedObservationRelatedObjectStateKind::Present,
+                SourceRecordState::Absent => ScopedObservationRelatedObjectStateKind::Absent,
+            },
+        }
+    }
+}
+
+impl ScopedObservationRelatedObjectState {
+    fn matches_binding(&self, binding: &ScopedObservationRelatedObjectBinding) -> bool {
+        let actual = binding.identity();
+        let checkpoint_matches_kind = match (&self.checkpoint, self.kind) {
+            (None, ScopedObservationRelatedObjectStateKind::Absent) => true,
+            (Some(checkpoint), ScopedObservationRelatedObjectStateKind::Absent) => {
+                checkpoint.generation > 0 && !checkpoint.present
+            }
+            (
+                Some(checkpoint),
+                ScopedObservationRelatedObjectStateKind::Present
+                | ScopedObservationRelatedObjectStateKind::Oversized,
+            ) => checkpoint.generation > 0 && checkpoint.present,
+            (None, _) => false,
+        };
+        Arc::ptr_eq(
+            &self.identity.attachment_authority,
+            &actual.attachment_authority,
+        ) && self.identity.relation_id == actual.relation_id
+            && self.identity.primitive == actual.primitive
+            && self.identity.object_token == actual.object_token
+            && self.identity.source == actual.source
+            && self.identity.semantic_context == actual.semantic_context
+            && checkpoint_matches_kind
+    }
+
+    #[cfg(test)]
+    pub(crate) fn checkpoint_for_test(&self) -> Option<&ReplaceCheckpoint> {
+        self.checkpoint.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decoder_state_for_test(&self) -> Option<&[u8]> {
+        self.decoder_state.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn object_context_for_test(&self) -> &AdapterObjectContext {
+        &self.object_context
+    }
+}
+
+impl ScopedObservationRelatedObjectRefreshObservation {
+    pub(crate) fn refresh_state(&self) -> Option<ScopedObservationRelatedObjectState> {
+        match self {
+            Self::RetryTransient { .. } => None,
+            Self::Unchanged(state) => Some((**state).clone()),
+            Self::Oversized {
+                binding,
+                object_context,
+                checkpoint,
+                retained_decoder_state,
+                ..
+            } => Some(ScopedObservationRelatedObjectState {
+                identity: binding.identity.clone(),
+                checkpoint: Some(checkpoint.clone()),
+                object_context: object_context.clone(),
+                decoder_state: retained_decoder_state.clone(),
+                kind: ScopedObservationRelatedObjectStateKind::Oversized,
+            }),
+            Self::Present(snapshot) | Self::Removed(snapshot) => Some(snapshot.refresh_state()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn present_snapshot_for_test(
+        &self,
+    ) -> Option<&ScopedObservationRelatedObjectDecodedSnapshot> {
+        match self {
+            Self::Present(snapshot) => Some(snapshot),
+            Self::RetryTransient { .. }
+            | Self::Unchanged(_)
+            | Self::Oversized { .. }
+            | Self::Removed(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn removed_snapshot_for_test(
+        &self,
+    ) -> Option<&ScopedObservationRelatedObjectDecodedSnapshot> {
+        match self {
+            Self::Removed(snapshot) => Some(snapshot),
+            Self::RetryTransient { .. }
+            | Self::Unchanged(_)
+            | Self::Oversized { .. }
+            | Self::Present(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_unchanged_for_test(&self) -> bool {
+        matches!(self, Self::Unchanged(_))
     }
 }
 
@@ -2436,6 +2669,13 @@ impl<'pass> ScopedObservationRuntimeSourceReservation<'pass> {
             self.fail_conservative();
             return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
         }
+        let object_context = match related.bootstrap_object_context() {
+            Ok(object_context) => object_context,
+            Err(error) => {
+                self.fail_conservative();
+                return Err(error);
+            }
+        };
         let max_bytes = match usize::try_from(self.binding.runtime.reserved_max_bytes()) {
             Ok(max_bytes) if max_bytes > 0 => max_bytes,
             _ => {
@@ -2474,6 +2714,7 @@ impl<'pass> ScopedObservationRuntimeSourceReservation<'pass> {
                 return Ok(
                     ScopedObservationRelatedObjectInitialObservation::RetryTransient {
                         binding: Box::new(related),
+                        object_context,
                     },
                 );
             }
@@ -2492,18 +2733,24 @@ impl<'pass> ScopedObservationRuntimeSourceReservation<'pass> {
             ReplaceRead::Missing => Ok(
                 ScopedObservationRelatedObjectInitialObservation::Unavailable {
                     binding: Box::new(related),
+                    object_context,
                 },
             ),
             ReplaceRead::RetryTransient => Ok(
                 ScopedObservationRelatedObjectInitialObservation::RetryTransient {
                     binding: Box::new(related),
+                    object_context,
                 },
             ),
             ReplaceRead::Record {
                 record,
                 checkpoint,
                 generation_changed: true,
-            } => related.decode_initial_record(checkpoint, record),
+            } => related
+                .decode_replace_record(object_context, checkpoint, record, None)
+                .map(|snapshot| {
+                    ScopedObservationRelatedObjectInitialObservation::Present(Box::new(snapshot))
+                }),
             ReplaceRead::Quarantined {
                 quarantine,
                 checkpoint,
@@ -2511,6 +2758,7 @@ impl<'pass> ScopedObservationRuntimeSourceReservation<'pass> {
             } => Ok(
                 ScopedObservationRelatedObjectInitialObservation::Oversized {
                     binding: Box::new(related),
+                    object_context,
                     checkpoint,
                     quarantine: Box::new(quarantine),
                 },
@@ -2525,6 +2773,175 @@ impl<'pass> ScopedObservationRuntimeSourceReservation<'pass> {
                 generation_changed: false,
                 ..
             } => Err(ScopedObservationRuntimeSourceError::InvalidBinding),
+        }
+    }
+
+    /// Refresh one exact related ReplaceDocument source from state previously
+    /// minted by this attachment. Identity, checkpoint, object context, and
+    /// decoder state remain one nonconstructible unit; a foreign or retargeted
+    /// state fails before native I/O.
+    pub(crate) fn observe_related_replace_refresh(
+        self,
+        previous: &ScopedObservationRelatedObjectState,
+        origin: &RecordOrigin,
+    ) -> Result<ScopedObservationRelatedObjectRefreshObservation, ScopedObservationRuntimeSourceError>
+    {
+        if self._pass.state.closed.load(Ordering::Acquire) {
+            self.fail_conservative();
+            return Err(ScopedObservationRuntimeSourceError::Closed);
+        }
+        let related = match prepare_related_object_binding(
+            self.binding(),
+            Arc::clone(&self._pass.attachment_authority),
+        ) {
+            Ok(related) => related,
+            Err(error) => {
+                self.fail_conservative();
+                return Err(error);
+            }
+        };
+        if !previous.matches_binding(&related)
+            || origin.source_instance_id != self.binding.source_instance_id()
+        {
+            self.fail_conservative();
+            return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+        }
+        let object_context = match related.bootstrap_object_context() {
+            Ok(object_context) => object_context,
+            Err(error) => {
+                self.fail_conservative();
+                return Err(error);
+            }
+        };
+        let incompatible_replacement = previous.object_context != object_context;
+        let max_bytes = match usize::try_from(self.binding.runtime.reserved_max_bytes()) {
+            Ok(max_bytes) if max_bytes > 0 => max_bytes,
+            _ => {
+                self.fail_conservative();
+                return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+            }
+        };
+        let driver = match ReplaceDocument::new(ReplaceDocumentConfig {
+            max_document_bytes: max_bytes,
+        }) {
+            Ok(driver) => driver,
+            Err(_) => {
+                self.fail_conservative();
+                return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+            }
+        };
+        let read =
+            match read_stable_file_confined(self.binding.root(), self.binding.locator(), max_bytes)
+            {
+                Ok(read) => read,
+                Err(error) => {
+                    self.fail_conservative();
+                    return Err(ScopedObservationRuntimeSourceError::RelatedSource(
+                        super::source_failure_class(&error),
+                    ));
+                }
+            };
+        if self._pass.state.closed.load(Ordering::Acquire) {
+            self.fail_conservative();
+            return Err(ScopedObservationRuntimeSourceError::Closed);
+        }
+        let (bytes_read, outcome) = match &read {
+            StableRead::Missing => (0, AccessOutcome::Unavailable),
+            StableRead::Unstable => {
+                self.fail_conservative();
+                return Ok(
+                    ScopedObservationRelatedObjectRefreshObservation::RetryTransient {
+                        binding: Box::new(related),
+                        object_context,
+                    },
+                );
+            }
+            StableRead::Oversized(_) => (0, AccessOutcome::Oversized),
+            StableRead::Stable { bytes, .. } => (bytes.len() as u64, AccessOutcome::Available),
+        };
+        self.complete(bytes_read, outcome)?;
+        let framed = driver
+            .frame_retained_read(
+                read,
+                previous.checkpoint.as_ref(),
+                origin,
+                incompatible_replacement,
+            )
+            .map_err(|error| {
+                ScopedObservationRuntimeSourceError::RelatedSource(super::source_failure_class(
+                    &error,
+                ))
+            })?;
+        match framed {
+            ReplaceRead::Missing => {
+                if previous.checkpoint.is_some()
+                    || previous.kind != ScopedObservationRelatedObjectStateKind::Absent
+                {
+                    return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+                }
+                Ok(ScopedObservationRelatedObjectRefreshObservation::Unchanged(
+                    Box::new(ScopedObservationRelatedObjectState {
+                        identity: related.identity,
+                        checkpoint: None,
+                        object_context,
+                        decoder_state: previous.decoder_state.clone(),
+                        kind: ScopedObservationRelatedObjectStateKind::Absent,
+                    }),
+                ))
+            }
+            ReplaceRead::RetryTransient => Ok(
+                ScopedObservationRelatedObjectRefreshObservation::RetryTransient {
+                    binding: Box::new(related),
+                    object_context,
+                },
+            ),
+            ReplaceRead::Unchanged { checkpoint } => {
+                Ok(ScopedObservationRelatedObjectRefreshObservation::Unchanged(
+                    Box::new(ScopedObservationRelatedObjectState {
+                        identity: related.identity,
+                        checkpoint: Some(checkpoint),
+                        object_context,
+                        decoder_state: previous.decoder_state.clone(),
+                        kind: previous.kind,
+                    }),
+                ))
+            }
+            ReplaceRead::Record {
+                record,
+                checkpoint,
+                generation_changed,
+            } => {
+                let decoder_state = (!generation_changed)
+                    .then_some(previous.decoder_state.as_deref())
+                    .flatten();
+                related
+                    .decode_replace_record(object_context, checkpoint, record, decoder_state)
+                    .map(|snapshot| {
+                        ScopedObservationRelatedObjectRefreshObservation::Present(Box::new(
+                            snapshot,
+                        ))
+                    })
+            }
+            ReplaceRead::Removed { record, checkpoint } => related
+                .decode_replace_record(object_context, checkpoint, record, None)
+                .map(|snapshot| {
+                    ScopedObservationRelatedObjectRefreshObservation::Removed(Box::new(snapshot))
+                }),
+            ReplaceRead::Quarantined {
+                quarantine,
+                checkpoint,
+                generation_changed,
+            } => Ok(
+                ScopedObservationRelatedObjectRefreshObservation::Oversized {
+                    binding: Box::new(related),
+                    object_context,
+                    checkpoint,
+                    quarantine: Box::new(quarantine),
+                    retained_decoder_state: (!generation_changed)
+                        .then(|| previous.decoder_state.clone())
+                        .flatten(),
+                },
+            ),
         }
     }
 

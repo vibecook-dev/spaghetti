@@ -455,14 +455,14 @@ pub(crate) mod tests {
         ScopedObservationPollError, ScopedObservationPollLease, ScopedObservationPollResolution,
         ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
         ScopedObservationQueueLimits, ScopedObservationReadyResolution,
-        ScopedObservationResyncResolution, ScopedObservationScopeJoinSnapshot,
-        ScopedObservationSourceOwnerBindingError, ScopedObservationSourceOwnerRetryPolicy,
-        ScopedObservationSourceOwnerRunError, ScopedObservationSourceOwnerRunExit,
-        ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
-        ScopedObservationTrustedAccessRequest, ScopedObservationUnknownWireNegotiation,
-        ScopedObservationWatcherHintAction, ScopedObservationWatcherPhase,
-        ScopedObserverFailureReason, ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
-        ScopedRelationMembershipObservation, ScopedReplacementMode,
+        ScopedObservationRelatedObjectState, ScopedObservationResyncResolution,
+        ScopedObservationScopeJoinSnapshot, ScopedObservationSourceOwnerBindingError,
+        ScopedObservationSourceOwnerRetryPolicy, ScopedObservationSourceOwnerRunError,
+        ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
+        ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
+        ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
+        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
+        ScopedQueuedObservationFrame, ScopedRelationMembershipObservation, ScopedReplacementMode,
         ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
         ScopedRootIdentityRequest, ScopedScopeRelationState, ScopedSourceFailureClass,
         ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
@@ -474,6 +474,7 @@ pub(crate) mod tests {
         DirectorySelection, DirtyHint, DirtyReason, DirtyScope, HintEnqueue, IngestPriority,
         RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport, ScopeAccessRequest,
         ScopeIdentityInput, SharedSourcePassPool, SourceCursor, SourceMediaType, SourceRecord,
+        SourceRecordState,
     };
 
     use super::*;
@@ -554,6 +555,7 @@ pub(crate) mod tests {
         dependency_mutation: Option<(PathBuf, Vec<u8>)>,
         dependency_free_bootstrap_failure_suffix: Option<PathBuf>,
         dependency_free_bootstrap_panic_suffix: Option<PathBuf>,
+        dependency_free_context_revision: Option<Arc<AtomicUsize>>,
     }
 
     impl EmptyAdapter {
@@ -578,6 +580,7 @@ pub(crate) mod tests {
                 dependency_mutation: None,
                 dependency_free_bootstrap_failure_suffix: None,
                 dependency_free_bootstrap_panic_suffix: None,
+                dependency_free_context_revision: None,
             }
         }
 
@@ -619,6 +622,11 @@ pub(crate) mod tests {
 
         fn with_dependency_free_bootstrap_panic(mut self, suffix: PathBuf) -> Self {
             self.dependency_free_bootstrap_panic_suffix = Some(suffix);
+            self
+        }
+
+        fn with_dependency_free_context_revision(mut self, revision: Arc<AtomicUsize>) -> Self {
+            self.dependency_free_context_revision = Some(revision);
             self
         }
 
@@ -2030,6 +2038,12 @@ pub(crate) mod tests {
                     "private fixture failure /Users/alice/private/session.jsonl",
                 ));
             }
+            if let Some(revision) = &self.dependency_free_context_revision {
+                return AdapterObjectContext::new(
+                    1,
+                    revision.load(Ordering::Acquire).to_be_bytes().to_vec(),
+                );
+            }
             self.bootstrap_object(instance, object)
         }
 
@@ -3010,6 +3024,196 @@ pub(crate) mod tests {
         assert_eq!(present_relation.bytes_read, related_payload.len() as u64);
         assert_eq!(present_relation.trace[0].outcome, AccessOutcome::Available);
 
+        let refresh = |team_name: &[u8],
+                       previous: &ScopedObservationRelatedObjectState,
+                       phase: AccessPhase| {
+            let pass = host.begin_pass().unwrap();
+            let identity = [ScopeIdentityInput {
+                name: "team-name",
+                value: team_name,
+            }];
+            let observation = pass
+                .reserve_observation_runtime_source(ScopeAccessRequest {
+                    relation_id: "team-config-from-evidence",
+                    operation: AccessOperation::ObjectRead,
+                    phase,
+                    parent_token: None,
+                    identity_inputs: &identity,
+                    depth: 1,
+                    max_bytes: 4_096,
+                    max_rows: 0,
+                })
+                .unwrap()
+                .observe_related_replace_refresh(previous, &origin);
+            let report = pass.finish();
+            (observation, report)
+        };
+        let initial_state = present.refresh_state().unwrap();
+        assert_eq!(
+            initial_state.checkpoint_for_test().unwrap().revision,
+            Revision::digest(related_payload)
+        );
+        assert_eq!(
+            initial_state.decoder_state_for_test(),
+            Some(related_payload.as_slice())
+        );
+
+        let corrected_payload = b"corrected-private-document";
+        std::fs::write(
+            root.join("teams/private-team-coordinate/config.json"),
+            corrected_payload,
+        )
+        .unwrap();
+        let (corrected, corrected_report) = refresh(
+            b"private-team-coordinate",
+            &initial_state,
+            AccessPhase::Revalidation,
+        );
+        let corrected = corrected.unwrap();
+        let corrected_snapshot = corrected.present_snapshot_for_test().unwrap();
+        assert_eq!(corrected_snapshot.generation(), 1);
+        assert_eq!(
+            corrected_snapshot.revision(),
+            Revision::digest(corrected_payload)
+        );
+        let expected_decoder_state =
+            [related_payload.as_slice(), corrected_payload.as_slice()].concat();
+        assert_eq!(
+            corrected_snapshot.next_decoder_state_for_test(),
+            Some(expected_decoder_state.as_slice())
+        );
+        let corrected_relation = corrected_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(
+            corrected_relation.bytes_read,
+            corrected_payload.len() as u64
+        );
+        assert_eq!(
+            corrected_relation.trace[0].outcome,
+            AccessOutcome::Available
+        );
+        let corrected_state = corrected.refresh_state().unwrap();
+
+        let (unchanged, _) = refresh(
+            b"private-team-coordinate",
+            &corrected_state,
+            AccessPhase::Revalidation,
+        );
+        let unchanged = unchanged.unwrap();
+        assert!(unchanged.is_unchanged_for_test());
+        let unchanged_state = unchanged.refresh_state().unwrap();
+        assert_eq!(
+            unchanged_state.decoder_state_for_test(),
+            Some(expected_decoder_state.as_slice())
+        );
+
+        std::fs::remove_file(root.join("teams/private-team-coordinate/config.json")).unwrap();
+        let (removed, removed_report) = refresh(
+            b"private-team-coordinate",
+            &unchanged_state,
+            AccessPhase::Revalidation,
+        );
+        let removed = removed.unwrap();
+        let removed_snapshot = removed.removed_snapshot_for_test().unwrap();
+        assert_eq!(removed_snapshot.generation(), 2);
+        assert_eq!(
+            removed_snapshot.record_for_test().state,
+            SourceRecordState::Absent
+        );
+        assert_eq!(removed_snapshot.record_for_test().payload, b"");
+        assert_eq!(
+            removed_report
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "team-config-from-evidence")
+                .unwrap()
+                .bytes_read,
+            0
+        );
+        let removed_state = removed.refresh_state().unwrap();
+        assert!(!removed_state.checkpoint_for_test().unwrap().present);
+
+        let recreated_payload = b"recreated-private-document";
+        std::fs::write(
+            root.join("teams/private-team-coordinate/config.json"),
+            recreated_payload,
+        )
+        .unwrap();
+        let (recreated, _) = refresh(
+            b"private-team-coordinate",
+            &removed_state,
+            AccessPhase::Revalidation,
+        );
+        let recreated = recreated.unwrap();
+        let recreated_snapshot = recreated.present_snapshot_for_test().unwrap();
+        assert_eq!(recreated_snapshot.generation(), 3);
+        assert_eq!(
+            recreated_snapshot.next_decoder_state_for_test(),
+            Some(recreated_payload.as_slice())
+        );
+
+        let (substitution, substitution_report) = refresh(
+            b"different-private-team",
+            &removed_state,
+            AccessPhase::Revalidation,
+        );
+        let substitution = substitution.unwrap_err();
+        assert_eq!(
+            substitution.to_string(),
+            "scoped observation source binding does not match the active attachment"
+        );
+        assert!(!format!("{substitution:?}").contains("different-private-team"));
+        let substitution_relation = substitution_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(
+            substitution_relation.trace[0].outcome,
+            AccessOutcome::Failed
+        );
+
+        let foreign_host =
+            ScopedObservationAccessHost::authorize(&registry, scoped_access_request(root.clone()))
+                .unwrap();
+        let foreign_pass = foreign_host.begin_pass().unwrap();
+        let foreign_identity = [ScopeIdentityInput {
+            name: "team-name",
+            value: b"private-team-coordinate",
+        }];
+        let foreign_error = foreign_pass
+            .reserve_observation_runtime_source(ScopeAccessRequest {
+                relation_id: "team-config-from-evidence",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Revalidation,
+                parent_token: None,
+                identity_inputs: &foreign_identity,
+                depth: 1,
+                max_bytes: 4_096,
+                max_rows: 0,
+            })
+            .unwrap()
+            .observe_related_replace_refresh(&removed_state, &origin)
+            .unwrap_err();
+        assert_eq!(
+            foreign_error.to_string(),
+            "scoped observation source binding does not match the active attachment"
+        );
+        assert_eq!(
+            foreign_pass
+                .finish()
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "team-config-from-evidence")
+                .unwrap()
+                .trace[0]
+                .outcome,
+            AccessOutcome::Failed
+        );
+
         let (missing, missing_report) = observe(b"missing-team", AccessPhase::Revalidation);
         assert!(missing.is_unavailable());
         assert_eq!(
@@ -3034,6 +3238,11 @@ pub(crate) mod tests {
             missing_relation.trace[0].outcome,
             AccessOutcome::Unavailable
         );
+        let missing_state = missing.refresh_state().unwrap();
+        assert!(missing_state.checkpoint_for_test().is_none());
+        let (still_missing, _) =
+            refresh(b"missing-team", &missing_state, AccessPhase::Revalidation);
+        assert!(still_missing.unwrap().is_unchanged_for_test());
 
         let (oversized, oversized_report) = observe(b"oversized-team", AccessPhase::Revalidation);
         assert_eq!(oversized.oversized().map(|value| value.0), Some(4_097));
@@ -3047,6 +3256,30 @@ pub(crate) mod tests {
         assert_eq!(
             oversized_relation.trace[0].outcome,
             AccessOutcome::Oversized
+        );
+        let oversized_state = oversized.refresh_state().unwrap();
+        let (still_oversized, _) = refresh(
+            b"oversized-team",
+            &oversized_state,
+            AccessPhase::Revalidation,
+        );
+        let still_oversized = still_oversized.unwrap();
+        assert!(still_oversized.is_unchanged_for_test());
+        let still_oversized_state = still_oversized.refresh_state().unwrap();
+        std::fs::write(
+            root.join("teams/oversized-team/config.json"),
+            b"recovered-document",
+        )
+        .unwrap();
+        let (recovered, _) = refresh(
+            b"oversized-team",
+            &still_oversized_state,
+            AccessPhase::Revalidation,
+        );
+        let recovered = recovered.unwrap();
+        assert_eq!(
+            recovered.present_snapshot_for_test().unwrap().generation(),
+            1
         );
     }
 
@@ -3158,8 +3391,120 @@ pub(crate) mod tests {
             .iter()
             .find(|relation| relation.relation_id == "team-config-from-evidence")
             .unwrap();
-        assert_eq!(panic_relation.bytes_read, 21);
-        assert_eq!(panic_relation.trace[0].outcome, AccessOutcome::Available);
+        assert_eq!(panic_relation.bytes_read, 4_096);
+        assert_eq!(panic_relation.trace[0].outcome, AccessOutcome::Failed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn related_object_context_change_resets_generation_and_decoder_state() {
+        let context_revision = Arc::new(AtomicUsize::new(1));
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(COMPOSED_RELATED_SCOPE_DOCUMENT);
+        let registry = AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![
+                        fixture_root_runtime_stream(),
+                        fixture_related_runtime_stream(),
+                    ])
+                    .with_stateful_decode()
+                    .with_dependency_free_context_revision(Arc::clone(&context_revision)),
+            )
+            .register_native_support_probe("fixture", |_| {
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("context-private-root");
+        std::fs::create_dir_all(root.join("teams/context-team")).unwrap();
+        let payload = b"context-stable-document";
+        std::fs::write(root.join("teams/context-team/config.json"), payload).unwrap();
+        let request = scoped_access_request(root);
+        let source_instance_id = request.source_instance.id;
+        let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "team-name",
+            value: b"context-team",
+        }];
+        let origin = RecordOrigin {
+            source_instance_id,
+            stream_id: 91,
+            object_id: 92,
+            observed_at: 93,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/json").unwrap(),
+        };
+
+        let initial_pass = host.begin_pass().unwrap();
+        let initial = initial_pass
+            .reserve_observation_runtime_source(ScopeAccessRequest {
+                relation_id: "team-config-from-evidence",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 4_096,
+                max_rows: 0,
+            })
+            .unwrap()
+            .observe_initial_related_replace(&origin)
+            .unwrap();
+        let initial_snapshot = initial.present_snapshot().unwrap();
+        assert_eq!(initial_snapshot.generation(), 1);
+        assert_eq!(
+            initial_snapshot.next_decoder_state_for_test(),
+            Some(payload.as_slice())
+        );
+        let initial_state = initial.refresh_state().unwrap();
+        initial_pass.finish();
+
+        context_revision.store(2, Ordering::Release);
+        let refresh_pass = host.begin_pass().unwrap();
+        let refreshed = refresh_pass
+            .reserve_observation_runtime_source(ScopeAccessRequest {
+                relation_id: "team-config-from-evidence",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Revalidation,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 4_096,
+                max_rows: 0,
+            })
+            .unwrap()
+            .observe_related_replace_refresh(&initial_state, &origin)
+            .unwrap();
+        let refreshed_snapshot = refreshed.present_snapshot_for_test().unwrap();
+        assert_eq!(refreshed_snapshot.generation(), 2);
+        assert_eq!(refreshed_snapshot.revision(), Revision::digest(payload));
+        assert_eq!(
+            refreshed_snapshot.next_decoder_state_for_test(),
+            Some(payload.as_slice())
+        );
+        let refreshed_state = refreshed.refresh_state().unwrap();
+        assert_ne!(
+            initial_state.object_context_for_test().payload(),
+            refreshed_state.object_context_for_test().payload()
+        );
+        let relation = refresh_pass
+            .finish()
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap()
+            .clone();
+        assert_eq!(relation.bytes_read, payload.len() as u64);
+        assert_eq!(relation.trace[0].outcome, AccessOutcome::Available);
     }
 
     #[test]

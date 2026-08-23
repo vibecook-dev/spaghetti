@@ -25129,6 +25129,7 @@ pub(crate) use observation_source_access::{
     scan_observation_directory_membership_for_test,
     scan_observation_directory_membership_with_foreign_attachment_for_test,
     ScopedObservationDirectoryMemberObserveFailureKind, ScopedObservationDirectoryMemberRead,
+    ScopedObservationRelatedObjectState,
 };
 
 #[cfg(test)]
