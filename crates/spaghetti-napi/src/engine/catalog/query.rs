@@ -10,7 +10,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use rusqlite::{params, Connection, Row};
 
-use super::super::query_identity::{encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
+use super::super::query_identity::{
+    decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
+};
 use super::super::query_pool::read_committed_watermark;
 use super::super::EngineError;
 use super::{CatalogPageBounds, CatalogState, MAX_CATALOG_PAGE_LIMIT};
@@ -199,27 +201,33 @@ pub fn read_project_page(
                 cursor_key,
                 i64::from(limit) + 1,
             ],
-            decode_project_row,
+            |row| decode_project_row(row),
         )
         .map_err(|error| sqlite_error("read catalog project page", error))?;
 
     let mut projects = Vec::with_capacity(limit as usize);
-    let mut overflow = None;
+    let mut last_key: Option<Vec<u8>> = None;
+    let mut overflow = false;
     for row in rows {
-        let row = row.map_err(|error| sqlite_error("decode catalog project row", error))?;
+        let (row, project_key) =
+            row.map_err(|error| sqlite_error("decode catalog project row", error))?;
         if projects.len() == limit as usize {
-            overflow = Some(row);
+            overflow = true;
             break;
         }
+        last_key = Some(project_key);
         projects.push(row);
     }
-    let cursor = overflow.and(projects.last()).map(|last| {
-        encode_cursor(&Cursor {
+    // The cursor carries the raw key, never a re-parse of the opaque id: the
+    // id's base64url payload can itself contain the prefix separator.
+    let cursor = match (overflow, projects.last(), last_key) {
+        (true, Some(last), Some(entity_key)) => Some(encode_cursor(&Cursor {
             watermark,
             sort_key: last.latest_activity_at.clone().unwrap_or_default(),
-            entity_key: decode_entity_bytes(&last.project_id),
-        })
-    });
+            entity_key,
+        })),
+        _ => None,
+    };
 
     drop(statement);
     transaction
@@ -298,37 +306,39 @@ pub fn read_session_page(
                 i64::from(limit) + 1,
                 project_key,
             ],
-            |row| decode_session_row(row).map(|row| (row.0, row.1)),
+            decode_session_row,
         )
         .map_err(|error| sqlite_error("read catalog session page", error))?;
 
     let mut sessions = Vec::with_capacity(limit as usize);
-    let mut sort_keys = Vec::with_capacity(limit as usize);
+    let mut keys: Vec<(String, Vec<u8>)> = Vec::with_capacity(limit as usize);
     let mut overflow = false;
     for row in rows {
-        let (row, sort_time) =
+        let (row, sort_time, session_key) =
             row.map_err(|error| sqlite_error("decode catalog session row", error))?;
         if sessions.len() == limit as usize {
             overflow = true;
             break;
         }
         sessions.push(row);
-        sort_keys.push(sort_time);
+        keys.push((sort_time, session_key));
     }
     drop(statement);
 
-    for session in &mut sessions {
-        session.identity_conflicts =
-            read_conflicts(&transaction, &decode_entity_bytes(&session.session_id))?;
+    for (session, (_, session_key)) in sessions.iter_mut().zip(keys.iter()) {
+        session.identity_conflicts = read_conflicts(&transaction, session_key)?;
     }
 
-    let cursor = (overflow && !sessions.is_empty()).then(|| {
-        encode_cursor(&Cursor {
+    // The cursor carries the raw key, never a re-parse of the opaque id: the
+    // id's base64url payload can itself contain the prefix separator.
+    let cursor = match (overflow, keys.last()) {
+        (true, Some((sort_key, entity_key))) => Some(encode_cursor(&Cursor {
             watermark,
-            sort_key: sort_keys.last().cloned().unwrap_or_default(),
-            entity_key: decode_entity_bytes(&sessions[sessions.len() - 1].session_id),
-        })
-    });
+            sort_key: sort_key.clone(),
+            entity_key: entity_key.clone(),
+        })),
+        _ => None,
+    };
 
     transaction
         .commit()
@@ -438,7 +448,7 @@ fn read_conflicts(
         .map_err(|error| sqlite_error("decode catalog conflict", error))
 }
 
-fn decode_project_row(row: &Row<'_>) -> rusqlite::Result<CatalogProjectRow> {
+fn decode_project_row(row: &Row<'_>) -> rusqlite::Result<(CatalogProjectRow, Vec<u8>)> {
     let project_key: Vec<u8> = row.get(0)?;
     let external_ref: Vec<u8> = row.get(1)?;
     let latest_activity: String = row.get(10)?;
@@ -446,25 +456,28 @@ fn decode_project_row(row: &Row<'_>) -> rusqlite::Result<CatalogProjectRow> {
     let transcript_count: i64 = row.get(8)?;
     let hydrated_count: i64 = row.get(9)?;
     let degraded: i64 = row.get(11)?;
-    Ok(CatalogProjectRow {
-        project_id: encode_entity_id(PROJECT_ID_PREFIX, &project_key),
-        external_ref: encode_external_ref(&external_ref),
-        adapter_id: row.get(2)?,
-        native_project_key: row.get(3)?,
-        display_name: row.get(4)?,
-        display_path: row.get(5)?,
-        catalog_state: project_state(session_count, transcript_count, hydrated_count),
-        degraded: degraded != 0,
-        degraded_reason: row.get(12)?,
-        session_count: session_count.max(0) as u64,
-        transcript_session_count: transcript_count.max(0) as u64,
-        hydrated_session_count: hydrated_count.max(0) as u64,
-        latest_activity_at: (!latest_activity.is_empty()).then_some(latest_activity),
-        last_commit_seq: row.get::<_, i64>(6)?.max(0) as u64,
-    })
+    Ok((
+        CatalogProjectRow {
+            project_id: encode_entity_id(PROJECT_ID_PREFIX, &project_key),
+            external_ref: encode_external_ref(&external_ref),
+            adapter_id: row.get(2)?,
+            native_project_key: row.get(3)?,
+            display_name: row.get(4)?,
+            display_path: row.get(5)?,
+            catalog_state: project_state(session_count, transcript_count, hydrated_count),
+            degraded: degraded != 0,
+            degraded_reason: row.get(12)?,
+            session_count: session_count.max(0) as u64,
+            transcript_session_count: transcript_count.max(0) as u64,
+            hydrated_session_count: hydrated_count.max(0) as u64,
+            latest_activity_at: (!latest_activity.is_empty()).then_some(latest_activity),
+            last_commit_seq: row.get::<_, i64>(6)?.max(0) as u64,
+        },
+        project_key,
+    ))
 }
 
-fn decode_session_row(row: &Row<'_>) -> rusqlite::Result<(CatalogSessionRow, String)> {
+fn decode_session_row(row: &Row<'_>) -> rusqlite::Result<(CatalogSessionRow, String, Vec<u8>)> {
     let session_key: Vec<u8> = row.get(0)?;
     let project_key: Vec<u8> = row.get(1)?;
     let external_ref: Vec<u8> = row.get(2)?;
@@ -475,7 +488,7 @@ fn decode_session_row(row: &Row<'_>) -> rusqlite::Result<(CatalogSessionRow, Str
     let degraded: i64 = row.get(17)?;
     Ok((
         CatalogSessionRow {
-            session_id: encode_entity_id(SESSION_ID_PREFIX, &session_key),
+            session_id: encode_entity_id(SESSION_ID_PREFIX, &session_key.clone()),
             project_id: encode_entity_id(PROJECT_ID_PREFIX, &project_key),
             external_ref: encode_external_ref(&external_ref),
             adapter_id: row.get(3)?,
@@ -498,6 +511,7 @@ fn decode_session_row(row: &Row<'_>) -> rusqlite::Result<(CatalogSessionRow, Str
             last_commit_seq: row.get::<_, i64>(13)?.max(0) as u64,
         },
         sort_time,
+        session_key,
     ))
 }
 
@@ -609,26 +623,6 @@ fn decode_external_ref(value: &str) -> Option<Vec<u8>> {
     let payload = value.strip_prefix(&format!("{EXTERNAL_REF_ENCODING_VERSION}:"))?;
     let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
     (decoded.len() == 32).then_some(decoded)
-}
-
-fn decode_entity_bytes(entity_id: &str) -> Vec<u8> {
-    entity_id
-        .rsplit_once('_')
-        .and_then(|(_, payload)| URL_SAFE_NO_PAD.decode(payload).ok())
-        .unwrap_or_default()
-}
-
-fn decode_entity_id(
-    value: &str,
-    prefix: &str,
-    label: &'static str,
-) -> Result<Vec<u8>, EngineError> {
-    let payload = value
-        .strip_prefix(prefix)
-        .ok_or_else(|| EngineError::InvalidQuery(format!("{label} is not valid")))?;
-    URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|_| EngineError::InvalidQuery(format!("{label} is not valid")))
 }
 
 fn validate_limit(limit: u32) -> Result<u32, EngineError> {

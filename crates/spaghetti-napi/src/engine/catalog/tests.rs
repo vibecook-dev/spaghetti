@@ -342,8 +342,21 @@ fn an_unchanged_rescan_costs_no_commit() {
     engine.shutdown().unwrap();
 }
 
+/// Runs several times over distinct roots on purpose.
+///
+/// A row's opaque id is `<prefix><base64url(entity key)>`, and the key bytes
+/// depend on the source instance — so the payload contains the `_` separator
+/// for some roots and not others. Splitting the id to recover the key was
+/// therefore wrong in a way that only showed up on about a quarter of runs;
+/// looking up conflicts across several roots pins it.
 #[test]
 fn a_session_claimed_by_two_projects_reports_the_conflict() {
+    for attempt in 0..6 {
+        claimed_by_two_projects_case(attempt);
+    }
+}
+
+fn claimed_by_two_projects_case(attempt: u32) {
     let temp = TempDir::new().unwrap();
     let root = claude_tree(temp.path());
     // The beta project's index claims SESSION_A, which physically lives in
@@ -360,6 +373,14 @@ fn a_session_claimed_by_two_projects_reports_the_conflict() {
     let engine = open_engine(temp.path().join("conflict.db"));
     engine.discover_source_catalog(&configured(&root)).unwrap();
 
+    let readiness = engine.readiness().unwrap();
+    assert_eq!(
+        readiness.catalog.state,
+        ReadinessState::Ready,
+        "a readable tree must not be degraded: {:?}",
+        readiness.catalog.detail
+    );
+
     let sessions = sessions(&engine);
     let contested = sessions
         .sessions
@@ -373,7 +394,8 @@ fn a_session_claimed_by_two_projects_reports_the_conflict() {
     assert_eq!(
         contested.identity_conflicts.len(),
         1,
-        "the competing claim stays queryable"
+        "the competing claim stays queryable (attempt {attempt}, id {})",
+        contested.session_id
     );
     assert_eq!(
         contested.identity_conflicts[0].competing_native_project_key,
