@@ -48,7 +48,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use crate::adapter::{AdapterId, AdapterRegistry, FactBatch, TypedAccessAuthorization};
 use crate::source::{IngestPriority, SharedSourcePassPermit};

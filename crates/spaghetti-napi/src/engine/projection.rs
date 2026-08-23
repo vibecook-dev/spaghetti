@@ -7,7 +7,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Params, Transaction};
+#[cfg(test)]
+use rusqlite::Connection;
+use rusqlite::{params, params_from_iter, OptionalExtension, Params, Transaction};
 
 use crate::adapter::{
     ContractCompleteness, DelegationFact, DelegationKind, DelegationMetadataFact,
@@ -3804,7 +3806,6 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     use tempfile::TempDir;
-    use walkdir::WalkDir;
 
     use crate::adapter::{
         ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
@@ -3839,12 +3840,11 @@ mod tests {
         ProjectionVersionCommit, ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate,
         SourceStreamSpec,
     };
-    use crate::engine::query_identity::{encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
     use crate::engine::unknown_evidence_projection::{
         read_unknown_evidence_snapshot, unknown_evidence_owner,
     };
     use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
-    use crate::unknown_evidence_reducer::{UnknownEvidenceOccurrence, UnknownEvidenceReducer};
+    use crate::unknown_evidence_reducer::UnknownEvidenceOccurrence;
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
     const PROJECT: &str = "-Users-fixture-project";
@@ -5712,7 +5712,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_unknown_evidence_corrects_restarts_and_retracts_with_shared_digest() {
+    fn durable_unknown_evidence_corrects_restarts_and_retracts_the_retained_set() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("unknown-evidence.db");
         let object_key = b"fixture-transcript";
@@ -5732,15 +5732,9 @@ mod tests {
         first_request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
         apply_fact_observation_commit(&mut connection, &first_request, &first_batch).unwrap();
 
-        let mut reference = UnknownEvidenceReducer::new(
-            crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
-            crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_SAMPLES,
-        )
-        .unwrap();
-        reference.apply(first_occurrence.clone()).unwrap();
         assert_eq!(
             read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
-            reference.snapshot().unwrap()
+            vec![first_occurrence.clone()]
         );
         assert_eq!(
             unknown_evidence_owner(&connection, &first_occurrence.evidence.source_record_id)
@@ -5767,11 +5761,10 @@ mod tests {
         correction_request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
         apply_fact_observation_commit(&mut connection, &correction_request, &corrected_batch)
             .unwrap();
-        reference.apply(corrected_occurrence).unwrap();
-        let corrected_snapshot = reference.snapshot().unwrap();
+        let corrected_retained = vec![corrected_occurrence];
         assert_eq!(
             read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
-            corrected_snapshot
+            corrected_retained
         );
         assert_eq!(count(&connection, "unknown_native_evidence"), 1);
 
@@ -5780,7 +5773,7 @@ mod tests {
         schema::initialize_schema(&connection).unwrap();
         assert_eq!(
             read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
-            corrected_snapshot
+            corrected_retained
         );
 
         let mut reset_request = request(
@@ -5799,12 +5792,9 @@ mod tests {
             &FactBatch::new(1, 1).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            read_unknown_evidence_snapshot(&connection, object_id, 2)
-                .unwrap()
-                .complete_count,
-            0
-        );
+        assert!(read_unknown_evidence_snapshot(&connection, object_id, 2)
+            .unwrap()
+            .is_empty());
         assert_eq!(count(&connection, "unknown_native_evidence"), 0);
     }
 
