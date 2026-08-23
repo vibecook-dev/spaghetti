@@ -1042,3 +1042,207 @@ fn wait_until(timeout: Duration, predicate: impl Fn() -> bool, diagnostic: impl 
         diagnostic()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Runtime fact commits: the durable writer rejects a repeated revision
+// identity, so a decode that derives one twice fails the whole reconcile.
+// These drive the real supervisor, decode spine, and commit path.
+// ---------------------------------------------------------------------------
+
+fn runtime_fact_rows(database: &Path) -> (i64, i64) {
+    let connection =
+        Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let committed: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM fact_records WHERE fact_kind LIKE 'runtime.%'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let distinct: i64 = connection
+        .query_row(
+            "SELECT COUNT(DISTINCT semantic_fact_revision_id) FROM fact_records
+             WHERE fact_kind LIKE 'runtime.%' AND semantic_fact_revision_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    (committed, distinct)
+}
+
+/// A transcript whose shapes recur, written the way Claude writes one.
+///
+/// The repetition is the point: the same tool called with the same input, a
+/// model and permission mode that oscillate, and a record repeated verbatim.
+/// Every one of those produced a duplicate `FactRevisionId` before the
+/// identity fix, and the durable writer answers a duplicate by failing the
+/// commit — so a decode bug shows up here as a failed reconcile.
+fn write_repetitive_transcript(path: &Path, turns: u32) {
+    let mut lines: Vec<String> = Vec::new();
+    for turn in 0..turns {
+        let model = if turn % 2 == 0 { "model-a" } else { "model-b" };
+        let mode = if turn % 3 == 0 {
+            "default"
+        } else {
+            "acceptEdits"
+        };
+        let call = format!("toolu_{}", turn % 8);
+        let assistant = serde_json::json!({
+            "type": "assistant",
+            "uuid": format!("{turn:08x}-0000-4000-8000-000000000000"),
+            "parentUuid": null,
+            "timestamp": "2026-04-01T00:00:00.000Z",
+            "sessionId": "00000000-0000-4000-8000-000000000000",
+            "cwd": "/w/p",
+            "version": "1.0.0",
+            "gitBranch": "main",
+            "isSidechain": false,
+            "userType": "external",
+            "permissionMode": mode,
+            "message": {
+                "id": format!("msg_{turn}"),
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [
+                    {"type": "text", "text": "the same sentence every turn"},
+                    {"type": "tool_use", "id": call, "name": "Read", "input": {"path": "same"}},
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+        })
+        .to_string();
+        let user = serde_json::json!({
+            "type": "user",
+            "uuid": format!("{turn:08x}-1111-4000-8000-000000000000"),
+            "parentUuid": null,
+            "timestamp": "2026-04-01T00:00:00.000Z",
+            "sessionId": "00000000-0000-4000-8000-000000000000",
+            "cwd": "/w/p",
+            "version": "1.0.0",
+            "isSidechain": false,
+            "userType": "external",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": call, "content": "same result"},
+                ],
+            },
+        })
+        .to_string();
+        lines.push(assistant.clone());
+        lines.push(user);
+        if turn % 10 == 0 {
+            lines.push(assistant);
+        }
+    }
+    std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+}
+
+#[test]
+fn a_repetitive_corpus_commits_every_runtime_fact() {
+    const WAIT: Duration = Duration::from_secs(60);
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("claude");
+    let project = root.join("projects").join("-w-p");
+    std::fs::create_dir_all(&project).unwrap();
+    write_repetitive_transcript(
+        &project.join("00000000-0000-4000-8000-000000000000.jsonl"),
+        700,
+    );
+
+    let database = temp.path().join("engine.db");
+    let engine = open_engine(database.clone());
+    engine
+        .start_observation_supervisor(
+            ClaudeCodeAdapter::new(),
+            ObservationSupervisorOptions::new(vec![root]),
+        )
+        .unwrap();
+    wait_until(
+        WAIT,
+        || {
+            let observation = engine.status().observation;
+            !observation.reconcile_in_flight && observation.dirty_instances == 0
+        },
+        || format!("{:?}", engine.status().observation),
+    );
+
+    let observation = engine.status().observation;
+    assert_eq!(
+        observation.failed_reconciles_total, 0,
+        "a runtime fact commit failed: {:?}",
+        observation.last_error
+    );
+    assert_eq!(observation.last_error, None);
+    engine.shutdown().unwrap();
+
+    let (committed, distinct) = runtime_fact_rows(&database);
+    assert!(
+        committed > 4_000,
+        "the generated corpus should commit thousands of runtime facts, got {committed}"
+    );
+    assert_eq!(
+        committed, distinct,
+        "every committed runtime fact must own its revision identity"
+    );
+}
+
+/// Ingest a real native corpus and prove nothing is rejected at commit.
+///
+/// Ignored by default: it needs a populated native root, which only exists on
+/// a developer machine. Run with
+/// `CLAUDE_CORPUS_ROOT=~/.claude cargo test -p spaghetti-napi runtime_facts_commit_on_a_real_corpus -- --ignored --nocapture`.
+///
+/// It prints counts and durations only — never a path, name, id, or prompt.
+#[test]
+#[ignore = "requires a populated native root"]
+fn runtime_facts_commit_on_a_real_corpus() {
+    let Ok(root) = std::env::var("CLAUDE_CORPUS_ROOT") else {
+        panic!("set CLAUDE_CORPUS_ROOT to a native agent root");
+    };
+    let root = PathBuf::from(root);
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("corpus.db");
+    let engine = open_engine(database.clone());
+
+    let started = Instant::now();
+    engine
+        .start_observation_supervisor(
+            ClaudeCodeAdapter::new(),
+            ObservationSupervisorOptions::new(vec![root]),
+        )
+        .unwrap();
+    wait_until(
+        Duration::from_secs(3_600),
+        || {
+            let observation = engine.status().observation;
+            !observation.reconcile_in_flight && observation.dirty_instances == 0
+        },
+        || format!("{:?}", engine.status().observation),
+    );
+    let elapsed = started.elapsed();
+
+    let observation = engine.status().observation;
+    println!(
+        "history: {:.1}s, reconciles={}, failed={}",
+        elapsed.as_secs_f64(),
+        observation.reconciles_total,
+        observation.failed_reconciles_total,
+    );
+    assert_eq!(
+        observation.failed_reconciles_total, 0,
+        "a real-corpus commit failed: {:?}",
+        observation.last_error
+    );
+    assert_eq!(observation.last_error, None, "a real-corpus commit errored");
+    engine.shutdown().unwrap();
+
+    let (committed, distinct) = runtime_fact_rows(&database);
+    println!("runtime facts committed: {committed} ({distinct} distinct revisions)");
+    assert!(committed > 0, "a real corpus must commit runtime facts");
+    assert_eq!(
+        committed, distinct,
+        "every committed runtime fact must own its revision identity"
+    );
+}
