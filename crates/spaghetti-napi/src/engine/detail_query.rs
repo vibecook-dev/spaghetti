@@ -944,8 +944,11 @@ pub(super) fn read_canonical_stats(connection: &Connection) -> Result<CanonicalS
             "effective_interpretation_settings",
             "canonical_effective_interpretation_settings",
         ),
-        ("usage_contributions", "usage_contributions"),
-        ("usage_sessions", "usage_totals"),
+        // Response-level usage. `usage_contributions` counted native rows and
+        // over-counted responses roughly 2.3x on the production corpus, so the
+        // name it reported no longer describes anything the engine stores.
+        ("usage_responses", "usage_v2_response_contributions"),
+        ("usage_actor_runs", "runtime_actor_runs_v2"),
     ];
     let mut entities = Vec::with_capacity(entity_tables.len() + 1);
     entities.push(NamedCount {

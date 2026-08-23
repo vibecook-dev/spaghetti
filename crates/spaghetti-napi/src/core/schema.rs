@@ -4322,8 +4322,6 @@ mod tests {
               ON canonical_messages(session_key, source_generation, cursor_start);
             CREATE INDEX idx_canonical_message_blocks_run
               ON canonical_message_content_blocks(run_key, message_key, block_ordinal);
-            CREATE INDEX idx_usage_v2_response_session_only
-              ON usage_v2_response_contributions(session_key, usage_key);
             "#,
         )
         .expect("install superseded indexes");
@@ -4338,11 +4336,6 @@ mod tests {
             &conn,
             "index",
             "idx_canonical_message_blocks_run"
-        ));
-        assert!(!object_exists(
-            &conn,
-            "index",
-            "idx_usage_v2_response_session_only"
         ));
 
         for (sql, expected_index) in [

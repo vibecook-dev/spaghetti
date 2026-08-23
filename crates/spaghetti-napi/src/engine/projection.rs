@@ -434,7 +434,6 @@ impl TransactionalProjectionWork for FactProjectionWork<'_> {
                 | Fact::WorkflowSnapshot(_)
                 | Fact::WorkflowMemberEvent(_)
                 | Fact::RunEvidence(_)
-                | Fact::Usage(_)
                 | Fact::UsageRevisionV2(_)
                 | Fact::UserInputRequestRevision(_)
                 | Fact::MessageRevision(_)
@@ -4934,7 +4933,9 @@ mod tests {
         messages: Vec<MessageSnapshot>,
         runs: Vec<(String, Option<Vec<u8>>)>,
         states: Vec<String>,
-        totals: Vec<[i64; 8]>,
+        /// Per-session response-level totals: the four buckets plus the count
+        /// of responses that produced them.
+        totals: Vec<[i64; 5]>,
     }
 
     fn semantic_snapshot(connection: &Connection) -> SemanticSnapshot {
@@ -4973,15 +4974,18 @@ mod tests {
             ),
             totals: collect(
                 connection,
-                r#"SELECT exact_input_tokens, exact_output_tokens,
-                          exact_cache_creation_tokens, exact_cache_read_tokens,
-                          estimated_input_tokens, estimated_output_tokens,
-                          estimated_cache_creation_tokens, estimated_cache_read_tokens
-                   FROM usage_totals ORDER BY session_key"#,
+                r#"SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                          COALESCE(SUM(cache_creation_input_tokens), 0),
+                          COALESCE(SUM(cache_read_input_tokens), 0), COUNT(*)
+                   FROM usage_v2_response_contributions
+                   GROUP BY session_key ORDER BY session_key"#,
                 |row| {
                     Ok([
-                        row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-                        row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
                     ])
                 },
             ),
@@ -5198,16 +5202,15 @@ mod tests {
         connection
     }
 
+    /// History parity only. Per-message token columns are gone: RFC 012C
+    /// attributes usage to a response, not to a transcript record, and the
+    /// corpus totals are proven against the independent oracle instead.
     type HistoryParityRow = (
         String,
         String,
         Option<String>,
         Option<String>,
         String,
-        i64,
-        i64,
-        i64,
-        i64,
         String,
     );
 
@@ -5291,9 +5294,7 @@ mod tests {
         let mut rows = connection
             .prepare(
                 r#"
-                SELECT session_id, msg_type, uuid, timestamp, data,
-                       input_tokens, output_tokens, cache_creation_tokens,
-                       cache_read_tokens, text_content
+                SELECT session_id, msg_type, uuid, timestamp, data, text_content
                 FROM messages WHERE source_id = 'claude-code'
                 "#,
             )
@@ -5306,10 +5307,6 @@ mod tests {
                     row.get(3)?,
                     normalized_json(row.get(4)?),
                     row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
                 ))
             })
             .unwrap()
@@ -5326,16 +5323,11 @@ mod tests {
                 SELECT cs.native_session_id, cm.native_kind,
                        cm.native_message_id, cm.source_time,
                        cm.raw_json, cm.raw_json_codec,
-                       COALESCE(uc.input_tokens, 0),
-                       COALESCE(uc.output_tokens, 0),
-                       COALESCE(uc.cache_creation_tokens, 0),
-                       COALESCE(uc.cache_read_tokens, 0),
                        COALESCE(cm.search_text, '')
                 FROM canonical_messages cm
                 JOIN canonical_sessions cs ON cs.session_key = cm.session_key
                 JOIN source_objects so ON so.source_object_id = cm.source_object_id
                 JOIN source_streams ss ON ss.source_stream_id = so.source_stream_id
-                LEFT JOIN usage_contributions uc ON uc.subject_key = cm.message_key
                 WHERE ss.stream_key = 'session-transcripts'
                 "#,
             )
@@ -5349,10 +5341,6 @@ mod tests {
                     row.get::<_, Vec<u8>>(4)?,
                     row.get::<_, String>(5)?,
                     row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
                 ))
             })
             .unwrap()
@@ -5360,68 +5348,41 @@ mod tests {
             .unwrap();
         let mut rows = rows
             .into_iter()
-            .map(
-                |(
+            .map(|(session, kind, message, time, raw, codec, text)| {
+                let raw = crate::engine::storage_codec::decode(
+                    &codec,
+                    &raw,
+                    64 * 1024 * 1024,
+                    "decode parent parity payload",
+                )
+                .unwrap();
+                (
                     session,
                     kind,
                     message,
                     time,
-                    raw,
-                    codec,
-                    input,
-                    output,
-                    creation,
-                    read,
+                    normalized_json(String::from_utf8(raw).unwrap()),
                     text,
-                )| {
-                    let raw = crate::engine::storage_codec::decode(
-                        &codec,
-                        &raw,
-                        64 * 1024 * 1024,
-                        "decode parent parity payload",
-                    )
-                    .unwrap();
-                    (
-                        session,
-                        kind,
-                        message,
-                        time,
-                        normalized_json(String::from_utf8(raw).unwrap()),
-                        input,
-                        output,
-                        creation,
-                        read,
-                        text,
-                    )
-                },
-            )
+                )
+            })
             .collect::<Vec<_>>();
         rows.sort();
         rows
     }
 
-    type SubagentParityRow = (String, Option<String>, String, i64, i64, i64, i64);
+    type SubagentParityRow = (String, Option<String>, String);
 
     fn legacy_subagent_rows(connection: &Connection) -> Vec<SubagentParityRow> {
         let mut rows = connection
             .prepare(
                 r#"
-                SELECT session_id, timestamp, data, input_tokens, output_tokens,
-                       cache_creation_tokens, cache_read_tokens
+                SELECT session_id, timestamp, data
                 FROM subagent_messages WHERE source_id = 'claude-code'
                 "#,
             )
             .unwrap()
             .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    normalized_json(row.get(2)?),
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
+                Ok((row.get(0)?, row.get(1)?, normalized_json(row.get(2)?)))
             })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
@@ -5435,16 +5396,11 @@ mod tests {
             .prepare(
                 r#"
                 SELECT cs.native_session_id, cm.source_time,
-                       cm.raw_json, cm.raw_json_codec,
-                       COALESCE(uc.input_tokens, 0),
-                       COALESCE(uc.output_tokens, 0),
-                       COALESCE(uc.cache_creation_tokens, 0),
-                       COALESCE(uc.cache_read_tokens, 0)
+                       cm.raw_json, cm.raw_json_codec
                 FROM canonical_messages cm
                 JOIN canonical_sessions cs ON cs.session_key = cm.session_key
                 JOIN source_objects so ON so.source_object_id = cm.source_object_id
                 JOIN source_streams ss ON ss.source_stream_id = so.source_stream_id
-                LEFT JOIN usage_contributions uc ON uc.subject_key = cm.message_key
                 WHERE ss.stream_key = 'subagent-transcripts'
                 "#,
             )
@@ -5455,10 +5411,6 @@ mod tests {
                     row.get(1)?,
                     row.get::<_, Vec<u8>>(2)?,
                     row.get::<_, String>(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
                 ))
             })
             .unwrap()
@@ -5466,26 +5418,20 @@ mod tests {
             .unwrap();
         let mut rows = rows
             .into_iter()
-            .map(
-                |(session, time, raw, codec, input, output, creation, read)| {
-                    let raw = crate::engine::storage_codec::decode(
-                        &codec,
-                        &raw,
-                        64 * 1024 * 1024,
-                        "decode subagent parity payload",
-                    )
-                    .unwrap();
-                    (
-                        session,
-                        time,
-                        normalized_json(String::from_utf8(raw).unwrap()),
-                        input,
-                        output,
-                        creation,
-                        read,
-                    )
-                },
-            )
+            .map(|(session, time, raw, codec)| {
+                let raw = crate::engine::storage_codec::decode(
+                    &codec,
+                    &raw,
+                    64 * 1024 * 1024,
+                    "decode subagent parity payload",
+                )
+                .unwrap();
+                (
+                    session,
+                    time,
+                    normalized_json(String::from_utf8(raw).unwrap()),
+                )
+            })
             .collect::<Vec<_>>();
         rows.sort();
         rows
@@ -6630,7 +6576,7 @@ mod tests {
         assert_eq!(baseline, semantic_snapshot(&live));
         assert_eq!(baseline.messages.len(), 2);
         assert_eq!(baseline.states, vec!["active"]);
-        assert_eq!(baseline.totals, vec![[17, 9, 2, 4, 0, 0, 0, 0]]);
+        assert_eq!(baseline.totals, vec![[17, 9, 2, 4, 2]]);
 
         let path = root.path().join("transcript.jsonl");
         let driver = AppendDelimitedFile::new(AppendDelimitedConfig::json_lines()).unwrap();
@@ -6911,7 +6857,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_v2_replaces_response_snapshots_without_changing_legacy_usage() {
+    fn usage_v2_replaces_response_snapshots_instead_of_adding_native_rows() {
         let root = TempDir::new().unwrap();
         let adapter = ClaudeCodeAdapter::new();
         let context = adapter_context(root.path(), &adapter);
@@ -6949,19 +6895,10 @@ mod tests {
             offset = end;
         }
 
-        assert_eq!(count(&connection, "usage_contributions"), 7);
+        // Seven native usage rows, three responses. The additive path counted
+        // the rows; the response path counts the responses.
         assert_eq!(count(&connection, "usage_v2_response_contributions"), 3);
         assert_eq!(count(&connection, "runtime_actor_runs_v2"), 1);
-        assert_eq!(
-            connection
-                .query_row(
-                    "SELECT SUM(exact_input_tokens) FROM usage_totals",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            56
-        );
         let v2_totals: (i64, i64, i64, i64) = connection
             .query_row(
                 r#"
@@ -7089,7 +7026,7 @@ mod tests {
             Some(format!("v1:{}", URL_SAFE_NO_PAD.encode(revision_id)).as_str())
         );
 
-        let readiness_receipt = apply_projection_version_commit(
+        apply_projection_version_commit(
             &mut connection,
             &ProjectionVersionCommit {
                 source_instance_id: source_instance_catalog_id("claude-code", b"fixture-root"),
@@ -7110,6 +7047,22 @@ mod tests {
         )
         .unwrap()
         .expect("ready transition advances the fixed query watermark");
+        assert_eq!(count(&connection, "usage_v2_response_contributions"), 3);
+
+        // A generation correction owns a fresh response namespace and retracts
+        // every contribution from the replaced transcript before replay.
+        state.decoder_state = None;
+        let replacement = claude_usage_line("row-new", "api-1", None, 4, 2, Some(0), Some(0));
+        let replacement_record =
+            direct_record(2, 0, replacement.len() as u64 + 1, 300, &replacement);
+        decode_commit(
+            &mut connection,
+            &adapter,
+            &context,
+            &replacement_record,
+            &mut state,
+            301,
+        );
         assert_eq!(count(&connection, "usage_v2_response_contributions"), 1);
         assert_eq!(count(&connection, "runtime_actor_runs_v2"), 1);
         assert_eq!(
