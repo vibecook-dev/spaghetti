@@ -512,13 +512,29 @@ def _validate_scope_contract(bundle: Bundle) -> list[str]:
                         errors.append(f"{prefix}: source binding stream lacks replace/delete/recreate lifecycle")
             observation_binding = relation.get("observation_binding")
             is_observation = relation["primitive"] in observation_primitives
+            directory_identity_authority = relation.get("directory_identity_authority")
+            is_directory = relation["primitive"] == "ChildDirectoryByNativeId"
+            if is_directory and directory_identity_authority is None:
+                errors.append(
+                    f"{prefix}: child-directory relation requires an explicit identity authority"
+                )
+            elif is_directory and directory_identity_authority not in {
+                "configured_root",
+                "scope_join",
+            }:
+                errors.append(
+                    f"{prefix}: child-directory identity authority is invalid"
+                )
+            if not is_directory and directory_identity_authority is not None:
+                errors.append(
+                    f"{prefix}: only a child-directory relation may declare a directory identity authority"
+                )
             if scope["status"] == "promoted" and is_observation and observation_binding is None:
                 errors.append(f"{prefix}: promoted dynamic observation relation requires an executable source binding")
             if observation_binding is not None and relation["primitive"] not in executable_observation_primitives:
                 errors.append(f"{prefix}: observation source binding is not supported for this relation primitive")
             if observation_binding is not None:
                 relative_selector = observation_binding.get("relative_selector")
-                is_directory = relation["primitive"] == "ChildDirectoryByNativeId"
                 locator_pattern = _scope_locator_pattern(
                     locator, relation.get("identity_inputs")
                 )

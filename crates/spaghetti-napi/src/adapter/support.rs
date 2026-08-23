@@ -3956,6 +3956,7 @@ mod tests {
                     access_root: "root".to_string(),
                     locator: "known-object".to_string(),
                     identity_inputs: vec!["native-session-id".to_string()],
+                    directory_identity_authority: None,
                     bounds: ScopeRelationBounds {
                         max_fan_out: 1,
                         max_depth: 1,
@@ -4478,6 +4479,7 @@ mod tests {
                 "access_root": "root",
                 "locator": "sessions/{native-session-id}/children",
                 "identity_inputs": ["native-session-id"],
+                "directory_identity_authority": "configured_root",
                 "bounds": {"max_fan_out": 8, "max_depth": 4, "max_objects": 8, "max_bytes": 8192, "max_rows": 0},
                 "observation_binding": {"stream_id": "descendant-stream", "source_pattern": "sessions/*/children/**/entry-*.jsonl", "relative_selector": "**/entry-*.jsonl"},
                 "unavailable_behavior": "record_unavailable",

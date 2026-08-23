@@ -64,11 +64,11 @@ pub(crate) use registry::tests::{
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use scope::{
-    ScopeContractError, ScopeJoinEvidence, ScopeJoinIdentityInput, ScopeJoinParameterSet,
-    ScopeJoinUpdate, ScopeObservationSourceBinding, ScopeProgramDeclaration, ScopeProgramManifest,
-    ScopeProgramStatus, ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
-    ScopeRelationSourceBinding, ScopeRelationSourcePrimitive, ScopeUnavailableBehavior,
-    SCOPE_PROGRAM_SCHEMA_VERSION,
+    ScopeContractError, ScopeDirectoryIdentityAuthority, ScopeJoinEvidence, ScopeJoinIdentityInput,
+    ScopeJoinParameterSet, ScopeJoinUpdate, ScopeObservationSourceBinding, ScopeProgramDeclaration,
+    ScopeProgramManifest, ScopeProgramStatus, ScopeRelationBounds, ScopeRelationDeclaration,
+    ScopeRelationPrimitive, ScopeRelationSourceBinding, ScopeRelationSourcePrimitive,
+    ScopeUnavailableBehavior, SCOPE_PROGRAM_SCHEMA_VERSION,
 };
 pub use semantic::{
     compare_coverage, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,

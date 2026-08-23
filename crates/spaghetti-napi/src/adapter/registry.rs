@@ -654,7 +654,9 @@ pub(crate) mod tests {
 
     const CLAUDE_COMPOSED_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-transcript","relations":[{"relation_id":"root-transcript","primitive":"KnownObject","access_root":"root","locator":"root-transcript","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"current-child","primitive":"KnownObject","access_root":"root","locator":"current-child","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"future-child","primitive":"KnownObject","access_root":"root","locator":"future-child","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"team-inbox-sidecar","primitive":"KnownObject","access_root":"root","locator":"team-inbox-sidecar","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1024,"max_rows":0},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
-    const UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{native-session-id}/children","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"observation_binding":{"stream_id":"descendant-stream","source_pattern":"sessions/*/children/**","relative_selector":"**"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+    const UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{native-session-id}/children","identity_inputs":["native-session-id"],"directory_identity_authority":"configured_root","bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"observation_binding":{"stream_id":"descendant-stream","source_pattern":"sessions/*/children/**","relative_selector":"**"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
+    const JOIN_DERIVED_DYNAMIC_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"descendant-objects","primitive":"ChildDirectoryByNativeId","access_root":"root","locator":"sessions/{child-id}/children","identity_inputs":["child-id"],"directory_identity_authority":"scope_join","bounds":{"max_fan_out":8,"max_depth":2,"max_objects":8,"max_bytes":8192,"max_rows":0},"observation_binding":{"stream_id":"descendant-stream","source_pattern":"sessions/*/children/**","relative_selector":"**"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
     const COMPOSED_ROOT_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
@@ -735,6 +737,7 @@ pub(crate) mod tests {
             "access_root":"projects",
             "locator":"{project-key}/{native-session-id}/subagents",
             "identity_inputs":["project-key","native-session-id"],
+            "directory_identity_authority":"configured_root",
             "bounds":{"max_fan_out":4,"max_depth":5,"max_objects":4,"max_bytes":8388608,"max_rows":0},
             "observation_binding":{"stream_id":"subagent-transcripts","source_pattern":"*/*/subagents/**/agent-*.jsonl","relative_selector":"**/agent-*.jsonl"},
             "unavailable_behavior":"skip_optional",
@@ -874,7 +877,9 @@ pub(crate) mod tests {
         AdapterSupportBinding,
         crate::adapter::ScopeProgramManifest,
     ) {
-        let source_document = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
+        let source_document = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT
+            || scope_document == JOIN_DERIVED_DYNAMIC_SCOPE_DOCUMENT
+        {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"},{"stream_id":"artifact-blobs","root_id":"artifact","relative_patterns":["artifacts/*"],"primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"},{"stream_id":"descendant-stream","root_id":"root","relative_patterns":["sessions/*/children/**"],"decoder_id":"fixture-descendant","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
         } else if scope_document == COMPOSED_RELATED_SCOPE_DOCUMENT {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"root-stream","root_id":"root","relative_patterns":["sessions/*.jsonl"],"decoder_id":"fixture-root","authority":"canonical","primitive":"AppendDelimited","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},"lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],"safe_decoder_state_boundary":"object_generation_cursor"},{"stream_id":"team-config-stream","root_id":"root","relative_patterns":["teams/*/config.json"],"decoder_id":"fixture-related","authority":"canonical","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":4096},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
@@ -944,7 +949,9 @@ pub(crate) mod tests {
         let (catalog, binding, scope_programs) =
             promoted_fixture_catalog_with_scope(scope_document);
         let adapter = EmptyAdapter::new("fixture").with_support(binding, scope_programs);
-        let adapter = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT {
+        let adapter = if scope_document == UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT
+            || scope_document == JOIN_DERIVED_DYNAMIC_SCOPE_DOCUMENT
+        {
             adapter.with_streams(vec![
                 fixture_root_runtime_stream(),
                 fixture_descendant_runtime_stream(),
@@ -1149,8 +1156,20 @@ pub(crate) mod tests {
         probe_calls: Arc<AtomicUsize>,
         discover_calls: Arc<AtomicUsize>,
     ) -> AdapterRegistry {
+        configured_dynamic_directory_registry_with_scope(
+            UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT,
+            probe_calls,
+            discover_calls,
+        )
+    }
+
+    fn configured_dynamic_directory_registry_with_scope(
+        scope_document: &[u8],
+        probe_calls: Arc<AtomicUsize>,
+        discover_calls: Arc<AtomicUsize>,
+    ) -> AdapterRegistry {
         let (catalog, binding, scope_programs) =
-            promoted_fixture_catalog_with_scope(UNCOMPOSED_DYNAMIC_SCOPE_DOCUMENT);
+            promoted_fixture_catalog_with_scope(scope_document);
         AdapterRegistryBuilder::new()
             .register(
                 EmptyAdapter::new("fixture")
@@ -5057,6 +5076,65 @@ pub(crate) mod tests {
         assert!(!rendered.contains("configured-dynamic-private-root"));
         assert!(!rendered.contains("fixture-session"));
         assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn configured_scope_join_directory_cannot_be_preseeded_by_the_root_request() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_dynamic_directory_registry_with_scope(
+            JOIN_DERIVED_DYNAMIC_SCOPE_DOCUMENT,
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-join-private-root");
+        std::fs::create_dir_all(root.join("sessions/private-child/children")).unwrap();
+        std::fs::write(root.join("sessions/session.jsonl"), b"fixture\n").unwrap();
+
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![root.clone()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(attachment
+            .relation_identity_inputs("descendant-objects")
+            .is_none());
+        let runtime_error = attachment.prepare_append_runtime(16, 16).unwrap_err();
+        assert!(runtime_error
+            .to_string()
+            .contains("configured scoped runtime stream is not supported"));
+
+        let injected_identity = ScopedConfiguredRootIdentity::new(
+            b"fixture-session".as_slice(),
+            BTreeMap::from([
+                (
+                    "native-session-id".to_string(),
+                    Arc::<[u8]>::from(b"fixture-session".as_slice()),
+                ),
+                (
+                    "child-id".to_string(),
+                    Arc::<[u8]>::from(b"private-child".as_slice()),
+                ),
+            ]),
+        )
+        .unwrap()
+        .with_root_run_identity_key(Arc::from(b"fixture-root-run".as_slice()));
+        let injected = configured_attachment_request_with_identity(
+            vec![root],
+            PathBuf::from("sessions/session.jsonl"),
+            injected_identity,
+        );
+        let error =
+            prepare_configured_scoped_observation_attachment(&registry, injected).unwrap_err();
+        let rendered = error.to_string();
+        assert!(!rendered.contains("private-child"));
+        assert_eq!(probe_calls.load(Ordering::Acquire), 2);
         assert_eq!(discover_calls.load(Ordering::Acquire), 1);
     }
 

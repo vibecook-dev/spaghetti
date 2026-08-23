@@ -813,6 +813,13 @@ identity inputs must match the declared names exactly before their values are
 hashed into an opaque object token. Native identity values never enter access
 telemetry.
 
+Every `ChildDirectoryByNativeId` relation also declares its identity authority
+as either `configured_root` or `scope_join`. A configured-root coordinate is
+fixed with the trusted root request before access. A scope-join coordinate is
+accepted only from adapter join output retained by the common semantic reducer;
+supplying the same names in a portable root request cannot activate or retarget
+that directory.
+
 The initial relation vocabulary is:
 
 | Relation primitive            | Meaning                                                      |

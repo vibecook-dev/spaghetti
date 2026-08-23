@@ -28,11 +28,11 @@
     },
     "scope_program": {
       "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",
-      "sha256": "sha256:589a8bf80c4a538bdf7e54e366b4b537ea2ca1a1f968385415057643cad6e36d"
+      "sha256": "sha256:9685fdd1cc52c12771723e2b3e39cf3fc6200ee41053dcfd6a48b6439472c4f3"
     },
     "evidence": {
       "path": "agent-support/claude-code/candidate-2026-08-15/evidence.json",
-      "sha256": "sha256:d5ce28d72766d757f7c732ec1237a9a0c8499927cf7f435f37af29bda9123d31"
+      "sha256": "sha256:cc71ba262db1c13b1a06fbaaf9874b3f505d90af7a60c96e3d0175311c1c55a8"
     },
     "conformance": {
       "path": "agent-support/claude-code/candidate-2026-08-15/conformance.json",

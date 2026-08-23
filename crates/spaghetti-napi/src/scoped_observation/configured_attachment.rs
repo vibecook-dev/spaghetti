@@ -15,8 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::adapter::{
     AdapterRegistry, AuthorizedObservationSourceDriver, CanonicalEntityKey, CoverageDomain,
     DiscoveryContext, DriverSpec, ExternalEntityRef, FactSemanticContext, NativeIdentityClaim,
-    ScopeJoinEvidence, ScopeJoinParameterSet, ScopeRelationBounds, ScopeRelationPrimitive,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+    ScopeDirectoryIdentityAuthority, ScopeJoinEvidence, ScopeJoinParameterSet, ScopeRelationBounds,
+    ScopeRelationPrimitive, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, StreamSpec,
 };
 use crate::observation_contract::{ObservationContractOffer, ObservationContractRequest};
 use crate::source::{
@@ -2743,7 +2744,11 @@ fn compose_prepared_attachment(
     let observation_relations = plan.observation_relations().cloned().collect::<Vec<_>>();
     let directory_relation_bounds = observation_relations
         .iter()
-        .filter(|relation| relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId)
+        .filter(|relation| {
+            relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                && relation.directory_identity_authority
+                    == Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot)
+        })
         .map(|relation| (relation.relation_id.clone(), relation.bounds))
         .collect::<BTreeMap<_, _>>();
     let related_relation_bindings = observation_relations
@@ -2778,25 +2783,25 @@ fn compose_prepared_attachment(
         .collect::<Result<BTreeMap<_, _>, ScopedObservationAccessError>>()?;
     let unsupported_observation_relations = observation_relations
         .iter()
-        .filter(|relation| {
-            !matches!(
-                relation.primitive,
-                ScopeRelationPrimitive::KnownObject
-                    | ScopeRelationPrimitive::ChildDirectoryByNativeId
-                    | ScopeRelationPrimitive::SiblingObject
-                    | ScopeRelationPrimitive::ReferencedObjectFromField
-            )
+        .filter(|relation| match relation.primitive {
+            ScopeRelationPrimitive::KnownObject
+            | ScopeRelationPrimitive::SiblingObject
+            | ScopeRelationPrimitive::ReferencedObjectFromField => false,
+            ScopeRelationPrimitive::ChildDirectoryByNativeId => {
+                relation.directory_identity_authority
+                    != Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot)
+            }
+            _ => true,
         })
         .map(|relation| relation.relation_id.clone())
         .collect::<BTreeSet<_>>();
     let expected_identity_names = observation_relations
         .iter()
         .filter(|relation| {
-            matches!(
-                relation.primitive,
-                ScopeRelationPrimitive::KnownObject
-                    | ScopeRelationPrimitive::ChildDirectoryByNativeId
-            )
+            matches!(relation.primitive, ScopeRelationPrimitive::KnownObject)
+                || (relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                    && relation.directory_identity_authority
+                        == Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot))
         })
         .flat_map(|relation| relation.identity_inputs.iter().cloned())
         .collect::<BTreeSet<_>>();
@@ -2813,11 +2818,10 @@ fn compose_prepared_attachment(
     let relation_identity_inputs = observation_relations
         .iter()
         .filter(|relation| {
-            matches!(
-                relation.primitive,
-                ScopeRelationPrimitive::KnownObject
-                    | ScopeRelationPrimitive::ChildDirectoryByNativeId
-            )
+            matches!(relation.primitive, ScopeRelationPrimitive::KnownObject)
+                || (relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                    && relation.directory_identity_authority
+                        == Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot))
         })
         .map(|relation| {
             Ok((

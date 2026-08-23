@@ -333,6 +333,18 @@ pub enum ScopeUnavailableBehavior {
     FailScope,
 }
 
+/// Authority that may supply the identity coordinates for a child-directory
+/// observation. Configured-root coordinates are fixed before native access;
+/// scope-join coordinates must be emitted by the selected adapter from
+/// retained semantic evidence. Keeping this explicit prevents a portable
+/// request from pre-seeding an evidence-owned directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeDirectoryIdentityAuthority {
+    ConfiguredRoot,
+    ScopeJoin,
+}
+
 /// Exact bounded source contract used by an evidence-derived artifact
 /// relation. V1 intentionally permits only the common ReplaceDocument shape:
 /// other primitives need their own generation and position law before they
@@ -472,6 +484,11 @@ pub struct ScopeRelationDeclaration {
     pub access_root: String,
     pub locator: String,
     pub identity_inputs: Vec<String>,
+    /// Required for promoted child-directory relations. Other primitives have
+    /// an intrinsic authority: known objects are configured-root bound, while
+    /// sibling and referenced objects are scope-join bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_identity_authority: Option<ScopeDirectoryIdentityAuthority>,
     pub bounds: ScopeRelationBounds,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub statement_id: Option<String>,
@@ -509,6 +526,21 @@ impl ScopeRelationDeclaration {
         validate_identifier_list("scope relation identity input", &self.identity_inputs, true)?;
         validate_identifier_list("scope relation claim", &self.claim_refs, true)?;
         self.bounds.validate()?;
+
+        match (self.primitive, self.directory_identity_authority) {
+            (ScopeRelationPrimitive::ChildDirectoryByNativeId, None) => {
+                return Err(invalid(
+                    "child-directory relation requires an explicit identity authority",
+                ));
+            }
+            (ScopeRelationPrimitive::ChildDirectoryByNativeId, _) => {}
+            (_, Some(_)) => {
+                return Err(invalid(
+                    "only a child-directory relation may declare a directory identity authority",
+                ));
+            }
+            (_, None) => {}
+        }
 
         match self.primitive {
             ScopeRelationPrimitive::ParameterizedSQLiteRows => {
@@ -1074,6 +1106,13 @@ mod tests {
             .validate()
             .unwrap_err()
             .to_string()
+            .contains("requires an explicit identity authority"));
+        manifest.programs[0].relations[1].directory_identity_authority =
+            Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot);
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
             .contains("requires a relative selector"));
         manifest.programs[0].relations[1]
             .observation_binding
@@ -1089,6 +1128,12 @@ mod tests {
 
         manifest.programs[0].relations[1].primitive =
             ScopeRelationPrimitive::ReferencedObjectFromField;
+        assert!(manifest
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("only a child-directory relation"));
+        manifest.programs[0].relations[1].directory_identity_authority = None;
         let binding = manifest.programs[0].relations[1]
             .observation_binding
             .as_mut()

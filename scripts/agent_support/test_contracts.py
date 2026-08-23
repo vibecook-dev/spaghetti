@@ -888,6 +888,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                                     "access_root": "root",
                                     "locator": "sessions/{session}/children",
                                     "identity_inputs": ["session"],
+                                    "directory_identity_authority": "configured_root",
                                     "bounds": {"max_bytes": 8192},
                                     "observation_binding": {
                                         "stream_id": "children",
@@ -941,7 +942,26 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         bundle = FixtureBundle()
         self.assertEqual(_validate_scope_contract(bundle), [])
 
-        binding = bundle.scope["programs"][0]["relations"][1]["observation_binding"]
+        relation = bundle.scope["programs"][0]["relations"][1]
+        relation.pop("directory_identity_authority")
+        self.assertTrue(
+            any(
+                "requires an explicit identity authority" in error
+                for error in _validate_scope_contract(bundle)
+            )
+        )
+        relation["directory_identity_authority"] = "configured_root"
+        root_relation = bundle.scope["programs"][0]["relations"][0]
+        root_relation["directory_identity_authority"] = "configured_root"
+        self.assertTrue(
+            any(
+                "only a child-directory relation" in error
+                for error in _validate_scope_contract(bundle)
+            )
+        )
+        root_relation.pop("directory_identity_authority")
+
+        binding = relation["observation_binding"]
         binding["source_pattern"] = "sessions/*/other/**"
         self.assertTrue(
             any("pattern is not declared" in error for error in _validate_scope_contract(bundle))

@@ -366,7 +366,7 @@
     },
     {
       "claim_id": "claude-scope-relations-open",
-      "statement": "The candidate declares additional RFC 012D session relations (team inbox, todo, plan, workflow journal/child, and a bounded task-item document relation) with declared finite bounds and synthetic native-shape fixtures. Eleven concrete dynamic or related-object observation relations carry machine-readable bindings to exact existing scoped streams and source patterns; directory relations additionally bind a confined relative selector, and locator placeholders use their declared identity-input names. These bindings describe reviewed source coordinates but do not authorize, open, or read native sources. The retained declared-bounds report is a synthetic declaration worksheet with no ledger execution, exact-bound proof, native I/O, or benchmark. Current and later descendants share one ChildDirectoryByNativeId membership/watch relation. The conceptual task-artifact locator remains unresolved, so this is not complete RFC 012D relation coverage. The declarations are not executable through the common scoped observer.",
+      "statement": "The candidate declares additional RFC 012D session relations (team inbox, todo, plan, workflow journal/child, and a bounded task-item document relation) with declared finite bounds and synthetic native-shape fixtures. Eleven concrete dynamic or related-object observation relations carry machine-readable bindings to exact existing scoped streams and source patterns; directory relations additionally bind a confined relative selector and an explicit configured-root or retained scope-join identity authority, and locator placeholders use their declared identity-input names. All three Claude directory relations require retained scope-join authority, so a portable root request cannot pre-seed their coordinates. These bindings describe reviewed source coordinates but do not authorize, open, or read native sources. The retained declared-bounds report is a synthetic declaration worksheet with no ledger execution, exact-bound proof, native I/O, or benchmark. Current and later descendants share one ChildDirectoryByNativeId membership/watch relation. The conceptual task-artifact locator remains unresolved, so this is not complete RFC 012D relation coverage. The declarations are not executable through the common scoped observer.",
       "state": "degraded",
       "sources": [
         {
@@ -378,7 +378,7 @@
         {
           "kind": "code_reference",
           "path": "agent-support/claude-code/candidate-2026-08-15/scope-programs.json",
-          "sha256": "sha256:589a8bf80c4a538bdf7e54e366b4b537ea2ca1a1f968385415057643cad6e36d",
+          "sha256": "sha256:9685fdd1cc52c12771723e2b3e39cf3fc6200ee41053dcfd6a48b6439472c4f3",
           "locator": "eleven concrete observation bindings with exact stream, source-pattern, and directory-selector coordinates"
         },
         {

@@ -70,6 +70,7 @@
                   "items": { "$ref": "#/$defs/id" },
                   "uniqueItems": true
                 },
+                "directory_identity_authority": { "enum": ["configured_root", "scope_join"] },
                 "bounds": {
                   "type": "object",
                   "additionalProperties": false,
@@ -88,7 +89,14 @@
                 "observation_binding": { "$ref": "#/$defs/observationBinding" },
                 "unavailable_behavior": { "enum": ["record_unavailable", "skip_optional", "fail_scope"] },
                 "claim_refs": { "$ref": "#/$defs/claimRefs" }
-              }
+              },
+              "allOf": [
+                {
+                  "if": { "properties": { "primitive": { "const": "ChildDirectoryByNativeId" } } },
+                  "then": { "required": ["directory_identity_authority"] },
+                  "else": { "not": { "required": ["directory_identity_authority"] } }
+                }
+              ]
             }
           },
           "claim_refs": { "$ref": "#/$defs/claimRefs" }

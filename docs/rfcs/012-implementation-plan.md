@@ -2993,7 +2993,11 @@ the newly decoded child state. Configured `SiblingObject` and
 adapter-produced join evidence through pass-bound reads. They enter bootstrap
 coverage and replay inside each fresh whole-epoch stage without carrying stale
 native state. The real Claude multi-hop composition, including join-derived
-directory parameters, remains open. Built-in support remains Candidate and
+directory parameters, remains open. Child-directory declarations now bind an
+explicit `configured_root` or `scope_join` identity authority, and attachment
+composition rejects caller-provided coordinates for the latter before
+discovery. Execution of those retained join coordinates is the remaining D2
+step. Built-in support remains Candidate and
 cannot authorize this path. The active 2026-08-21 durable-path Candidate keeps
 only a bounded root-transcript scope declaration; the broader incomplete
 relation worksheet remains in the 2026-08-15 Candidate package.
