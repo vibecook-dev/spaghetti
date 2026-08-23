@@ -74,9 +74,9 @@ Three things a reader should not infer from the table.
 
 **The rebuild is minutes, not hours.** `SCHEMA_VERSION` 64 forces a full rebuild
 at first start: the catalog appears in about 100 ms, and history and search
-converge in the background — 193 s and 202 s on a 3.2 GB Claude corpus, after
-durable ingest went from 70 to 11,653 records/s (166×) on a frozen 301 MB
-corpus. Both root causes and the trade-offs accepted are in
+converge in the background — about 12 minutes (725 s, all eleven fact
+families) on a 3.2 GB Claude corpus, after durable ingest went from 70 to
+11,653 records/s (166×) on a frozen 301 MB corpus. Both root causes and the trade-offs accepted are in
 [the performance report](./012-landing-perf-report.md).
 
 **"Implemented" for the fact families means all eleven are emitted with typed

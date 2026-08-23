@@ -185,11 +185,13 @@ a 3.2 GB copy. The playground library screen renders from the catalog path in
 491 ms.
 
 What catalog-first buys is now measurable end to end: on that 3.2 GB corpus the
-catalog is listable in a quarter of a second while complete history arrives at
-193 s and search at 202 s. The gap between those numbers is the whole point of
-this RFC, and it closed from roughly three hours to three minutes when durable
-ingest went from 70 to 11,653 records/s
-([the performance report](./012-landing-perf-report.md)).
+catalog is listable in a quarter of a second while complete history arrives in
+about 12 minutes (725 s, 2.3 M runtime facts across all eleven families) and
+search shortly after. The gap between those numbers is the whole point of this
+RFC, and it closed from roughly three hours to about twelve minutes when
+durable ingest went from 70 to 11,653 records/s
+([the performance report](./012-landing-perf-report.md); its 193 s / 202 s
+full-corpus row predates the eight additional fact families).
 
 The draft's §14 table of experiment targets is superseded by these numbers and
 by landing plan §6; no numeric value here is a ratified release ceiling.

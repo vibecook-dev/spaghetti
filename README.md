@@ -85,7 +85,7 @@ its evidence was read at. A source that cannot be read completely is reported
 > **First run after upgrading to 0.8.0 rebuilds the index.** The schema changed,
 > so the whole corpus is re-read. The catalog is back in about a second, and the
 > rest is **minutes, not hours** — a 3.2 GB Claude corpus reaches complete
-> history in about 3 minutes and full-text search a few seconds later. Nothing
+> history in about 12 minutes and full-text search shortly after. Nothing
 > is lost; the database is a pure function of your agent files.
 
 ## Token usage is counted per response

@@ -45,7 +45,8 @@ re-read.
   screen work immediately.
 - **History, usage, artifacts, and search** converge in the background, in
   **minutes rather than hours**: a 3.2 GB Claude corpus reaches complete history
-  in 193 s and queryable search at 202 s. Durable ingest went from 70 to 11,653
+  in about 12 minutes (725 s, 2.3 M runtime facts across all eleven families)
+  and queryable search shortly after. Durable ingest went from 70 to 11,653
   records/s on a frozen 301 MB corpus — **166×** — this release; the
   measurements, both root causes, and the trade-offs accepted are in
   [the performance report](docs/rfcs/012-landing-perf-report.md).

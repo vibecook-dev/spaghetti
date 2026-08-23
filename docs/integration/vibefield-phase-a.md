@@ -249,7 +249,7 @@ Full detail and the porting table:
 - **No policy gating.** Native ids and locators are returned to any local
   caller; the petition's authorized-view distinction is not implemented.
 - **First run after 0.8.0 rebuilds the index.** The catalog is back in about a
-  quarter of a second; complete history follows in about 3 minutes on a 3.2 GB
-  corpus and search a few seconds after that. Read `getReadiness()` rather than
+  quarter of a second; complete history follows in about 12 minutes on a 3.2 GB
+  corpus (all eleven fact families) and search shortly after that. Read `getReadiness()` rather than
   assuming an empty query means empty data — and expect `projection_pending`
   from search until its field reports `ready`.
