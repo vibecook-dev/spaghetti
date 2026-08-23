@@ -20,13 +20,12 @@ use serde_json::{Map, Value};
 
 use super::adapter::{normalize_session_meta, CodexSessionMeta};
 use crate::adapter::{
-    AdapterError, AdapterErrorClass, AssociationQuality, CatalogDiscoveryLimits,
-    DiscoveredProject, DiscoveredSession, ProjectAssociationBasis, SourceCatalogDiscovery,
-    SourceInstance,
+    AdapterError, AdapterErrorClass, AssociationQuality, CatalogDiscoveryLimits, DiscoveredProject,
+    DiscoveredSession, ProjectAssociationBasis, SourceCatalogDiscovery, SourceInstance,
 };
 use crate::source::{
-    read_prefix_confined, read_stable_file_confined, DirectoryEntryKind, DirectoryScan, DirectorySelection,
-    DirectorySnapshot, DirectorySnapshotConfig, SourceDriverError, StableRead,
+    read_prefix_confined, read_stable_file_confined, DirectoryEntryKind, DirectoryScan,
+    DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, SourceDriverError, StableRead,
 };
 
 const SESSIONS_ROOT: &str = "sessions";

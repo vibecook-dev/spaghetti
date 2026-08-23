@@ -24,6 +24,11 @@ use super::capability_query::{
     MemoryDocumentPageRequest, PlanPage, PlanPageRequest, TaskCollectionPage,
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
 };
+use super::catalog::{
+    read_project_page, read_readiness, read_session_page, resolve_catalog_entity,
+    CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest, CatalogSessionPage,
+    CatalogSessionPageRequest, Readiness,
+};
 use super::coverage_query::{
     read_fact_family_coverage_page, read_fact_family_replay_target,
     validate_fact_family_coverage_page, validate_fact_family_replay_target, FactFamilyCoveragePage,
@@ -45,11 +50,6 @@ use super::orchestration_query::{
 use super::performance::{
     atomic_max, atomic_saturating_add, duration_ns, LatencyHistogram, NamedLatencySnapshot,
     QueryPerformanceSnapshot, RuntimeUsageCompatibilityTelemetrySnapshot,
-};
-use super::catalog::{
-    read_project_page, read_readiness, read_session_page, resolve_catalog_entity,
-    CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest, CatalogSessionPage,
-    CatalogSessionPageRequest, Readiness,
 };
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,

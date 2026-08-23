@@ -4819,20 +4819,20 @@ fn pending_projection_updates(
     instance: &SourceInstance,
     reason: &str,
 ) -> Vec<ProjectionVersionUpdate> {
-    (declares_usage_v2_projection(manifest) && stream_declares_usage_v2_projection(stream)).then(
-        || {
-        usage_v2_projection_update(
-            instance,
-            ProjectionReadiness::Pending,
-            Some(if reason == USAGE_V2_REPLAY_COMMIT_REASON {
-                USAGE_V2_REPLAY_PENDING_DETAIL
-            } else {
-                "source reconciliation in progress"
-            }),
-        )
-    })
-    .into_iter()
-    .collect()
+    (declares_usage_v2_projection(manifest) && stream_declares_usage_v2_projection(stream))
+        .then(|| {
+            usage_v2_projection_update(
+                instance,
+                ProjectionReadiness::Pending,
+                Some(if reason == USAGE_V2_REPLAY_COMMIT_REASON {
+                    USAGE_V2_REPLAY_PENDING_DETAIL
+                } else {
+                    "source reconciliation in progress"
+                }),
+            )
+        })
+        .into_iter()
+        .collect()
 }
 
 fn coverage_position_kind(driver: &DriverSpec) -> CoveragePositionKind {

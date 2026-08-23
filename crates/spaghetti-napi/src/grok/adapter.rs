@@ -13,17 +13,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::adapter::{
-    CatalogDiscoveryLimits, SourceCatalogDiscovery,
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
-    CapabilityGranularity, CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock,
-    DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
-    EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact,
-    MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact,
-    ScopeProgramManifest, SessionFact, SourceAccess, SourceInstance, SourceInstanceKey,
-    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, SourceSnapshot, StreamAuthority,
-    StreamId, StreamSpec, SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact,
-    UsageScope, ValueQuality,
+    CapabilityGranularity, CapabilityId, CapabilitySupport, CatalogDiscoveryLimits,
+    ConsistencyPolicy, ContentBlock, DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy,
+    DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact,
+    FactBatch, MessageFact, MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy,
+    RunEvidenceFact, RunFact, ScopeProgramManifest, SessionFact, SourceAccess,
+    SourceCatalogDiscovery, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceRoot, SourceSnapshot, StreamAuthority, StreamId, StreamSpec,
+    SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
+    ValueQuality,
 };
 use crate::source::{
     platform_path_key, read_stable_file_confined, AppendDelimitedConfig, DirectorySnapshotConfig,

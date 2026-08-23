@@ -18,11 +18,10 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use super::adapter::{grok_project_key, grok_percent_decode};
+use super::adapter::{grok_percent_decode, grok_project_key};
 use crate::adapter::{
-    AdapterError, AdapterErrorClass, AssociationQuality, CatalogDiscoveryLimits,
-    DiscoveredProject, DiscoveredSession, ProjectAssociationBasis, SourceCatalogDiscovery,
-    SourceInstance,
+    AdapterError, AdapterErrorClass, AssociationQuality, CatalogDiscoveryLimits, DiscoveredProject,
+    DiscoveredSession, ProjectAssociationBasis, SourceCatalogDiscovery, SourceInstance,
 };
 use crate::source::{
     read_stable_file_confined, DirectoryEntryKind, DirectoryScan, DirectorySelection,
@@ -164,7 +163,8 @@ fn apply_summary(session: &mut DiscoveredSession, summary: Option<Value>) {
     session.title = text(summary.get("generated_title"))
         .or_else(|| text(summary.get("session_summary")))
         .or_else(|| session.title.take());
-    session.native_created_at = text(summary.get("created_at")).or_else(|| session.native_created_at.take());
+    session.native_created_at =
+        text(summary.get("created_at")).or_else(|| session.native_created_at.take());
     session.native_updated_at = text(summary.get("updated_at"))
         .or_else(|| text(summary.get("last_active_at")))
         .or_else(|| session.native_updated_at.take());

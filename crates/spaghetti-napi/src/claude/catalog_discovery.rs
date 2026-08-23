@@ -23,9 +23,9 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::adapter::{
-    AdapterError, AdapterErrorClass, AssociationQuality, CatalogDiscoveryLimits, DiscoveredAssociationConflict,
-    DiscoveredProject, DiscoveredSession, ProjectAssociationBasis, SourceCatalogDiscovery,
-    SourceInstance,
+    AdapterError, AdapterErrorClass, AssociationQuality, CatalogDiscoveryLimits,
+    DiscoveredAssociationConflict, DiscoveredProject, DiscoveredSession, ProjectAssociationBasis,
+    SourceCatalogDiscovery, SourceInstance,
 };
 use crate::source::{
     read_stable_file_confined, DirectoryEntryKind, DirectoryScan, DirectorySelection,

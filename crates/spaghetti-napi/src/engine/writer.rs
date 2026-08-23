@@ -17,6 +17,7 @@ use rusqlite::{Connection, TransactionBehavior};
 use crate::adapter::FactBatch;
 use crate::core::schema;
 
+use super::catalog::{commit_source_scan, CatalogScanReceipt, SourceScan};
 use super::commit::{
     self, ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, CommitDetail, CommitHook,
     CommitReceipt, CommitStage, ObservationCommit,
@@ -25,7 +26,6 @@ use super::performance::{
     atomic_max, atomic_saturating_add, duration_ns, CheckpointPerformanceSnapshot,
     LatencyHistogram, NamedLatencySnapshot, WriterPerformanceSnapshot,
 };
-use super::catalog::{commit_source_scan, CatalogScanReceipt, SourceScan};
 use super::projection;
 use super::query_pool::{read_source_catalog, SourceCatalogSnapshot};
 use super::EngineError;

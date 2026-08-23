@@ -119,7 +119,12 @@ pub(crate) fn scan_source<A: AgentAdapter + ?Sized>(
     let mut projects = Vec::with_capacity(discovery.projects.len());
     for project in &discovery.projects {
         projects.push(ScannedProject {
-            project_key: native_key(&adapter_id, instance, "project", &project.native_project_key)?,
+            project_key: native_key(
+                &adapter_id,
+                instance,
+                "project",
+                &project.native_project_key,
+            )?,
             external_ref: external_ref(
                 &adapter_id,
                 &source_instance_key,

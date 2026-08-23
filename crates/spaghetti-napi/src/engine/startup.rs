@@ -40,6 +40,10 @@ pub(crate) struct ConfiguredObservationSource {
 }
 
 impl ConfiguredObservationSource {
+    pub(crate) fn adapter_id(&self) -> &str {
+        &self.adapter_id
+    }
+
     pub(crate) fn new(
         adapter_id: impl Into<String>,
         roots: Vec<PathBuf>,
@@ -222,7 +226,6 @@ impl SpaghettiEngineCore {
     ) -> Result<ConfiguredObservationStartupOutcome, EngineError> {
         self.ensure_configured_observation_startup_available()?;
         let configured = normalize_configured_sources(configured, &cancellation)?;
-        self.retain_configured_catalog_sources(configured.clone());
 
         // Catalog before history: every source contributes its rows and the
         // library becomes listable before any watcher thread starts a scan.
@@ -300,6 +303,7 @@ impl SpaghettiEngineCore {
         source: &ConfiguredObservationSource,
     ) -> Result<Vec<super::catalog::CatalogScanReceipt>, EngineError> {
         let adapter = self.registered_adapter(&source.adapter_id)?;
+        self.retain_configured_catalog_source(source.clone());
         let observed_at = now_ms();
         let specs = adapter
             .discover(&DiscoveryContext {

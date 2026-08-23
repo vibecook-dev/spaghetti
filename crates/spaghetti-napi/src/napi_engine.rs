@@ -10,32 +10,29 @@ use napi::bindgen_prelude::{
 };
 use napi_derive::napi;
 
-use crate::adapter::{
-    AdapterError, AdapterRegistry, SupportCatalog, SupportContractError,
-};
+use crate::adapter::{AdapterError, AdapterRegistry, SupportCatalog, SupportContractError};
 use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
-    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats,
-    CatalogEntityResolution, CatalogPageBounds, CatalogProjectPageRequest, CatalogProjectRow,
-    CatalogSessionPageRequest, CatalogSessionRow, ChangeCursor, ChangeReplay, ChangeReplayRequest,
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, CatalogEntityResolution,
+    CatalogPageBounds, CatalogProjectPageRequest, CatalogProjectRow, CatalogSessionPageRequest,
+    CatalogSessionRow, ChangeCursor, ChangeReplay, ChangeReplayRequest,
     CheckpointPerformanceSnapshot, CommitWaitResult, ConfiguredObservationSource, DelegationPage,
     DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
     EngineOptions, EngineOverview, EngineStatusSnapshot, FactFamilyCoverageItem,
     FactFamilyCoveragePage, FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary,
     FactFamilyReplayCommand, FactFamilyReplayResult, HistoryProjectIndexSummary,
     HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
-    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest, IdentityConflict,
-    Readiness, ReadinessField, DEFAULT_CATALOG_PAGE_LIMIT,
-    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
-    MessageDetail, MessagePage, MessagePageRequest, NamedCount, NamedLatencySnapshot,
-    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
-    PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
-    ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket,
-    RuntimeUsageCompatibilityReport, RuntimeUsageCompatibilityRequest,
-    RuntimeUsageCompatibilityTelemetrySnapshot, RuntimeUsageLegacyTotals,
-    RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
+    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
+    HistorySessionSummary, IdentityConflict, MemoryDocument, MemoryDocumentPage,
+    MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest, NamedCount,
+    NamedLatencySnapshot, ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata,
+    PlanDetail, PlanPage, PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot,
+    Readiness, ReadinessField, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
+    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
+    RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket, RuntimeUsageCompatibilityReport,
+    RuntimeUsageCompatibilityRequest, RuntimeUsageCompatibilityTelemetrySnapshot,
+    RuntimeUsageLegacyTotals, RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
     RuntimeUsageQuerySelectionResult, RuntimeUsageQuerySelectionValue, RuntimeUsageTotalsReport,
     RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, RuntimeUsageV2ActorContext,
     RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
@@ -55,8 +52,8 @@ use crate::engine::{
     UsageScopeRequest, UsageTokenValues, UsageTotalsReport, WorkflowDetails,
     WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage, WorkflowMemberPageRequest,
     WorkflowPage, WorkflowPageRequest, WorkflowSummary, WriterPerformanceSnapshot,
-    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
-    DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
+    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CATALOG_PAGE_LIMIT,
+    DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
     DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
     DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
     DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,

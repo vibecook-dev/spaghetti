@@ -5,8 +5,8 @@
 //! can own the same `SpaghettiEngineCore` and receive identical semantics.
 
 mod artifact_projection;
-mod catalog;
 mod capability_query;
+mod catalog;
 mod commit;
 mod coordinator;
 mod coverage_query;
@@ -29,9 +29,9 @@ mod runtime_usage_query;
 mod runtime_usage_totals_query;
 mod search_query;
 mod session_index_projection;
-mod startup;
 mod settings_projection;
 mod source_coverage;
+mod startup;
 mod storage_codec;
 mod supervisor;
 mod task_projection;
@@ -51,7 +51,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-
 use crate::adapter::{
     AdapterId, AdapterRegistry, FactBatch, SourceCoverageSet, TypedAccessAuthorization,
 };
@@ -62,6 +61,12 @@ pub use capability_query::{
     TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest,
     ToolResultDetail, ToolResultPage, ToolResultPageRequest, CAPABILITY_QUERY_CONTRACT_VERSION,
     DEFAULT_CAPABILITY_PAGE_LIMIT, MAX_CAPABILITY_PAGE_PAYLOAD_BYTES,
+};
+pub use catalog::{
+    CatalogEntityResolution, CatalogPageBounds, CatalogProjectPage, CatalogProjectPageRequest,
+    CatalogProjectRow, CatalogSessionPage, CatalogSessionPageRequest, CatalogSessionRow,
+    CatalogState, IdentityConflict, Readiness, ReadinessField, ReadinessState,
+    DEFAULT_CATALOG_PAGE_LIMIT,
 };
 pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
@@ -103,14 +108,6 @@ pub use performance::{
     StoragePerformanceSnapshot, WriterPerformanceSnapshot,
 };
 use performance::{SourcePerformanceRecorder, SourceTelemetry};
-pub use catalog::{
-    CatalogEntityResolution, CatalogPageBounds, CatalogProjectPage, CatalogProjectPageRequest,
-    CatalogProjectRow, CatalogSessionPage, CatalogSessionPageRequest, CatalogSessionRow,
-    CatalogState, IdentityConflict, Readiness, ReadinessField, ReadinessState,
-    DEFAULT_CATALOG_PAGE_LIMIT,
-};
-pub(crate) use startup::{ConfiguredObservationSource, ConfiguredObservationStartupOutcome};
-use startup::ConfiguredObservationStartupRuntime;
 pub use query_pool::{
     ChangeCursor, ChangeReplay, ChangeReplayRequest, DurableChange, HistoryProjectIndexSummary,
     HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
@@ -145,6 +142,8 @@ pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
     MAX_SEARCH_PAGE_PAYLOAD_BYTES, SEARCH_QUERY_CONTRACT_VERSION,
 };
+use startup::ConfiguredObservationStartupRuntime;
+pub(crate) use startup::{ConfiguredObservationSource, ConfiguredObservationStartupOutcome};
 pub use supervisor::ObservationSupervisorOptions;
 use supervisor::{ObservationSupervisor, PreparedObservationSupervisor};
 pub use team_query::{
@@ -851,14 +850,21 @@ impl SpaghettiEngineCore {
             .clone()
     }
 
-    pub(crate) fn retain_configured_catalog_sources(
-        &self,
-        sources: Vec<ConfiguredObservationSource>,
-    ) {
-        *self
+    /// Remember one source so a later rescan can repeat its discovery pass
+    /// without the caller re-supplying roots. Keyed by adapter, so re-running
+    /// discovery for the same adapter replaces rather than duplicates.
+    pub(crate) fn retain_configured_catalog_source(&self, source: ConfiguredObservationSource) {
+        let mut sources = self
             .configured_catalog_sources
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = sources;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match sources
+            .iter_mut()
+            .find(|existing| existing.adapter_id() == source.adapter_id())
+        {
+            Some(existing) => *existing = source,
+            None => sources.push(source),
+        }
     }
 
     /// List canonical projects through one bounded, snapshot-consistent

@@ -14,16 +14,15 @@ use crossbeam_channel::{after, bounded, select, Receiver, Sender};
 use notify::{event::ModifyKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::adapter::{
-    AgentAdapter,
-    DiscoveryContext, DriverSpec, SourceInstance, SourceInstanceSpec, StreamAuthority,
+    AgentAdapter, DiscoveryContext, DriverSpec, SourceInstance, SourceInstanceSpec, StreamAuthority,
 };
 use crate::source::{confined_relative_path_key, DirtyReason, IngestPriority, PollingPolicy};
 
 use super::coordinator::SelectorPatterns;
 use super::observation::PendingObservationWork;
 use super::{
-    EngineError, ObservationCoordinator, QueryCancellationToken,
-    ReconcileRequest, ReconcileRetryTarget, SpaghettiEngineCore,
+    EngineError, ObservationCoordinator, QueryCancellationToken, ReconcileRequest,
+    ReconcileRetryTarget, SpaghettiEngineCore,
 };
 
 const WATCH_EVENT_CAPACITY: usize = 1_024;
