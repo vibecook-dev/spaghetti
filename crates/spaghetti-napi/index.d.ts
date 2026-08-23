@@ -1829,6 +1829,11 @@ export interface ObserverStatus {
    * never comparable to a durable commit sequence.
    */
   offeredThroughSequence: number
+  /**
+   * Source objects opened since attach. A watcher-directed pass reads only
+   * what changed, so this grows with real activity rather than scope size.
+   */
+  objectReads: number
   queuedSemantic: number
   queuedControl: number
   retainedBytes: number

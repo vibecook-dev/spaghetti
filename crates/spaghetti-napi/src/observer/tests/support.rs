@@ -173,6 +173,14 @@ pub(crate) fn assistant_record(uuid: &str, response_id: &str, input_tokens: u64)
     )
 }
 
+/// The smallest assistant record that still reduces to one usage revision.
+/// Used where a test needs many revisions and the file size matters.
+pub(crate) fn compact_assistant_record(index: usize) -> String {
+    format!(
+        r#"{{"type":"assistant","uuid":"m{index}","timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/f","version":"1","isSidechain":false,"userType":"external","requestId":"r{index}","message":{{"model":"m","id":"p{index}","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
+    )
+}
+
 /// A subagent transcript record. The child declares its own actor id.
 pub(crate) fn subagent_record(agent_id: &str, uuid: &str) -> String {
     format!(
@@ -202,7 +210,14 @@ pub(crate) fn collect_until(
 
 /// Everything delivered through the first bootstrap barrier.
 pub(crate) fn drain_bootstrap(handle: &ObserverHandle) -> Vec<ObserverEvent> {
-    collect_until(handle, Duration::from_secs(10), |events| {
+    drain_bootstrap_within(handle, Duration::from_secs(10))
+}
+
+pub(crate) fn drain_bootstrap_within(
+    handle: &ObserverHandle,
+    timeout: Duration,
+) -> Vec<ObserverEvent> {
+    collect_until(handle, timeout, |events| {
         events
             .iter()
             .any(|event| matches!(event, ObserverEvent::BootstrapComplete(_)))

@@ -79,6 +79,25 @@ impl ObserverHandle {
         request: &ObserveSessionRequest,
         adapter: Arc<dyn crate::adapter::AgentAdapter>,
     ) -> Result<Self, ObserverError> {
+        Self::open_inner(request, adapter, true)
+    }
+
+    /// Attach without installing filesystem watches. Tests use this to prove
+    /// the bounded reconciliation sweep stands on its own, since RFC 012D
+    /// treats notifications as hints that may never arrive.
+    #[cfg(test)]
+    pub(crate) fn open_unwatched(
+        request: &ObserveSessionRequest,
+        adapter: Arc<dyn crate::adapter::AgentAdapter>,
+    ) -> Result<Self, ObserverError> {
+        Self::open_inner(request, adapter, false)
+    }
+
+    fn open_inner(
+        request: &ObserveSessionRequest,
+        adapter: Arc<dyn crate::adapter::AgentAdapter>,
+        watch: bool,
+    ) -> Result<Self, ObserverError> {
         let resolved = request.resolve(adapter.manifest().id.as_str())?;
         let delivery = Arc::new(Delivery::new(resolved.queue));
         let runtime = ObserverRuntime::attach(resolved, adapter, Arc::clone(&delivery))?;
@@ -86,7 +105,7 @@ impl ObserverHandle {
         let hint = sender.clone();
         let owner = std::thread::Builder::new()
             .name("spaghetti-observer".to_string())
-            .spawn(move || runtime.run(receiver, hint))
+            .spawn(move || runtime.run_with_watcher(receiver, hint, watch))
             .map_err(|error| ObserverError::Unsupported(error.to_string()))?;
         Ok(Self {
             delivery,
@@ -114,6 +133,7 @@ impl ObserverHandle {
             scope_epoch: i64::try_from(status.epoch).unwrap_or(i64::MAX),
             offered_through_sequence: i64::try_from(status.offered_through_sequence)
                 .unwrap_or(i64::MAX),
+            object_reads: i64::try_from(status.object_reads).unwrap_or(i64::MAX),
             queued_semantic: status.queued_semantic,
             queued_control: status.queued_control,
             retained_bytes: status.retained_bytes,

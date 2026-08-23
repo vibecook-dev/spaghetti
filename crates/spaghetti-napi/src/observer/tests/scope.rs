@@ -6,7 +6,7 @@ use super::support::{
     assistant_record, collect_until, drain_bootstrap, open_observer, subagent_record, user_record,
     SessionFixture, SESSION,
 };
-use crate::observer::ObserverEvent;
+use crate::observer::{ObserverEvent, ObserverHandle};
 
 fn coverage_paths(events: &[ObserverEvent]) -> Vec<String> {
     events
@@ -282,6 +282,153 @@ fn a_sidecar_the_decoder_cannot_map_arrives_as_bounded_evidence() {
     assert!(
         !encoded.contains("unexpected"),
         "bounded evidence must not carry native content"
+    );
+    observer.close();
+}
+
+#[test]
+fn a_change_with_no_watcher_notification_is_still_picked_up_by_the_sweep() {
+    let fixture = SessionFixture::new();
+    fixture.append(
+        &fixture.transcript(),
+        &[assistant_record("a-1", "resp-1", 5)],
+    );
+
+    // No filesystem watches at all: the only thing that can notice the append
+    // below is the bounded reconciliation sweep. RFC 012D §11 makes that the
+    // authority precisely because notifications get dropped and coalesced.
+    let observer = ObserverHandle::open_unwatched(
+        &fixture.request(),
+        std::sync::Arc::new(crate::claude::ClaudeCodeAdapter::new()),
+    )
+    .expect("observer attaches");
+    let bootstrap = drain_bootstrap(&observer);
+    assert!(
+        bootstrap
+            .iter()
+            .any(|event| matches!(event, ObserverEvent::UsageV2(_))),
+        "bootstrap should read the existing record"
+    );
+
+    fixture.append(
+        &fixture.transcript(),
+        &[assistant_record("a-2", "resp-2", 9)],
+    );
+    let live = collect_until(&observer, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, ObserverEvent::UsageV2(_)))
+    });
+    assert!(
+        live.iter()
+            .any(|event| matches!(event, ObserverEvent::UsageV2(_))),
+        "the sweep must pick up an append no watcher reported"
+    );
+    observer.close();
+}
+
+#[test]
+fn a_pass_reads_what_changed_rather_than_the_whole_scope() {
+    let fixture = SessionFixture::new();
+    fixture.append(
+        &fixture.transcript(),
+        &[assistant_record("a-1", "resp-1", 5)],
+    );
+    // Enough children that a full sweep is clearly distinguishable from a
+    // targeted pass.
+    for index in 0..40 {
+        let agent = format!("child-{index}");
+        fixture.append(
+            &fixture.subagent(&agent),
+            &[subagent_record(&agent, &format!("c-{index}"))],
+        );
+    }
+
+    // A long poll interval makes the sweep cadence long too, so anything read
+    // during the window below was read because it was flagged, not swept.
+    let mut request = fixture.request();
+    request.poll_interval_ms = Some(2_000);
+    let observer = open_observer(&request).expect("observer attaches");
+    let bootstrap = drain_bootstrap(&observer);
+    assert!(
+        bootstrap
+            .iter()
+            .any(|event| matches!(event, ObserverEvent::BootstrapComplete(_))),
+        "bootstrap completes"
+    );
+    let after_bootstrap = observer.status().object_reads;
+
+    // One child changes. A whole-scope pass would read all 41+ objects.
+    fixture.append(
+        &fixture.subagent("child-7"),
+        &[subagent_record("child-7", "c-7-second")],
+    );
+    collect_until(&observer, Duration::from_secs(10), |events| {
+        events.iter().any(|event| match event {
+            ObserverEvent::UsageV2(event) => event.source.object_path.contains("child-7"),
+            _ => false,
+        })
+    });
+
+    let reads = observer.status().object_reads - after_bootstrap;
+    // The property is that cost tracks what changed, not how big the scope is:
+    // 41 members are in scope and one of them moved. A handful of reads is
+    // expected — a flagged object is re-read whatever `stat` says, and the
+    // filesystem may report the same change more than once — but a
+    // whole-scope pass would be an order of magnitude more.
+    assert!(
+        reads < 15,
+        "one changed child in a 41-member scope should not cost a whole-scope \
+         pass: {reads} object reads"
+    );
+    observer.close();
+}
+
+#[test]
+fn a_burst_across_many_children_coalesces_into_few_passes() {
+    let fixture = SessionFixture::new();
+    fixture.append(
+        &fixture.transcript(),
+        &[assistant_record("a-1", "resp-1", 5)],
+    );
+    for index in 0..30 {
+        let agent = format!("child-{index}");
+        fixture.append(
+            &fixture.subagent(&agent),
+            &[subagent_record(&agent, &format!("c-{index}"))],
+        );
+    }
+
+    let mut request = fixture.request();
+    request.poll_interval_ms = Some(2_000);
+    let observer = open_observer(&request).expect("observer attaches");
+    drain_bootstrap(&observer);
+    let after_bootstrap = observer.status().object_reads;
+
+    // Thirty children change at once. Each is one object that genuinely needs
+    // reading; the guarantee is that the burst does not multiply into a pass
+    // per notification across the whole scope.
+    for index in 0..30 {
+        let agent = format!("child-{index}");
+        fixture.append(
+            &fixture.subagent(&agent),
+            &[subagent_record(&agent, &format!("c-{index}-second"))],
+        );
+    }
+    collect_until(&observer, Duration::from_secs(15), |events| {
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserverEvent::UsageV2(_)))
+            .count()
+            >= 30
+    });
+
+    let reads = observer.status().object_reads - after_bootstrap;
+    assert!(
+        // Measured: exactly 30 — one read per genuinely changed object.
+        reads <= 45,
+        "a 30-child burst should cost one read per change, not a sweep per \
+         notification: {reads} object reads"
     );
     observer.close();
 }
