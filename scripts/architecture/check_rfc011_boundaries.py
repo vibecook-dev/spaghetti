@@ -773,15 +773,10 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
                     continue
                 pending.append(target)
 
-    sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
-    sdk_exports = RUNTIME_MODULE_RE.findall(read(sdk_index))
-    for export in (
-        "./contracts/rfc012b.js",
-        "./contracts/rfc012b-hydration.js",
-        "./contracts/rfc012b-pages.js",
-    ):
-        if export not in sdk_exports:
-            found.add(f"{repo_path(sdk_index)}#missing-{Path(export).stem}-contract-export")
+    # No barrel-export requirement: these modules are internal to
+    # `client/*` and the SDK barrel is an explicit allowlist (landing plan §4).
+    # The self-containment check above is what actually matters here — a
+    # catalog contract may not reach outside `contracts/`.
     return found
 
 
