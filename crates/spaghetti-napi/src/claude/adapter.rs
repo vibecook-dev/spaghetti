@@ -236,6 +236,17 @@ impl ClaudeCodeAdapter {
     fn adapter_id(&self) -> &AdapterId {
         &self.manifest.id
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_support(
+        mut self,
+        binding: AdapterSupportBinding,
+        scope_programs: ScopeProgramManifest,
+    ) -> Self {
+        self.manifest.support_binding = Some(binding);
+        self.manifest.scope_programs = Some(scope_programs);
+        self
+    }
 }
 
 impl Default for ClaudeCodeAdapter {
@@ -305,7 +316,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
     }
 
     fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
-        let streams = vec![
+        let mut streams = vec![
             StreamSpec {
                 id: StreamId::new(PARENT_STREAM)?,
                 driver: DriverSpec::AppendDelimited(AppendDelimitedConfig::json_lines()),
@@ -612,6 +623,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 capabilities: interpretation_settings_capabilities(),
             },
         ];
+        let authorized_roots = instance
+            .spec
+            .roots
+            .iter()
+            .map(|root| root.name.as_str())
+            .collect::<BTreeSet<_>>();
+        streams.retain(|stream| authorized_roots.contains(stream.selector.root_name.as_str()));
         for stream in &streams {
             stream.validate(instance)?;
         }

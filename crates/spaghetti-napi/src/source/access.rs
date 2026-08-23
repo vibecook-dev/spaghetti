@@ -1479,9 +1479,11 @@ impl AuthorizedObservationRuntimeStreamReservation {
         self.reservation.directory_root_authority()
     }
 
-    /// Seal this exact audited listing and, only for an available
-    /// ChildDirectory/ReplaceDocument stream, mint authority to read its
-    /// accounted children under the declaration-owned object bound.
+    /// Seal this exact audited listing. An available ChildDirectory backed by
+    /// ReplaceDocument mints authority to read its accounted children under
+    /// the declaration-owned object bound. A different framing contract may
+    /// seal only an empty member set and therefore mints no child-read
+    /// authority.
     pub(crate) fn complete_directory_listing(
         self,
         authority: &AuthorizedObservationDirectoryRootAuthority,
@@ -1491,12 +1493,9 @@ impl AuthorizedObservationRuntimeStreamReservation {
             AuthorizedObservationSourceDriver::ReplaceDocument { max_object_bytes }
                 if max_object_bytes > 0 =>
             {
-                max_object_bytes
+                Some(max_object_bytes)
             }
-            _ => {
-                self.fail_conservative();
-                return Err(invalid_directory_read_authority());
-            }
+            _ => None,
         };
         self.reservation.reservation.complete_directory_listing(
             authority,
@@ -1754,12 +1753,12 @@ impl ScopeAccessReservation {
     fn complete_directory_listing(
         self,
         authority: &AuthorizedObservationDirectoryRootAuthority,
-        max_object_bytes: u64,
+        max_object_bytes: Option<u64>,
         outcome: AccessOutcome,
     ) -> Result<Option<AuthorizedObservationDirectoryReadAuthority>, AccessBudgetError> {
         if self.declaration.primitive != ScopeRelationPrimitive::ChildDirectoryByNativeId
             || self.operation() != AccessOperation::ObjectListing
-            || max_object_bytes == 0
+            || max_object_bytes == Some(0)
             || !matches!(
                 outcome,
                 AccessOutcome::Available | AccessOutcome::Unavailable
@@ -1782,6 +1781,7 @@ impl ScopeAccessReservation {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if state.sealed
                 || (outcome == AccessOutcome::Unavailable && !state.accounted.is_empty())
+                || (max_object_bytes.is_none() && !state.accounted.is_empty())
             {
                 drop(state);
                 self.fail_conservative();
@@ -1789,15 +1789,18 @@ impl ScopeAccessReservation {
             }
             state.sealed = true;
         }
-        let read_authority = (outcome == AccessOutcome::Available).then(|| {
-            AuthorizedObservationDirectoryReadAuthority {
-                inner,
-                root_object_token: self.object_token,
-                phase,
-                max_object_bytes,
-                listing_state: Arc::clone(&authority.listing_state),
+        let read_authority = match (outcome, max_object_bytes) {
+            (AccessOutcome::Available, Some(max_object_bytes)) => {
+                Some(AuthorizedObservationDirectoryReadAuthority {
+                    inner,
+                    root_object_token: self.object_token,
+                    phase,
+                    max_object_bytes,
+                    listing_state: Arc::clone(&authority.listing_state),
+                })
             }
-        });
+            _ => None,
+        };
         self.complete(0, 0, outcome)?;
         Ok(read_authority)
     }
@@ -2994,7 +2997,7 @@ mod tests {
         let ignored_token = ignored.object_token();
         ignored.complete(false).unwrap();
         let read_authority = root
-            .complete_directory_listing(&authority, 16, AccessOutcome::Available)
+            .complete_directory_listing(&authority, Some(16), AccessOutcome::Available)
             .unwrap()
             .unwrap();
         assert_eq!(read_authority.max_object_bytes(), 16);
@@ -3032,9 +3035,39 @@ mod tests {
         let unavailable_root = reserve_root(&unavailable_plan);
         let unavailable_authority = unavailable_root.directory_root_authority().unwrap();
         assert!(unavailable_root
-            .complete_directory_listing(&unavailable_authority, 16, AccessOutcome::Unavailable,)
+            .complete_directory_listing(
+                &unavailable_authority,
+                Some(16),
+                AccessOutcome::Unavailable,
+            )
             .unwrap()
             .is_none());
+
+        let empty_plan = child_directory_scope_plan("{project-key}/{native-session-id}/subagents");
+        let empty_root = reserve_root(&empty_plan);
+        let empty_authority = empty_root.directory_root_authority().unwrap();
+        assert!(empty_root
+            .complete_directory_listing(&empty_authority, None, AccessOutcome::Available)
+            .unwrap()
+            .is_none());
+
+        let unframed_member_plan =
+            child_directory_scope_plan("{project-key}/{native-session-id}/subagents");
+        let unframed_member_root = reserve_root(&unframed_member_plan);
+        let unframed_member_authority = unframed_member_root.directory_root_authority().unwrap();
+        unframed_member_root
+            .reserve_directory_entry(&unframed_member_authority, &child_key, None, 1)
+            .unwrap()
+            .complete(true)
+            .unwrap();
+        assert!(matches!(
+            unframed_member_root.complete_directory_listing(
+                &unframed_member_authority,
+                None,
+                AccessOutcome::Available,
+            ),
+            Err(AccessBudgetError::InvalidConfig(_))
+        ));
     }
 
     #[test]

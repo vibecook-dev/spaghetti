@@ -400,16 +400,19 @@ pub(crate) mod tests {
         verify_support_release_bundle, ActorRunRevisionFact, ActorRunRole, AdapterErrorClass,
         AdapterManifest, AdapterObjectContext, AdapterSupportBinding,
         AuthorizedObservationSourceDriver, CanonicalEntityKey, CanonicalFactId,
-        CanonicalSourceInstanceKey, CompatibilityClass, ConsistencyPolicy, CoverageAbsenceKind,
-        CoverageDomain, CoverageObjectKey, CoveragePositionKind, CoverageSetCompleteness,
-        CoverageStatus, CoverageStreamKey, DecodeContext, DecodeDisposition, DecoderId,
-        DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope, ExternalEntityRef, Fact,
-        FactBatch, FactRevisionId, FactSemanticContext, NativeArtifactProbe, ObjectSelector,
-        RawRetentionPolicy, ScopeJoinEvidence, ScopeJoinIdentityInput, ScopeJoinParameterSet,
-        ScopeJoinUpdate, ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess,
-        SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-        StreamAuthority, StreamId, StreamSpec, SupportBundleDocument,
+        CanonicalSourceInstanceKey, CompatibilityClass, ConsistencyPolicy, ContractCompleteness,
+        CoverageAbsenceKind, CoverageDomain, CoverageObjectKey, CoveragePositionKind,
+        CoverageSetCompleteness, CoverageStatus, CoverageStreamKey, DecodeContext,
+        DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope,
+        ExternalEntityRef, Fact, FactBatch, FactRevisionId, FactSemanticContext,
+        NativeArtifactProbe, NativeIdentity, NativeIdentityClaim, ObjectSelector, QualifiedValue,
+        QualifiedValueQuality, RawRetentionPolicy, ScopeJoinEvidence, ScopeJoinIdentityInput,
+        ScopeJoinParameterSet, ScopeJoinUpdate, ScopeRelationPrimitive, SemanticRevisionRef,
+        Sha256Digest, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+        SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
+        SupportBundleDocument,
     };
+    use crate::claude::ClaudeCodeAdapter;
     use crate::observation_contract::unknown_wire::{
         ObservationUnknownWireCapability, ObservationUnknownWireCompatibilityAxis,
         ObservationUnknownWireContractError, ObservationUnknownWireContractOffer,
@@ -657,7 +660,212 @@ pub(crate) mod tests {
 
     const COMPOSED_RELATED_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"team-config-from-evidence","primitive":"ReferencedObjectFromField","access_root":"root","locator":"teams/{team-name}/config.json","identity_inputs":["team-name"],"bounds":{"max_fan_out":4,"max_depth":1,"max_objects":4,"max_bytes":4096,"max_rows":0},"observation_binding":{"stream_id":"team-config-stream","source_pattern":"teams/*/config.json"},"unavailable_behavior":"skip_optional","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
 
+    const CLAUDE_RELATED_TEST_SOURCE_DOCUMENT: &[u8] = br#"{
+      "adapter_id":"claude-code",
+      "ads_id":"claude-code-d2-test-ads",
+      "streams":[
+        {
+          "stream_id":"session-transcripts",
+          "root_id":"projects",
+          "relative_patterns":["*/*.jsonl"],
+          "decoder_id":"claude-session-record",
+          "authority":"canonical",
+          "primitive":"AppendDelimited",
+          "topologies":["scoped"],
+          "implementation_state":"existing",
+          "bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},
+          "lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],
+          "safe_decoder_state_boundary":"object_generation_cursor"
+        },
+        {
+          "stream_id":"subagent-transcripts",
+          "root_id":"projects",
+          "relative_patterns":["*/*/subagents/**/agent-*.jsonl","*/*/subagents/workflows/*/**/agent-*.jsonl"],
+          "decoder_id":"claude-subagent-record",
+          "authority":"canonical",
+          "primitive":"AppendDelimited",
+          "topologies":["scoped"],
+          "implementation_state":"existing",
+          "bounds":{"max_record_bytes":4194304,"max_batch_bytes":8388608,"max_records_per_batch":1024},
+          "lifecycle":["append","partial_write","truncate","identity_change","delete","recreate"],
+          "safe_decoder_state_boundary":"object_generation_cursor"
+        },
+        {
+          "stream_id":"todo-snapshots",
+          "root_id":"home",
+          "relative_patterns":["todos/*-agent-*.json"],
+          "decoder_id":"claude-todo-snapshot",
+          "authority":"canonical",
+          "primitive":"ReplaceDocument",
+          "topologies":["scoped"],
+          "implementation_state":"existing",
+          "bounds":{"max_object_bytes":1048576},
+          "lifecycle":["replace","identity_change","delete","recreate"],
+          "safe_decoder_state_boundary":"object_generation_revision"
+        }
+      ]
+    }"#;
+
+    const CLAUDE_RELATED_TEST_SCOPE_DOCUMENT: &[u8] = br#"{
+      "schema_version":1,
+      "declaration_id":"claude-code-d2-related-test-scope",
+      "adapter_id":"claude-code",
+      "ads_id":"claude-code-d2-test-ads",
+      "status":"promoted",
+      "roots":["home","projects"],
+      "programs":[{
+        "program_id":"observe-real-claude-related",
+        "root_entity_kind":"session",
+        "root_relation_id":"root-transcript",
+        "relations":[
+          {
+            "relation_id":"root-transcript",
+            "primitive":"KnownObject",
+            "access_root":"projects",
+            "locator":"known-transcript",
+            "identity_inputs":["native-session-id","transcript-locator"],
+            "bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},
+            "observation_binding":{"stream_id":"session-transcripts","source_pattern":"*/*.jsonl"},
+            "unavailable_behavior":"record_unavailable",
+            "claim_refs":["scope-evidence"]
+          },
+          {
+            "relation_id":"descendant-transcripts",
+            "primitive":"ChildDirectoryByNativeId",
+            "access_root":"projects",
+            "locator":"{project-key}/{native-session-id}/subagents",
+            "identity_inputs":["project-key","native-session-id"],
+            "bounds":{"max_fan_out":4,"max_depth":5,"max_objects":4,"max_bytes":8388608,"max_rows":0},
+            "observation_binding":{"stream_id":"subagent-transcripts","source_pattern":"*/*/subagents/**/agent-*.jsonl","relative_selector":"**/agent-*.jsonl"},
+            "unavailable_behavior":"skip_optional",
+            "claim_refs":["scope-evidence"]
+          },
+          {
+            "relation_id":"todo-snapshot-from-evidence",
+            "primitive":"ReferencedObjectFromField",
+            "access_root":"home",
+            "locator":"todos/{native-session-id}-agent-{native-actor-id}.json",
+            "identity_inputs":["native-session-id","native-actor-id"],
+            "bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1048576,"max_rows":0},
+            "observation_binding":{"stream_id":"todo-snapshots","source_pattern":"todos/*-agent-*.json"},
+            "unavailable_behavior":"skip_optional",
+            "claim_refs":["scope-evidence"]
+          }
+        ],
+        "claim_refs":["scope-evidence"]
+      }],
+      "blockers":[],
+      "claim_refs":["scope-evidence"]
+    }"#;
+
     const COMPOSED_TWO_APPEND_SCOPE_DOCUMENT: &[u8] = br#"{"schema_version":1,"declaration_id":"fixture-scope","adapter_id":"fixture","ads_id":"fixture-ads","status":"promoted","roots":["root"],"programs":[{"program_id":"observe-session","root_entity_kind":"session","root_relation_id":"root-object","relations":[{"relation_id":"root-object","primitive":"KnownObject","access_root":"root","locator":"known-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"root-stream","source_pattern":"sessions/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]},{"relation_id":"sibling-object","primitive":"KnownObject","access_root":"root","locator":"sibling-object","identity_inputs":["native-session-id"],"bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":8388608,"max_rows":0},"observation_binding":{"stream_id":"sibling-stream","source_pattern":"siblings/*.jsonl"},"unavailable_behavior":"record_unavailable","claim_refs":["scope-evidence"]}],"claim_refs":["scope-evidence"]}],"blockers":[],"claim_refs":["scope-evidence"]}"#;
+
+    struct PromotedTestSupportDocuments<'document> {
+        support_release_id: &'document str,
+        adapter_id: &'document str,
+        ads_id: &'document str,
+        artifact_family: &'document str,
+        artifact_version: &'document str,
+        required_marker: &'document str,
+        adapter_package_version: &'document str,
+        decoder_contract_version: u32,
+        capabilities: &'document [(&'document str, &'document str)],
+        source_document: &'document [u8],
+        scope_document: &'document [u8],
+    }
+
+    fn promoted_test_catalog(
+        config: PromotedTestSupportDocuments<'_>,
+    ) -> (
+        Arc<SupportCatalog>,
+        AdapterSupportBinding,
+        crate::adapter::ScopeProgramManifest,
+    ) {
+        let ads_document = serde_json::to_vec(&serde_json::json!({
+            "adapter_id": config.adapter_id,
+            "ads_id": config.ads_id,
+        }))
+        .unwrap();
+        let evidence_document = ads_document.clone();
+        let conformance_document = serde_json::to_vec(&serde_json::json!({
+            "adapter_id": config.adapter_id,
+            "support_release_id": config.support_release_id,
+        }))
+        .unwrap();
+        let documents = [
+            ("ads", "support/ads.json", ads_document),
+            (
+                "source_declaration",
+                "support/source.json",
+                config.source_document.to_vec(),
+            ),
+            (
+                "scope_program",
+                "support/scope.json",
+                config.scope_document.to_vec(),
+            ),
+            ("evidence", "support/evidence.json", evidence_document),
+            (
+                "conformance",
+                "support/conformance.json",
+                conformance_document,
+            ),
+        ];
+        let references = documents
+            .iter()
+            .map(|(kind, path, bytes)| {
+                (
+                    (*kind).to_string(),
+                    serde_json::json!({"path": path, "sha256": Sha256Digest::of(bytes).to_string()}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let capabilities = config
+            .capabilities
+            .iter()
+            .map(|(capability_id, topology)| {
+                serde_json::json!({
+                    "capability_id": capability_id,
+                    "topology": topology,
+                    "level": "supported",
+                    "notes": null
+                })
+            })
+            .collect::<Vec<_>>();
+        let release_json = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "support_release_id": config.support_release_id,
+            "adapter_id": config.adapter_id,
+            "status": "promoted",
+            "artifact_compatibility": {
+                "family": config.artifact_family,
+                "platforms": ["test"],
+                "exact_versions": [config.artifact_version],
+                "ranges": [],
+                "required_markers": [config.required_marker],
+                "forward_catalog_only": false
+            },
+            "references": references,
+            "versions": {
+                "adapter_package": config.adapter_package_version,
+                "decoder_contract": config.decoder_contract_version
+            },
+            "capabilities": capabilities
+        }))
+        .unwrap();
+        let bundle_documents = documents
+            .iter()
+            .map(|(_, path, bytes)| SupportBundleDocument::new(path, bytes))
+            .collect::<Vec<_>>();
+        let release = verify_support_release_bundle(&release_json, &bundle_documents).unwrap();
+        let binding = release.adapter_binding().clone();
+        let scope_programs = release.scope_programs().clone();
+        (
+            Arc::new(SupportCatalog::new([release]).unwrap()),
+            binding,
+            scope_programs,
+        )
+    }
 
     fn promoted_fixture_catalog_with_scope(
         scope_document: &[u8],
@@ -677,83 +885,23 @@ pub(crate) mod tests {
         } else {
             br#"{"adapter_id":"fixture","ads_id":"fixture-ads","streams":[{"stream_id":"artifact-blobs","root_id":"artifact","primitive":"ReplaceDocument","topologies":["scoped"],"implementation_state":"existing","bounds":{"max_object_bytes":1024},"lifecycle":["replace","delete","recreate"],"safe_decoder_state_boundary":"object_generation_revision"}]}"#.as_slice()
         };
-        let documents = [
-            (
-                "ads",
-                "support/ads.json",
-                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
-            ),
-            ("source_declaration", "support/source.json", source_document),
-            ("scope_program", "support/scope.json", scope_document),
-            (
-                "evidence",
-                "support/evidence.json",
-                br#"{"adapter_id":"fixture","ads_id":"fixture-ads"}"#.as_slice(),
-            ),
-            (
-                "conformance",
-                "support/conformance.json",
-                br#"{"adapter_id":"fixture","support_release_id":"fixture-release"}"#.as_slice(),
-            ),
-        ];
-        let references = documents
-            .iter()
-            .map(|(kind, path, bytes)| {
-                (
-                    (*kind).to_string(),
-                    serde_json::json!({"path": path, "sha256": Sha256Digest::of(bytes).to_string()}),
-                )
-            })
-            .collect::<serde_json::Map<_, _>>();
-        let release_json = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
-            "support_release_id": "fixture-release",
-            "adapter_id": "fixture",
-            "status": "promoted",
-            "artifact_compatibility": {
-                "family": "fixture",
-                "platforms": ["test"],
-                "exact_versions": ["1.0.0"],
-                "ranges": [],
-                "required_markers": ["fixture.marker"],
-                "forward_catalog_only": false
-            },
-            "references": references,
-            "versions": {"adapter_package": "1.0.0", "decoder_contract": 1},
-            "capabilities": [
-                {
-                    "capability_id": "fixture-catalog",
-                    "topology": "catalog",
-                    "level": "supported",
-                    "notes": null
-                },
-                {
-                    "capability_id": "fixture-history",
-                    "topology": "durable",
-                    "level": "supported",
-                    "notes": null
-                },
-                {
-                    "capability_id": "fixture-observation",
-                    "topology": "scoped",
-                    "level": "supported",
-                    "notes": null
-                }
-            ]
-        }))
-        .unwrap();
-        let bundle_documents = documents
-            .iter()
-            .map(|(_, path, bytes)| SupportBundleDocument::new(path, bytes))
-            .collect::<Vec<_>>();
-        let release = verify_support_release_bundle(&release_json, &bundle_documents).unwrap();
-        let binding = release.adapter_binding().clone();
-        let scope_programs = release.scope_programs().clone();
-        (
-            Arc::new(SupportCatalog::new([release]).unwrap()),
-            binding,
-            scope_programs,
-        )
+        promoted_test_catalog(PromotedTestSupportDocuments {
+            support_release_id: "fixture-release",
+            adapter_id: "fixture",
+            ads_id: "fixture-ads",
+            artifact_family: "fixture",
+            artifact_version: "1.0.0",
+            required_marker: "fixture.marker",
+            adapter_package_version: "1.0.0",
+            decoder_contract_version: 1,
+            capabilities: &[
+                ("fixture-catalog", "catalog"),
+                ("fixture-history", "durable"),
+                ("fixture-observation", "scoped"),
+            ],
+            source_document,
+            scope_document,
+        })
     }
 
     fn promoted_fixture_catalog() -> (
@@ -762,6 +910,26 @@ pub(crate) mod tests {
         crate::adapter::ScopeProgramManifest,
     ) {
         promoted_fixture_catalog_with_scope(SINGLE_OBJECT_SCOPE_DOCUMENT)
+    }
+
+    fn promoted_claude_related_test_catalog() -> (
+        Arc<SupportCatalog>,
+        AdapterSupportBinding,
+        crate::adapter::ScopeProgramManifest,
+    ) {
+        promoted_test_catalog(PromotedTestSupportDocuments {
+            support_release_id: "claude-code-d2-related-test-release",
+            adapter_id: "claude-code",
+            ads_id: "claude-code-d2-test-ads",
+            artifact_family: "claude-code",
+            artifact_version: "2.1.223",
+            required_marker: "claude.test.marker",
+            adapter_package_version: env!("CARGO_PKG_VERSION"),
+            decoder_contract_version: 22,
+            capabilities: &[("claude-code-d2-related-test-observation", "scoped")],
+            source_document: CLAUDE_RELATED_TEST_SOURCE_DOCUMENT,
+            scope_document: CLAUDE_RELATED_TEST_SCOPE_DOCUMENT,
+        })
     }
 
     fn supported_fixture_registry() -> AdapterRegistry {
@@ -1038,6 +1206,24 @@ pub(crate) mod tests {
             .unwrap()
     }
 
+    fn configured_claude_related_registry(probe_calls: Arc<AtomicUsize>) -> AdapterRegistry {
+        let (catalog, binding, scope_programs) = promoted_claude_related_test_catalog();
+        AdapterRegistryBuilder::new()
+            .register(ClaudeCodeAdapter::new().with_test_support(binding, scope_programs))
+            .register_native_support_probe("claude-code", move |_| {
+                probe_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(NativeArtifactProbe {
+                    family: "claude-code".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("2.1.223".to_string()),
+                    markers: vec!["claude.test.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap()
+    }
+
     fn configured_attachment_request(
         configured_roots: Vec<PathBuf>,
         relative_path: PathBuf,
@@ -1098,6 +1284,71 @@ pub(crate) mod tests {
                     PathBuf::from("siblings/sibling.jsonl"),
                 ),
             ]),
+            identity,
+            template.observation_contract_request,
+            template.observation_contract_offer,
+        )
+        .unwrap()
+        .with_unknown_wire_contract(template.unknown_wire_contract.unwrap())
+    }
+
+    fn configured_claude_related_request(
+        root: PathBuf,
+        native_session_id: &str,
+    ) -> ScopedConfiguredAttachmentRequest {
+        let transcript = PathBuf::from(format!("project/{native_session_id}.jsonl"));
+        let stable_source_instance =
+            SourceInstanceKey::new(platform_path_key(&std::fs::canonicalize(&root).unwrap()))
+                .unwrap();
+        let canonical_source_instance =
+            CanonicalSourceInstanceKey::derive(1, stable_source_instance.as_bytes()).unwrap();
+        let session_key = CanonicalEntityKey::derive(
+            "claude-code",
+            &canonical_source_instance,
+            "session",
+            native_session_id.as_bytes(),
+        )
+        .unwrap();
+        let session_ref = ExternalEntityRef::new(session_key);
+        let native_identity = QualifiedValue::from_parts(
+            Some(NativeIdentity {
+                native_namespace: "claude-code.session".to_string(),
+                native_id: native_session_id.to_string(),
+            }),
+            QualifiedValueQuality::NativeClaimed,
+            "claude-code".to_string(),
+            ContractCompleteness::Complete,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let identity = ScopedConfiguredRootIdentity::new(
+            native_session_id.as_bytes(),
+            BTreeMap::from([
+                (
+                    "native-session-id".to_string(),
+                    Arc::<[u8]>::from(native_session_id.as_bytes()),
+                ),
+                (
+                    "project-key".to_string(),
+                    Arc::<[u8]>::from(b"project".as_slice()),
+                ),
+                (
+                    "transcript-locator".to_string(),
+                    Arc::<[u8]>::from(transcript.to_string_lossy().as_bytes()),
+                ),
+            ]),
+        )
+        .unwrap()
+        .with_expected_session(session_key, session_ref)
+        .with_native_session_claim(NativeIdentityClaim::new(session_ref, native_identity).unwrap());
+        let template = multi_family_scoped_access_request(root.clone());
+        ScopedConfiguredAttachmentRequest::new(
+            "claude-code",
+            vec![root],
+            "observe-real-claude-related",
+            BTreeMap::from([("root-transcript".to_string(), transcript)]),
             identity,
             template.observation_contract_request,
             template.observation_contract_offer,
@@ -3059,6 +3310,213 @@ pub(crate) mod tests {
         assert_eq!(owners.source().replacement_extension_relation_count(), 1);
         assert!(close.wait_async().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(callback_slot.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configured_real_claude_root_join_reads_and_replays_todo_sidecar() {
+        const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_claude_related_registry(Arc::clone(&probe_calls));
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-real-claude-private-root");
+        let project = root.join("projects/project");
+        let descendants = project.join(SESSION).join("subagents");
+        std::fs::create_dir_all(&descendants).unwrap();
+        std::fs::create_dir_all(root.join("todos")).unwrap();
+        let transcript = project.join(format!("{SESSION}.jsonl"));
+        let mut transcript_bytes = format!(
+            r#"{{"type":"user","uuid":"root-message","parentUuid":null,"timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","message":{{"role":"user","content":"compose the tree"}}}}"#
+        )
+        .into_bytes();
+        transcript_bytes.push(b'\n');
+        std::fs::write(&transcript, transcript_bytes).unwrap();
+        let todo = root.join(format!("todos/{SESSION}-agent-{SESSION}.json"));
+        std::fs::write(
+            &todo,
+            br#"[{"content":"Add scoped proof","status":"pending","activeForm":"Adding scoped proof"}]"#,
+        )
+        .unwrap();
+
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_claude_related_request(root, SESSION),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            attachment
+                .relation_identity_inputs("descendant-transcripts")
+                .unwrap()
+                .iter()
+                .map(|input| input.name())
+                .collect::<Vec<_>>(),
+            vec!["project-key", "native-session-id"]
+        );
+        assert_eq!(
+            attachment
+                .related_relation_bindings()
+                .map(|binding| binding.relation_id())
+                .collect::<Vec<_>>(),
+            vec!["todo-snapshot-from-evidence"]
+        );
+
+        let prepared = attachment.prepare_append_runtime(32, 16).unwrap();
+        assert_eq!(prepared.objects().len(), 1);
+        assert_eq!(prepared.directory_bindings().len(), 1);
+        assert_eq!(prepared.related_relation_bindings().len(), 1);
+        assert_eq!(prepared.required_coverage_objects(), 8);
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opened = prepared
+            .open_with_watcher_factory(ConfiguredScopedObservationRuntimeOptions::default(), {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let (mut runtime, handle, supervisor) = opened.into_parts();
+        let mut supervisor_task = tokio::spawn(supervisor.run_until_stopped());
+
+        let mut root_actor_seen = false;
+        let mut bootstrap = None;
+        for _ in 0..32 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("real Claude configured supervisor stopped before bootstrap: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            if matches!(
+                &yielded.envelope.event,
+                ScopedObservationEvent::ActorRun { revision, .. }
+                    if revision.role == ActorRunRole::Root
+                        && revision.native_session_id.as_deref() == Some(SESSION)
+            ) {
+                root_actor_seen = true;
+            }
+            if let ScopedObservationEvent::ObserverBootstrapComplete { barrier } =
+                &yielded.envelope.event
+            {
+                bootstrap = Some(Arc::clone(barrier));
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if bootstrap.is_some() {
+                break;
+            }
+        }
+        assert!(
+            root_actor_seen,
+            "the real Claude decoder must project the root actor"
+        );
+        let bootstrap = bootstrap.expect("real Claude related scope must complete bootstrap");
+        assert_eq!(bootstrap.scope_coverage.relations().len(), 3);
+        assert_eq!(
+            bootstrap.scope_coverage.completeness(),
+            CoverageSetCompleteness::Complete
+        );
+        assert_eq!(
+            bootstrap
+                .scope_coverage
+                .relations()
+                .iter()
+                .map(|relation| relation.relation_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec![
+                "descendant-transcripts",
+                "root-transcript",
+                "todo-snapshot-from-evidence",
+            ]
+        );
+        let decode = bootstrap
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            decode.points.len() + decode.explicit_absence_or_deletion.len(),
+            4,
+            "root, descendant membership, todo membership, and todo object must be complete"
+        );
+
+        std::fs::write(
+            &todo,
+            br#"[{"content":"Add scoped proof","status":"completed","activeForm":"Adding scoped proof"}]"#,
+        )
+        .unwrap();
+        let poll_task = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.poll().await }
+        });
+        let mut replacement = None;
+        for _ in 0..48 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("real Claude configured supervisor stopped during replacement: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            if let ScopedObservationEvent::ObserverResyncComplete { barrier } =
+                &yielded.envelope.event
+            {
+                replacement = Some(Arc::clone(barrier));
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if replacement.is_some() {
+                break;
+            }
+        }
+        let replacement = replacement.expect("real Claude todo replacement must complete");
+        assert_eq!(replacement.scope_epoch, 2);
+        assert_eq!(replacement.scope_coverage.relations().len(), 3);
+        assert_ne!(
+            replacement.coverage_snapshot_digest,
+            bootstrap.snapshot_digest
+        );
+        let replacement_decode = replacement
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            replacement_decode.points.len() + replacement_decode.explicit_absence_or_deletion.len(),
+            4
+        );
+        assert!(matches!(
+            poll_task.await.unwrap().unwrap(),
+            ScopedObservationPollResolution::Ready(watermark)
+                if watermark.scope_epoch == replacement.scope_epoch
+        ));
+
+        let close = handle.request_close();
+        let stopped = tokio::time::timeout(Duration::from_secs(2), supervisor_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ConfiguredScopedObservationSupervisorRunResult::Stopped(owners) = stopped else {
+            panic!("real Claude configured owner must close structurally");
+        };
+        assert_eq!(owners.source().binding_count(), 1);
+        assert_eq!(owners.source().directory_binding_count(), 1);
+        assert_eq!(owners.source().replacement_extension_relation_count(), 1);
+        assert!(close.wait_async().await.complete);
+        assert!(runtime.next_event().await.unwrap().is_none());
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(callback_slot.lock().unwrap().is_none());
     }

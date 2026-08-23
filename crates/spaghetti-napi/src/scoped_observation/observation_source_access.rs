@@ -1054,8 +1054,10 @@ impl ScopedObservationDirectoryScanAuthority {
                     }
                 };
                 let read_authority = binding
-                    .complete_directory_listing(&proof.authority, AccessOutcome::Available)?
-                    .ok_or(ScopedObservationRuntimeSourceError::InvalidBinding)?;
+                    .complete_directory_listing(&proof.authority, AccessOutcome::Available)?;
+                if read_authority.is_none() && !proof.entries.is_empty() {
+                    return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+                }
                 Ok(ScopedObservationDirectoryScan::Snapshot(Box::new(
                     ScopedObservationDirectoryListing {
                         identity: proof.identity,
@@ -1063,7 +1065,7 @@ impl ScopedObservationDirectoryScanAuthority {
                         changes,
                         root_moved,
                         accounted_entries: proof.entries,
-                        read_authority: Some(read_authority),
+                        read_authority,
                         root,
                         members,
                         completed_members: Vec::new(),
