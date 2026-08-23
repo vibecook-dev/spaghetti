@@ -35,8 +35,8 @@ use crate::adapter::{
     SourceCatalogDiscovery, SourceInstance,
 };
 use crate::source::{
-    read_stable_file_confined, DirectoryEntryKind, DirectoryScan, DirectorySelection,
-    DirectorySnapshot, DirectorySnapshotConfig, SourceDriverError, StableRead,
+    portable_relative_path, read_stable_file_confined, DirectoryEntryKind, DirectoryScan,
+    DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, SourceDriverError, StableRead,
 };
 
 const PROJECTS_ROOT: &str = "projects";
@@ -196,7 +196,10 @@ fn session_row(
 /// but never descended into, so a deep `subagents/` or `workflows/` tree
 /// costs nothing.
 fn catalog_selection(path: &Path, kind: DirectoryEntryKind) -> DirectorySelection {
-    let components = path_components(&path.to_string_lossy());
+    let Ok(portable_path) = portable_relative_path(path) else {
+        return DirectorySelection::Ignore;
+    };
+    let components = path_components(&portable_path);
     match (kind, components.len()) {
         (DirectoryEntryKind::Directory, 1) => DirectorySelection::Recurse,
         (DirectoryEntryKind::Directory, 2) if is_uuid(&components[1]) => {

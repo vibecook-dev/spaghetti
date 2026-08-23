@@ -203,11 +203,11 @@ describe('Claude observation shadow', () => {
   test('derives a sibling database path without replacing the production extension', () => {
     assert.equal(
       defaultClaudeObservationShadowDbPath('/tmp/cache/spaghetti-rs.db'),
-      '/tmp/cache/spaghetti-rs.observation-shadow.db',
+      path.resolve('/tmp/cache/spaghetti-rs.observation-shadow.db'),
     );
     assert.equal(
       defaultClaudeObservationShadowDbPath('/tmp/cache/spaghetti'),
-      '/tmp/cache/spaghetti.observation-shadow.db',
+      path.resolve('/tmp/cache/spaghetti.observation-shadow.db'),
     );
   });
 

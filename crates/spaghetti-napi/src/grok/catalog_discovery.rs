@@ -24,8 +24,8 @@ use crate::adapter::{
     DiscoveredSession, ProjectAssociationBasis, SourceCatalogDiscovery, SourceInstance,
 };
 use crate::source::{
-    read_stable_file_confined, DirectoryEntryKind, DirectoryScan, DirectorySelection,
-    DirectorySnapshot, DirectorySnapshotConfig, SourceDriverError, StableRead,
+    portable_relative_path, read_stable_file_confined, DirectoryEntryKind, DirectoryScan,
+    DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, SourceDriverError, StableRead,
 };
 
 const SESSIONS_ROOT: &str = "sessions";
@@ -135,7 +135,10 @@ pub(super) fn discover(
 
 /// Depth-3 selection: `<cwd>/<session>/{summary.json,chat_history.jsonl}`.
 fn session_selection(path: &Path, kind: DirectoryEntryKind) -> DirectorySelection {
-    let components = path_components(&path.to_string_lossy());
+    let Ok(portable_path) = portable_relative_path(path) else {
+        return DirectorySelection::Ignore;
+    };
+    let components = path_components(&portable_path);
     match kind {
         DirectoryEntryKind::Directory if components.len() <= 2 => DirectorySelection::Recurse,
         DirectoryEntryKind::File if components.len() == 3 => {

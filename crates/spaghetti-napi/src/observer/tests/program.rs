@@ -134,13 +134,7 @@ fn every_declared_relation_kind_resolves_to_the_paths_it_declares() {
     let members = resolve_members(&request, &program, &catalog, &joined);
     let paths: BTreeSet<String> = members
         .iter()
-        .map(|member| {
-            format!(
-                "{}:{}",
-                member.key.root_name,
-                member.key.relative_path.to_string_lossy()
-            )
-        })
+        .map(|member| format!("{}:{}", member.key.root_name, member.key.object_path()))
         .collect();
 
     let project = fixture.project();
