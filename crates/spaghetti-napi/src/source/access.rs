@@ -1480,10 +1480,10 @@ impl AuthorizedObservationRuntimeStreamReservation {
     }
 
     /// Seal this exact audited listing. An available ChildDirectory backed by
-    /// ReplaceDocument mints authority to read its accounted children under
-    /// the declaration-owned object bound. A different framing contract may
-    /// seal only an empty member set and therefore mints no child-read
-    /// authority.
+    /// ReplaceDocument or AppendDelimited mints authority to read its
+    /// accounted children under the declaration-owned object/batch bound. A
+    /// different framing contract may seal only an empty member set and
+    /// therefore mints no child-read authority.
     pub(crate) fn complete_directory_listing(
         self,
         authority: &AuthorizedObservationDirectoryRootAuthority,
@@ -1495,6 +1495,9 @@ impl AuthorizedObservationRuntimeStreamReservation {
             {
                 Some(max_object_bytes)
             }
+            AuthorizedObservationSourceDriver::AppendDelimited {
+                max_batch_bytes, ..
+            } if max_batch_bytes > 0 => Some(max_batch_bytes),
             _ => None,
         };
         self.reservation.reservation.complete_directory_listing(
