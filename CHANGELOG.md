@@ -2,6 +2,127 @@
 
 <!-- Standing notice — maintained by hand, not by release-please. -->
 
+## Upgrading to 0.8.0 — RFC 012 landing
+
+Release-please generates the commit list below. This block is the part a
+release note cannot derive from commit subjects: what breaks, what the first
+run feels like, and what to do about it.
+
+### ⚠ BREAKING — token totals are corrected downward, about 2×
+
+Usage is now counted **per agent response**. One response contributes once,
+however many times the transcript revised its counters while the reply was
+streaming. The previous accounting added every one of those rows as if it were
+new consumption.
+
+On a large Claude corpus the same data now reports **36.88B tokens where 0.7.x
+reported 78.52B — 2.129× lower** — from 362,043 native usage rows that resolve
+to 158,118 actual responses. Nothing was lost and nothing is being hidden: the
+old totals were wrong, and any dashboard, budget, or report built on them will
+shift by roughly this factor.
+
+Each of the four buckets (input, output, cache creation, cache read) is now
+qualified independently. A bucket the source never asserted is *unknown* and is
+never summed as zero, so a total is labelled `exact`, `estimated`, or `mixed`
+instead of implying a precision it does not have.
+
+Codex totals also change: its legacy path double-counted cache-read inside
+input and reasoning inside output. Grok totals are unchanged.
+
+### ⚠ BREAKING — the first run rebuilds the whole index
+
+`SCHEMA_VERSION` is 64. On first start after upgrading, the entire corpus is
+re-read.
+
+- The **catalog** — every project and session — is committed first and is
+  listable in roughly 100 ms. `spag projects`, `spag sessions`, and the library
+  screen work immediately.
+- **History, usage, artifacts, and search** converge in the background. On a
+  large corpus this currently takes **hours**, not minutes. Ingest throughput is
+  a known regression against the 2026-08-15 profile and is being fixed; until
+  then, expect a long tail on the first run and plan an upgrade accordingly.
+- Nothing is lost. The database is a pure function of your agent files, and
+  `spag doctor` shows exactly which fields are still `indexing`.
+
+### ⚠ BREAKING — the SDK entry point is an allowlist
+
+`@vibecook/spaghetti-sdk` used to `export *` twenty-four hand-written contract
+modules, putting hundreds of symbols on the public API. Those are gone; the
+barrel is now an explicit list of exports that each have a named consumer.
+
+Removed from the package entry point:
+
+- `./contracts/rfc012a.js`
+- `./contracts/rfc012b.js`, `rfc012b-client.js`, `rfc012b-hydration.js`,
+  `rfc012b-pages.js`
+- `./contracts/rfc012c.js`, `rfc012c-unknown-evidence.js`
+- `./contracts/rfc012d.js` and its sixteen companions: `rfc012d-actor-envelope`,
+  `rfc012d-artifact`, `rfc012d-artifact-availability`,
+  `rfc012d-artifact-availability-envelope`, `rfc012d-capability-snapshot`,
+  `rfc012d-close`, `rfc012d-completion-envelope`, `rfc012d-continuity-envelope`,
+  `rfc012d-event-envelope`, `rfc012d-known-envelope`,
+  `rfc012d-replacement-manifest`, `rfc012d-scope-coverage`,
+  `rfc012d-source-envelope`, `rfc012d-unknown-wire`, `rfc012d-usage-envelope`,
+  `rfc012d-watermark`
+- `mergeDurableAndScopedUsage`, `DurableLiveUsageMerge`,
+  `DurableUsageContribution`, `ScopedUsageObserverEvent`
+- `SCOPED_OBSERVATION_REQUEST_CONTRACT_VERSION`,
+  `ScopedObservationRequestError`, `ScopedObservationTransportError`,
+  `SessionObservationApply`, `SessionObservationRequest`,
+  `SessionObservationRootIdentity`
+
+`observeSession` and `SessionObserver` keep their names but **not their
+shape** — the old callback/apply observer is replaced by the async iterator
+described below. The identity and event types that replace those contract
+modules are generated from Rust and exported from the same entry point.
+
+### New
+
+- **`observeSession(request, options)`** — a store-free observer over one
+  session tree, as an async iterator. It opens no database, enumerates no
+  unrelated sessions, and follows the root transcript plus its subagent
+  transcripts and declared sidecars. Events carry a deterministic `event_id`, a
+  `scope_epoch`, and — on semantic events — the same `semantic_revision_ref` a
+  durable query returns for that revision. Losing continuity is explicit: the
+  observer says so and replaces the epoch with a full snapshot rather than
+  dropping events. See
+  [SDK README](packages/sdk/README.md#watching-one-session-observesession) and
+  [the migration note](docs/integration/chopsticks-observe-session.md).
+- **`getReadiness()`** on the observation service (`readiness()` on the native
+  engine and the host) — six independent fields, `catalog`, `history`, `usage`,
+  `capabilities`, `artifacts`, `search`, each `pending` / `indexing` / `ready` /
+  `degraded` / `unavailable` with the commit its evidence was read at.
+  `spag doctor` renders it.
+- **Catalog-first `listProjects` / `listSessions`** — rows now carry
+  `externalRef` (a persistable, restart-stable reference), `catalogState`
+  (`discovered` → `transcript_backed` → `hydrated` → `searchable`), `degraded`
+  with `degradedReason`, `nativeMessageCount` beside `decodedMessageCount`, and,
+  on sessions, `associationBasis` / `associationQuality` /
+  `associationProvenance` plus `identityConflicts[]`. Existing fields are
+  unchanged.
+- **VibeField Phase A helpers** — `queryWatermark`, `isSameSnapshot`,
+  `isSameEntity`, `isSameRevision`, `isSameNativeIdentity`, with generated
+  `SessionRef` / `ProjectRef` / `SemanticRevisionRef` / `NativeIdentity`. See
+  [docs/integration/vibefield-phase-a.md](docs/integration/vibefield-phase-a.md).
+
+### Deprecated
+
+- **`watchSessionTranscript`** — superseded by `observeSession`. It still ships
+  and still works, and it is removed **one release after** downstream consumers
+  migrate. The porting table is in the SDK README: raw lines from one file
+  become reduced revisions from the whole session tree, callbacks become
+  `for await`, a silent re-read becomes an explicit `reset`, and continuity
+  becomes a claim the observer actually makes.
+
+Design: [RFC 012](docs/rfcs/012-evidence-backed-adapters-and-progressive-readiness.md)
+and its children [012B](docs/rfcs/012b-catalog-readiness-and-progressive-startup.md),
+[012C](docs/rfcs/012c-runtime-semantics-and-usage-v2.md),
+[012D](docs/rfcs/012d-session-scoped-observation.md).
+
+<!-- End standing notice. -->
+
+<!-- Standing notice — maintained by hand, not by release-please. -->
+
 ## Removed in 0.6.0 — Plane 3 (hooks, chat, plugins)
 
 `spag hooks`, `spag chat`, `spag plugin`, the Hooks Monitor and Chat TUI views,
