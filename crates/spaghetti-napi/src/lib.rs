@@ -17,9 +17,6 @@
 //!   and bounded recovery scheduling.
 //! - `orchestrate` — feature-gated legacy differential tooling.
 
-// Dead code is expected until Phase 1 finishes wiring the orchestrator.
-#![allow(dead_code)]
-
 use napi_derive::napi;
 
 pub mod adapter;
