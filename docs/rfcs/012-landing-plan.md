@@ -194,10 +194,10 @@ it is the largest and depends on L2's codegen).
 
 | Item | State | Evidence |
 | --- | --- | --- |
-| Wave 0 | in progress 2026-08-23 | this file; `allow(dead_code)` removed; ratchets |
-| L1 observer | not started | — |
-| L2 sdk-api | not started | — |
-| L3 usage | not started | — |
-| L4 catalog | not started | — |
+| Wave 0 | done 2026-08-23 (local `main` `3db39a7`) | plan + lane briefs landed; `allow(dead_code)` removed (`a08c013`); code-shape ratchet in `validate-all.sh` (`8753f28`); lane worktrees `land-l1..l4` on the SSD; push of `main` + archive branch awaiting owner go-ahead |
+| L1 observer | in progress (Opus lane, branch `land/l1-observer`) | — |
+| L2 sdk-api | in progress (Opus lane, branch `land/l2-sdk-api`, Phase A) | — |
+| L3 usage | in progress (Opus lane, branch `land/l3-usage`) | — |
+| L4 catalog | in progress (Opus lane, branch `land/l4-catalog`) | — |
 | Wave 2 | not started | — |
 | Wave 3 | not started | — |
