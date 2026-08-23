@@ -62,8 +62,18 @@ describe('Grok product surface', { skip: !native }, () => {
   });
 
   after(async () => {
+    // Await the full teardown before deleting: a directory cannot be removed
+    // while the SQLite handle is still open, and the retry knobs absorb
+    // transient locks. Native connection teardown is not synchronously
+    // observable from JS, so `dispose()` resolving does not guarantee the
+    // handle is closed *this* tick — a leaked temp dir is better than a red
+    // suite whose assertions all passed, but keep it loud.
     await service.dispose();
-    rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    try {
+      rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch (error) {
+      console.warn(`[grok-product-surface] temp dir not removed: ${String(error)}`);
+    }
   });
 
   test('the configured adapter is the only source', async () => {

@@ -54,7 +54,14 @@ let identityEngine: SpaghettiEngine;
 
 after(async () => {
   for (const engine of engines.splice(0)) await engine.dispose();
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  for (const dir of tempDirs.splice(0)) {
+    // See `engine-json-contract.test.ts`: removal races native handle close.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (error) {
+      console.warn(`[vibefield] temp dir not removed: ${String(error)}`);
+    }
+  }
 });
 
 before(async () => {

@@ -72,7 +72,14 @@ let sessionId: string;
 after(async () => {
   if (engine) await engine.dispose();
   for (const directory of tempDirs.splice(0)) {
-    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    // `dispose()` resolving does not prove the native SQLite handle closed on
+    // this tick, so removal can lose a race under load. Losing a temp dir is
+    // not a test failure; report it and move on.
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (error) {
+      console.warn(`[engine-json-contract] temp dir not removed: ${String(error)}`);
+    }
   }
 });
 
