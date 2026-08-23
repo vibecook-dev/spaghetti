@@ -685,8 +685,27 @@ impl NativeIdentity {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How well a native timestamp is known. A file-metadata fallback is not the
+/// same claim as a timestamp the record itself carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub enum TimestampQuality {
+    NativeExact,
+    NativeApproximate,
+    FileMetadataFallback,
+    Derived,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct QualifiedTimestamp {
+    pub value: String,
+    pub quality: TimestampQuality,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum QualifiedValueQuality {
     Exact,
     NativeClaimed,
@@ -695,16 +714,18 @@ pub enum QualifiedValueQuality {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ContractCompleteness {
     Complete,
     Partial,
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum QualifiedUnknownReason {
     Missing,
     Unsupported,
@@ -714,7 +735,8 @@ pub enum QualifiedUnknownReason {
     Malformed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 pub struct QualifiedValue<T, A = String, P = Vec<SemanticRevisionRef>> {
     pub value: Option<T>,
     pub quality: QualifiedValueQuality,

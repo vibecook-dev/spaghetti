@@ -202,15 +202,15 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 22,
+                contract_version: 23,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         "claude-code-support-2026-08-21-candidate",
                         env!("CARGO_PKG_VERSION"),
-                        22,
+                        23,
                         "sha256:d88b3e31bb3b8d7ebe7e3147a30adf774801301f164ccdfa8518545b98cb34ab",
                         "sha256:a1da27b6370c89e6d8bbc8b8fe671ab3cee4544758699729970617b29fd4ae0d",
-                        "sha256:b28608dcf0f0a5d6d55475b121cd4162b592c4f6a5e47e7284d3ba2b2a4434a8",
+                        "sha256:d7f48d920b393ca8fbc6767e3262619955ffa82e5d6ea43909087836d89101ad",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -5385,7 +5385,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 22);
+        assert_eq!(adapter.manifest().contract_version, 23);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -5945,7 +5945,9 @@ mod tests {
         );
         let candidate_scope = manifest.scope_programs.as_ref().unwrap();
         assert_eq!(candidate_scope.status, ScopeProgramStatus::Candidate);
-        assert!(candidate_scope.program("observe-root-session-and-descendants").is_some());
+        assert!(candidate_scope
+            .program("observe-root-session-and-descendants")
+            .is_some());
         let scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"

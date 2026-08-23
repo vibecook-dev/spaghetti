@@ -3,6 +3,7 @@ import type { ActorRef } from "./ActorRef.js";
 import type { ObserverEventId } from "./ObserverEventId.js";
 import type { ObserverFamily } from "./ObserverFamily.js";
 import type { ObserverPhase } from "./ObserverPhase.js";
+import type { RuntimeSemanticValue } from "./RuntimeSemanticValue.js";
 import type { SemanticOperation } from "./SemanticOperation.js";
 import type { SourcePosition } from "./SourcePosition.js";
 
@@ -41,5 +42,9 @@ observed_at: number,
 /**
  * The reduced typed value, exactly as RFC 012C defines it for this family.
  * Absent for a retraction.
+ *
+ * Carried as JSON because the observer is adapter-neutral, and typed for
+ * TypeScript as the union it actually contains — `adapter/runtime_value.rs`
+ * proves the two shapes agree for every family.
  */
-value: unknown, };
+value: RuntimeSemanticValue | null, };

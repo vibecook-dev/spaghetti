@@ -615,11 +615,7 @@ fn push_user_input_revision(
     let mut key = Vec::new();
     key.extend_from_slice(b"runtime.user-input-request\0");
     key.extend_from_slice(fact.native_tool_use_id.as_bytes());
-    output.push_native_object_scoped(
-        record,
-        &key,
-        Fact::UserInputRequestRevision(fact.clone()),
-    )?;
+    output.push_native_object_scoped(record, &key, Fact::UserInputRequestRevision(fact.clone()))?;
     Ok(())
 }
 
