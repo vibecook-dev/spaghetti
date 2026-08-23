@@ -65,20 +65,6 @@ impl SpaghettiSessionObserver {
         encode(&events)
     }
 
-    /// TEMPORARY: object-valued twin of `poll`, kept only long enough to
-    /// measure it against the JSON-string path. Removed before the branch ships.
-    #[napi(js_name = "pollValues")]
-    pub fn poll_values(&self, max: Option<u32>) -> Result<Vec<serde_json::Value>> {
-        self.handle
-            .poll(batch_size(max))
-            .iter()
-            .map(|event| {
-                serde_json::to_value(event)
-                    .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))
-            })
-            .collect()
-    }
-
     /// Wait up to `timeoutMs` for at least one event, then take up to `max`.
     /// Resolves with an empty array on timeout.
     #[napi(js_name = "waitForEvents", ts_return_type = "Promise<string>")]
@@ -191,9 +177,12 @@ fn batch_size(max: Option<u32>) -> usize {
     max.unwrap_or(DEFAULT_BATCH).clamp(1, MAX_BATCH) as usize
 }
 
-/// Events cross as one JSON string. A batch of transcript events is several
-/// kilobytes of deeply nested data; building that as JS values costs one N-API
-/// call per node, while V8's own parser handles the whole batch in native code.
+/// Events cross as one JSON string.
+///
+/// Measured on a 341 MB session tree: 36.5k events materialize in ~0.42-0.58 s
+/// as a string plus `JSON.parse`, against ~1.02-1.34 s built as JS values
+/// through napi-rs — 2.3x to 2.6x slower. Building an object graph costs one
+/// N-API call per node; V8's own parser reads the whole batch in native code.
 fn encode(events: &[ObserverEvent]) -> Result<String> {
     serde_json::to_string(events)
         .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))
