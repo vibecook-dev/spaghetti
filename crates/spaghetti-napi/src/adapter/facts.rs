@@ -3358,6 +3358,33 @@ impl FactBatch {
             )
     }
 
+    /// Canonical identity an object-scoped native fact *will* receive from
+    /// [`Self::push_native_object_scoped_with_revision`]. A dependent fact
+    /// (an RFC 012C content block naming its message) must reference its owner
+    /// by canonical fact identity, so the adapter derives that identity from
+    /// the same inputs rather than reconstructing it from a pushed envelope.
+    pub fn canonical_object_scoped_fact_id(
+        &self,
+        generation: u64,
+        fact_kind: &str,
+        stable_native_fact_key: &[u8],
+    ) -> Result<CanonicalFactId, AdapterError> {
+        let context = self.semantic_context.as_ref().ok_or_else(|| {
+            AdapterError::invalid_contract(
+                "canonical fact derivation requires a bound semantic decode context",
+            )
+        })?;
+        let semantic_key =
+            context.object_scoped_native_fact_key(generation, stable_native_fact_key)?;
+        CanonicalFactId::native(
+            context.adapter_id.as_str(),
+            &context.source_instance_key,
+            fact_kind,
+            &semantic_key,
+        )
+        .map_err(semantic_identity_error)
+    }
+
     /// Emit a native fact whose revision is not fully owned by the primary
     /// source record (for example, one incorporating a declared dependency
     /// revision). The explicit revision key must encode every semantic input

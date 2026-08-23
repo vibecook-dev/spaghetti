@@ -21,6 +21,8 @@ pub mod fts_text;
 pub mod message_extractor;
 #[cfg(feature = "legacy-oracle")]
 pub mod project_parser;
+/// RFC 012C runtime fact emission from decoded Claude records.
+pub(crate) mod runtime_facts;
 pub mod session_metadata;
 pub(crate) mod support_probe;
 pub mod types;

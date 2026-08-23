@@ -35,6 +35,10 @@ use crate::adapter::{
     WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
 };
 use crate::claude::message_extractor;
+use crate::claude::runtime_facts::{
+    emit_task_snapshot_runtime_facts, emit_transcript_runtime_facts, runtime_task_items,
+    TranscriptRuntimeRecord, TranscriptRuntimeState,
+};
 use crate::claude::session_metadata;
 use crate::claude::types::content::{
     AssistantContentBlock, ToolResultContent, UserContentBlock, UserMessageContent,
@@ -131,7 +135,10 @@ const PROJECT_MEMORY_DECODER: &str = "claude-project-memory";
 const PERSISTED_TOOL_RESULT_DECODER: &str = "claude-persisted-tool-result";
 const INTERPRETATION_SETTINGS_DECODER: &str = "claude-interpretation-settings";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
-const TRANSCRIPT_DECODER_STATE_VERSION: u8 = 1;
+/// Bumped to 2 when RFC 012C runtime families were added: the state now
+/// carries tool correlation and effective-state carry-over, so a generation
+/// decoded by version 1 must replay rather than resume.
+const TRANSCRIPT_DECODER_STATE_VERSION: u8 = 2;
 const TRANSCRIPT_DECODER_STATE_BYTES: usize = 67;
 const TRANSCRIPT_STATE_SESSION_DECLARED: u8 = 1 << 0;
 const TRANSCRIPT_STATE_RUN_DECLARED: u8 = 1 << 1;
@@ -234,17 +241,6 @@ impl ClaudeCodeAdapter {
 
     fn adapter_id(&self) -> &AdapterId {
         &self.manifest.id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_test_support(
-        mut self,
-        binding: AdapterSupportBinding,
-        scope_programs: ScopeProgramManifest,
-    ) -> Self {
-        self.manifest.support_binding = Some(binding);
-        self.manifest.scope_programs = Some(scope_programs);
-        self
     }
 }
 
@@ -1882,6 +1878,9 @@ struct ClaudeTranscriptDecoderState {
     first_prompt_declared: bool,
     cwd_hash: Option<[u8; 32]>,
     git_branch_hash: Option<[u8; 32]>,
+    /// RFC 012C correlation and effective-state carry-over. Bounded, and
+    /// owned by `runtime_facts` so this struct stays a flag record.
+    runtime: TranscriptRuntimeState,
 }
 
 impl ClaudeTranscriptDecoderState {
@@ -1889,7 +1888,7 @@ impl ClaudeTranscriptDecoderState {
         let Some(value) = value else {
             return Ok(Self::default());
         };
-        if value.len() != TRANSCRIPT_DECODER_STATE_BYTES {
+        if value.len() < TRANSCRIPT_DECODER_STATE_BYTES {
             return Err(AdapterError::new(
                 AdapterErrorClass::StreamFatal,
                 "claude_transcript_decoder_state_length",
@@ -1923,6 +1922,7 @@ impl ClaudeTranscriptDecoderState {
             cwd_hash: (present & TRANSCRIPT_STATE_CWD_PRESENT != 0).then_some(cwd_hash),
             git_branch_hash: (present & TRANSCRIPT_STATE_BRANCH_PRESENT != 0)
                 .then_some(git_branch_hash),
+            runtime: TranscriptRuntimeState::decode(&value[TRANSCRIPT_DECODER_STATE_BYTES..])?,
         })
     }
 
@@ -1943,6 +1943,7 @@ impl ClaudeTranscriptDecoderState {
         encoded.extend_from_slice(self.cwd_hash.as_ref().unwrap_or(&[0; 32]));
         encoded.extend_from_slice(self.git_branch_hash.as_ref().unwrap_or(&[0; 32]));
         debug_assert_eq!(encoded.len(), TRANSCRIPT_DECODER_STATE_BYTES);
+        encoded.extend_from_slice(&self.runtime.encode());
         output.set_next_decoder_state(encoded)
     }
 
@@ -2750,8 +2751,15 @@ fn decode_todo_snapshot(
             native_owner_id: Some(context.native_agent_id.clone()),
             kind: TaskCollectionKind::TodoList,
             coverage: TaskSnapshotCoverage::Complete,
-            items,
+            items: items.clone(),
         }),
+    )?;
+    emit_task_snapshot_runtime_facts(
+        record,
+        &output.canonical_entity_key("session", context.native_session_id.as_bytes())?,
+        &canonical_todo_actor_run(output, context)?,
+        &runtime_task_items(&items),
+        output,
     )?;
     Ok(DecodeDisposition::Applied)
 }
@@ -4238,6 +4246,21 @@ fn decode_transcript_record(
         _ => projection.msg_type.clone(),
     };
     let spawn_descriptors = delegation_spawn_descriptors(&content);
+    emit_transcript_runtime_facts(
+        record,
+        &TranscriptRuntimeRecord {
+            session: &output.canonical_entity_key("session", context.session_id.as_bytes())?,
+            actor_run: &canonical_transcript_actor_run(output, context)?,
+            record_type: projection.msg_type.as_str(),
+            record_uuid: native_message_id.as_deref(),
+            role: &role,
+            content: &content,
+            model: model.as_deref(),
+            raw: &value,
+        },
+        &mut state.runtime,
+        output,
+    )?;
     output.push(
         record,
         Fact::Message(MessageFact {
@@ -4461,6 +4484,26 @@ fn canonical_transcript_actor_run(
         output.canonical_entity_key("run", context.run_native_key().as_bytes())
     } else {
         output.canonical_root_actor_run_key(context.session_id.as_bytes(), None)
+    }
+}
+
+/// Actor that owns a `todos/<session>-agent-<agent>.json` document.
+///
+/// The file name names its owner: an agent equal to the session is the root
+/// actor, and any other agent is a plain (non-workflow) subagent, which is the
+/// same derivation `run_native_key` uses for that shape.
+fn canonical_todo_actor_run(
+    output: &FactBatch,
+    context: &ClaudeTodoContext,
+) -> Result<crate::adapter::CanonicalEntityKey, AdapterError> {
+    if context.native_agent_id == context.native_session_id {
+        output.canonical_root_actor_run_key(context.native_session_id.as_bytes(), None)
+    } else {
+        let native_key = format!(
+            "{}\0\0{}",
+            context.native_session_id, context.native_agent_id
+        );
+        output.canonical_entity_key("run", native_key.as_bytes())
     }
 }
 
@@ -7108,7 +7151,14 @@ mod tests {
               {"content":"Run parity","status":"future_native_status"}
             ]"#,
         );
-        let mut batch = FactBatch::new(4, 4).unwrap();
+        // The todo document now also proves RFC 012C tasks, which are canonical
+        // facts and therefore need a bound semantic context.
+        let mut batch = semantic_batch(
+            TODO_STREAM,
+            &format!("todos/{SESSION}-agent-{SESSION}.json"),
+            16,
+            4,
+        );
         let disposition = adapter
             .decode(
                 DecodeContext {
@@ -7142,7 +7192,12 @@ mod tests {
         let changed = document_record(
             br#"[{"content":"Add task projection","status":"completed","activeForm":"Adding task projection"}]"#,
         );
-        let mut changed_batch = FactBatch::new(4, 4).unwrap();
+        let mut changed_batch = semantic_batch(
+            TODO_STREAM,
+            &format!("todos/{SESSION}-agent-{SESSION}.json"),
+            16,
+            4,
+        );
         adapter
             .decode(
                 DecodeContext {
@@ -7326,7 +7381,7 @@ mod tests {
               "ownerOrganizationUuid":"fixture-organization"
             }"#,
         );
-        let mut batch = semantic_transcript_batch(8, 4);
+        let mut batch = semantic_transcript_batch(32, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -7371,7 +7426,7 @@ mod tests {
               "ownerOrganizationUuid":"example-organization"
             }"#,
         );
-        let mut changed_owner_batch = semantic_transcript_batch(8, 4);
+        let mut changed_owner_batch = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -7431,7 +7486,7 @@ mod tests {
               }
             }"#,
         );
-        let mut batch = semantic_transcript_batch(16, 8);
+        let mut batch = semantic_transcript_batch(48, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -7524,7 +7579,7 @@ mod tests {
         topology_replay.stream_id = 80;
         topology_replay.object_id = 90;
         topology_replay.observed_at = 100;
-        let mut replay_batch = semantic_transcript_batch(16, 8);
+        let mut replay_batch = semantic_transcript_batch(48, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -7570,7 +7625,7 @@ mod tests {
               }
             }"#,
         );
-        let mut delta_batch = semantic_transcript_batch(16, 8);
+        let mut delta_batch = semantic_transcript_batch(48, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -7635,7 +7690,7 @@ mod tests {
               }
             }"#,
         );
-        let mut batch = semantic_transcript_batch(16, 8);
+        let mut batch = semantic_transcript_batch(48, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -7680,7 +7735,7 @@ mod tests {
               }
             }"#,
         );
-        let mut missing_batch = semantic_transcript_batch(16, 8);
+        let mut missing_batch = semantic_transcript_batch(48, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -8666,7 +8721,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = semantic_transcript_batch(8, 4);
+        let mut batch = semantic_transcript_batch(32, 8);
         let disposition = adapter
             .decode(
                 DecodeContext {
@@ -8679,7 +8734,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(disposition, DecodeDisposition::Applied);
-        assert_eq!(batch.facts().len(), 6);
+        // The six RFC 011 facts, plus the RFC 012C families this record
+        // proves: a message, its content blocks, the tool call, and the
+        // response model.
+        assert_eq!(batch.facts().len(), 11);
         let message = fact_values(&batch)
             .find_map(|fact| match fact {
                 Fact::Message(message) => Some(message),
@@ -8753,7 +8811,7 @@ mod tests {
         };
         let decode = |payload: Vec<u8>, start: u64| {
             let record = record_at(&payload, start);
-            let mut batch = semantic_transcript_batch(8, 4);
+            let mut batch = semantic_transcript_batch(32, 8);
             adapter
                 .decode(
                     DecodeContext {
@@ -8917,7 +8975,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut first = semantic_transcript_batch(8, 4);
+        let mut first = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -8933,7 +8991,10 @@ mod tests {
         assert!(fact_values(&first).any(|fact| matches!(fact, Fact::Run(_))));
         assert!(fact_values(&first).any(|fact| matches!(fact, Fact::ActorRunRevision(_))));
         let first_state = first.next_decoder_state().unwrap().to_vec();
-        assert_eq!(first_state.len(), TRANSCRIPT_DECODER_STATE_BYTES);
+        // The flag record is followed by the bounded RFC 012C runtime tail
+        // (effective state, and correlation for unresolved tool calls).
+        assert!(first_state.len() >= TRANSCRIPT_DECODER_STATE_BYTES);
+        assert_eq!(first_state[0], TRANSCRIPT_DECODER_STATE_VERSION);
 
         let prompt_record = record(
             format!(
@@ -8941,7 +9002,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut prompt = semantic_transcript_batch(8, 4);
+        let mut prompt = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -8969,7 +9030,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut later = semantic_transcript_batch(8, 4);
+        let mut later = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -9050,7 +9111,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = semantic_transcript_batch(9, 4);
+        let mut batch = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -9166,7 +9227,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = semantic_batch(SUBAGENT_STREAM, &relative, 9, 4);
+        let mut batch = semantic_batch(SUBAGENT_STREAM, &relative, 32, 8);
         adapter
             .decode(
                 DecodeContext {

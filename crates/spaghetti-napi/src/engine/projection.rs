@@ -6607,8 +6607,10 @@ mod tests {
         assert_eq!(count(&cold, "usage_v2_response_contributions"), 2);
         assert_eq!(
             count(&cold, "fact_records"),
-            7,
-            "the actor declaration is retained with each message's activity plus its response usage"
+            12,
+            "the actor declaration is retained with each message's activity, its \
+             response usage, and the RFC 012C message/content-block/effective-state \
+             revisions the same records prove"
         );
     }
 
