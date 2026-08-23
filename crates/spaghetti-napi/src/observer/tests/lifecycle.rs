@@ -271,7 +271,7 @@ fn replacing_the_transcript_file_is_a_discontinuity_not_an_append() {
 fn a_repeated_usage_row_adds_nothing_and_a_correction_replaces_it() {
     let fixture = SessionFixture::new();
     let repeated = assistant_record("a-1", "resp-1", 100);
-    fixture.append(&fixture.transcript(), &[repeated.clone()]);
+    fixture.append(&fixture.transcript(), std::slice::from_ref(&repeated));
 
     let observer = fixture.open();
     let bootstrap = drain_bootstrap(&observer);

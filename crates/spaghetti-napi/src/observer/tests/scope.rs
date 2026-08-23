@@ -184,7 +184,7 @@ fn a_sidecar_joins_the_scope_only_when_evidence_names_it() {
     let todo = r#"[{"content":"fixture","status":"pending","activeForm":"fixture"}]"#.to_string();
     // The root actor's own sidecar: the transcript decode emits scope-join
     // evidence naming it, so bootstrap reaches it in the same pass set.
-    fixture.append_once(&fixture.todo_sidecar(SESSION), &[todo.clone()]);
+    fixture.append_once(&fixture.todo_sidecar(SESSION), std::slice::from_ref(&todo));
     // A sidecar for an actor nothing in this session mentions. Reaching it
     // would mean enumerating a global root, which RFC 012D §5 forbids.
     fixture.append_once(&fixture.todo_sidecar("unnamed-actor"), &[todo]);
