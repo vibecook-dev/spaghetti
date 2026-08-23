@@ -46,8 +46,14 @@ export interface ObservationHostOptions {
   /** Diagnostic label written to the owner metadata sidecar. */
   ownerLabel?: string;
   /**
-   * Explicitly defer search-only structures until the initial native scans
-   * finish. The host never traverses source roots to infer this policy.
+   * Defer search-only structures until the initial native scans finish.
+   * Defaults to `true`: the host never traverses source roots to infer this
+   * policy, and it does not need to, because the engine ignores the request
+   * unless the database has no committed ingest commits. That is exactly the
+   * cold build — a fresh database, or the rebuild every schema bump forces —
+   * where maintaining full-text triggers and the deferred indexes per commit
+   * costs far more than one rebuild at the end. Pass `false` to keep search
+   * queryable throughout the build.
    */
   deferQueryStructures?: boolean;
   /** Cancels startup; every partially started supervisor is still disposed. */
@@ -125,7 +131,7 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
     dbPath: resolveDatabasePath(options.dbPath),
     queryWorkers: options.queryWorkers,
     ownerLabel: options.ownerLabel ?? 'sdk-observation-host',
-    ...(options.deferQueryStructures ? { bootstrapQueryStructures: true } : {}),
+    ...((options.deferQueryStructures ?? true) ? { bootstrapQueryStructures: true } : {}),
   });
   const bootstrapActive = engine.status.state === 'bootstrapping';
   let client: SpaghettiClient | undefined;

@@ -10,11 +10,9 @@ use std::time::Instant;
 use rusqlite::{params, params_from_iter, OptionalExtension, Params, Transaction};
 
 use crate::adapter::{
-    ContractCompleteness, DelegationFact, DelegationKind, DelegationMetadataFact,
-    DelegationSpawnFact, EntityKey, EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope,
-    FactRevisionId, MessageRole, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValueQuality,
-    RawRetentionPolicy, RelationStrength, SessionFact, TimestampQuality, UsageQualifiedValue,
-    UsageResponseIdentity, UsageValueAuthority,
+    DelegationFact, DelegationKind, DelegationMetadataFact, DelegationSpawnFact, EntityKey,
+    EvidenceKind, EvidenceStrength, Fact, FactBatch, FactEnvelope, FactRevisionId, MessageRole,
+    QualifiedTimestamp, RawRetentionPolicy, RelationStrength, SessionFact, TimestampQuality,
 };
 
 use super::artifact_projection::{apply_artifact_facts, retract_replayed_artifact_fact};
@@ -37,6 +35,7 @@ use super::tool_result_projection::{
     apply_persisted_tool_result_facts, replace_message_references, replaced_message_reference_keys,
 };
 use super::unknown_evidence_projection::apply_unknown_evidence_mappings;
+use super::usage_v2_qualification::{intern_usage_v2_qualification, usage_v2_response_identity};
 use super::workflow_projection::apply_workflow_facts;
 use super::EngineError;
 
@@ -3375,120 +3374,11 @@ fn opaque_reference(bytes: &[u8]) -> Result<String, EngineError> {
     ))
 }
 
-fn intern_usage_v2_qualification<T>(
-    transaction: &Transaction<'_>,
-    value: &UsageQualifiedValue<T>,
-) -> Result<[u8; 32], EngineError> {
-    let key = usage_v2_qualification_key(value);
-    let affected = execute_cached(
-        transaction,
-        r#"
-            INSERT INTO usage_v2_qualification_specs (
-                qualification_key, quality, completeness, unknown_reason,
-                authority, native_field, normalization_contract_version
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            ON CONFLICT(qualification_key) DO UPDATE SET
-                qualification_key = excluded.qualification_key
-            WHERE quality = excluded.quality
-              AND completeness = excluded.completeness
-              AND unknown_reason IS excluded.unknown_reason
-              AND authority = excluded.authority
-              AND native_field = excluded.native_field
-              AND normalization_contract_version = excluded.normalization_contract_version
-        "#,
-        params![
-            key.as_slice(),
-            usage_v2_quality(value.quality),
-            usage_v2_completeness(value.completeness),
-            value.unknown_reason.map(usage_v2_unknown_reason),
-            usage_v2_authority(value.authority),
-            value.provenance.native_field,
-            i64::from(value.provenance.normalization_contract_version),
-        ],
-    )
-    .map_err(|error| sqlite_error("intern usage-v2 qualification", error))?;
-    if affected != 1 {
-        return Err(EngineError::InvalidCommit(
-            "usage-v2 qualification digest collision".to_string(),
-        ));
-    }
-    Ok(key)
-}
-
-fn usage_v2_qualification_key<T>(value: &UsageQualifiedValue<T>) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spaghetti-usage-v2-qualification-v1\0");
-    for component in [
-        usage_v2_quality(value.quality).as_bytes(),
-        usage_v2_completeness(value.completeness).as_bytes(),
-        value
-            .unknown_reason
-            .map(usage_v2_unknown_reason)
-            .unwrap_or("")
-            .as_bytes(),
-        usage_v2_authority(value.authority).as_bytes(),
-        value.provenance.native_field.as_bytes(),
-    ] {
-        hasher.update(&(component.len() as u64).to_be_bytes());
-        hasher.update(component);
-    }
-    hasher.update(
-        &value
-            .provenance
-            .normalization_contract_version
-            .to_be_bytes(),
-    );
-    *hasher.finalize().as_bytes()
-}
-
 fn sqlite_optional_u64(
     value: Option<u64>,
     field: &'static str,
 ) -> Result<Option<i64>, EngineError> {
     value.map(|value| sqlite_u64(value, field)).transpose()
-}
-
-fn usage_v2_response_identity(identity: UsageResponseIdentity) -> &'static str {
-    match identity {
-        UsageResponseIdentity::NativeMessageId => "native_message_id",
-        UsageResponseIdentity::SourceRecordFallback => "source_record_fallback",
-    }
-}
-
-fn usage_v2_quality(quality: QualifiedValueQuality) -> &'static str {
-    match quality {
-        QualifiedValueQuality::Exact => "exact",
-        QualifiedValueQuality::NativeClaimed => "native_claimed",
-        QualifiedValueQuality::Derived => "derived",
-        QualifiedValueQuality::Estimated => "estimated",
-        QualifiedValueQuality::Unknown => "unknown",
-    }
-}
-
-fn usage_v2_completeness(completeness: ContractCompleteness) -> &'static str {
-    match completeness {
-        ContractCompleteness::Complete => "complete",
-        ContractCompleteness::Partial => "partial",
-        ContractCompleteness::Unknown => "unknown",
-    }
-}
-
-fn usage_v2_unknown_reason(reason: QualifiedUnknownReason) -> &'static str {
-    match reason {
-        QualifiedUnknownReason::Missing => "missing",
-        QualifiedUnknownReason::Unsupported => "unsupported",
-        QualifiedUnknownReason::Withheld => "withheld",
-        QualifiedUnknownReason::NotYetObserved => "not_yet_observed",
-        QualifiedUnknownReason::Ambiguous => "ambiguous",
-        QualifiedUnknownReason::Malformed => "malformed",
-    }
-}
-
-fn usage_v2_authority(authority: UsageValueAuthority) -> &'static str {
-    match authority {
-        UsageValueAuthority::NativeResponse => "native_response",
-        UsageValueAuthority::AdapterDerived => "adapter_derived",
-    }
 }
 
 fn upsert_change(
@@ -3764,7 +3654,7 @@ fn sqlite_u64(value: u64, field: &'static str) -> Result<i64, EngineError> {
         .map_err(|_| EngineError::InvalidCommit(format!("{field} exceeds SQLite integer range")))
 }
 
-fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
+pub(super) fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
     EngineError::Sqlite {
         operation,
         detail: error.to_string(),
