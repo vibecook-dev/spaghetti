@@ -97,6 +97,101 @@ utility process remains the sole native owner. Durable subscriptions wait on
 the Rust writer's commit signal and replay from `(commitSeq, ordinal)`; use
 `getSubscriptionMetrics()` for local delivery/lag diagnostics.
 
+## Watching one session (`observeSession`)
+
+`observeSession` attaches to a single session tree and yields typed events. It
+opens no database, enumerates no unrelated sessions, and holds one batch in
+memory at a time, so a slow consumer applies backpressure to the native queue
+instead of growing an array.
+
+```ts
+import { observeSession, isSemanticEvent } from '@vibecook/spaghetti-sdk';
+
+const observer = observeSession({
+  adapter_id: 'claude-code',
+  agent_root: `${homedir()}/.claude`,
+  transcript_path: transcriptPath, // may not exist yet
+});
+
+try {
+  for await (const event of observer) {
+    switch (event.type) {
+      case 'bootstrap_complete':
+      case 'resync_complete':
+        commitStagedEpoch(event.scope_epoch); // the barrier carries full coverage
+        break;
+      case 'overflow':
+        discardEpoch(event.scope_epoch); // a replacement snapshot follows
+        break;
+      case 'reset':
+        reloadObject(event.source.object_path);
+        break;
+      case 'source_error':
+        if (event.terminal) warn(event.message);
+        break;
+      case 'closed':
+        break;
+      default:
+        if (isSemanticEvent(event)) apply(event);
+    }
+  }
+} finally {
+  await observer.close();
+}
+```
+
+Leaving the loop — `break`, `return`, or a thrown error — closes the
+attachment; the `finally` above only matters if you also want `close()` to have
+resolved before continuing. Iteration is single-consumer: the observer returns
+the same iterator every time, because a second one would take events from the
+first rather than receive its own copy.
+
+A live session has no natural end, so `for await` parks on the next event
+rather than returning. Call `close()` from elsewhere — a signal handler, a
+session switch — to end the iteration; the loop then drains what is already
+queued and stops.
+
+> **Known deviation (as of 0.8.0-dev).** On a session tree whose per-family
+> revision count exceeds 65,536, `bootstrap_complete` is emitted early: the
+> barrier reports the truncated count as complete coverage, and the remaining
+> revisions arrive afterwards labelled `phase: "live"` even though they were
+> already on disk at attach. Nothing is lost, but a consumer that commits its
+> staged epoch at the barrier will briefly treat existing entities as absent,
+> and one that distinguishes cold state from live activity will see the
+> remainder as new. Sessions below that bound are unaffected.
+
+### Replacing `watchSessionTranscript`
+
+`watchSessionTranscript` still works and still ships, but it is superseded and
+will be removed one release after downstream consumers migrate. The differences
+that matter when porting:
+
+| `watchSessionTranscript` | `observeSession` |
+| --- | --- |
+| raw transcript lines from one file | reduced RFC 012C revisions from the whole session tree, subagent transcripts and declared sidecars included |
+| callbacks | `for await` |
+| a rewritten file is silently re-read | `reset` names the object and its new generation |
+| no continuity claim | `scope_epoch` plus `overflow` → full replacement snapshot |
+| no identity | `semantic_revision_ref` on every semantic event, equal to what a durable query returns for the same revision |
+
+Deduplicate on `(scope_epoch, event_id)`; `sequence` is the delivery order
+inside one attachment and is not comparable across attachments or to a durable
+commit sequence.
+
+### Typing the payload
+
+Every event type is generated from Rust — regenerate with `pnpm generate:types`
+rather than editing anything under `src/generated/`. `SemanticEvent.value` is
+still `unknown`: the per-family value types come from `adapter/facts.rs` in
+Wave 2. Until then, narrow on `family` and validate the value at your own
+boundary.
+
+```ts
+if (isSemanticEvent(event) && event.family === 'usage_v2') {
+  const usage = event.value as MyUsageShape; // your own contract, for now
+}
+```
+
 ## Architecture and compatibility
 
 - Rust owns discovery, bounded reads, decoding, projection transactions,
