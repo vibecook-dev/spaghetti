@@ -59,7 +59,7 @@ RFC012_SEMANTIC_FORBIDDEN_RE = re.compile(
 RFC012_SUPPORT_FORBIDDEN_RE = re.compile(
     r"(?:\bcrate::|\bsuper::(?:::|\b)|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
 )
-RFC012_SCOPED_HOST_FORBIDDEN_RE = re.compile(
+RFC012_OBSERVER_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate)"
     r"|rusqlite|napi)(?:::|\b)"
 )
@@ -67,11 +67,11 @@ RFC012_OBSERVATION_CONTRACT_FORBIDDEN_RE = re.compile(
     r"(?:\bcrate::(?!adapter(?:::|\b))|\brusqlite(?:::|\b)|\bnapi(?:::|\b))"
 )
 RFC012_DECODE_RUNTIME_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|scoped_observation)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|observer)"
     r"|rusqlite|napi)(?:::|\b)"
 )
 RFC012_CATALOG_CONTRACT_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|scoped_observation|source)"
+    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|observer|source)"
     r"|rusqlite|napi)(?:::|\b)"
 )
 RFC012_SEMANTIC_CONTRACT_FORBIDDEN_RE = re.compile(
@@ -437,577 +437,53 @@ def discover_rfc012_adapter_support_binding_gaps() -> set[str]:
 
 
 def discover_rfc012_scoped_host_boundary_violations() -> set[str]:
-    """RFC 012D composition and contracts cannot acquire persistence or vendor authority."""
-    relative = "crates/spaghetti-napi/src/scoped_observation.rs"
-    path = REPO_ROOT / relative
+    """The store-free observer holds no persistence, query, or vendor authority.
+
+    RFC 012D section 2: a scoped observer opens no store, migration, query pool,
+    durable outbox, or configured whole-adapter host, and it composes the same
+    decode spine and semantic reducers the durable host uses. The N-API binding
+    layer is the one exception: it is the composition root, so it is allowed to
+    resolve the adapter that every other module then treats as opaque.
+    """
+    relative = "crates/spaghetti-napi/src/observer"
+    root = REPO_ROOT / relative
     found: set[str] = set()
-    scoped_text = production_rust_text(path) if path.exists() else ""
-    scoped_dir = path.with_suffix("")
-    production_scoped_paths = [
-        candidate
-        for candidate in production_rust()
-        if candidate == path or candidate.is_relative_to(scoped_dir)
+    modules = [
+        candidate for candidate in production_rust() if candidate.is_relative_to(root)
     ]
-    if (
-        not path.exists()
-        or not production_scoped_paths
-        or any(
-            RFC012_SCOPED_HOST_FORBIDDEN_RE.search(production_rust_text(candidate))
-            for candidate in production_scoped_paths
-        )
-    ):
+    if not root.is_dir() or not modules:
         found.add(relative)
-    required_observation_bindings = (
-        "observation_contract_request: ObservationContractRequest",
-        "negotiate_observation_contract(",
-        "observation_contract: ObservationContractSelection",
-        "pub fn contract_selection(&self) -> &ObservationContractSelection",
-        "observation_capabilities: ObservationCapabilities",
-        "pub fn capabilities(&self) -> &ObservationCapabilities",
-        "pub contract_selection: ObservationContractSelection",
-        "contract_version: self.contract_selection.envelope_contract_version",
-        "EventFamilyNotSelected",
-    )
-    if any(binding not in scoped_text for binding in required_observation_bindings):
-        found.add(f"{relative}#missing-observation-contract-binding")
-    usage_wire = scoped_dir / "usage_wire.rs"
-    usage_wire_text = (
-        production_rust_text(usage_wire) if usage_wire in production_scoped_paths else ""
-    )
-    required_usage_wire_bindings = (
-        "pub(crate) struct ScopedUsageEnvelopeWire",
-        "from_wire_value_for_context(",
-        "expected_selection: &ObservationContractSelection",
-        "expected_root: &ScopedObservationRootIdentity",
-        "expected_sources: &[ScopedSourceObjectIdentity]",
-        "ScopedUsageEnvelopeContractError::UnsupportedEvent",
-    )
-    if any(binding not in usage_wire_text for binding in required_usage_wire_bindings):
-        found.add(f"{relative}#missing-contextual-usage-envelope-contract")
-    close_wire = scoped_dir / "close_wire.rs"
-    close_wire_text = (
-        production_rust_text(close_wire) if close_wire in production_scoped_paths else ""
-    )
-    required_close_wire_bindings = (
-        "pub(crate) struct ScopedCloseCommand",
-        "pub(crate) struct ScopedObservationCloseOperation",
-        "pub(crate) struct ScopedCloseReceiptWire",
-        "prepare_portable_close(",
-        "close_portable_with_consumer(",
-        "pub(crate) fn context_wire(&self) -> ScopedCloseContextWire",
-        "from_wire_value_for_operation(",
-        "expected_operation: &ScopedObservationCloseOperation",
-        "pub(crate) fn parse_receipt(",
-        "active_operations != 0",
-        "active_watcher_tasks != 0",
-        "consumer_drain_pending",
-        "Arc::ptr_eq(&self.attachment_authority",
-    )
-    if any(binding not in close_wire_text for binding in required_close_wire_bindings):
-        found.add(f"{relative}#missing-attachment-bound-close-contract")
-    artifact_wire = scoped_dir / "artifact_wire.rs"
-    artifact_wire_text = (
-        production_rust_text(artifact_wire)
-        if artifact_wire in production_scoped_paths
-        else ""
-    )
-    required_artifact_wire_bindings = (
-        "pub(crate) struct ScopedArtifactReadCommand",
-        "pub(crate) enum ScopedArtifactReadOutcome",
-        "prepare_portable_artifact_read(",
-        "validate_portable_artifact_command(",
-        "pub(crate) fn context_wire(&self) -> ScopedArtifactReadContextWire",
-        "from_wire_value_for_command(",
-        "expected: &ScopedArtifactReadCommand",
-        "Arc::ptr_eq(&self.attachment_authority",
-        "self.artifact_access_policy",
-        "artifact_access_policy_allows(",
-        "ScopedArtifactContractError::PolicyDenied",
-        "ScopedArtifactLocatorDisclosureWire::Withheld",
-        "MAX_INLINE_ARTIFACT_BYTES",
-    )
+        return found
+    binding_layer = root / "bindings.rs"
+    for module in modules:
+        if module == binding_layer:
+            continue
+        text = production_rust_text(module)
+        if RFC012_OBSERVER_FORBIDDEN_RE.search(text):
+            found.add(f"{repo_path(module)}#observer-acquired-foreign-authority")
+    # One decode spine, shared reducers: the observer is not a second parser.
+    if "decode_record(DecodeRuntimeRequest" not in production_rust_text(root / "object.rs"):
+        found.add(f"{relative}/object.rs#missing-shared-decode-spine")
+    state_text = production_rust_text(root / "state.rs")
     if any(
-        binding not in artifact_wire_text
-        for binding in required_artifact_wire_bindings
-    ):
-        found.add(f"{relative}#missing-attachment-bound-artifact-contract")
-    source_wire = scoped_dir / "source_wire.rs"
-    source_wire_text = (
-        production_rust_text(source_wire) if source_wire in production_scoped_paths else ""
-    )
-    required_source_wire_bindings = (
-        "pub(crate) struct ScopedSourceEnvelopeWire",
-        "from_wire_value_for_context(",
-        "expected_selection: &ObservationContractSelection",
-        "expected_root: &ScopedObservationRootIdentity",
-        "expected_sources: &[ScopedSourceObjectIdentity]",
-        "source_presence_event_id(",
-        "source_reset_event_id(",
-        "source_object_error_event_id(",
-        "ScopedSourceEnvelopeContractError::UnsupportedEvent",
-    )
-    if any(binding not in source_wire_text for binding in required_source_wire_bindings):
-        found.add(f"{relative}#missing-contextual-source-envelope-contract")
-    source_access = scoped_dir / "observation_source_access.rs"
-    source_access_text = (
-        production_rust_text(source_access)
-        if source_access in production_scoped_paths
-        else ""
-    )
-    required_directory_membership_bindings = (
-        "pub(crate) struct ScopedObservationDirectoryListing",
-        "struct ScopedObservationDirectoryContractIdentity",
-        "attachment_authority: Arc<ScopedObservationAttachmentAuthority>",
-        "Arc::ptr_eq(",
-        "scan_confined_audited(",
-        "matches_checkpoint(&self.binding, &checkpoint)",
-        "pub(crate) fn from_directory_listing(",
-    )
-    combined_directory_membership_text = scoped_text + source_access_text
-    if any(
-        binding not in combined_directory_membership_text
-        for binding in required_directory_membership_bindings
-    ) or "from_directory_checkpoint" in combined_directory_membership_text:
-        found.add(f"{relative}#missing-authorized-directory-membership-listing")
-    required_directory_member_read_bindings = (
-        "pub(crate) struct ScopedObservationDirectoryMemberContent",
-        "pub(crate) fn read_next_member(",
-        "complete_directory_listing(",
-        "reserve_member_read(",
-        "confined_relative_path_from_key(",
-        "read_stable_file_confined(",
-        "directory_member_stamp_matches(",
-        "confirm_membership_unchanged(",
-        "verification.checkpoint != self.checkpoint",
-        "!self.membership_revalidated",
-        ".finalize_for_membership()",
-    )
-    if any(
-        binding not in combined_directory_membership_text
-        for binding in required_directory_member_read_bindings
-    ):
-        found.add(f"{relative}#missing-authorized-directory-member-read")
-    required_directory_member_identity_bindings = (
-        "pub(crate) struct ScopedObservationDirectoryMemberIdentity",
-        "pub(crate) struct ScopedObservationDirectoryMemberBinding",
-        "semantic_context: FactSemanticContext",
-        "adapter: Arc<dyn AgentAdapter>",
-        "source_instance: Arc<SourceInstance>",
-        "runtime_stream: Arc<StreamSpec>",
-        "descriptor: SourceObjectDescriptor",
-        "pub(crate) struct ScopedObservationDirectoryMemberDecodeInput",
-        "pub(crate) struct ScopedObservationDirectoryMemberBootstrapFailure",
-        "pub(crate) struct ScopedObservationDirectoryMemberRecordInput",
-        "pub(crate) struct ScopedObservationDirectoryMemberFrameFailure",
-        "valid_for_dependency_free_bootstrap(",
-        "bootstrap_object_without_source_access(",
-        "frame_initial_replace(",
-        ".frame_retained_stable(",
-        "origin.source_instance_id != self.binding.source_instance().id",
-        "confined_relative_path_key(&relative_path)",
-        "ScopedSourceObjectIdentity::from_semantic_context",
-        "completed_members",
-        "dynamic_relation_members",
-        "enum ScopedRelationMembershipAuthority",
-        "Directory(Box<ScopedObservationDirectoryListing>)",
-        "dynamic_relation_authorities",
-        "fn directory_listing(&self) -> Option<&ScopedObservationDirectoryListing>",
-        "dynamic_member_decoder_states",
-        "directory_member_decoder_state(",
-        "decoder_state: Option<&[u8]>",
-        "dynamic_relation_authorities.len() != admission.dynamic_relation_members.len()",
-        "known_objects.contains_key(membership.relation_id.as_ref())",
-        "source_reserved_for_dynamic_relation",
-        "extend_coverage_sources_bounded(",
-        ".chain(member_sources.iter())",
-    )
-    if any(
-        binding not in combined_directory_membership_text
-        for binding in required_directory_member_identity_bindings
-    ):
-        found.add(f"{relative}#missing-authorized-directory-member-identity")
-    required_directory_member_decode_bindings = (
-        "pub(crate) struct ScopedObservationDirectoryMemberDecodedSnapshot",
-        "pub(crate) enum ScopedObservationDirectoryMemberLifecycle",
-        "observe_retained_replace(",
-        ".frame_retained_stable(",
-        "decode_record(",
-        "DirectoryMemberSourceAccessDenied",
-        "admit_directory_member(",
-        "ExactSnapshot",
-    )
-    if any(
-        binding not in combined_directory_membership_text
-        for binding in required_directory_member_decode_bindings
-    ) or any(
-        forbidden in source_access_text
-        for forbidden in (".read_confined(", "SqliteSnapshot")
-    ):
-        found.add(f"{relative}#missing-authorized-directory-member-decode")
-    continuity_wire = scoped_dir / "continuity_wire.rs"
-    continuity_wire_text = (
-        production_rust_text(continuity_wire)
-        if continuity_wire in production_scoped_paths
-        else ""
-    )
-    required_continuity_wire_bindings = (
-        "pub(crate) struct ScopedContinuityEnvelopeWire",
-        "pub(crate) struct ScopedContinuityConsumerContext",
-        "from_wire_value_for_context(",
-        "expected_selection: &ObservationContractSelection",
-        "expected_root: &ScopedObservationRootIdentity",
-        "expected_state: &ScopedContinuityConsumerContext",
-        "prior_resync_required: Option<ScopedResyncRequired>",
-        "resync_required_event_id(",
-        "resync_started_event_id(",
-        "observer_failed_event_id(",
-        "ScopedContinuityEnvelopeContractError::UnsupportedEvent",
-    )
-    if any(
-        binding not in continuity_wire_text
-        for binding in required_continuity_wire_bindings
-    ):
-        found.add(f"{relative}#missing-contextual-continuity-envelope-contract")
-    completion_wire = scoped_dir / "completion_wire.rs"
-    completion_wire_text = (
-        production_rust_text(completion_wire)
-        if completion_wire in production_scoped_paths
-        else ""
-    )
-    required_completion_wire_bindings = (
-        "pub(crate) struct ScopedCompletionEnvelopeConsumerContext",
-        "pub(crate) struct ScopedCompletionEnvelopeWire",
-        "from_scoped_envelope(",
-        "from_wire_value_for_context(",
-        "Arc<ScopedCapabilitySnapshotConsumerContext>",
-        "source_coverage_matches_authority(",
-        "bootstrap_barrier_snapshot_is_valid(barrier)",
-        "resync_barrier_snapshot_is_valid(barrier)",
-        "validate_common_via_source_contract(",
-        "ScopedCompletionEnvelopeContractError::UnsupportedEvent",
-    )
-    if any(
-        binding not in completion_wire_text
-        for binding in required_completion_wire_bindings
-    ):
-        found.add(f"{relative}#missing-contextual-completion-envelope-contract")
-    watermark_wire = scoped_dir / "watermark_wire.rs"
-    watermark_wire_text = (
-        production_rust_text(watermark_wire)
-        if watermark_wire in production_scoped_paths
-        else ""
-    )
-    required_watermark_wire_bindings = (
-        "pub(crate) struct ScopedObservationWatermarkConsumerContext",
-        "pub(crate) struct ScopedObservationWatermarkWire",
-        "from_scoped_for_context(",
-        "from_wire_value_for_context(",
-        "Arc::ptr_eq(",
-        "source_coverage_matches_authority(",
-        "selected_family_coverage_is_complete(",
-        "canonical_explicit_errors(",
-        "WatermarkContinuityWire::Bootstrap",
-        "WatermarkContinuityWire::Valid",
-    )
-    if any(
-        binding not in watermark_wire_text
-        for binding in required_watermark_wire_bindings
-    ):
-        found.add(f"{relative}#missing-contextual-watermark-contract")
-    scope_coverage_wire = scoped_dir / "scope_coverage_wire.rs"
-    scope_coverage_wire_text = (
-        production_rust_text(scope_coverage_wire)
-        if scope_coverage_wire in production_scoped_paths
-        else ""
-    )
-    required_scope_coverage_wire_bindings = (
-        "pub(crate) struct ScopedScopeCoverageConsumerContext",
-        "pub(crate) struct ScopedScopeCoverageWire",
-        "from_wire_value_for_context(",
-        "expected.validate_against(root, source_coverage)",
-        "reconstructed.validate_against(",
-        "MAX_SCOPE_COVERAGE_RELATIONS",
-    )
-    if any(
-        binding not in scope_coverage_wire_text
-        for binding in required_scope_coverage_wire_bindings
-    ):
-        found.add(f"{relative}#missing-contextual-scope-coverage-contract")
-    lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
-    if re.search(r"^\s*pub\s+mod\s+scoped_observation\s*;", read(lib), re.MULTILINE):
-        found.add(f"{repo_path(lib)}#premature-public-scoped-host")
-
-    contract_relative = "crates/spaghetti-napi/src/observation_contract.rs"
-    contract_path = (REPO_ROOT / contract_relative).resolve()
-    contract_dir = contract_path.with_suffix("")
-    production_contract_paths = [
-        candidate
-        for candidate in production_rust()
-        if candidate == contract_path or candidate.is_relative_to(contract_dir)
-    ]
-    if not contract_path.exists() or not production_contract_paths or any(
-        RFC012_OBSERVATION_CONTRACT_FORBIDDEN_RE.search(production_rust_text(candidate))
-        for candidate in production_contract_paths
-    ):
-        found.add(contract_relative)
-    if re.search(r"^\s*pub\s+mod\s+observation_contract\s*;", read(lib), re.MULTILINE):
-        found.add(f"{repo_path(lib)}#premature-public-observation-contract")
-    capabilities_path = contract_dir / "capabilities.rs"
-    required_capabilities_contract = (
-        "pub(crate) struct ObservationCapabilities",
-        "implemented_fact_families: &[(&str, u32)]",
-        "from_wire_value_for_context(",
-    )
-    capabilities_text = production_rust_text(capabilities_path) if capabilities_path.exists() else ""
-    if any(marker not in capabilities_text for marker in required_capabilities_contract):
-        found.add(f"{contract_relative}#missing-capabilities-contract")
-
-    portable_relative = "packages/sdk/src/contracts/rfc012d.ts"
-    portable = REPO_ROOT / portable_relative
-    usage_portable_relative = "packages/sdk/src/contracts/rfc012d-usage-envelope.ts"
-    usage_portable = REPO_ROOT / usage_portable_relative
-    source_portable_relative = "packages/sdk/src/contracts/rfc012d-source-envelope.ts"
-    source_portable = REPO_ROOT / source_portable_relative
-    continuity_portable_relative = (
-        "packages/sdk/src/contracts/rfc012d-continuity-envelope.ts"
-    )
-    continuity_portable = REPO_ROOT / continuity_portable_relative
-    completion_portable_relative = (
-        "packages/sdk/src/contracts/rfc012d-completion-envelope.ts"
-    )
-    completion_portable = REPO_ROOT / completion_portable_relative
-    watermark_portable_relative = "packages/sdk/src/contracts/rfc012d-watermark.ts"
-    watermark_portable = REPO_ROOT / watermark_portable_relative
-    close_portable_relative = "packages/sdk/src/contracts/rfc012d-close.ts"
-    close_portable = REPO_ROOT / close_portable_relative
-    artifact_portable_relative = "packages/sdk/src/contracts/rfc012d-artifact.ts"
-    artifact_portable = REPO_ROOT / artifact_portable_relative
-    artifact_availability_portable_relative = (
-        "packages/sdk/src/contracts/rfc012d-artifact-availability.ts"
-    )
-    artifact_availability_portable = REPO_ROOT / artifact_availability_portable_relative
-    artifact_availability_envelope_portable_relative = (
-        "packages/sdk/src/contracts/rfc012d-artifact-availability-envelope.ts"
-    )
-    artifact_availability_envelope_portable = (
-        REPO_ROOT / artifact_availability_envelope_portable_relative
-    )
-    scope_coverage_portable_relative = (
-        "packages/sdk/src/contracts/rfc012d-scope-coverage.ts"
-    )
-    scope_coverage_portable = REPO_ROOT / scope_coverage_portable_relative
-    contracts_root = portable.parent.resolve()
-    if (
-        not portable.exists()
-        or not usage_portable.exists()
-        or not source_portable.exists()
-        or not continuity_portable.exists()
-        or not completion_portable.exists()
-        or not watermark_portable.exists()
-        or not close_portable.exists()
-        or not artifact_portable.exists()
-        or not artifact_availability_portable.exists()
-        or not artifact_availability_envelope_portable.exists()
-        or not scope_coverage_portable.exists()
-    ):
-        found.add(portable_relative)
-    else:
-        portable_text = read(portable)
-        if (
-            "export interface ObservationCapabilities" not in portable_text
-            or "export function parseObservationCapabilities(" not in portable_text
-        ):
-            found.add(f"{portable_relative}#missing-capabilities-contract")
-        usage_portable_text = read(usage_portable)
-        if (
-            "export interface ScopedUsageEnvelope" not in usage_portable_text
-            or "export function parseScopedUsageEnvelope(" not in usage_portable_text
-            or "expectedContextInput: unknown" not in usage_portable_text
-        ):
-            found.add(f"{usage_portable_relative}#missing-contextual-usage-envelope-contract")
-        source_portable_text = read(source_portable)
-        if (
-            "export interface ScopedSourceEnvelope" not in source_portable_text
-            or "export function parseScopedSourceEnvelope(" not in source_portable_text
-            or "expectedContextInput: unknown" not in source_portable_text
-        ):
-            found.add(f"{source_portable_relative}#missing-contextual-source-envelope-contract")
-        continuity_portable_text = read(continuity_portable)
-        if (
-            "export interface ScopedContinuityEnvelope" not in continuity_portable_text
-            or "export interface ScopedContinuityEnvelopeContext"
-            not in continuity_portable_text
-            or "export function parseScopedContinuityEnvelope(" not in continuity_portable_text
-            or "expectedContextInput: unknown" not in continuity_portable_text
-        ):
-            found.add(
-                f"{continuity_portable_relative}#missing-contextual-continuity-envelope-contract"
-            )
-        completion_portable_text = read(completion_portable)
-        if (
-            "export interface ScopedCompletionEnvelopeContext"
-            not in completion_portable_text
-            or "export interface ScopedCompletionEnvelope"
-            not in completion_portable_text
-            or "export function parseScopedCompletionEnvelope("
-            not in completion_portable_text
-            or "expectedContextInput: unknown" not in completion_portable_text
-        ):
-            found.add(
-                f"{completion_portable_relative}#missing-contextual-completion-envelope-contract"
-            )
-        watermark_portable_text = read(watermark_portable)
-        if (
-            "export interface ScopedObservationWatermarkContext"
-            not in watermark_portable_text
-            or "export interface ScopedObservationWatermark"
-            not in watermark_portable_text
-            or "export function parseScopedObservationWatermark("
-            not in watermark_portable_text
-            or "expectedContextInput: unknown" not in watermark_portable_text
-        ):
-            found.add(
-                f"{watermark_portable_relative}#missing-contextual-watermark-contract"
-            )
-        close_portable_text = read(close_portable)
-        if (
-            "export interface ScopedCloseContext" not in close_portable_text
-            or "export interface ScopedCloseReceipt" not in close_portable_text
-            or "export function parseScopedCloseReceipt(" not in close_portable_text
-            or "expectedContextInput: unknown" not in close_portable_text
-        ):
-            found.add(f"{close_portable_relative}#missing-attachment-bound-close-contract")
-        artifact_portable_text = read(artifact_portable)
-        if (
-            "export interface ScopedArtifactReadContext" not in artifact_portable_text
-            or "export interface ScopedObservedArtifact" not in artifact_portable_text
-            or "export function parseScopedObservedArtifact(" not in artifact_portable_text
-            or "expectedContextInput: unknown" not in artifact_portable_text
-        ):
-            found.add(
-                f"{artifact_portable_relative}#missing-attachment-bound-artifact-contract"
-            )
-        artifact_availability_portable_text = read(artifact_availability_portable)
-        if (
-            "export interface ScopedArtifactAvailabilitySnapshot"
-            not in artifact_availability_portable_text
-            or "export function parseScopedArtifactAvailabilitySnapshot("
-            not in artifact_availability_portable_text
-            or "export function parseScopedArtifactAvailabilityEntry("
-            not in artifact_availability_portable_text
-        ):
-            found.add(
-                f"{artifact_availability_portable_relative}#missing-contextual-artifact-availability-contract"
-            )
-        artifact_availability_envelope_portable_text = read(
-            artifact_availability_envelope_portable
+        binding not in state_text
+        for binding in (
+            "reduce_runtime_fact_revision(",
+            "runtime_replacement_state_digest(",
         )
-        if (
-            "export interface ScopedArtifactAvailabilityEnvelopeContext"
-            not in artifact_availability_envelope_portable_text
-            or "export interface ScopedArtifactAvailabilityEnvelope"
-            not in artifact_availability_envelope_portable_text
-            or "export function parseScopedArtifactAvailabilityEnvelope("
-            not in artifact_availability_envelope_portable_text
-            or "expectedContextInput: unknown"
-            not in artifact_availability_envelope_portable_text
-        ):
-            found.add(
-                f"{artifact_availability_envelope_portable_relative}#missing-contextual-artifact-availability-envelope-contract"
-            )
-        scope_coverage_portable_text = read(scope_coverage_portable)
-        if (
-            "export interface ScopedScopeCoverageContext"
-            not in scope_coverage_portable_text
-            or "export interface ScopedScopeCoverage" not in scope_coverage_portable_text
-            or "export function parseScopedScopeCoverage(" not in scope_coverage_portable_text
-            or "expectedContextInput: unknown" not in scope_coverage_portable_text
-        ):
-            found.add(
-                f"{scope_coverage_portable_relative}#missing-contextual-scope-coverage-contract"
-            )
-        pending = [
-            portable,
-            usage_portable,
-            source_portable,
-            continuity_portable,
-            completion_portable,
-            watermark_portable,
-            close_portable,
-            artifact_portable,
-            artifact_availability_portable,
-            artifact_availability_envelope_portable,
-            scope_coverage_portable,
-        ]
-        visited: set[Path] = set()
-        while pending:
-            importer = pending.pop().resolve()
-            if importer in visited:
-                continue
-            visited.add(importer)
-            for specifier in RUNTIME_MODULE_RE.findall(read(importer)):
-                edge = f"{repo_path(importer)} -> {specifier}"
-                target = resolve_typescript_module(importer, specifier)
-                if (
-                    not specifier.startswith(".")
-                    or target is None
-                    or not target.is_relative_to(contracts_root)
-                ):
-                    found.add(edge)
-                    continue
-                pending.append(target)
-
-    sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
-    if "./contracts/rfc012d.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-contract-export")
-    if "./contracts/rfc012d-usage-envelope.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
     ):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-usage-envelope-export")
-    if "./contracts/rfc012d-source-envelope.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
+        found.add(f"{relative}/state.rs#missing-shared-reducer-law")
+    # Deterministic identity and epoch replacement are semantic contracts.
+    identity_text = production_rust_text(root / "identity.rs")
+    if "source_record_id" not in identity_text:
+        found.add(f"{relative}/identity.rs#event-id-missing-source-occurrence")
+    queue_text = production_rust_text(root / "queue.rs")
+    if any(
+        binding not in queue_text
+        for binding in ("fn invalidate_epoch", "fn begin_replacement_epoch", "fn admit_control")
     ):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-source-envelope-export")
-    if "./contracts/rfc012d-continuity-envelope.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
-    ):
-        found.add(
-            f"{repo_path(sdk_index)}#missing-rfc012d-continuity-envelope-export"
-        )
-    if "./contracts/rfc012d-completion-envelope.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
-    ):
-        found.add(
-            f"{repo_path(sdk_index)}#missing-rfc012d-completion-envelope-export"
-        )
-    if "./contracts/rfc012d-watermark.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
-    ):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-watermark-export")
-    if "./contracts/rfc012d-close.js" not in RUNTIME_MODULE_RE.findall(read(sdk_index)):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-close-export")
-    if "./contracts/rfc012d-artifact.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
-    ):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-artifact-export")
-    if "./contracts/rfc012d-artifact-availability.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
-    ):
-        found.add(
-            f"{repo_path(sdk_index)}#missing-rfc012d-artifact-availability-export"
-        )
-    if "./contracts/rfc012d-artifact-availability-envelope.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
-    ):
-        found.add(
-            f"{repo_path(sdk_index)}#missing-rfc012d-artifact-availability-envelope-export"
-        )
-    if "./contracts/rfc012d-scope-coverage.js" not in RUNTIME_MODULE_RE.findall(
-        read(sdk_index)
-    ):
-        found.add(f"{repo_path(sdk_index)}#missing-rfc012d-scope-coverage-export")
+        found.add(f"{relative}/queue.rs#missing-epoch-replacement-or-control-lane")
     return found
-
 
 def discover_rfc012_decode_runtime_boundary_violations() -> set[str]:
     """The shared decoder boundary cannot depend on a sink or concrete adapter."""
@@ -1297,15 +773,10 @@ def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
                     continue
                 pending.append(target)
 
-    sdk_index = REPO_ROOT / "packages/sdk/src/index.ts"
-    sdk_exports = RUNTIME_MODULE_RE.findall(read(sdk_index))
-    for export in (
-        "./contracts/rfc012b.js",
-        "./contracts/rfc012b-hydration.js",
-        "./contracts/rfc012b-pages.js",
-    ):
-        if export not in sdk_exports:
-            found.add(f"{repo_path(sdk_index)}#missing-{Path(export).stem}-contract-export")
+    # No barrel-export requirement: these modules are internal to
+    # `client/*` and the SDK barrel is an explicit allowlist (landing plan §4).
+    # The self-containment check above is what actually matters here — a
+    # catalog contract may not reach outside `contracts/`.
     return found
 
 

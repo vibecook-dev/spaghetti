@@ -34,7 +34,7 @@
     },
     "evidence": {
       "path": "agent-support/claude-code/candidate-2026-08-21/evidence.json",
-      "sha256": "sha256:7042840ea02dbfee96380924121b76a6602bb0543f6b7043e747d5a0b195464d"
+      "sha256": "sha256:da961421349c1c8284a00ab6dfa70116f7d27a59a593b4f3af2259f94252ee5b"
     },
     "conformance": {
       "path": "agent-support/claude-code/candidate-2026-08-21/conformance.json",

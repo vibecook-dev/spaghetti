@@ -121,8 +121,8 @@
         },
         {
           "state": "implemented",
-          "target": "crates/spaghetti-napi/src/scoped_observation.rs",
-          "claim": "Scoped delivery tests reject overflow without partial offer and discard reoverflowed incomplete replacement stages."
+          "target": "crates/spaghetti-napi/src/observer/queue.rs",
+          "claim": "Scoped delivery invalidates a saturated epoch explicitly and republishes a complete replacement snapshot rather than offering a partial one."
         }
       ]
     },
@@ -135,13 +135,23 @@
       ],
       "legacy_behavior": "Runtime observation is delivered through durable changes after commit.",
       "target_behavior": "A non-authoritative, database-free observer may deliver the same semantic evidence for one declared session scope.",
-      "migration": "Shadow the scoped observer against durable facts before Chopsticks switches.",
-      "rollback": "Keep watchSessionTranscript and durable observation until the compatibility window closes.",
+      "migration": "Chopsticks moves from watchSessionTranscript to observeSession with one release of overlap (RFC 012 landing plan \u00a77 Wave 3). The feature-flagged TypeScript shadow that preceded this was deleted with the native transport it wrapped: it had no consumer and produced no parity evidence.",
+      "rollback": "watchSessionTranscript stays exported from the SDK barrel, and durable observation stays authoritative, until the compatibility window closes.",
       "evidence": [
         {
+          "state": "planned",
+          "target": "docs/rfcs/012-landing-plan.md",
+          "claim": "\u00a73.1 defines the observeSession surface that replaces the scoped-observation shadow: all 11 event families, deterministic event_id/scope_epoch/SemanticRevisionRef, and overflow to a new epoch with full snapshot replacement."
+        },
+        {
           "state": "implemented",
-          "target": "packages/sdk/src/sources/claude-code/live/session-observation-shadow.ts",
-          "claim": "Feature-flagged shadow compares scoped usage envelopes beside watchSessionTranscript and rolls back to the legacy tail."
+          "target": "packages/sdk/src/sources/claude-code/live/session-tail.ts",
+          "claim": "The legacy tail is the rollback path and is reachable from the SDK barrel for the whole compatibility window."
+        },
+        {
+          "state": "implemented",
+          "target": "packages/sdk/src/__tests__/session-observer.test.ts",
+          "claim": "The store-free observer is reachable from Node and delivers typed revisions for a real session tree; watchSessionTranscript remains the fallback tail until the downstream migration lands."
         }
       ]
     },

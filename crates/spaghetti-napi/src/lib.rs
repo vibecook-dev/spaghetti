@@ -15,6 +15,8 @@
 //!   workers (library-first; no Node types).
 //! - [`source`] — adapter-neutral RFC 011 source drivers, provenance records,
 //!   and bounded recovery scheduling.
+//! - [`observer`] — RFC 012D store-free observation of one session tree:
+//!   no database, declared scope only, shared decoder and reducers.
 //! - `orchestrate` — feature-gated legacy differential tooling.
 
 use napi_derive::napi;
@@ -30,13 +32,10 @@ pub mod engine;
 pub mod factory;
 pub mod grok;
 mod napi_engine;
-mod observation_contract;
+pub mod observer;
 #[cfg(feature = "legacy-oracle")]
 pub mod orchestrate;
 mod runtime_semantic_reducer;
-mod scoped_observation;
-mod scoped_observation_napi;
-mod scoped_observation_transport;
 mod semantic_contract;
 mod semantic_contract_napi;
 pub mod source;
@@ -48,13 +47,15 @@ pub use napi_engine::{
     EngineOwnerMetadata, EngineReconcileOptions, EngineReconcileResult, EngineStatus,
     SpaghettiEngine,
 };
+pub use observer::{
+    observe_session, ObserveSessionRequest, ObserverEvent, SpaghettiSessionObserver,
+};
 #[cfg(feature = "legacy-oracle")]
 pub use orchestrate::ingest::{
     ingest, IngestError, IngestOptions, IngestProgress, IngestStats, IngestTask,
 };
 #[cfg(feature = "legacy-oracle")]
 pub use orchestrate::live_ingest::{live_ingest_batch, LiveBatchResult, LiveRow, LiveRowId};
-pub use scoped_observation_napi::{open_scoped_observation_json, SpaghettiSessionObserver};
 
 /// Returns the semver of the native addon.
 #[napi]

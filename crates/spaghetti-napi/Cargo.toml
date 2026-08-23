@@ -26,6 +26,7 @@ napi-derive.workspace = true
 
 # JSON
 sonic-rs.workspace = true
+ts-rs = { version = "12", features = ["serde-compat"] }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true
@@ -55,6 +56,9 @@ regex.workspace = true
 once_cell.workspace = true
 blake3.workspace = true
 rustix.workspace = true
+
+# Rust -> TypeScript binding generation (RFC 012 landing; see
+# scripts/generate-types.mjs and packages/sdk/src/generated/).
 
 # Time formatting
 time.workspace = true

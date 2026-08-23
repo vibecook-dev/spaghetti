@@ -70,7 +70,7 @@ use super::team_query::{
 use super::timeline_query::{
     read_timeline_page, validate_timeline_page, TimelinePage, TimelinePageRequest,
 };
-use super::usage_query::{read_usage, UsageReport, UsageRequest, UsageWindow};
+use super::usage_query::{read_usage, UsageReport, UsageRequest};
 use super::EngineError;
 
 const QUEUE_DEPTH_PER_WORKER: usize = 16;
@@ -4194,7 +4194,7 @@ mod tests {
             .usage(UsageRequest {
                 project_id: missing_project_id.clone(),
                 session_id: None,
-                window: Some(UsageWindow {
+                window: Some(crate::engine::usage_query::UsageWindow {
                     from: "2026-08-12".to_string(),
                     to: "2026-08-12".to_string(),
                 }),
@@ -4487,7 +4487,7 @@ mod tests {
             queued_client.usage(UsageRequest {
                 project_id: encode_entity_id(PROJECT_ID_PREFIX, b"project"),
                 session_id: None,
-                window: Some(UsageWindow {
+                window: Some(crate::engine::usage_query::UsageWindow {
                     from: "2026-01-01".to_string(),
                     to: "2026-12-31".to_string(),
                 }),

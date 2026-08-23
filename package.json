@@ -24,6 +24,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "clean": "pnpm -r clean",
+    "generate:types": "node scripts/generate-types.mjs",
     "prepare": "node scripts/setup-git-hooks.mjs",
     "typecheck": "pnpm -r typecheck && pnpm typecheck:scripts",
     "typecheck:scripts": "pnpm --dir packages/sdk exec tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --types node --skipLibCheck ../../scripts/bench-queries.ts ../../scripts/bench-observation.ts ../../scripts/observation-diff.ts ../../scripts/adapter-check.ts",

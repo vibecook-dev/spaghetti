@@ -30,6 +30,7 @@ mod projection;
 mod query_identity;
 mod query_pool;
 mod runtime_query;
+pub(crate) mod runtime_semantic_merge;
 mod runtime_semantic_projection;
 mod search_query;
 mod session_index_projection;
