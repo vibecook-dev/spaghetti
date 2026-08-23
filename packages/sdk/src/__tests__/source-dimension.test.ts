@@ -54,6 +54,7 @@ describe('source dimension (schema v5)', () => {
       for (const session of spaghetti.getSessionList(project)) {
         assert.equal(session.sourceId, 'claude-code');
         assert.equal(session.projectSlug, project.slug);
+        assert.equal(session.decoded, true);
       }
     }
   });

@@ -128,6 +128,7 @@ export const DEBUG_SESSION: SessionListItem = {
   sessionId: SESSION_ID,
   sourceId: 'claude-code',
   projectSlug: PROJECT_SLUG,
+  decoded: true,
   startTime: timestamp(0),
   lastUpdate: timestamp(900),
   lifespanMs: 15 * 60 * 1000,

@@ -103,6 +103,13 @@ export interface SessionListItem {
   sourceId: string;
   /** Source-owned project slug for subsequent session reads. */
   projectSlug: string;
+  /**
+   * Stable RFC 012 external identity when this row came from the canonical
+   * observation owner. Legacy/in-memory readers may not have one.
+   */
+  externalRef?: string;
+  /** True once transcript-backed fields on this row are readable. */
+  decoded: boolean;
   startTime: string;
   lastUpdate: string;
   lifespanMs: number;

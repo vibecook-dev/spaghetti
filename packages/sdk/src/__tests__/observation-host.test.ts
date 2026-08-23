@@ -398,6 +398,14 @@ describe('multi-adapter observation host', { skip: !native }, () => {
       assert.ok(project, `${sourceId} project`);
       const sessions = await service.getSessionList(project, { sourceId });
       assert.ok(sessions.length > 0, `${sourceId} sessions`);
+      assert.ok(
+        sessions.every((session) => session.decoded),
+        `${sourceId} sessions are transcript-backed`,
+      );
+      assert.ok(
+        sessions.every((session) => session.externalRef),
+        `${sourceId} sessions carry canonical identity`,
+      );
       const page = await service.getSessionMessages(sessions[0]!.projectSlug, sessions[0]!.sessionId, 200, 0, {
         sourceId,
       });

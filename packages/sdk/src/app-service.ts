@@ -403,6 +403,7 @@ function toSessionListItem(data: SessionSummaryData): SessionListItem {
     sessionId: data.sessionId,
     sourceId: data.sourceId,
     projectSlug: data.projectSlug,
+    decoded: true,
     startTime: data.startTime,
     lastUpdate: data.lastUpdate,
     lifespanMs: data.lifespanMs,

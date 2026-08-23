@@ -980,6 +980,8 @@ class RustObservationService extends EventEmitter implements ObservationService 
       sessionId: session.nativeSessionId,
       sourceId: project.adapterId,
       projectSlug: project.nativeProjectKey,
+      ...(session.externalRef ? { externalRef: session.externalRef } : {}),
+      decoded: true,
       startTime,
       lastUpdate,
       lifespanMs: durationBetween(startTime, lastUpdate),
