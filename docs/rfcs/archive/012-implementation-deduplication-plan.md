@@ -1,18 +1,18 @@
 # RFC 012 implementation de-duplication plan
 
 - **Status:** SUPERSEDED on 2026-08-23 by
-  [012-landing-plan.md](./012-landing-plan.md). Kept for history; do not
+  [012-landing-plan.md](../012-landing-plan.md). Kept for history; do not
   update. The RFC documents remain the semantic authorities.
 - **Written:** 2026-08-22
 - **Baseline:** `d478679`
 - **Related roadmap:**
   [RFC 012 implementation plan](./012-implementation-plan.md)
 - **Semantic authorities:**
-  [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md),
-  [RFC 012A](./012a-agent-adaptation-and-engine-boundaries.md),
-  [RFC 012B](./012b-catalog-readiness-and-progressive-startup.md),
-  [RFC 012C](./012c-runtime-semantics-and-usage-v2.md), and
-  [RFC 012D](./012d-session-scoped-observation.md)
+  [RFC 012](../012-evidence-backed-adapters-and-progressive-readiness.md),
+  [RFC 012A](../012a-agent-adaptation-and-engine-boundaries.md),
+  [RFC 012B](../012b-catalog-readiness-and-progressive-startup.md),
+  [RFC 012C](../012c-runtime-semantics-and-usage-v2.md), and
+  [RFC 012D](../012d-session-scoped-observation.md)
 
 ## Contents
 

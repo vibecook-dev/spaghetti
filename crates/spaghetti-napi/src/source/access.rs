@@ -6,12 +6,14 @@
 //! prevents retries, panics, and partial reads from bypassing a scope budget.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::locator::ScopeIdentityInput;
 use crate::adapter::{
     AuthorizedScopeProgram, ScopeProgramManifest, ScopeProgramStatus, ScopeRelationDeclaration,
     ScopeRelationPrimitive, ScopeUnavailableBehavior,
@@ -21,8 +23,8 @@ pub const ACCESS_TRACE_CONTRACT_VERSION: u32 = 1;
 pub const SCOPE_ACCESS_REPORT_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 
-const MAX_RELATION_ID_BYTES: usize = 128;
 const MAX_TRACE_CAPACITY: usize = 16_384;
+#[cfg(test)]
 const MAX_RENDERED_SCOPE_LOCATOR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
@@ -208,15 +210,6 @@ pub struct AccessReservationRequest {
     pub depth: u32,
     pub max_bytes: u64,
     pub max_rows: u64,
-}
-
-/// One named native identity value supplied to a declarative scope relation.
-/// The name is checked against the declaration before its value contributes to
-/// the opaque object token.
-#[derive(Debug, Clone, Copy)]
-pub struct ScopeIdentityInput<'a> {
-    pub name: &'a str,
-    pub value: &'a [u8],
 }
 
 /// A bounded request against one relation in a compiled scope program.
@@ -799,9 +792,11 @@ impl ScopeAccessReservation {
         &self,
         identity_inputs: &[ScopeIdentityInput<'_>],
     ) -> Result<PathBuf, AccessBudgetError> {
-        validate_evidence_locator_template(&self.declaration)?;
+        super::locator::validate_evidence_locator_template(&self.declaration)
+            .map_err(|_| invalid_locator_template())?;
         self.validate_locator_identity_binding(identity_inputs)?;
-        render_confined_locator(&self.declaration.locator, identity_inputs)
+        super::locator::render_confined_locator(&self.declaration.locator, identity_inputs)
+            .map_err(|_| invalid_locator_template())
     }
 
     #[cfg(test)]
@@ -848,154 +843,7 @@ impl ScopeAccessReservation {
     }
 }
 
-/// Render one declared relation's locator against identity inputs.
-///
-/// This is the confinement law for declared locators, and the only sanctioned
-/// way to turn a declaration plus evidence into a path. It rejects a template
-/// whose placeholders are not declared identity inputs, an identity value
-/// carrying a path separator or control byte, and a rendered locator that is
-/// absolute, drive-qualified, or contains `.`/`..`/empty components — then
-/// re-checks the result through the same confined-path key the drivers use.
-pub(crate) fn render_declared_locator(
-    declaration: &ScopeRelationDeclaration,
-    expected_primitive: ScopeRelationPrimitive,
-    identity_inputs: &[ScopeIdentityInput<'_>],
-) -> Result<PathBuf, AccessBudgetError> {
-    validate_bound_locator_template(declaration, expected_primitive)?;
-    render_confined_locator(&declaration.locator, identity_inputs)
-}
-
 #[cfg(test)]
-pub(crate) fn validate_evidence_locator_template(
-    declaration: &ScopeRelationDeclaration,
-) -> Result<(), AccessBudgetError> {
-    validate_bound_locator_template(
-        declaration,
-        ScopeRelationPrimitive::ArtifactLocatorFromEvidence,
-    )
-}
-
-fn validate_bound_locator_template(
-    declaration: &ScopeRelationDeclaration,
-    expected_primitive: ScopeRelationPrimitive,
-) -> Result<(), AccessBudgetError> {
-    if declaration.primitive != expected_primitive {
-        return Err(invalid_locator_template());
-    }
-    validate_locator_identity_placeholders(declaration)
-}
-
-fn validate_locator_identity_placeholders(
-    declaration: &ScopeRelationDeclaration,
-) -> Result<(), AccessBudgetError> {
-    let placeholders = locator_placeholders(&declaration.locator)?;
-    if placeholders.is_empty()
-        || placeholders.iter().any(|(_, _, name)| {
-            !declaration
-                .identity_inputs
-                .iter()
-                .any(|declared| declared == name)
-        })
-    {
-        return Err(invalid_locator_template());
-    }
-    Ok(())
-}
-
-fn render_confined_locator(
-    template: &str,
-    identity_inputs: &[ScopeIdentityInput<'_>],
-) -> Result<PathBuf, AccessBudgetError> {
-    let placeholders = locator_placeholders(template)?;
-    let values = identity_inputs
-        .iter()
-        .map(|input| {
-            let value = std::str::from_utf8(input.value).map_err(|_| invalid_locator_template())?;
-            if value.is_empty()
-                || value
-                    .bytes()
-                    .any(|byte| byte.is_ascii_control() || matches!(byte, b'/' | b'\\'))
-            {
-                return Err(invalid_locator_template());
-            }
-            Ok((input.name, value))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()?;
-    if values.len() != identity_inputs.len() {
-        return Err(invalid_locator_template());
-    }
-
-    let mut output_len = template.len();
-    for (start, end, name) in &placeholders {
-        let value = values.get(name).ok_or_else(invalid_locator_template)?;
-        output_len = output_len
-            .checked_sub(end - start)
-            .and_then(|length| length.checked_add(value.len()))
-            .ok_or_else(invalid_locator_template)?;
-    }
-    if output_len == 0 || output_len > MAX_RENDERED_SCOPE_LOCATOR_BYTES {
-        return Err(invalid_locator_template());
-    }
-    let mut output = String::new();
-    output
-        .try_reserve_exact(output_len)
-        .map_err(|_| invalid_locator_template())?;
-    let mut cursor = 0;
-    for (start, end, name) in placeholders {
-        output.push_str(&template[cursor..start]);
-        output.push_str(values.get(name).ok_or_else(invalid_locator_template)?);
-        cursor = end;
-    }
-    output.push_str(&template[cursor..]);
-    let first_component = output.split('/').next().unwrap_or_default().as_bytes();
-    let has_windows_drive_prefix = first_component.len() >= 2
-        && first_component[0].is_ascii_alphabetic()
-        && first_component[1] == b':';
-    if output.len() != output_len
-        || output.starts_with('/')
-        || has_windows_drive_prefix
-        || output.contains('\\')
-        || output
-            .split('/')
-            .any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        return Err(invalid_locator_template());
-    }
-    let path = PathBuf::from(output);
-    super::file::confined_relative_path_key(&path).map_err(|_| invalid_locator_template())?;
-    Ok(path)
-}
-
-fn locator_placeholders(locator: &str) -> Result<Vec<(usize, usize, &str)>, AccessBudgetError> {
-    let bytes = locator.as_bytes();
-    let mut placeholders = Vec::new();
-    let mut names = BTreeSet::new();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'{' => {
-                let end = bytes[cursor + 1..]
-                    .iter()
-                    .position(|byte| *byte == b'}')
-                    .map(|offset| cursor + 1 + offset)
-                    .ok_or_else(invalid_locator_template)?;
-                let name = &locator[cursor + 1..end];
-                if name.as_bytes().contains(&b'{')
-                    || validate_relation_id(name).is_err()
-                    || !names.insert(name)
-                {
-                    return Err(invalid_locator_template());
-                }
-                placeholders.push((cursor, end + 1, name));
-                cursor = end + 1;
-            }
-            b'}' => return Err(invalid_locator_template()),
-            _ => cursor += 1,
-        }
-    }
-    Ok(placeholders)
-}
-
 fn invalid_locator_template() -> AccessBudgetError {
     AccessBudgetError::InvalidConfig(
         "scope locator template or bound identity input is invalid".to_string(),
@@ -1411,23 +1259,12 @@ fn sum_exceeds<const N: usize>(limit: u64, values: [u64; N]) -> bool {
     total > limit
 }
 
-pub(crate) fn validate_relation_id(value: &str) -> Result<(), AccessBudgetError> {
-    let valid = !value.is_empty()
-        && value.len() <= MAX_RELATION_ID_BYTES
-        && value.trim() == value
-        && value
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
-        });
-    if !valid {
-        return Err(AccessBudgetError::InvalidConfig(
+fn validate_relation_id(value: &str) -> Result<(), AccessBudgetError> {
+    super::locator::validate_relation_id(value).map_err(|_| {
+        AccessBudgetError::InvalidConfig(
             "relation id must match [a-z0-9][a-z0-9._-]{0,127}".to_string(),
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1576,113 +1413,6 @@ mod tests {
             max_rows: 0,
         })?
         .render_evidence_locator(&identity)
-    }
-
-    #[test]
-    fn artifact_locator_templates_render_only_exact_bound_identity_inputs() {
-        assert_eq!(
-            render_artifact_locator(
-                "file-history/{native-session-id}/{backup-name}.{artifact-version}",
-                b"session-7",
-                b"backup-a",
-                b"9",
-            )
-            .unwrap(),
-            PathBuf::from("file-history/session-7/backup-a.9")
-        );
-
-        let plan = artifact_scope_plan("file-history/{native-session-id}/{backup-name}");
-        let reserved_identity = [
-            ScopeIdentityInput {
-                name: "native-session-id",
-                value: b"session-7",
-            },
-            ScopeIdentityInput {
-                name: "backup-name",
-                value: b"backup-a",
-            },
-            ScopeIdentityInput {
-                name: "artifact-version",
-                value: b"9",
-            },
-        ];
-        let reservation = plan
-            .reserve(ScopeAccessRequest {
-                relation_id: "summary-sidecar",
-                operation: AccessOperation::ObjectRead,
-                phase: AccessPhase::Revalidation,
-                parent_token: None,
-                identity_inputs: &reserved_identity,
-                depth: 1,
-                max_bytes: 1,
-                max_rows: 0,
-            })
-            .unwrap();
-        let substituted_identity = [
-            ScopeIdentityInput {
-                name: "native-session-id",
-                value: b"other-session",
-            },
-            reserved_identity[1],
-            reserved_identity[2],
-        ];
-        assert!(reservation
-            .render_evidence_locator(&substituted_identity)
-            .is_err());
-    }
-
-    #[test]
-    fn artifact_locator_templates_reject_conceptual_or_ambiguous_shapes() {
-        for locator in [
-            "declared-artifact-locator",
-            "file-history/{unknown-input}",
-            "file-history/{backup-name}/{backup-name}",
-            "file-history/{backup-name",
-            "file-history/backup-name}",
-            "file-history/{{backup-name}}",
-        ] {
-            let plan = artifact_scope_plan(locator);
-            let declaration = plan.relation("summary-sidecar").unwrap();
-            assert!(
-                validate_evidence_locator_template(declaration).is_err(),
-                "accepted {locator:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn artifact_locator_rendering_is_confined_and_bounded_before_retention() {
-        for native_session_id in [
-            b"..".as_slice(),
-            b".".as_slice(),
-            b"C:".as_slice(),
-            b"nested/session".as_slice(),
-            b"nested\\session".as_slice(),
-            b"line\nbreak".as_slice(),
-            b"\xff".as_slice(),
-        ] {
-            assert!(
-                render_artifact_locator(
-                    "{native-session-id}/{backup-name}",
-                    native_session_id,
-                    b"backup-a",
-                    b"9",
-                )
-                .is_err(),
-                "accepted {native_session_id:?}"
-            );
-        }
-
-        let exact = vec![b'a'; MAX_RENDERED_SCOPE_LOCATOR_BYTES];
-        assert_eq!(
-            render_artifact_locator("{backup-name}", b"session-7", &exact, b"9")
-                .unwrap()
-                .as_os_str()
-                .len(),
-            MAX_RENDERED_SCOPE_LOCATOR_BYTES
-        );
-        let oversized = vec![b'a'; MAX_RENDERED_SCOPE_LOCATOR_BYTES + 1];
-        assert!(render_artifact_locator("{backup-name}", b"session-7", &oversized, b"9").is_err());
     }
 
     #[test]

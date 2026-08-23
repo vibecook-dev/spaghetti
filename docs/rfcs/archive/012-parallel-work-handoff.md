@@ -1,7 +1,7 @@
 # RFC 012 parallel execution runbook
 
 - **Status:** SUPERSEDED on 2026-08-23 by
-  [012-landing-plan.md](./012-landing-plan.md). Kept for history; do not
+  [012-landing-plan.md](../012-landing-plan.md). Kept for history; do not
   update. The RFC documents remain the semantic authorities.
 - **Written:** 2026-08-19
 - **Current product-code base:** `67a1ae9` (historical Wave 1 assignment base)
@@ -10,10 +10,10 @@
 - **Audience:** repository owner, primary integrator, and parallel implementation
   agents
 - **Primary references:** [implementation plan](./012-implementation-plan.md),
-  [RFC 012A](./012a-agent-adaptation-and-engine-boundaries.md),
-  [RFC 012B](./012b-catalog-readiness-and-progressive-startup.md),
-  [RFC 012C](./012c-runtime-semantics-and-usage-v2.md), and
-  [RFC 012D](./012d-session-scoped-observation.md)
+  [RFC 012A](../012a-agent-adaptation-and-engine-boundaries.md),
+  [RFC 012B](../012b-catalog-readiness-and-progressive-startup.md),
+  [RFC 012C](../012c-runtime-semantics-and-usage-v2.md), and
+  [RFC 012D](../012d-session-scoped-observation.md)
 
 This runbook supersedes the 2026-08-16 single-agent handoff formerly stored at
 this path. It defines the parallel order for the still-open A1-A3, B1-B3, and

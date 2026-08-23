@@ -18,7 +18,8 @@ use crate::adapter::{
     ScopeRelationDeclaration, ScopeRelationPrimitive, StreamSpec,
 };
 use crate::source::{
-    confined_relative_path_key, render_declared_locator, GlobPattern, ScopeIdentityInput,
+    confined_relative_path_key, render_confined_locator, validate_bound_locator_template,
+    GlobPattern, ScopeIdentityInput,
 };
 
 use super::request::ResolvedRequest;
@@ -247,10 +248,13 @@ impl ScopeProgram {
                 value: value.as_bytes(),
             })
             .collect();
-        // The confinement law: placeholders must be declared inputs, values may
-        // not carry separators or control bytes, and the rendered locator may
-        // not be absolute or contain `.`, `..`, or empty components.
-        render_declared_locator(relation, relation.primitive, &inputs).ok()
+        // The confinement law lives in `source::locator` and is applied in two
+        // steps: the template must be the primitive this evaluator thinks it is
+        // and name only declared identity inputs, then the render refuses values
+        // carrying separators or control bytes and any result that is absolute
+        // or contains `.`, `..`, or empty components.
+        validate_bound_locator_template(relation, relation.primitive).ok()?;
+        render_confined_locator(&relation.locator, &inputs).ok()
     }
 }
 
