@@ -9,6 +9,7 @@ use crate::source::{
     SqliteSnapshotConfig,
 };
 
+use super::catalog::{CatalogDiscoveryLimits, SourceCatalogDiscovery};
 use super::scope::{ScopeJoinUpdate, ScopeProgramManifest};
 use super::support::AdapterSupportBinding;
 use super::FactBatch;
@@ -607,6 +608,23 @@ pub trait AgentAdapter: Send + Sync + 'static {
 
     fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError>;
 
+    /// Cheap RFC 012B catalog discovery for one source instance.
+    ///
+    /// Enumerate the projects and sessions that are *discoverable* from
+    /// bounded native evidence — index documents, directory membership, one
+    /// bounded record head — without decoding transcripts. The pass must stay
+    /// inside `limits`, must return root-relative locators only, and must
+    /// report a `degraded_reason` rather than an error when part of the native
+    /// surface is unreadable but the rest is usable.
+    fn discover_catalog(
+        &self,
+        instance: &SourceInstance,
+        limits: &CatalogDiscoveryLimits,
+    ) -> Result<SourceCatalogDiscovery, AdapterError> {
+        let _ = (instance, limits);
+        Ok(SourceCatalogDiscovery::default())
+    }
+
     fn bootstrap_object(
         &self,
         _instance: &SourceInstance,
@@ -688,6 +706,14 @@ where
 
     fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
         (**self).streams(instance)
+    }
+
+    fn discover_catalog(
+        &self,
+        instance: &SourceInstance,
+        limits: &CatalogDiscoveryLimits,
+    ) -> Result<SourceCatalogDiscovery, AdapterError> {
+        (**self).discover_catalog(instance, limits)
     }
 
     fn bootstrap_object(

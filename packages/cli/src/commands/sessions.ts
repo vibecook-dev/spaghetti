@@ -1,15 +1,30 @@
 /**
- * Sessions command — list sessions for a project
+ * Sessions command — list the session catalog for one project.
+ *
+ * Both the project resolution and the row set come from the catalog, so this
+ * works during background ingestion. Decoded per-session statistics are merged
+ * in only once history has converged; until then a row shows what the native
+ * surface claims and how far decoding has got.
  */
 
 import type { SessionListItem } from '@vibecook/spaghetti-sdk';
-import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
+import type { ObservationService, SpaghettiCatalogSession } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatTokens, formatTokenUsage, formatDuration, formatNumber, totalTokens } from '../lib/format.js';
 import { sourceReportsPerMessageTokens } from '@vibecook/spaghetti-sdk';
+import {
+  allCatalogProjects,
+  allCatalogSessions,
+  catalogProjectName,
+  catalogStateLabel,
+  decodedStatsAvailable,
+  indexingNotice,
+  readinessField,
+  resolveCatalogProject,
+  suggestCatalogProjects,
+} from '../lib/catalog.js';
 import { renderTable } from '../lib/table.js';
 import type { Column } from '../lib/table.js';
-import { resolveProject, suggestProjects } from '../lib/resolve.js';
 import { noProjectMatch } from '../lib/error.js';
 import { resolveLimit } from '../lib/limit.js';
 
@@ -23,21 +38,40 @@ export interface SessionsOptions {
 
 type SortKey = 'recent' | 'tokens' | 'messages' | 'duration';
 
-function sortSessions(sessions: SessionListItem[], key: SortKey): SessionListItem[] {
-  const sorted = [...sessions];
+/** One display row: a catalog session plus decoded stats when they exist. */
+interface SessionRow {
+  catalog: SpaghettiCatalogSession;
+  stats?: SessionListItem;
+}
+
+/** Decoded tokens for a row, or zero when history has not reached it. */
+function statTokens(stats: SessionListItem | undefined): number {
+  return stats ? totalTokens(stats.tokenUsage) : 0;
+}
+
+/** Best available activity time: native first, then decoded. */
+function activityAt(row: SessionRow): string {
+  return row.catalog.nativeUpdatedAt ?? row.catalog.nativeCreatedAt ?? row.stats?.lastUpdate ?? '';
+}
+
+/** Messages the row can actually prove, preferring what the agent claims. */
+function messageCount(row: SessionRow): number | null {
+  if (row.stats) return row.stats.messageCount;
+  if (row.catalog.decodedMessageCount > 0) return row.catalog.decodedMessageCount;
+  return row.catalog.nativeMessageCount ?? null;
+}
+
+function sortRows(rows: SessionRow[], key: SortKey): SessionRow[] {
+  const sorted = [...rows];
   switch (key) {
     case 'recent':
-      return sorted.sort(
-        (a: SessionListItem, b: SessionListItem) => new Date(b.lastUpdate).getTime() - new Date(a.lastUpdate).getTime(),
-      );
+      return sorted.sort((a, b) => activityAt(b).localeCompare(activityAt(a)));
     case 'tokens':
-      return sorted.sort(
-        (a: SessionListItem, b: SessionListItem) => totalTokens(b.tokenUsage) - totalTokens(a.tokenUsage),
-      );
+      return sorted.sort((a, b) => statTokens(b.stats) - statTokens(a.stats));
     case 'messages':
-      return sorted.sort((a: SessionListItem, b: SessionListItem) => b.messageCount - a.messageCount);
+      return sorted.sort((a, b) => (messageCount(b) ?? 0) - (messageCount(a) ?? 0));
     case 'duration':
-      return sorted.sort((a: SessionListItem, b: SessionListItem) => b.lifespanMs - a.lifespanMs);
+      return sorted.sort((a, b) => (b.stats?.lifespanMs ?? 0) - (a.stats?.lifespanMs ?? 0));
     default:
       return sorted;
   }
@@ -94,129 +128,131 @@ export async function sessionsCommand(
   projectInput: string | undefined,
   opts: SessionsOptions,
 ): Promise<void> {
-  const projects = await api.getProjectList();
+  const [readiness, catalogProjects] = await Promise.all([api.getReadiness(), allCatalogProjects(api)]);
 
-  // Resolve project
   const input = projectInput ?? '.';
-  const project = resolveProject(input, projects);
-
+  const project = resolveCatalogProject(input, catalogProjects);
   if (!project) {
-    throw noProjectMatch(input, suggestProjects(input, projects));
+    throw noProjectMatch(input, suggestCatalogProjects(input, catalogProjects));
   }
 
-  const allSessions = await api.getSessionList(project);
-  let sessions = [...allSessions];
+  const catalogSessions = await allCatalogSessions(api, project.projectId);
 
-  // Filter by --since
+  // Decoded statistics need a resolved history project, which only exists once
+  // that project's transcripts have been decoded.
+  const stats = new Map<string, SessionListItem>();
+  if (decodedStatsAvailable(readiness)) {
+    const decoded = await api
+      .getSessionList({
+        projectId: project.projectId,
+        members: [{ sourceId: project.adapterId, slug: project.nativeProjectKey }],
+      })
+      .catch(() => [] as SessionListItem[]);
+    for (const session of decoded) stats.set(session.sessionId, session);
+  }
+
+  let rows: SessionRow[] = catalogSessions.map((session) => ({
+    catalog: session,
+    stats: session.nativeSessionId ? stats.get(session.nativeSessionId) : undefined,
+  }));
+  const totalSessions = rows.length;
+
   if (opts.since) {
     const sinceDate = parseSince(opts.since);
     if (sinceDate) {
       const sinceMs = sinceDate.getTime();
-      sessions = sessions.filter((s: any) => new Date(s.lastUpdate).getTime() >= sinceMs);
+      rows = rows.filter((row) => {
+        const at = activityAt(row);
+        return at !== '' && new Date(at).getTime() >= sinceMs;
+      });
     } else {
       process.stderr.write(theme.warning(`\n  Could not parse time: "${opts.since}"\n\n`));
     }
   }
 
-  // Sort
-  const sortKey = (opts.sort ?? 'recent') as SortKey;
-  sessions = sortSessions(sessions, sortKey);
+  rows = sortRows(rows, (opts.sort ?? 'recent') as SortKey);
+  if (!opts.all) rows = rows.slice(0, resolveLimit(opts.limit, 20));
 
-  // Limit
-  if (!opts.all) {
-    const limit = resolveLimit(opts.limit, 20);
-    sessions = sessions.slice(0, limit);
-  }
-
-  // JSON output
   if (opts.json) {
-    process.stdout.write(JSON.stringify(sessions, null, 2) + '\n');
+    process.stdout.write(
+      JSON.stringify(
+        {
+          readiness,
+          atCommitSeq: readiness.atCommitSeq,
+          project,
+          sessions: rows.map((row) => ({ ...row.catalog, stats: row.stats ?? null })),
+        },
+        null,
+        2,
+      ) + '\n',
+    );
     return;
   }
 
-  if (sessions.length === 0) {
-    process.stdout.write('\n  ' + theme.project(project.folderName) + '\n' + theme.muted('  No sessions found.\n\n'));
+  const projectName = catalogProjectName(project);
+  if (rows.length === 0) {
+    process.stdout.write('\n  ' + theme.project(projectName) + '\n' + theme.muted('  No sessions found.\n\n'));
     return;
   }
 
-  // Header
-  const totalSessions = allSessions.length;
-  const header = `  ${theme.project(project.folderName)} ${project.sourceIds.map((id) => theme.agent(id)).join(' ')} ${theme.muted(`(${totalSessions} sessions)`)}`;
+  const header = `  ${theme.project(projectName)} ${theme.agent(project.adapterId)} ${theme.muted(`(${totalSessions} sessions)`)}`;
 
   const columns: Column[] = [
+    { key: '_index', label: '#', width: 4, align: 'right', format: (v: any) => theme.muted(String(v)) },
+    { key: '_agent', label: 'Agent', width: 8, format: (v: any) => theme.agent(String(v)) },
+    { key: '_state', label: 'State', width: 12, format: (v: any) => String(v) },
     {
-      key: '_index',
-      label: '#',
-      width: 4,
-      align: 'right',
-      format: (v: any) => theme.muted(String(v)),
-    },
-    {
-      key: 'sourceId',
-      label: 'Agent',
-      width: 8,
-      format: (v: any) => theme.agent(String(v)),
-    },
-    {
-      key: 'gitBranch',
+      key: '_branch',
       label: 'Branch',
-      format: (v: any) => {
-        const branch = String(v || '');
-        return branch ? theme.accent(branch) : theme.muted('-');
-      },
+      format: (v: any) => (v ? theme.accent(String(v)) : theme.muted('-')),
     },
     {
-      key: 'messageCount',
+      key: '_messages',
       label: 'Msgs',
       width: 6,
       align: 'right',
-      format: (v: any) => formatNumber(Number(v)),
+      format: (v: any) => (v === null ? theme.muted('—') : formatNumber(Number(v))),
     },
+    { key: '_tokens', label: 'Tokens', width: 9, align: 'right', format: (v: any) => theme.tokens(String(v)) },
     {
-      key: '_tokens',
-      label: 'Tokens',
-      width: 9,
-      align: 'right',
-      format: (v: any) => theme.tokens(String(v)),
-    },
-    {
-      key: 'lifespanMs',
+      key: '_duration',
       label: 'Duration',
       width: 10,
       align: 'right',
-      format: (v: any) => theme.muted(formatDuration(Number(v))),
+      format: (v: any) => (v === null ? theme.muted('—') : theme.muted(formatDuration(Number(v)))),
     },
-    {
-      key: '_summary',
-      label: 'Summary',
-      format: (v: any) => String(v || ''),
-    },
+    { key: '_summary', label: 'Summary', format: (v: any) => String(v || '') },
   ];
 
-  // Add index and summary to data
-  const rows = sessions.map((s: SessionListItem, i: number) => ({
-    ...s,
-    _index: i + 1,
-    _tokens: formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated),
-    _summary: s.title || s.summary || s.firstPrompt || '',
+  const tableRows = rows.map((row, index) => ({
+    _index: index + 1,
+    _agent: row.catalog.adapterId,
+    _state: row.catalog.degraded ? theme.error('degraded') : catalogStateLabel(row.catalog.catalogState),
+    _branch: row.stats?.gitBranch ?? '',
+    _messages: messageCount(row),
+    _tokens: row.stats ? formatTokenUsage(row.stats.tokenUsage, row.stats.sourceId, row.stats.tokensEstimated) : '—',
+    _duration: row.stats?.lifespanMs ?? null,
+    _summary: row.catalog.title ?? row.stats?.title ?? row.stats?.summary ?? '',
   }));
 
-  const table = renderTable(rows, columns);
+  const table = renderTable(tableRows, columns);
 
-  // Footer
   let totalTok = 0;
   let totalMsgs = 0;
-  const tokensKnown = project.sourceIds.some(sourceReportsPerMessageTokens);
-  for (const s of sessions) {
-    if (tokensKnown) totalTok += totalTokens(s.tokenUsage);
-    totalMsgs += s.messageCount;
+  const tokensKnown = sourceReportsPerMessageTokens(project.adapterId);
+  for (const row of rows) {
+    if (tokensKnown && row.stats) totalTok += totalTokens(row.stats.tokenUsage);
+    totalMsgs += messageCount(row) ?? 0;
   }
 
-  const showing =
-    sessions.length < totalSessions ? `showing ${sessions.length}/${totalSessions}` : `${sessions.length} sessions`;
-
+  const showing = rows.length < totalSessions ? `showing ${rows.length}/${totalSessions}` : `${rows.length} sessions`;
   const tokFooter = tokensKnown ? `${formatTokens(totalTok)} tokens` : 'tokens n/a';
-  const footer = theme.muted(`  ${showing} \u00b7 ${formatNumber(totalMsgs)} messages \u00b7 ${tokFooter}`);
+  const lines = [
+    theme.muted(`  ${showing} · ${formatNumber(totalMsgs)} messages · ${tokFooter}`),
+    `  ${readinessField('catalog', readiness.catalog)}`,
+  ];
+  const notice = indexingNotice(readiness);
+  if (notice) lines.push(`  ${notice}`);
 
-  process.stdout.write('\n' + header + '\n\n' + table + '\n\n' + footer + '\n\n');
+  process.stdout.write('\n' + header + '\n\n' + table + '\n\n' + lines.join('\n') + '\n\n');
 }

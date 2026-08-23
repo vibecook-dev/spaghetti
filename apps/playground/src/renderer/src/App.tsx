@@ -2,16 +2,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
 import { SpaghettiProvider } from '@vibecook/spaghetti-sdk/react';
-import type {
-  InitProgress,
-  ProjectListItem,
-  SegmentChangeBatch,
-  SessionListItem,
-  StoreStats,
-} from '@vibecook/spaghetti-sdk';
+import type { InitProgress, SegmentChangeBatch, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
 import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
+import type { SpaghettiReadiness } from '@vibecook/spaghetti-sdk/observation';
 import type { ObservationOwnerStatus } from '@shared/ipc';
 import { createIpcClient } from './ipc-api.js';
+import { catalogLibrary, type LibraryProject } from './lib/catalog-library.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge, SourceBadges } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
@@ -103,7 +99,8 @@ function PlaygroundShell() {
   const [engine, setEngine] = useState<'rs' | null>(null);
   const [rebuilding, setRebuilding] = useState(false);
   const [debugSession, setDebugSession] = useState<DebugSessionModule | null>(null);
-  const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  const [projects, setProjects] = useState<LibraryProject[]>([]);
+  const [readiness, setReadiness] = useState<SpaghettiReadiness | null>(null);
   const [selected, setSelected] = useState<ProjectKey | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [sessionListProjectKey, setSessionListProjectKey] = useState<string | null>(null);
@@ -153,7 +150,7 @@ function PlaygroundShell() {
       if (cancelled) return;
       setDebugSession(gallery);
       setProjects((current) => [
-        gallery.DEBUG_PROJECT,
+        { ...gallery.DEBUG_PROJECT, decoded: true },
         ...current.filter((project) => projectKey(project) !== projectKey(gallery.DEBUG_PROJECT)),
       ]);
       setSelected({ ...gallery.DEBUG_PROJECT_KEY });
@@ -406,6 +403,56 @@ function PlaygroundShell() {
     };
   }, []);
 
+  // Readiness drives one small indicator: the library renders from the
+  // catalog, which is complete long before history, usage, and search are.
+  // Poll while anything is still converging, then stop.
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = (): void => {
+      void window.spaghetti
+        .getReadiness()
+        .then((next) => {
+          if (cancelled) return;
+          setReadiness(next);
+          const converging = [next.history, next.usage, next.search].some(
+            (field) => field.state === 'indexing' || field.state === 'pending',
+          );
+          if (converging) timer = setTimeout(poll, 2_000);
+        })
+        .catch(() => undefined);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [ready]);
+
+  // The catalog answers while ingestion is still running, so the library is
+  // on screen in milliseconds. Decoded rows replace these in place — the
+  // grouping key is the same one `getProjectList` computes.
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    void window.spaghetti
+      .listCatalogProjects({ limit: 500 })
+      .then((page) => {
+        if (cancelled || projectListLoadedRef.current) return;
+        const rows = catalogLibrary(page.projects);
+        setProjects((current) => {
+          const debugRow = current.find((project) => project.projectId === debugSession?.DEBUG_PROJECT.projectId);
+          const seeded = rows.filter((project) => project.projectId !== debugRow?.projectId);
+          return debugRow ? [debugRow, ...seeded] : seeded;
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, debugSession]);
+
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
@@ -414,13 +461,14 @@ function PlaygroundShell() {
       .then((list) => {
         if (cancelled) return;
         projectListLoadedRef.current = true;
+        const decoded = list.map((project) => ({ ...project, decoded: true }));
         setProjects(
           debugSession
             ? [
-                debugSession.DEBUG_PROJECT,
-                ...list.filter((project) => projectKey(project) !== projectKey(debugSession.DEBUG_PROJECT)),
+                { ...debugSession.DEBUG_PROJECT, decoded: true },
+                ...decoded.filter((project) => projectKey(project) !== projectKey(debugSession.DEBUG_PROJECT)),
               ]
-            : list,
+            : decoded,
         );
       })
       .catch((e: unknown) => {
@@ -589,6 +637,26 @@ function PlaygroundShell() {
 
   const sourceIds = useMemo(() => [...new Set(projects.flatMap((p) => p.sourceIds))].sort(), [projects]);
 
+  // "indexing…" while background convergence continues; "degraded" when a
+  // configured source could not be read completely. Nothing when all is well.
+  const [indexingLabel, indexingDetail] = useMemo<[string | null, string | null]>(() => {
+    if (!readiness) return [null, null];
+    if (readiness.catalog.state === 'degraded') {
+      return ['degraded', readiness.catalog.detail ?? 'a configured source could not be read completely'];
+    }
+    const converging = (
+      [
+        ['history', readiness.history],
+        ['usage', readiness.usage],
+        ['search', readiness.search],
+      ] as const
+    )
+      .filter(([, field]) => field.state === 'indexing' || field.state === 'pending')
+      .map(([name, field]) => (field.detail ? `${name}: ${field.detail}` : name));
+    if (converging.length === 0) return [null, null];
+    return ['indexing…', converging.join('\n')];
+  }, [readiness]);
+
   const liveProjectMembers = useMemo(
     () =>
       new Set(
@@ -756,6 +824,14 @@ function PlaygroundShell() {
               <div className="h-10 px-4 flex items-center">
                 <span className="font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">Projects</span>
                 <span className="ml-auto font-mono text-[8px] tracking-widest opacity-45">{projects.length}</span>
+                {indexingLabel ? (
+                  <span
+                    className="ml-2 font-mono text-[8px] tracking-widest opacity-60"
+                    title={indexingDetail ?? undefined}
+                  >
+                    {indexingLabel}
+                  </span>
+                ) : null}
               </div>
             </div>
 
@@ -804,7 +880,8 @@ function PlaygroundShell() {
                       </p>
                       <div className="flex items-center justify-between gap-2 font-mono text-[8px] uppercase tracking-[0.08em] opacity-60">
                         <span className="truncate">
-                          {formatNumber(p.sessionCount)} sess · {formatNumber(p.messageCount)} msg · {tok} tok
+                          {formatNumber(p.sessionCount)} sess · {p.decoded ? formatNumber(p.messageCount) : '—'} msg ·{' '}
+                          {p.decoded ? tok : '—'} tok
                         </span>
                         <span className="shrink-0">{formatRelativeTime(p.lastActiveAt)}</span>
                       </div>
@@ -883,11 +960,15 @@ function PlaygroundShell() {
                 )}
                 {selected && filteredSessions.length === 0 && (
                   <EmptyState
-                    title="No sessions"
+                    title={selectedProject && !selectedProject.decoded ? 'Indexing' : 'No sessions'}
                     detail={
                       sessionSourceFilter
                         ? `No ${sourceLabel(sessionSourceFilter)} sessions in this project.`
-                        : 'This project has no indexed sessions yet.'
+                        : selectedProject && !selectedProject.decoded
+                          ? // The catalog already counted them; they are not readable
+                            // until their transcripts decode.
+                            `${formatNumber(selectedProject.sessionCount)} sessions found. Their transcripts are still being read.`
+                          : 'This project has no indexed sessions yet.'
                     }
                   />
                 )}

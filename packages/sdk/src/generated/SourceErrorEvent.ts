@@ -5,7 +5,7 @@ import type { SourcePosition } from "./SourcePosition.js";
 /**
  * One in-scope object failed. Siblings keep being observed.
  */
-export type SourceErrorEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number, source: SourcePosition, message: string, 
+export type SourceErrorEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number, source: SourcePosition, message: string,
 /**
  * False when the object is expected to recover on a later pass.
  */

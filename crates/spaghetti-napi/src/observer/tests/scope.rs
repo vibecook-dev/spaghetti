@@ -27,6 +27,11 @@ fn coverage_paths(events: &[ObserverEvent]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The Claude adapter, as the binding layer would supply it.
+fn claude_adapter() -> std::sync::Arc<dyn crate::adapter::AgentAdapter> {
+    std::sync::Arc::new(crate::claude::ClaudeCodeAdapter::new())
+}
+
 #[test]
 fn a_subagent_transcript_created_after_bootstrap_joins_the_same_scope() {
     let fixture = SessionFixture::new();
@@ -330,25 +335,29 @@ fn a_change_with_no_watcher_notification_is_still_picked_up_by_the_sweep() {
 #[test]
 fn a_pass_reads_what_changed_rather_than_the_whole_scope() {
     let fixture = SessionFixture::new();
-    fixture.append(
+    fixture.append_once(
         &fixture.transcript(),
         &[assistant_record("a-1", "resp-1", 5)],
     );
-    // Enough children that a full sweep is clearly distinguishable from a
-    // targeted pass.
+    // Enough children that a targeted pass is clearly distinguishable from a
+    // whole-scope one.
     for index in 0..40 {
         let agent = format!("child-{index}");
-        fixture.append(
+        fixture.append_once(
             &fixture.subagent(&agent),
             &[subagent_record(&agent, &format!("c-{index}"))],
         );
     }
 
-    // A long poll interval makes the sweep cadence long too, so anything read
-    // during the window below was read because it was flagged, not swept.
-    let mut request = fixture.request();
-    request.poll_interval_ms = Some(2_000);
-    let observer = open_observer(&request).expect("observer attaches");
+    let request = fixture.request();
+    // Attached without watches on purpose. A flagged object is re-read whatever
+    // `stat` reports — that is deliberate, since a same-size same-mtime rewrite
+    // is exactly what a stat cannot see — so every duplicate notification would
+    // add a read, and a loaded machine produces more of them. Without a
+    // watcher, a poll sweeps, stats every member, and reads only what moved,
+    // which is the reconciliation property this test is about.
+    let observer =
+        ObserverHandle::open_unwatched(&request, claude_adapter()).expect("observer attaches");
     let bootstrap = drain_bootstrap(&observer);
     assert!(
         bootstrap
@@ -358,12 +367,12 @@ fn a_pass_reads_what_changed_rather_than_the_whole_scope() {
     );
     let after_bootstrap = observer.status().object_reads;
 
-    // One child changes. A whole-scope pass would read all 41+ objects.
-    fixture.append(
+    // One child changes. A whole-scope pass would read all 81 members.
+    fixture.append_once(
         &fixture.subagent("child-7"),
         &[subagent_record("child-7", "c-7-second")],
     );
-    collect_until(&observer, Duration::from_secs(10), |events| {
+    collect_until(&observer, Duration::from_secs(30), |events| {
         events.iter().any(|event| match event {
             ObserverEvent::UsageV2(event) => event.source.object_path.contains("child-7"),
             _ => false,
@@ -371,15 +380,10 @@ fn a_pass_reads_what_changed_rather_than_the_whole_scope() {
     });
 
     let reads = observer.status().object_reads - after_bootstrap;
-    // The property is that cost tracks what changed, not how big the scope is:
-    // 41 members are in scope and one of them moved. A handful of reads is
-    // expected — a flagged object is re-read whatever `stat` says, and the
-    // filesystem may report the same change more than once — but a
-    // whole-scope pass would be an order of magnitude more.
-    assert!(
-        reads < 15,
-        "one changed child in a 41-member scope should not cost a whole-scope \
-         pass: {reads} object reads"
+    assert_eq!(
+        reads, 1,
+        "one changed child in an 81-member scope should cost exactly one read; \
+         however many sweeps ran, the other 80 were unchanged"
     );
     observer.close();
 }
@@ -387,35 +391,37 @@ fn a_pass_reads_what_changed_rather_than_the_whole_scope() {
 #[test]
 fn a_burst_across_many_children_coalesces_into_few_passes() {
     let fixture = SessionFixture::new();
-    fixture.append(
+    fixture.append_once(
         &fixture.transcript(),
         &[assistant_record("a-1", "resp-1", 5)],
     );
     for index in 0..30 {
         let agent = format!("child-{index}");
-        fixture.append(
+        fixture.append_once(
             &fixture.subagent(&agent),
             &[subagent_record(&agent, &format!("c-{index}"))],
         );
     }
 
-    let mut request = fixture.request();
-    request.poll_interval_ms = Some(2_000);
-    let observer = open_observer(&request).expect("observer attaches");
+    let request = fixture.request();
+    // See the note in the test above: no watcher, so the count reflects the
+    // reconciliation decision rather than how often the OS reported a change.
+    let observer =
+        ObserverHandle::open_unwatched(&request, claude_adapter()).expect("observer attaches");
     drain_bootstrap(&observer);
     let after_bootstrap = observer.status().object_reads;
 
     // Thirty children change at once. Each is one object that genuinely needs
-    // reading; the guarantee is that the burst does not multiply into a pass
-    // per notification across the whole scope.
+    // reading; the guarantee is that a burst costs one read per change and does
+    // not multiply into a pass over the whole scope.
     for index in 0..30 {
         let agent = format!("child-{index}");
-        fixture.append(
+        fixture.append_once(
             &fixture.subagent(&agent),
             &[subagent_record(&agent, &format!("c-{index}-second"))],
         );
     }
-    collect_until(&observer, Duration::from_secs(15), |events| {
+    collect_until(&observer, Duration::from_secs(30), |events| {
         events
             .iter()
             .filter(|event| matches!(event, ObserverEvent::UsageV2(_)))
@@ -424,11 +430,66 @@ fn a_burst_across_many_children_coalesces_into_few_passes() {
     });
 
     let reads = observer.status().object_reads - after_bootstrap;
-    assert!(
-        // Measured: exactly 30 — one read per genuinely changed object.
-        reads <= 45,
-        "a 30-child burst should cost one read per change, not a sweep per \
-         notification: {reads} object reads"
+    assert_eq!(
+        reads, 30,
+        "a thirty-child burst should cost exactly thirty reads — one per \
+         change — however many sweeps it took to notice them"
+    );
+    observer.close();
+}
+
+#[test]
+fn an_evidence_named_sidecar_that_does_not_exist_costs_nothing_until_it_appears() {
+    let fixture = SessionFixture::new();
+    fixture.append_once(
+        &fixture.transcript(),
+        &[assistant_record("a-1", "resp-1", 5)],
+    );
+    // Each child's actor-run evidence names its own todo sidecar, so this
+    // scope declares 41 sidecars and none of them exist.
+    for index in 0..40 {
+        let agent = format!("child-{index}");
+        fixture.append_once(
+            &fixture.subagent(&agent),
+            &[subagent_record(&agent, &format!("c-{index}"))],
+        );
+    }
+
+    let observer = ObserverHandle::open_unwatched(&fixture.request(), claude_adapter())
+        .expect("observer attaches");
+    drain_bootstrap(&observer);
+    let after_bootstrap = observer.status().object_reads;
+
+    // Sweep repeatedly with nothing changing. A declared-but-missing object has
+    // no recorded state to compare against unless absence itself is recorded,
+    // and without that each sweep re-opens all 41 of them.
+    collect_until(&observer, Duration::from_millis(750), |_| false);
+    let idle_reads = observer.status().object_reads - after_bootstrap;
+    assert_eq!(
+        idle_reads, 0,
+        "sweeping a scope with 41 declared-but-missing sidecars and nothing \
+         changing should cost no reads at all: {idle_reads}"
+    );
+
+    // The sidecar appears. Absence is a state to leave, not a reason to stop
+    // looking, so it must still be picked up.
+    fixture.append_once(
+        &fixture.todo_sidecar(SESSION),
+        &[r#"[{"content":"f","status":"pending","activeForm":"f"}]"#.to_string()],
+    );
+    // Drive sweeps until the read happens. The appearance shows up as a read,
+    // not as an event: this sidecar's decoder emits no RFC 012C revision.
+    let baseline = after_bootstrap + idle_reads;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while observer.status().object_reads == baseline && std::time::Instant::now() < deadline {
+        let _unused = observer.poll(16);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let appeared_reads = observer.status().object_reads - baseline;
+    assert_eq!(
+        appeared_reads, 1,
+        "a sidecar that appears should be read exactly once: {appeared_reads}"
     );
     observer.close();
 }

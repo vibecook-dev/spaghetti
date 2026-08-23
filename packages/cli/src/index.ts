@@ -374,11 +374,16 @@ export function createProgram(): Command {
 
   program.addCommand(exportCmd);
 
-  // Doctor command (does not need SpaghettiAPI)
+  // Doctor command. The engine is optional: an unopenable index is itself
+  // diagnostic information, so the rest of the report still prints.
   const doctorCmd = new Command('doctor')
     .description('Health check for spaghetti and its related data paths')
     .action(async () => {
-      await doctorCommand(VERSION);
+      try {
+        await withService((api) => doctorCommand(VERSION, api));
+      } catch {
+        await doctorCommand(VERSION);
+      }
     });
 
   program.addCommand(doctorCmd);

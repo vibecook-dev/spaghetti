@@ -5,7 +5,9 @@
 
 #[cfg(test)]
 mod builtin_support;
+mod catalog;
 mod contract;
+mod disposition;
 mod facts;
 mod registry;
 mod runtime_value;
@@ -20,6 +22,10 @@ mod runtime_contract_fixture;
 pub(crate) use builtin_support::{
     verified_builtin_support_catalog, verified_claude_candidate_for_test,
 };
+pub use catalog::{
+    AssociationQuality, CatalogDiscoveryLimits, DiscoveredAssociationConflict, DiscoveredProject,
+    DiscoveredSession, ProjectAssociationBasis, SourceCatalogDiscovery,
+};
 pub use contract::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AgentAdapter, Availability, CapabilityDeclaration, CapabilityGranularity,
@@ -30,6 +36,8 @@ pub use contract::{
     SourceObjectListRequest, SourceQuery, SourceQueryBounds, SourceRoot, SourceRows,
     SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
+pub(crate) use disposition::{BoundedNativeEvidence, RecordMappingDisposition};
+pub(crate) use facts::MAX_UNKNOWN_RAW_PAYLOAD_BYTES;
 pub use facts::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, ArtifactCapture, ArtifactContentFact,
@@ -54,9 +62,6 @@ pub use facts::{
     UserInputLifecycleState, UserInputOperation, UserInputOption, UserInputQuestion,
     UserInputRequestRevisionFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
     WorkflowSnapshotFact, WorkflowStatus,
-};
-pub(crate) use facts::{
-    BoundedNativeEvidence, RecordMappingDisposition, MAX_UNKNOWN_RAW_PAYLOAD_BYTES,
 };
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use runtime_value::RuntimeSemanticValue;

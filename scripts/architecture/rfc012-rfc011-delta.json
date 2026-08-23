@@ -213,14 +213,14 @@
         "RFC012B"
       ],
       "legacy_behavior": "Projection readiness uses generic pack states including StaleSafe.",
-      "target_behavior": "Catalog readiness is coverage-plan-, epoch-, and snapshot-specific; unrelated packs retain their own versioned readiness.",
-      "migration": "Introduce the catalog pack and transition table beside the blocking compatibility path.",
-      "rollback": "Select blocking full-search startup and retain the last accepted durable catalog.",
+      "target_behavior": "Readiness is one vector {catalog, history, usage, capabilities, artifacts, search} derived from committed rows; the catalog field is ready or explicitly degraded long before the others converge.",
+      "migration": "Commit discovery rows per source on engine open, then derive every readiness field from them; no durable state machine or publication record is kept.",
+      "rollback": "Block startup on full convergence and serve only the history path.",
       "evidence": [
         {
           "state": "implemented",
-          "target": "packages/sdk/src/contracts/rfc012b-pages.ts",
-          "claim": "Portable catalog readiness distinguishes queryable last-complete catalog from complete-only search."
+          "target": "crates/spaghetti-napi/src/engine/catalog/readiness.rs",
+          "claim": "One readiness vector, derived from committed rows, distinguishes a queryable catalog from complete-only search."
         }
       ]
     },

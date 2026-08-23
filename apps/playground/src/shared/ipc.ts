@@ -33,7 +33,14 @@ import type {
   TokenActivityResult,
 } from '@vibecook/spaghetti-sdk';
 import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
-import type { ObservationHostSnapshot } from '@vibecook/spaghetti-sdk/observation';
+import type {
+  ObservationHostSnapshot,
+  SpaghettiCatalogPageOptions,
+  SpaghettiCatalogProjectPage,
+  SpaghettiCatalogSessionPage,
+  SpaghettiCatalogSessionPageOptions,
+  SpaghettiReadiness,
+} from '@vibecook/spaghetti-sdk/observation';
 import type {
   InitProgress,
   SearchQuery,
@@ -141,8 +148,20 @@ export interface SpaghettiIPC {
   getObservationOwnerStatus(): Promise<ObservationOwnerStatus>;
   /** Canonical catalog statistics read through the framed utility client. */
   getCanonicalStats(): Promise<SpaghettiClientResponseMap['getStats']>;
+  /**
+   * The readiness vector. The library renders from the catalog, which is
+   * ready long before history, usage, and search converge, so the UI needs
+   * this to say what is still arriving.
+   */
+  getReadiness(): Promise<SpaghettiReadiness>;
 
   // Projects ----------------------------------------------------------------
+  /**
+   * Discovered projects, answerable during background ingestion. The library
+   * renders from these and swaps in `getProjectList` rows as they decode.
+   */
+  listCatalogProjects(options?: SpaghettiCatalogPageOptions): Promise<SpaghettiCatalogProjectPage>;
+  /** Decoded projects. Waits for every supervisor to finish its scan. */
   getProjectList(): Promise<ProjectListItem[]>;
   getProjectTokenActivity(project: ProjectReference, query: TokenActivityQuery): Promise<TokenActivityResult>;
   getProjectMemory(project: ProjectReference, options?: SourceFilter): Promise<string | null>;
@@ -158,6 +177,8 @@ export interface SpaghettiIPC {
 
   // Sessions ----------------------------------------------------------------
   /** List all project sessions; optionally filter to one agent source. */
+  /** Discovered sessions of one catalog project, answerable during ingestion. */
+  listCatalogSessions(options?: SpaghettiCatalogSessionPageOptions): Promise<SpaghettiCatalogSessionPage>;
   getSessionList(project: ProjectReference, options?: SourceFilter): Promise<SessionListItem[]>;
   getSessionMessages(
     projectSlug: string,
@@ -228,10 +249,13 @@ export const IPC_CHANNELS = {
   getObservationHostStatus: 'spaghetti:getObservationHostStatus',
   getObservationOwnerStatus: 'spaghetti:getObservationOwnerStatus',
   getCanonicalStats: 'spaghetti:getCanonicalStats',
+  getReadiness: 'spaghetti:getReadiness',
+  listCatalogProjects: 'spaghetti:listCatalogProjects',
   getProjectList: 'spaghetti:getProjectList',
   getProjectTokenActivity: 'spaghetti:getProjectTokenActivity',
   getProjectMemory: 'spaghetti:getProjectMemory',
   getProjectWorktrees: 'spaghetti:getProjectWorktrees',
+  listCatalogSessions: 'spaghetti:listCatalogSessions',
   getSessionList: 'spaghetti:getSessionList',
   getSessionMessages: 'spaghetti:getSessionMessages',
   getSessionTimelineFacets: 'spaghetti:getSessionTimelineFacets',

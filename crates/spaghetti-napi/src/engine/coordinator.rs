@@ -82,7 +82,6 @@ const MAX_UNACKED_COMMITS: usize = 256;
 const USAGE_V2_REPLAY_PENDING_DETAIL: &str =
     "runtime.usage-v2 explicit replay in progress; replacement coverage not established";
 const USAGE_V2_REPLAY_COMMIT_REASON: &str = "projection.runtime.usage-v2.explicit_replay";
-const SELECTED_CATALOG_HYDRATION_COMMIT_REASON: &str = "catalog.selected_session_hydration";
 const PROMOTED_DURABLE_AUTHORIZATION_UNAVAILABLE: &str =
     "promoted durable support authorization unavailable";
 
@@ -252,17 +251,6 @@ pub struct ReconcileRetryTarget {
     pub stable_key: Vec<u8>,
     pub stream_key: String,
     pub object_key: Vec<u8>,
-}
-
-/// Engine-private, reducer-authorized object coordinates for one selected
-/// catalog session. The native relative path is never accepted from a public
-/// request; the observation supervisor constructs this value only after an
-/// exact catalog locator has matched its configured topology.
-pub(super) struct SelectedCatalogHydrationObject {
-    pub(super) target: ReconcileRetryTarget,
-    pub(super) root_name: String,
-    pub(super) relative_path: PathBuf,
-    pub(super) expected_generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1002,56 +990,6 @@ impl ObservationCoordinator {
         }
     }
 
-    /// Discover and durably register every source instance without opening a
-    /// declared stream or decoding source content. RFC 012B uses this phase to
-    /// make the complete configured source set visible before any catalog or
-    /// history producer starts reading native objects.
-    pub(crate) fn discover_and_register_sources<A: AgentAdapter + ?Sized>(
-        &self,
-        adapter: &A,
-        configured_roots: Vec<PathBuf>,
-    ) -> Result<Vec<SourceInstance>, EngineError> {
-        self.check_cancelled()?;
-        validate_request(&ReconcileRequest {
-            configured_roots: configured_roots.clone(),
-            reason: "catalog_registration".to_string(),
-        })?;
-        let manifest = adapter.manifest();
-        manifest
-            .validate()
-            .map_err(|error| adapter_error("validate adapter manifest", error))?;
-        let discovered_at = now_unix_ms()?;
-        let specs = catch_adapter_panic("discover catalog source instances", || {
-            adapter.discover(&DiscoveryContext {
-                configured_roots,
-                observed_at: discovered_at,
-            })
-        })?
-        .map_err(|error| adapter_error("discover catalog source instances", error))?;
-        if specs.is_empty() {
-            return Err(EngineError::InvalidConfig(
-                "catalog registration discovered no source instances".to_string(),
-            ));
-        }
-
-        let mut stable_keys = BTreeSet::new();
-        let mut instances = Vec::with_capacity(specs.len());
-        for spec in specs {
-            self.check_cancelled()?;
-            spec.validate()
-                .map_err(|error| adapter_error("validate catalog source instance", error))?;
-            if !stable_keys.insert(spec.stable_key.as_bytes().to_vec()) {
-                return Err(observation_error(
-                    "validate catalog source instances",
-                    "adapter discovered the same stable instance key more than once",
-                ));
-            }
-            let id = self.reserve_instance(adapter, &spec, discovered_at)?;
-            instances.push(SourceInstance { id, spec });
-        }
-        Ok(instances)
-    }
-
     #[cfg(test)]
     fn with_append_record_limit(engine: Arc<SpaghettiEngineCore>, limit: usize) -> Self {
         assert!(limit > 0 && limit <= MAX_APPEND_RECORDS_PER_RECONCILE);
@@ -1342,22 +1280,7 @@ impl ObservationCoordinator {
         target: &ReconcileRetryTarget,
         reason: impl Into<String>,
     ) -> Result<ReconcileOutcome, EngineError> {
-        self.reconcile_declared_object_inner(adapter, spec, target, None, reason.into())
-    }
-
-    pub(super) fn reconcile_selected_catalog_hydration<A: AgentAdapter + ?Sized>(
-        &self,
-        adapter: &A,
-        spec: AdapterSourceInstanceSpec,
-        selected: &SelectedCatalogHydrationObject,
-    ) -> Result<ReconcileOutcome, EngineError> {
-        self.reconcile_declared_object_inner(
-            adapter,
-            spec,
-            &selected.target,
-            Some(selected),
-            SELECTED_CATALOG_HYDRATION_COMMIT_REASON.to_string(),
-        )
+        self.reconcile_declared_object_inner(adapter, spec, target, reason.into())
     }
 
     fn reconcile_declared_object_inner<A: AgentAdapter + ?Sized>(
@@ -1365,7 +1288,6 @@ impl ObservationCoordinator {
         adapter: &A,
         spec: AdapterSourceInstanceSpec,
         target: &ReconcileRetryTarget,
-        selected: Option<&SelectedCatalogHydrationObject>,
         reason: String,
     ) -> Result<ReconcileOutcome, EngineError> {
         self.check_cancelled()?;
@@ -1444,48 +1366,7 @@ impl ObservationCoordinator {
             let previous = catalog.objects.iter().find(|object| {
                 object.stream_key == target.stream_key && object.object_key == target.object_key
             });
-            let object = if let Some(selected) = selected {
-                if selected.expected_generation == 0
-                    || stream.selector.root_name != selected.root_name
-                    || confined_relative_path_key(&selected.relative_path).map_err(source_error)?
-                        != target.object_key
-                    || !SelectorPatterns::new(&stream)?.matches(&selected.relative_path)
-                {
-                    return Err(observation_error(
-                        "hydrate selected catalog object",
-                        "catalog locator no longer matches the declared source stream",
-                    ));
-                }
-                match previous {
-                    Some(previous) if previous.generation != selected.expected_generation => {
-                        return Err(observation_error(
-                            "hydrate selected catalog object",
-                            "catalog locator generation no longer matches the durable source object",
-                        ));
-                    }
-                    None if selected.expected_generation != 1 => {
-                        return Err(observation_error(
-                            "hydrate selected catalog object",
-                            "catalog locator generation cannot register a new durable source object",
-                        ));
-                    }
-                    _ => {}
-                }
-                let root = instance.root(&selected.root_name).map_err(|error| {
-                    adapter_error("resolve selected catalog source root", error)
-                })?;
-                DeclaredObject {
-                    path: root.join(&selected.relative_path),
-                    descriptor: SourceObjectDescriptor {
-                        stream_id: stream.id.clone(),
-                        object_key: target.object_key.clone(),
-                        relative_path: selected.relative_path.clone(),
-                    },
-                    // Confined drivers re-open this exact descriptor relative
-                    // to the declared root. Avoid a lossy display-path stat.
-                    metadata: None,
-                }
-            } else {
+            let object = {
                 let Some(previous) = previous else {
                     // A native backend can report a newly created file as a
                     // content modification. The object route has no durable
@@ -1543,7 +1424,7 @@ impl ObservationCoordinator {
             )?;
             lane.flush()?;
             lane.apply_to(&mut outcome);
-            if usage_v2_stream && selected.is_none() {
+            if usage_v2_stream {
                 usage_v2_coverage.note_outcome(
                     stream.id.as_str(),
                     ProjectionBlockers::default(),
@@ -4376,10 +4257,6 @@ impl DurableObject {
         }
     }
 
-    fn mark_persisted(&mut self) {
-        self.unpersisted = false;
-    }
-
     fn advance(&mut self, checkpoint: &AppendCheckpoint, encoded: Vec<u8>) {
         self.generation = checkpoint.generation;
         self.committed_cursor = checkpoint.cursor().into_bytes();
@@ -4629,7 +4506,7 @@ fn decode_snapshot_records<A: AgentAdapter + ?Sized>(
     }))
 }
 
-fn source_instance_spec(
+pub(super) fn source_instance_spec(
     manifest: &AdapterManifest,
     spec: &AdapterSourceInstanceSpec,
     discovered_at: i64,
@@ -4884,22 +4761,20 @@ fn pending_projection_updates(
     instance: &SourceInstance,
     reason: &str,
 ) -> Vec<ProjectionVersionUpdate> {
-    (reason != SELECTED_CATALOG_HYDRATION_COMMIT_REASON
-        && declares_usage_v2_projection(manifest)
-        && stream_declares_usage_v2_projection(stream))
-    .then(|| {
-        usage_v2_projection_update(
-            instance,
-            ProjectionReadiness::Pending,
-            Some(if reason == USAGE_V2_REPLAY_COMMIT_REASON {
-                USAGE_V2_REPLAY_PENDING_DETAIL
-            } else {
-                "source reconciliation in progress"
-            }),
-        )
-    })
-    .into_iter()
-    .collect()
+    (declares_usage_v2_projection(manifest) && stream_declares_usage_v2_projection(stream))
+        .then(|| {
+            usage_v2_projection_update(
+                instance,
+                ProjectionReadiness::Pending,
+                Some(if reason == USAGE_V2_REPLAY_COMMIT_REASON {
+                    USAGE_V2_REPLAY_PENDING_DETAIL
+                } else {
+                    "source reconciliation in progress"
+                }),
+            )
+        })
+        .into_iter()
+        .collect()
 }
 
 fn coverage_position_kind(driver: &DriverSpec) -> CoveragePositionKind {

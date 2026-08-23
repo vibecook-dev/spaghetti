@@ -56,6 +56,12 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
       return runtime.getObservationHostStatus();
     case 'getObservationOwnerStatus':
       return runtime.getObservationOwnerStatus();
+    case 'getReadiness':
+      return runtime.read((sdk) => sdk.getReadiness());
+    case 'listCatalogProjects': {
+      const [options] = request.args;
+      return runtime.read((sdk) => sdk.listCatalogProjects(options));
+    }
     case 'getProjectList':
       return runtime.read((sdk) => sdk.getProjectList());
     case 'getProjectTokenActivity': {
@@ -65,6 +71,10 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
     case 'getProjectMemory': {
       const [project, options] = request.args;
       return runtime.read((sdk) => sdk.getProjectMemory(project, options));
+    }
+    case 'listCatalogSessions': {
+      const [options] = request.args;
+      return runtime.read((sdk) => sdk.listCatalogSessions(options));
     }
     case 'getSessionList': {
       const [project, options] = request.args;

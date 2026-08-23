@@ -9,6 +9,7 @@ use ts_rs::TS;
 
 use crate::source::SourceRecord;
 
+use super::disposition::RecordMappingDisposition;
 use super::{
     AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey, CanonicalFactId,
     CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness, DependencyRevision,
@@ -2927,44 +2928,6 @@ pub enum Fact {
 pub(crate) const MAX_UNKNOWN_NATIVE_KIND_BYTES: usize = 128;
 pub(crate) const MAX_UNKNOWN_REASON_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_UNKNOWN_RAW_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
-
-/// Value-free RFC 012A evidence retained for an unknown source record
-/// regardless of the selected raw-retention policy. The excerpt is produced
-/// by the common decode boundary and contains no native values.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BoundedNativeEvidence {
-    pub source_record_id: SourceRecordId,
-    pub observed_bytes: u64,
-    pub payload_digest: [u8; 32],
-    pub sanitized_excerpt: Vec<u8>,
-}
-
-/// RFC 012A's topology-independent outcome for one complete source record.
-///
-/// The common decode boundary constructs these values after adapter return.
-/// They live beside `FactBatch` so a durable batch cannot lose or reorder the
-/// record-level classification while append slices are merged for commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RecordMappingDisposition {
-    Mapped {
-        fact_count: u32,
-    },
-    IgnoredKnown {
-        reason_code: String,
-    },
-    RetainedUnknown {
-        family_hint: Option<String>,
-        bounded_evidence: BoundedNativeEvidence,
-    },
-    BufferedIncomplete,
-    Malformed {
-        reason_code: String,
-        bounded_diagnostic: Vec<u8>,
-    },
-    UnsupportedVersion {
-        observed_version: String,
-    },
-}
 
 impl Fact {
     pub fn kind(&self) -> &'static str {

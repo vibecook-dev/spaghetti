@@ -12,6 +12,7 @@
     "bench:query-topology": "pnpm build && electron out/main/query-topology-benchmark.js",
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "node --import tsx --test --test-force-exit \"src/**/*.test.ts\"",
     "clean": "rm -rf out",
     "ensure-electron": "node scripts/ensure-electron.mjs"
   },

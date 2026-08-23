@@ -16,7 +16,7 @@
       "sources": [
         {
           "kind": "code_reference",
-          "path": "crates/spaghetti-napi/src/claude/catalog_conformance/tests.rs",
+          "path": "crates/spaghetti-napi/src/claude/support_probe.rs",
           "sha256": null,
           "locator": "candidate_probe version 2.1.223"
         },

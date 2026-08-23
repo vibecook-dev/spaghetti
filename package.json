@@ -43,7 +43,7 @@
     "test:usage-v2-oracle": "python3 scripts/usage_v2_oracle/test_oracle.py",
     "agent-support:validate": "python3 scripts/agent_support/validate.py",
     "test:agent-support": "python3 -m unittest scripts.agent_support.test_contracts",
-    "test:packages": "pnpm --filter @vibecook/spaghetti-sdk test && pnpm --filter @vibecook/spaghetti test",
+    "test:packages": "pnpm --filter @vibecook/spaghetti-sdk test && pnpm --filter @vibecook/spaghetti test && pnpm --filter @vibecook/spaghetti-playground test",
     "test:ingest-diff": "node scripts/run-legacy-oracle.mjs scripts/ingest-diff.ts",
     "test:ingest-diff:medium": "node scripts/run-legacy-oracle.mjs scripts/ingest-diff.ts --fixture crates/spaghetti-napi/fixtures/medium/.claude",
     "test:ingest-diff:grok": "node scripts/run-legacy-oracle.mjs scripts/ingest-diff.ts --source=grok",

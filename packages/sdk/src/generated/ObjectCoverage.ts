@@ -3,11 +3,11 @@
 /**
  * State of one in-scope source object at a barrier.
  */
-export type ObjectCoverage = { 
+export type ObjectCoverage = {
 /**
  * The declared relation that admitted this object into the scope.
  */
-relation_id: string, stream_id: string, object_path: string, root_name: string, generation: number, present: boolean, 
+relation_id: string, stream_id: string, object_path: string, root_name: string, generation: number, present: boolean,
 /**
  * Set when the object could not be read or decoded. Sibling objects keep
  * being observed.

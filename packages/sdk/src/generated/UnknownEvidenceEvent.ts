@@ -12,11 +12,11 @@ import type { SourcePosition } from "./SourcePosition.js";
  * silently missing facts. No native values travel here — only how large the
  * record was and what it hashes to.
  */
-export type UnknownEvidenceEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number, phase: ObserverPhase, source: SourcePosition, 
+export type UnknownEvidenceEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number, phase: ObserverPhase, source: SourcePosition,
 /**
  * The adapter's guess at the family, when it offered one.
  */
-family_hint: string | null, 
+family_hint: string | null,
 /**
  * Size of the record that was not interpreted.
  */

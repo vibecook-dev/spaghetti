@@ -4,7 +4,7 @@ import type { ObserverEventId } from "./ObserverEventId.js";
 /**
  * The observer released the scope. Idempotent: only one is ever emitted.
  */
-export type ClosedEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number, 
+export type ClosedEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number,
 /**
  * Events discarded because they were never delivered.
  */

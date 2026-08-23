@@ -6,9 +6,7 @@
 //! tokens onto the preceding assistant message (ccusage-style).
 
 mod adapter;
-#[cfg(test)]
-mod catalog_conformance;
-pub(crate) mod catalog_runtime;
+mod catalog_discovery;
 #[cfg(feature = "legacy-oracle")]
 pub mod estimate_tokens;
 #[cfg(feature = "legacy-oracle")]

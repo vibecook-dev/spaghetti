@@ -22,7 +22,6 @@
 use napi_derive::napi;
 
 pub mod adapter;
-mod catalog_contract;
 pub mod claude;
 pub mod codex;
 pub mod core;
@@ -31,12 +30,17 @@ mod decode_runtime;
 pub mod engine;
 pub mod factory;
 pub mod grok;
+mod napi_catalog;
 mod napi_engine;
 pub mod observer;
 #[cfg(feature = "legacy-oracle")]
 pub mod orchestrate;
 mod runtime_semantic_reducer;
 mod semantic_contract;
+// `#[napi]` registration is compiled out under `cfg(test)`, so under the
+// unit-test target this module's only consumers (the JS callers in
+// `packages/sdk/src/contracts/__tests__/rfc012*-napi.test.ts`) do not exist.
+#[cfg(not(test))]
 mod semantic_contract_napi;
 pub mod source;
 mod unknown_evidence_reducer;

@@ -4,15 +4,15 @@ import type { ActorAttribution } from "./ActorAttribution.js";
 /**
  * Root + actor identity carried by every event.
  */
-export type ActorRef = { 
+export type ActorRef = {
 /**
  * RFC 012A canonical session key of the observed root.
  */
-session_key: string, 
+session_key: string,
 /**
  * Native session id as the adapter names it.
  */
-native_session_id: string, 
+native_session_id: string,
 /**
  * Canonical actor-run key. Equals the root run for root-produced events.
  */

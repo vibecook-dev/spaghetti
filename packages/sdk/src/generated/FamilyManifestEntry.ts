@@ -6,7 +6,7 @@ import type { ObserverFamily } from "./ObserverFamily.js";
  * `digest` make absence actionable: an entity missing from a complete family
  * is genuinely gone, not merely undelivered.
  */
-export type FamilyManifestEntry = { family: ObserverFamily, contract_version: number, entity_count: number, 
+export type FamilyManifestEntry = { family: ObserverFamily, contract_version: number, entity_count: number,
 /**
  * Topology-neutral replacement digest. A clean bootstrap and a completed
  * resync at equal coverage produce equal digests.

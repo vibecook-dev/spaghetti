@@ -111,9 +111,16 @@ pub(crate) struct ObservedObject {
     object_context: AdapterObjectContext,
     semantic_context: FactSemanticContext,
     origin: RecordOrigin,
-    /// `(len, mtime)` at the last completed read, for the cheap unchanged-check
-    /// a sweep uses before deciding to open anything.
-    last_stat: Option<(u64, std::time::SystemTime)>,
+    /// What the last completed pass observed on disk, for the cheap
+    /// unchanged-check a sweep uses before deciding to open anything.
+    ///
+    /// Three states, and the middle one is the point: `None` is "never
+    /// looked", `Some(None)` is "confirmed absent", and `Some(Some(..))` is
+    /// present with those attributes. Without the middle state, a declared
+    /// relation whose object does not exist — a sidecar named by scope-join
+    /// evidence, say — looks identical to one never checked, so every sweep
+    /// re-opens it forever.
+    last_stat: Option<Option<(u64, std::time::SystemTime)>>,
     decoder_state: Option<Vec<u8>>,
     generation: u64,
     present: bool,
@@ -227,30 +234,37 @@ impl ObservedObject {
     /// and an object it wrongly skips is still caught by the next full read,
     /// so the worst case is bounded staleness rather than a lost change.
     pub(crate) fn appears_unchanged(&self) -> bool {
-        let Some((len, mtime)) = self.last_stat else {
+        let Some(last) = self.last_stat else {
+            // Never looked at this object; nothing to compare against.
             return false;
         };
         let path = self.root.join(&self.member.key.relative_path);
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => {
+        match (last, std::fs::symlink_metadata(&path)) {
+            // Still absent. A declared relation whose object has not been
+            // created costs exactly this failed `stat` per sweep.
+            (None, Err(_)) => true,
+            // It appeared. Read it properly so the scope picks it up.
+            (None, Ok(_)) => false,
+            // It went away, or became unreadable: that is a change the driver
+            // has to see, so it can retract what the object owned.
+            (Some(_), Err(_)) => false,
+            (Some((len, mtime)), Ok(metadata)) => {
                 let Ok(modified) = metadata.modified() else {
                     return false;
                 };
                 metadata.len() == len && modified == mtime
             }
-            // Missing or unreadable is a change worth handling properly.
-            Err(_) => false,
         }
     }
 
     fn record_stat(&mut self) {
         let path = self.root.join(&self.member.key.relative_path);
-        self.last_stat = std::fs::symlink_metadata(&path).ok().and_then(|metadata| {
+        self.last_stat = Some(std::fs::symlink_metadata(&path).ok().and_then(|metadata| {
             metadata
                 .modified()
                 .ok()
                 .map(|mtime| (metadata.len(), mtime))
-        });
+        }));
     }
 
     /// Read every complete record newer than the checkpoint and decode it.

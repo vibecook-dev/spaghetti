@@ -76,6 +76,30 @@ pub(crate) fn read_stable_file_confined(
     read_stable_file_confined_with_hook(root, relative_path, max_bytes, || {})
 }
 
+/// Read at most `max_bytes` from the head of a confined file.
+///
+/// Unlike [`read_stable_file_confined`], an object larger than the bound is
+/// not rejected: catalog discovery deliberately wants the head of a large
+/// transcript and nothing else. Confinement, symlink refusal, and the
+/// directory-walk guarantees are identical.
+pub(crate) fn read_prefix_confined(
+    root: &Path,
+    relative_path: &Path,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, SourceDriverError> {
+    use std::io::Read as _;
+
+    let path = root.join(relative_path);
+    let Some(file) = open_confined_file(root, relative_path)? else {
+        return Ok(None);
+    };
+    let mut buffer = Vec::new();
+    file.take(max_bytes as u64)
+        .read_to_end(&mut buffer)
+        .map_err(|error| io_error("reading the head of", &path, error))?;
+    Ok(Some(buffer))
+}
+
 pub(crate) fn read_stable_file_confined_with_hook<F>(
     root: &Path,
     relative_path: &Path,
@@ -267,57 +291,6 @@ pub(crate) fn open_confined_file(
     }
 }
 
-/// Open a source directory relative to an already-approved root without
-/// following symlinks in any source-owned path component. The returned handle
-/// is suitable for descriptor-relative enumeration on POSIX hosts; callers
-/// must not re-resolve the joined path for native access.
-pub(crate) fn open_confined_directory(
-    root: &Path,
-    relative_path: &Path,
-) -> Result<Option<File>, SourceDriverError> {
-    confined_relative_path_key(relative_path)?;
-    let components = relative_path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(PathBuf::from(value)),
-            Component::CurDir => None,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
-        })
-        .collect::<Vec<_>>();
-    if components.is_empty() {
-        return Err(SourceDriverError::PathEscape(
-            relative_path.to_string_lossy().into_owned(),
-        ));
-    }
-
-    #[cfg(unix)]
-    {
-        use rustix::fs::{openat, Mode, OFlags, CWD};
-
-        let directory_flags =
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
-        let mut directory = match openat(CWD, root, directory_flags, Mode::empty()) {
-            Ok(directory) => directory,
-            Err(error) => return classify_confined_open_error(root, relative_path, error),
-        };
-        for component in components {
-            directory = match openat(&directory, component, directory_flags, Mode::empty()) {
-                Ok(directory) => directory,
-                Err(error) => return classify_confined_open_error(root, relative_path, error),
-            };
-        }
-        Ok(Some(File::from(directory)))
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = (root, components);
-        Err(SourceDriverError::InvalidConfig(
-            "descriptor-confined directory access is unavailable on this platform".to_string(),
-        ))
-    }
-}
-
 #[cfg(unix)]
 fn classify_confined_open_error(
     root: &Path,
@@ -411,90 +384,6 @@ pub(crate) fn confined_relative_path_key(path: &Path) -> Result<Vec<u8>, SourceD
     Ok(output)
 }
 
-/// Reconstruct an exact confined path from the component-framed identity
-/// emitted by [`confined_relative_path_key`]. This is the only supported way
-/// to reopen a selected directory member because display paths are lossy for
-/// non-UTF-8 native names. A canonical round trip rejects fabricated
-/// separators, dot components, truncation, and platform-invalid encodings.
-pub(crate) fn confined_relative_path_from_key(
-    path_key: &[u8],
-) -> Result<PathBuf, SourceDriverError> {
-    if path_key.first() != Some(&1) || path_key.len() == 1 {
-        return Err(invalid_confined_path_key());
-    }
-    let mut path = PathBuf::new();
-    let mut offset = 1_usize;
-    while offset < path_key.len() {
-        let length_end = offset
-            .checked_add(8)
-            .filter(|end| *end <= path_key.len())
-            .ok_or_else(invalid_confined_path_key)?;
-        let length = usize::try_from(u64::from_be_bytes(
-            path_key[offset..length_end]
-                .try_into()
-                .expect("the checked component length prefix has eight bytes"),
-        ))
-        .map_err(|_| invalid_confined_path_key())?;
-        if length == 0 {
-            return Err(invalid_confined_path_key());
-        }
-        let component_end = length_end
-            .checked_add(length)
-            .filter(|end| *end <= path_key.len())
-            .ok_or_else(invalid_confined_path_key)?;
-        path.push(os_string_from_key_component(
-            &path_key[length_end..component_end],
-        )?);
-        offset = component_end;
-    }
-    if confined_relative_path_key(&path).ok().as_deref() != Some(path_key) {
-        return Err(invalid_confined_path_key());
-    }
-    Ok(path)
-}
-
-fn invalid_confined_path_key() -> SourceDriverError {
-    SourceDriverError::InvalidCursor(
-        "confined relative path key is not canonical for this platform".to_string(),
-    )
-}
-
-#[cfg(unix)]
-fn os_string_from_key_component(bytes: &[u8]) -> Result<std::ffi::OsString, SourceDriverError> {
-    use std::os::unix::ffi::OsStringExt;
-
-    if bytes.contains(&0) {
-        return Err(invalid_confined_path_key());
-    }
-    Ok(std::ffi::OsString::from_vec(bytes.to_vec()))
-}
-
-#[cfg(windows)]
-fn os_string_from_key_component(bytes: &[u8]) -> Result<std::ffi::OsString, SourceDriverError> {
-    use std::os::windows::ffi::OsStringExt;
-
-    if !bytes.len().is_multiple_of(2) {
-        return Err(invalid_confined_path_key());
-    }
-    let wide = bytes
-        .chunks_exact(2)
-        .map(|unit| u16::from_be_bytes([unit[0], unit[1]]))
-        .collect::<Vec<_>>();
-    if wide.contains(&0) {
-        return Err(invalid_confined_path_key());
-    }
-    Ok(std::ffi::OsString::from_wide(&wide))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn os_string_from_key_component(bytes: &[u8]) -> Result<std::ffi::OsString, SourceDriverError> {
-    let component = std::str::from_utf8(bytes).map_err(|_| invalid_confined_path_key())?;
-    if component.contains('\0') {
-        return Err(invalid_confined_path_key());
-    }
-    Ok(std::ffi::OsString::from(component))
-}
-
 /// Binary-safe component-framed key for an already host-approved platform
 /// path. Unlike [`confined_relative_path_key`], absolute roots are allowed.
 pub fn platform_path_key(path: &Path) -> Vec<u8> {
@@ -553,60 +442,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn confined_path_keys_round_trip_exact_components() {
-        let path = Path::new("nested/child.jsonl");
-        let key = confined_relative_path_key(path).unwrap();
-        assert_eq!(confined_relative_path_from_key(&key).unwrap(), path);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn confined_path_keys_round_trip_non_utf8_components() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let path = PathBuf::from("nested").join(std::ffi::OsString::from_vec(vec![
-            b'c', b'h', b'i', b'l', b'd', 0xff,
-        ]));
-        let key = confined_relative_path_key(&path).unwrap();
-        assert_eq!(confined_relative_path_from_key(&key).unwrap(), path);
-    }
-
-    #[test]
-    fn confined_path_key_inverse_rejects_noncanonical_input_without_echoing_it() {
-        let framed = |component: &[u8]| {
-            let mut key = vec![1];
-            key.extend_from_slice(&(component.len() as u64).to_be_bytes());
-            key.extend_from_slice(component);
-            key
-        };
-        let mut truncated_component = framed(b"child");
-        truncated_component.pop();
-        let mut trailing_junk = framed(b"child");
-        trailing_junk.push(0xff);
-
-        for invalid in [
-            Vec::new(),
-            vec![1],
-            vec![2, 0, 0, 0, 0, 0, 0, 0, 1, b'a'],
-            vec![1, 0, 0, 0],
-            vec![1, 0, 0, 0, 0, 0, 0, 0, 0],
-            truncated_component,
-            trailing_junk,
-            framed(b"."),
-            framed(b".."),
-            framed(b"nested/escape"),
-            framed(b"nul\0byte"),
-        ] {
-            let error = confined_relative_path_from_key(&invalid).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "invalid source cursor: confined relative path key is not canonical for this platform"
-            );
-            assert!(!error.to_string().contains("nested/escape"));
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn confined_open_rejects_final_and_intermediate_symlinks() {
@@ -628,39 +463,6 @@ mod tests {
         symlink(&outside, root.join("nested")).unwrap();
         assert!(matches!(
             open_confined_file(&root, Path::new("nested/secret")),
-            Err(SourceDriverError::PathEscape(_))
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn confined_directory_open_is_descriptor_relative_and_no_follow() {
-        use std::os::unix::fs::symlink;
-
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("root");
-        let outside = temp.path().join("outside");
-        std::fs::create_dir_all(root.join("project/session/children")).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-
-        let directory = open_confined_directory(&root, Path::new("project/session/children"))
-            .unwrap()
-            .unwrap();
-        assert!(directory.metadata().unwrap().is_dir());
-        assert!(open_confined_directory(&root, Path::new("missing"))
-            .unwrap()
-            .is_none());
-
-        symlink(&outside, root.join("final-link")).unwrap();
-        assert!(matches!(
-            open_confined_directory(&root, Path::new("final-link")),
-            Err(SourceDriverError::PathEscape(_))
-        ));
-
-        std::fs::create_dir_all(outside.join("nested")).unwrap();
-        symlink(&outside, root.join("redirect")).unwrap();
-        assert!(matches!(
-            open_confined_directory(&root, Path::new("redirect/nested")),
             Err(SourceDriverError::PathEscape(_))
         ));
     }

@@ -25,7 +25,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -70,6 +70,21 @@ function exportBindings() {
   );
 }
 
+/**
+ * ts-rs leaves a trailing space after a field that carries a doc comment,
+ * which `git diff --check` rejects. Strip it here so the committed bindings
+ * are clean rather than asking every lane to work around it.
+ */
+function trimTrailingWhitespace() {
+  for (const entry of readdirSync(OUT_DIR)) {
+    if (!entry.endsWith('.ts')) continue;
+    const file = join(OUT_DIR, entry);
+    const text = readFileSync(file, 'utf8');
+    const cleaned = text.replace(/[ \t]+$/gm, '');
+    if (cleaned !== text) writeFileSync(file, cleaned, 'utf8');
+  }
+}
+
 /** One import site for the SDK: `./generated/index.js`. */
 function writeBarrel() {
   const modules = readdirSync(OUT_DIR)
@@ -89,6 +104,7 @@ const before = existsSync(OUT_DIR) ? readdirSync(OUT_DIR).sort().join(',') : '';
 
 clean();
 exportBindings();
+trimTrailingWhitespace();
 const modules = writeBarrel();
 
 if (check) {

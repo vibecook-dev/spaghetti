@@ -500,10 +500,7 @@ impl ObserverEvent {
             | Self::EffectiveState(event)
             | Self::ActorRun(event)
             | Self::ActorAffiliation(event)
-            | Self::UsageV2(event) => event
-                .value
-                .as_ref()
-                .map_or(128, |value| estimate_json_bytes(value)),
+            | Self::UsageV2(event) => event.value.as_ref().map_or(128, estimate_json_bytes),
             Self::UnknownEvidence(_) => 256,
             _ => 256,
         }
