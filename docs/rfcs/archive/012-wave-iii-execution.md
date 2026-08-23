@@ -1,7 +1,7 @@
 # RFC 012 Wave III execution runbook
 
 - **Status:** SUPERSEDED on 2026-08-23 by
-  [012-landing-plan.md](./012-landing-plan.md). Kept for history; do not
+  [012-landing-plan.md](../012-landing-plan.md). Kept for history; do not
   update. The RFC documents remain the semantic authorities.
 - **Written:** 2026-08-21
 - **Assignment base:** the integrator commit that lands this file; announced as
