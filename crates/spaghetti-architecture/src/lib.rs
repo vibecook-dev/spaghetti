@@ -1,16 +1,23 @@
 //! Physical workspace crate for RFC 012 X3.
 //!
 //! This crate must not depend on `spaghetti-napi`. It only asserts that the
-//! existing logical layer directories and architecture checkers remain the
+//! landed logical layer modules and architecture checkers remain the
 //! dependency boundary after crate extraction begins.
 
 use std::path::Path;
 
-/// RFC 012 logical layers that must remain distinct directories.
-pub const RFC012_LAYER_DIRS: &[&str] = &[
+/// Landed RFC 012 logical layers that must remain distinct modules.
+pub const RFC012_LAYER_MODULES: &[&str] = &[
     "adapter",
     "source",
+    "decode_runtime",
+    "runtime_semantic_reducer",
     "engine",
+    "observer",
+];
+
+/// Pre-landing parallel authorities that must not reappear.
+pub const RETIRED_RFC012_LAYER_MODULES: &[&str] = &[
     "catalog_contract",
     "observation_contract",
     "scoped_observation",
@@ -30,13 +37,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_boundaries_mirror_rfc012_dependency_layers() {
+    fn workspace_boundaries_mirror_landed_rfc012_dependency_layers() {
         let src = napi_src_root();
-        for layer in RFC012_LAYER_DIRS {
+        for layer in RFC012_LAYER_MODULES {
             let path = src.join(layer);
             assert!(
                 path.is_dir() || path.with_extension("rs").is_file(),
                 "missing RFC 012 layer {layer} under {}",
+                src.display()
+            );
+        }
+        for retired in RETIRED_RFC012_LAYER_MODULES {
+            let path = src.join(retired);
+            assert!(
+                !path.is_dir() && !path.with_extension("rs").is_file(),
+                "retired RFC 012 parallel authority {retired} reappeared under {}",
                 src.display()
             );
         }

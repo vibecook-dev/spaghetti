@@ -1588,13 +1588,11 @@ fn read_checkpoint_row(
 
 fn ensure_disk_reserve(database_path: &Path) -> Result<(), EngineError> {
     let filesystem_path = database_path.parent().unwrap_or(database_path);
-    let stats = rustix::fs::statvfs(filesystem_path).map_err(|error| EngineError::Sqlite {
-        operation: "inspect observation database free space",
-        detail: error.to_string(),
-    })?;
-    let fragment_bytes = stats.f_frsize.max(stats.f_bsize).max(1);
-    let available_bytes = stats.f_bavail.saturating_mul(fragment_bytes);
-    let total_bytes = stats.f_blocks.saturating_mul(fragment_bytes);
+    let (available_bytes, total_bytes) =
+        filesystem_space(filesystem_path).map_err(|error| EngineError::Sqlite {
+            operation: "inspect observation database free space",
+            detail: error.to_string(),
+        })?;
     let reserve_bytes = disk_reserve_bytes(total_bytes);
     if available_bytes < reserve_bytes {
         return Err(EngineError::InsufficientDiskSpace {
@@ -1604,6 +1602,55 @@ fn ensure_disk_reserve(database_path: &Path) -> Result<(), EngineError> {
         });
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn filesystem_space(path: &Path) -> Result<(u64, u64), std::io::Error> {
+    let stats = rustix::fs::statvfs(path)?;
+    let fragment_bytes = stats.f_frsize.max(stats.f_bsize).max(1);
+    Ok((
+        stats.f_bavail.saturating_mul(fragment_bytes),
+        stats.f_blocks.saturating_mul(fragment_bytes),
+    ))
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn filesystem_space(path: &Path) -> Result<(u64, u64), std::io::Error> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut available_bytes = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut free_bytes = 0_u64;
+    // SAFETY: `wide_path` is NUL-terminated and all three output pointers are
+    // valid, uniquely borrowed `u64` values for the duration of the call.
+    let succeeded = unsafe {
+        GetDiskFreeSpaceExW(
+            wide_path.as_ptr(),
+            &mut available_bytes,
+            &mut total_bytes,
+            &mut free_bytes,
+        )
+    };
+    if succeeded == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok((available_bytes, total_bytes))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn filesystem_space(_path: &Path) -> Result<(u64, u64), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "filesystem capacity inspection is unsupported on this platform",
+    ))
 }
 
 fn disk_reserve_bytes(total_bytes: u64) -> u64 {

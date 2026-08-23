@@ -169,6 +169,14 @@ fn disk_reserve_is_bounded_and_keeps_two_percent_on_normal_volumes() {
 }
 
 #[test]
+fn filesystem_capacity_reports_a_sane_volume() {
+    let temp = tempdir().unwrap();
+    let (available_bytes, total_bytes) = filesystem_space(temp.path()).unwrap();
+    assert!(total_bytes > 0);
+    assert!(available_bytes <= total_bytes);
+}
+
+#[test]
 fn bootstrap_collects_queued_commits_up_to_the_fact_bound() {
     let (tx, rx) = bounded(8);
     let (first, first_rx) = commit_command(grouped_request(1));

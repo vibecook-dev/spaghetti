@@ -803,6 +803,13 @@ def validate_subagent_meta() -> Section:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def main() -> int:
+    if not CLAUDE_DIR.exists():
+        # Importing this module already exercised its TypeScript interface
+        # lookups. The remaining checks require real Claude Code output, which
+        # a clean CI runner cannot observe.
+        print(f"SKIPPED: {CLAUDE_DIR} does not exist (no real Claude Code data to validate against)")
+        return 78
+
     print("=" * 78)
     print("  @spaghetti/core  —  Secondary Data Validation")
     print(f"  Source: {CLAUDE_DIR}")

@@ -45,7 +45,7 @@ pub(crate) fn confined_file_stamp(
             path.to_string_lossy().into_owned(),
         ));
     }
-    let stamp = file_stamp(&path, &handle_metadata);
+    let stamp = opened_file_stamp(&file, &path, &handle_metadata);
     if stamp.len > max_bytes as u64 {
         return Err(SourceDriverError::LimitExceeded(format!(
             "source file exceeds {max_bytes} byte limit"
@@ -155,7 +155,7 @@ where
     let before_metadata = file
         .metadata()
         .map_err(|error| io_error("reading metadata for", path, error))?;
-    let before = file_stamp(path, &before_metadata);
+    let before = opened_file_stamp(&file, path, &before_metadata);
     if before.len > max_bytes as u64 {
         after_read();
         let after_handle = file
@@ -168,7 +168,9 @@ where
             }
             Err(error) => return Err(io_error("rechecking path for", path, error)),
         };
-        if before != file_stamp(path, &after_handle) || before != file_stamp(path, &after_path) {
+        if before != opened_file_stamp(&file, path, &after_handle)
+            || before != file_stamp(path, &after_path)
+        {
             return Ok(StableRead::Unstable);
         }
         return Ok(StableRead::Oversized(before));
@@ -189,7 +191,7 @@ where
         }
         Err(error) => return Err(io_error("rechecking path for", path, error)),
     };
-    let handle_stamp = file_stamp(path, &after_handle);
+    let handle_stamp = opened_file_stamp(&file, path, &after_handle);
     let path_stamp = file_stamp(path, &after_path);
     if before != handle_stamp || before != path_stamp || bytes.len() as u64 != before.len {
         return Ok(StableRead::Unstable);
@@ -317,6 +319,21 @@ pub(crate) fn file_stamp(path: &Path, metadata: &Metadata) -> FileStamp {
     }
 }
 
+#[cfg(not(windows))]
+fn opened_file_stamp(_file: &File, path: &Path, metadata: &Metadata) -> FileStamp {
+    file_stamp(path, metadata)
+}
+
+#[cfg(windows)]
+fn opened_file_stamp(file: &File, path: &Path, metadata: &Metadata) -> FileStamp {
+    FileStamp {
+        identity: windows_file_identity(file)
+            .unwrap_or_else(|| FileIdentity::ConfinedPath(platform_path_key(path))),
+        len: metadata.len(),
+        modified_ns: modified_ns(metadata),
+    }
+}
+
 pub(crate) fn stamp_revision(stamp: &FileStamp) -> Revision {
     let mut bytes = Vec::with_capacity(64);
     stamp.identity.encode_into(&mut bytes);
@@ -335,16 +352,51 @@ pub(crate) fn file_identity(_path: &Path, metadata: &Metadata) -> FileIdentity {
 }
 
 #[cfg(windows)]
-pub(crate) fn file_identity(path: &Path, metadata: &Metadata) -> FileIdentity {
-    use std::os::windows::fs::MetadataExt;
+pub(crate) fn file_identity(path: &Path, _metadata: &Metadata) -> FileIdentity {
+    windows_identity_file(path)
+        .as_ref()
+        .and_then(windows_file_identity)
+        .unwrap_or_else(|| FileIdentity::ConfinedPath(platform_path_key(path)))
+}
 
-    match (metadata.volume_serial_number(), metadata.file_index()) {
-        (Some(volume), Some(file)) => FileIdentity::Windows {
-            volume: u64::from(volume),
-            file: u128::from(file),
-        },
-        _ => FileIdentity::ConfinedPath(platform_path_key(path)),
+#[cfg(windows)]
+fn windows_identity_file(path: &Path) -> Option<File> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+
+    OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .ok()
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_file_identity(file: &File) -> Option<FileIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a live Windows handle for the duration of the call,
+    // and `information` is a correctly sized, writable output structure.
+    let succeeded =
+        unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut information) };
+    if succeeded == 0 {
+        return None;
     }
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Some(FileIdentity::Windows {
+        volume: u64::from(information.dwVolumeSerialNumber),
+        file: u128::from(file_index),
+    })
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -440,6 +492,22 @@ mod tests {
             confined_relative_path_key(Path::new("../escape")),
             Err(SourceDriverError::PathEscape(_))
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_native_identity_survives_a_path_rename() {
+        let temp = TempDir::new().unwrap();
+        let before_path = temp.path().join("before.jsonl");
+        let after_path = temp.path().join("after.jsonl");
+        std::fs::write(&before_path, b"record").unwrap();
+
+        let before = file_identity(&before_path, &std::fs::metadata(&before_path).unwrap());
+        std::fs::rename(&before_path, &after_path).unwrap();
+        let after = file_identity(&after_path, &std::fs::metadata(&after_path).unwrap());
+
+        assert!(matches!(before, FileIdentity::Windows { .. }));
+        assert_eq!(before, after);
     }
 
     #[cfg(unix)]
