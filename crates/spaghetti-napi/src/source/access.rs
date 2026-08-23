@@ -370,6 +370,15 @@ impl AuthorizedScopeAccessPlan {
             })
     }
 
+    pub(crate) fn observation_source_driver(
+        &self,
+        relation_id: &str,
+    ) -> Option<AuthorizedObservationSourceDriver> {
+        self.observation_source_contracts
+            .get(relation_id)
+            .map(AuthorizedObservationSourceContract::driver)
+    }
+
     /// Reserve one declaration-owned dynamic/related source coordinate from
     /// this exact typed support authorization. Unlike [`ScopeAccessPlan`]'s
     /// generic reservation, the returned value proves that the source stream,

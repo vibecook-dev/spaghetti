@@ -13,10 +13,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::adapter::{
-    AdapterRegistry, CanonicalEntityKey, CoverageDomain, DiscoveryContext, DriverSpec,
-    ExternalEntityRef, FactSemanticContext, NativeIdentityClaim, ScopeJoinEvidence,
-    ScopeJoinParameterSet, ScopeRelationBounds, ScopeRelationPrimitive, SourceInstance,
-    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
+    AdapterRegistry, AuthorizedObservationSourceDriver, CanonicalEntityKey, CoverageDomain,
+    DiscoveryContext, DriverSpec, ExternalEntityRef, FactSemanticContext, NativeIdentityClaim,
+    ScopeJoinEvidence, ScopeJoinParameterSet, ScopeRelationBounds, ScopeRelationPrimitive,
+    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, StreamSpec,
 };
 use crate::observation_contract::{ObservationContractOffer, ObservationContractRequest};
 use crate::source::{
@@ -449,6 +449,7 @@ pub(crate) struct PreparedScopedRelatedRelationBinding {
     primitive: ScopeRelationPrimitive,
     identity_input_names: Vec<String>,
     bounds: ScopeRelationBounds,
+    max_read_bytes: u64,
 }
 
 impl PreparedScopedRelatedRelationBinding {
@@ -491,6 +492,7 @@ pub(crate) struct PreparedScopedRelatedSourceBinding {
     parameter: ScopeJoinParameterSet,
     evidence_groups: Vec<Vec<ScopeJoinEvidence>>,
     bounds: ScopeRelationBounds,
+    max_read_bytes: u64,
 }
 
 impl PreparedScopedRelatedSourceBinding {
@@ -607,6 +609,7 @@ fn prepared_related_source_matches_definition(
     source.relation_id == definition.relation_id
         && source.primitive == definition.primitive
         && source.bounds == definition.bounds
+        && source.max_read_bytes == definition.max_read_bytes
         && source.parameter.identity_inputs().len() == definition.identity_input_names.len()
         && source
             .parameter
@@ -1194,6 +1197,7 @@ trait PreparedScopedRelatedRuntimeContext {
                 parameter: candidate.parameter.clone(),
                 evidence_groups: vec![candidate.evidence.to_vec()],
                 bounds: candidate.definition.bounds,
+                max_read_bytes: candidate.definition.max_read_bytes,
             });
         }
         Ok(PreparedScopedRelatedReconciliationPlan {
@@ -1332,7 +1336,7 @@ trait PreparedScopedRelatedRuntimeContext {
                     parent_token: None,
                     identity_inputs: &identity_inputs,
                     depth: 1,
-                    max_bytes: source.bounds.max_bytes,
+                    max_bytes: source.max_read_bytes,
                     max_rows: 0,
                 })
                 .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
@@ -2752,17 +2756,26 @@ fn compose_prepared_attachment(
             )
         })
         .map(|relation| {
-            (
+            let max_read_bytes = match plan.observation_source_driver(&relation.relation_id) {
+                Some(AuthorizedObservationSourceDriver::ReplaceDocument { max_object_bytes })
+                    if max_object_bytes > 0 && max_object_bytes <= relation.bounds.max_bytes =>
+                {
+                    max_object_bytes
+                }
+                _ => return Err(invalid_configured_attachment()),
+            };
+            Ok((
                 relation.relation_id.clone(),
                 PreparedScopedRelatedRelationBinding {
                     relation_id: relation.relation_id.clone(),
                     primitive: relation.primitive,
                     identity_input_names: relation.identity_inputs.clone(),
                     bounds: relation.bounds,
+                    max_read_bytes,
                 },
-            )
+            ))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Result<BTreeMap<_, _>, ScopedObservationAccessError>>()?;
     let unsupported_observation_relations = observation_relations
         .iter()
         .filter(|relation| {
