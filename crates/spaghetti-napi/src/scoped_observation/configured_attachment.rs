@@ -44,8 +44,7 @@ use super::{
     ScopedObservationOpenDrainError, ScopedObservationOwnedIdentityInput,
     ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
     ScopedObservationQueueLimits, ScopedObservationRelatedMembershipAuthority,
-    ScopedObservationRelatedObjectInitialObservation,
-    ScopedObservationRelatedObjectRefreshObservation, ScopedObservationRelatedObjectState,
+    ScopedObservationRelatedObjectObservation, ScopedObservationRelatedObjectState,
     ScopedObservationScopeJoinSnapshot, ScopedObservationSourceOwnerRetryPolicy,
     ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
     ScopedObservationTrustedAccessRequest, ScopedObservationUnknownWireNegotiation,
@@ -748,35 +747,7 @@ impl std::fmt::Debug for PreparedScopedRelatedReconciliationState {
     }
 }
 
-/// One successful source attempt in deterministic plan order. Initial and
-/// refresh outcomes remain distinct so later admission can preserve exact
-/// replacement semantics without reconstructing them from checkpoints.
-pub(crate) enum PreparedScopedRelatedSourceObservation {
-    Initial(ScopedObservationRelatedObjectInitialObservation),
-    Refresh(ScopedObservationRelatedObjectRefreshObservation),
-}
-
-impl PreparedScopedRelatedSourceObservation {
-    fn refresh_state(&self) -> Option<ScopedObservationRelatedObjectState> {
-        match self {
-            Self::Initial(observation) => observation.refresh_state(),
-            Self::Refresh(observation) => observation.refresh_state(),
-        }
-    }
-}
-
-impl std::fmt::Debug for PreparedScopedRelatedSourceObservation {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Initial(observation) => {
-                formatter.debug_tuple("Initial").field(observation).finish()
-            }
-            Self::Refresh(observation) => {
-                formatter.debug_tuple("Refresh").field(observation).finish()
-            }
-        }
-    }
-}
+pub(crate) type PreparedScopedRelatedSourceObservation = ScopedObservationRelatedObjectObservation;
 
 pub(crate) struct PreparedScopedRelatedObservedSource {
     object_token: AccessObjectToken,
@@ -790,6 +761,10 @@ impl PreparedScopedRelatedObservedSource {
 
     pub(crate) fn observation(&self) -> &PreparedScopedRelatedSourceObservation {
         &self.observation
+    }
+
+    pub(crate) fn into_parts(self) -> (AccessObjectToken, PreparedScopedRelatedSourceObservation) {
+        (self.object_token, self.observation)
     }
 }
 

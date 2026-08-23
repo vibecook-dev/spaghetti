@@ -546,6 +546,43 @@ pub(crate) enum ScopedObservationRelatedObjectRefreshObservation {
     Removed(Box<ScopedObservationRelatedObjectDecodedSnapshot>),
 }
 
+/// Closed common lifecycle union consumed by related-source reconciliation
+/// and admission. Keeping initial and refresh outcomes explicit prevents a
+/// caller from reconstructing replacement semantics from a checkpoint alone.
+pub(crate) enum ScopedObservationRelatedObjectObservation {
+    Initial(ScopedObservationRelatedObjectInitialObservation),
+    Refresh(ScopedObservationRelatedObjectRefreshObservation),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScopedObservationRelatedObjectCoverageState {
+    Present {
+        generation: u64,
+        revision: Revision,
+    },
+    Absent {
+        generation: u64,
+        kind: CoverageAbsenceKind,
+    },
+    Oversized {
+        generation: u64,
+        revision: Revision,
+    },
+}
+
+pub(super) struct ScopedObservationRelatedObjectAdmissionParts {
+    pub binding: ScopedObservationRelatedObjectBinding,
+    pub object_context: AdapterObjectContext,
+    pub checkpoint: ReplaceCheckpoint,
+    pub record: SourceRecord,
+    pub disposition: DecodeDisposition,
+    pub mapping_disposition: RecordMappingDisposition,
+    pub batch: FactBatch,
+    pub scope_join_updates: Vec<ScopeJoinUpdate>,
+    pub next_decoder_state: Option<Vec<u8>>,
+    pub quarantined: bool,
+}
+
 struct DirectoryMemberSourceAccessDenied;
 
 /// Completed, path-free evidence that one exact native directory entry was
@@ -879,6 +916,19 @@ impl fmt::Debug for ScopedObservationRelatedObjectRefreshObservation {
                 .finish_non_exhaustive(),
             Self::Present(snapshot) => formatter.debug_tuple("Present").field(snapshot).finish(),
             Self::Removed(snapshot) => formatter.debug_tuple("Removed").field(snapshot).finish(),
+        }
+    }
+}
+
+impl fmt::Debug for ScopedObservationRelatedObjectObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Initial(observation) => {
+                formatter.debug_tuple("Initial").field(observation).finish()
+            }
+            Self::Refresh(observation) => {
+                formatter.debug_tuple("Refresh").field(observation).finish()
+            }
         }
     }
 }
@@ -2073,6 +2123,13 @@ impl ScopedObservationRelatedObjectIdentity {
     pub(crate) fn semantic_context(&self) -> &FactSemanticContext {
         &self.semantic_context
     }
+
+    pub(super) fn matches_attachment(
+        &self,
+        authority: &Arc<ScopedObservationAttachmentAuthority>,
+    ) -> bool {
+        Arc::ptr_eq(&self.attachment_authority, authority)
+    }
 }
 
 impl ScopedObservationRelatedObjectBinding {
@@ -2167,9 +2224,13 @@ impl ScopedObservationRelatedObjectBinding {
         })
     }
 
+    pub(super) fn runtime_stream(&self) -> &StreamSpec {
+        &self.runtime_stream
+    }
+
     #[cfg(test)]
     pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
-        &self.runtime_stream
+        self.runtime_stream()
     }
 
     #[cfg(test)]
@@ -2222,6 +2283,21 @@ impl ScopedObservationRelatedObjectDecodedSnapshot {
                 retained_native_bytes.checked_add(u64::try_from(update.retained_bytes()).ok()?)?;
         }
         Some((data_events, retained_native_bytes))
+    }
+
+    pub(super) fn into_admission_parts(self) -> ScopedObservationRelatedObjectAdmissionParts {
+        ScopedObservationRelatedObjectAdmissionParts {
+            binding: self.binding,
+            object_context: self.object_context,
+            checkpoint: self.checkpoint,
+            record: self.record,
+            disposition: self.disposition,
+            mapping_disposition: self.mapping_disposition,
+            batch: self.batch,
+            scope_join_updates: self.scope_join_updates,
+            next_decoder_state: self.next_decoder_state,
+            quarantined: self.quarantined,
+        }
     }
 
     #[cfg(test)]
@@ -2383,6 +2459,45 @@ impl ScopedObservationRelatedObjectState {
             && checkpoint_matches_kind
     }
 
+    pub(super) fn coverage_state(&self) -> Option<ScopedObservationRelatedObjectCoverageState> {
+        match (&self.checkpoint, self.kind) {
+            (None, ScopedObservationRelatedObjectStateKind::Absent) => {
+                Some(ScopedObservationRelatedObjectCoverageState::Absent {
+                    generation: 1,
+                    kind: CoverageAbsenceKind::Absent,
+                })
+            }
+            (Some(checkpoint), ScopedObservationRelatedObjectStateKind::Absent)
+                if checkpoint.generation > 0 && !checkpoint.present =>
+            {
+                Some(ScopedObservationRelatedObjectCoverageState::Absent {
+                    generation: checkpoint.generation,
+                    kind: CoverageAbsenceKind::Deleted,
+                })
+            }
+            (Some(checkpoint), ScopedObservationRelatedObjectStateKind::Present)
+                if checkpoint.generation > 0 && checkpoint.present =>
+            {
+                Some(ScopedObservationRelatedObjectCoverageState::Present {
+                    generation: checkpoint.generation,
+                    revision: checkpoint.revision,
+                })
+            }
+            (Some(checkpoint), ScopedObservationRelatedObjectStateKind::Oversized)
+                if checkpoint.generation > 0 && checkpoint.present =>
+            {
+                Some(ScopedObservationRelatedObjectCoverageState::Oversized {
+                    generation: checkpoint.generation,
+                    revision: checkpoint.revision,
+                })
+            }
+            (None, _)
+            | (Some(_), ScopedObservationRelatedObjectStateKind::Absent)
+            | (Some(_), ScopedObservationRelatedObjectStateKind::Present)
+            | (Some(_), ScopedObservationRelatedObjectStateKind::Oversized) => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn checkpoint_for_test(&self) -> Option<&ReplaceCheckpoint> {
         self.checkpoint.as_ref()
@@ -2450,6 +2565,135 @@ impl ScopedObservationRelatedObjectRefreshObservation {
     #[cfg(test)]
     pub(crate) fn is_unchanged_for_test(&self) -> bool {
         matches!(self, Self::Unchanged(_))
+    }
+}
+
+impl ScopedObservationRelatedObjectObservation {
+    pub(crate) fn identity(&self) -> &ScopedObservationRelatedObjectIdentity {
+        match self {
+            Self::Initial(observation) => observation.identity(),
+            Self::Refresh(observation) => match observation {
+                ScopedObservationRelatedObjectRefreshObservation::RetryTransient {
+                    binding,
+                    ..
+                }
+                | ScopedObservationRelatedObjectRefreshObservation::Oversized { binding, .. } => {
+                    binding.identity()
+                }
+                ScopedObservationRelatedObjectRefreshObservation::Unchanged(state) => {
+                    &state.identity
+                }
+                ScopedObservationRelatedObjectRefreshObservation::Present(snapshot)
+                | ScopedObservationRelatedObjectRefreshObservation::Removed(snapshot) => {
+                    snapshot.identity()
+                }
+            },
+        }
+    }
+
+    pub(crate) fn refresh_state(&self) -> Option<ScopedObservationRelatedObjectState> {
+        match self {
+            Self::Initial(observation) => observation.refresh_state(),
+            Self::Refresh(observation) => observation.refresh_state(),
+        }
+    }
+
+    pub(super) fn coverage_state(&self) -> Option<ScopedObservationRelatedObjectCoverageState> {
+        match self {
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Unavailable {
+                ..
+            }) => Some(ScopedObservationRelatedObjectCoverageState::Absent {
+                generation: 1,
+                kind: CoverageAbsenceKind::Absent,
+            }),
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::RetryTransient {
+                ..
+            })
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::RetryTransient {
+                ..
+            }) => None,
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Oversized {
+                checkpoint,
+                ..
+            })
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Oversized {
+                checkpoint,
+                ..
+            }) => Some(ScopedObservationRelatedObjectCoverageState::Oversized {
+                generation: checkpoint.generation,
+                revision: checkpoint.revision,
+            }),
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Present(snapshot))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Present(snapshot)) => {
+                Some(ScopedObservationRelatedObjectCoverageState::Present {
+                    generation: snapshot.generation(),
+                    revision: snapshot.revision(),
+                })
+            }
+            Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Removed(snapshot)) => {
+                Some(ScopedObservationRelatedObjectCoverageState::Absent {
+                    generation: snapshot.generation(),
+                    kind: CoverageAbsenceKind::Deleted,
+                })
+            }
+            Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Unchanged(state)) => {
+                state.coverage_state()
+            }
+        }
+    }
+
+    pub(super) fn admission_measurement(&self) -> Option<(u64, u64)> {
+        match self {
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Present(snapshot))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Present(snapshot))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Removed(snapshot)) => {
+                snapshot.admission_measurement()
+            }
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Unavailable {
+                ..
+            })
+            | Self::Initial(ScopedObservationRelatedObjectInitialObservation::Oversized {
+                ..
+            })
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Unchanged(_))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Oversized {
+                ..
+            }) => Some((0, 0)),
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::RetryTransient {
+                ..
+            })
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::RetryTransient {
+                ..
+            }) => None,
+        }
+    }
+
+    pub(super) fn into_admission_parts(
+        self,
+    ) -> Result<Option<ScopedObservationRelatedObjectAdmissionParts>, Box<Self>> {
+        match self {
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Present(snapshot))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Present(snapshot))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Removed(snapshot)) => {
+                Ok(Some((*snapshot).into_admission_parts()))
+            }
+            observation @ Self::Initial(
+                ScopedObservationRelatedObjectInitialObservation::RetryTransient { .. },
+            )
+            | observation @ Self::Refresh(
+                ScopedObservationRelatedObjectRefreshObservation::RetryTransient { .. },
+            ) => Err(Box::new(observation)),
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Unavailable {
+                ..
+            })
+            | Self::Initial(ScopedObservationRelatedObjectInitialObservation::Oversized {
+                ..
+            })
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Unchanged(_))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Oversized {
+                ..
+            }) => Ok(None),
+        }
     }
 }
 

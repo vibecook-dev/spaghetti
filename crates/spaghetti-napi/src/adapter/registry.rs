@@ -473,9 +473,9 @@ pub(crate) mod tests {
         AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile, AppendItem,
         AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirectoryEntryKind,
         DirectorySelection, DirtyHint, DirtyReason, DirtyScope, HintEnqueue, IngestPriority,
-        RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport, ScopeAccessRequest,
-        ScopeIdentityInput, SharedSourcePassPool, SourceCursor, SourceMediaType, SourceRecord,
-        SourceRecordState,
+        RecordHash, RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport,
+        ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool, SourceCursor,
+        SourceMediaType, SourceRecord, SourceRecordState,
     };
 
     use super::*;
@@ -2889,7 +2889,7 @@ pub(crate) mod tests {
         .prepare_append_runtime(16, 16)
         .unwrap();
         let source_key = CanonicalSourceInstanceKey::derive(1, b"related-reconciler").unwrap();
-        let join_update = |native_fact_key: &[u8]| {
+        let join_update = |native_fact_key: &[u8], team_name: &[u8]| {
             let fact_id = CanonicalFactId::native(
                 "fixture",
                 &source_key,
@@ -2908,7 +2908,7 @@ pub(crate) mod tests {
                 )],
                 vec![ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
                     "team-name",
-                    b"private-team-coordinate".to_vec(),
+                    team_name.to_vec(),
                 )
                 .unwrap()])
                 .unwrap()],
@@ -2916,8 +2916,8 @@ pub(crate) mod tests {
             .unwrap()
         };
         let snapshot = ScopedObservationScopeJoinSnapshot::from_updates_for_test(vec![
-            join_update(b"first-owner"),
-            join_update(b"second-owner"),
+            join_update(b"first-owner", b"private-team-coordinate"),
+            join_update(b"second-owner", b"private-team-coordinate"),
         ])
         .unwrap();
         let expected_token = AccessObjectToken::derive(
@@ -3001,7 +3001,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         let corrected_join_snapshot = ScopedObservationScopeJoinSnapshot::from_updates_for_test(
-            vec![join_update(b"second-owner")],
+            vec![join_update(b"second-owner", b"private-team-coordinate")],
         )
         .unwrap();
         let pass = prepared.host().begin_pass().unwrap();
@@ -3073,6 +3073,41 @@ pub(crate) mod tests {
             2
         );
 
+        std::fs::remove_file(root.join("teams/private-team-coordinate/config.json")).unwrap();
+        let pass = prepared.host().begin_pass().unwrap();
+        let removed = prepared
+            .execute_related_sources(
+                &pass,
+                prepared
+                    .plan_related_sources(&corrected_join_snapshot)
+                    .unwrap(),
+                Some(corrected.next_state()),
+                AccessPhase::Revalidation,
+                250,
+            )
+            .unwrap();
+        let removed_report = pass.finish();
+        let PreparedScopedRelatedSourceObservation::Refresh(observation) =
+            removed.observations()[0].observation()
+        else {
+            panic!("the missing related source must retain a refresh observation")
+        };
+        let decoded = observation.removed_snapshot_for_test().unwrap();
+        assert_eq!(decoded.generation(), 2);
+        assert_eq!(removed.memberships().len(), 1);
+        assert_eq!(
+            removed.memberships()[0].revision(),
+            corrected.memberships()[0].revision()
+        );
+        let removed_relation = removed_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(removed_relation.attempts, 1);
+        assert_eq!(removed_relation.completed, 1);
+        assert_eq!(removed_relation.bytes_read, 0);
+
         let empty_snapshot =
             ScopedObservationScopeJoinSnapshot::from_updates_for_test(Vec::new()).unwrap();
         let pass = prepared.host().begin_pass().unwrap();
@@ -3080,7 +3115,7 @@ pub(crate) mod tests {
             .execute_related_sources(
                 &pass,
                 prepared.plan_related_sources(&empty_snapshot).unwrap(),
-                Some(corrected.next_state()),
+                Some(removed.next_state()),
                 AccessPhase::Revalidation,
                 300,
             )
@@ -3092,7 +3127,7 @@ pub(crate) mod tests {
         assert_eq!(retired.memberships()[0].member_sources().count(), 0);
         assert_ne!(
             retired.memberships()[0].revision(),
-            corrected.memberships()[0].revision()
+            removed.memberships()[0].revision()
         );
         assert_eq!(retired.retired_sources().len(), 1);
         assert_eq!(
@@ -3145,7 +3180,7 @@ pub(crate) mod tests {
             0
         );
 
-        let rendered = format!("{initial:?} {corrected:?} {retired:?}");
+        let rendered = format!("{initial:?} {corrected:?} {removed:?} {retired:?}");
         for private in [
             "configured-related-reconciliation-private-root",
             "private-team-coordinate",
@@ -3231,6 +3266,292 @@ pub(crate) mod tests {
         assert!(foreign_admission
             .offered_decode_coverage(&foreign_membership_source)
             .is_none());
+
+        let (mut observations, mut memberships, retired_sources, next_state) = initial.into_parts();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(memberships.len(), 1);
+        assert!(retired_sources.is_empty());
+        assert_eq!(next_state.sources().len(), 1);
+        let observed = observations.pop().unwrap();
+        assert_eq!(observed.object_token(), expected_token);
+        let (_, observation) = observed.into_parts();
+        let authority = memberships.pop().unwrap();
+        let member_source = authority.member_sources().next().unwrap().clone();
+        let membership_source = authority.source().clone();
+        let related_pass_id = authority.access_pass_id();
+        let membership =
+            ScopedRelationMembershipObservation::from_related_membership(authority).unwrap();
+        let mut related_admission =
+            ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+                max_data_events: 8,
+                max_retained_native_bytes: 8_192,
+                max_control_items: 8,
+                max_coverage_objects: 2,
+            })
+            .unwrap();
+        related_admission
+            .record_related_relation_membership(
+                prepared.host(),
+                ScopedAppendDeliveryPhase::Bootstrap,
+                membership,
+            )
+            .unwrap();
+        let failure = related_admission
+            .admit_related_object(
+                related_pass_id + 1,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                observation,
+            )
+            .unwrap_err();
+        assert_eq!(failure.error, ScopedAdmissionError::InvalidCoverage);
+        let rendered = format!("{failure:?}");
+        for private in [
+            "configured-related-reconciliation-private-root",
+            "private-team-coordinate",
+            "initial-private-related-document",
+            "config.json",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        assert_eq!(related_admission.queued_data_events(), 0);
+        assert!(related_admission
+            .offered_decode_coverage(&member_source)
+            .is_none());
+        let receipt = related_admission
+            .admit_related_object(
+                related_pass_id,
+                ScopedAppendDeliveryPhase::Bootstrap,
+                *failure.observation,
+            )
+            .unwrap();
+        assert_eq!(receipt.data_events, 1);
+        assert_eq!(receipt.control_items, 0);
+        assert!(related_admission
+            .offered_decode_coverage(&membership_source)
+            .is_some());
+        assert!(related_admission
+            .offered_decode_coverage(&member_source)
+            .is_none());
+        match related_admission.pop_next() {
+            Some(ScopedQueuedObservationFrame::Decoded { item, source, .. }) => {
+                assert_eq!(source, member_source);
+                match *item {
+                    ScopedDecodedAppendItem::Record {
+                        disposition, batch, ..
+                    } => {
+                        assert_eq!(disposition, DecodeDisposition::PreservedUnknown);
+                        assert_eq!(batch.facts().len(), 1);
+                    }
+                    ScopedDecodedAppendItem::DriverQuarantine(_) => {
+                        panic!("expected one admitted related record")
+                    }
+                }
+            }
+            Some(_) | None => panic!("expected one admitted related decoded frame"),
+        }
+        let member_coverage = related_admission
+            .offered_decode_coverage(&member_source)
+            .unwrap();
+        assert_eq!(
+            member_coverage.point.as_ref().unwrap().status,
+            CoverageStatus::ExactSnapshot
+        );
+        assert_eq!(
+            member_coverage.completeness,
+            CoverageSetCompleteness::Complete
+        );
+        assert!(related_admission.pop_next().is_none());
+
+        let (mut observations, mut memberships, retired_sources, next_state) =
+            corrected.into_parts();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(memberships.len(), 1);
+        assert!(retired_sources.is_empty());
+        assert_eq!(next_state.sources().len(), 1);
+        let (_, observation) = observations.pop().unwrap().into_parts();
+        let authority = memberships.pop().unwrap();
+        assert_eq!(authority.member_sources().next(), Some(&member_source));
+        let corrected_pass_id = authority.access_pass_id();
+        related_admission
+            .record_related_relation_membership(
+                prepared.host(),
+                ScopedAppendDeliveryPhase::Correction,
+                ScopedRelationMembershipObservation::from_related_membership(authority).unwrap(),
+            )
+            .unwrap();
+        let receipt = related_admission
+            .admit_related_object(
+                corrected_pass_id,
+                ScopedAppendDeliveryPhase::Correction,
+                observation,
+            )
+            .unwrap();
+        assert_eq!(receipt.data_events, 1);
+        match related_admission.pop_next() {
+            Some(ScopedQueuedObservationFrame::Decoded { item, source, .. }) => {
+                assert_eq!(source, member_source);
+                match *item {
+                    ScopedDecodedAppendItem::Record { evidence, .. } => {
+                        assert_eq!(evidence.state, SourceRecordState::Present);
+                        assert_eq!(evidence.payload_hash, RecordHash::digest(corrected_payload));
+                    }
+                    ScopedDecodedAppendItem::DriverQuarantine(_) => {
+                        panic!("expected one admitted related correction")
+                    }
+                }
+            }
+            Some(_) | None => panic!("expected one admitted related correction frame"),
+        }
+        assert_eq!(
+            related_admission
+                .offered_decode_coverage(&member_source)
+                .unwrap()
+                .point
+                .as_ref()
+                .unwrap()
+                .status,
+            CoverageStatus::ExactSnapshot
+        );
+
+        let (mut observations, mut memberships, retired_sources, next_state) = removed.into_parts();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(memberships.len(), 1);
+        assert!(retired_sources.is_empty());
+        assert_eq!(next_state.sources().len(), 1);
+        let (_, observation) = observations.pop().unwrap().into_parts();
+        let authority = memberships.pop().unwrap();
+        assert_eq!(authority.member_sources().next(), Some(&member_source));
+        let removed_pass_id = authority.access_pass_id();
+        related_admission
+            .record_related_relation_membership(
+                prepared.host(),
+                ScopedAppendDeliveryPhase::Correction,
+                ScopedRelationMembershipObservation::from_related_membership(authority).unwrap(),
+            )
+            .unwrap();
+        let receipt = related_admission
+            .admit_related_object(
+                removed_pass_id,
+                ScopedAppendDeliveryPhase::Correction,
+                observation,
+            )
+            .unwrap();
+        assert_eq!(receipt.data_events, 1);
+        match related_admission.pop_next() {
+            Some(ScopedQueuedObservationFrame::Decoded { item, source, .. }) => {
+                assert_eq!(source, member_source);
+                match *item {
+                    ScopedDecodedAppendItem::Record { evidence, .. } => {
+                        assert_eq!(evidence.state, SourceRecordState::Absent);
+                    }
+                    ScopedDecodedAppendItem::DriverQuarantine(_) => {
+                        panic!("expected one admitted related removal")
+                    }
+                }
+            }
+            Some(_) | None => panic!("expected one admitted related removal frame"),
+        }
+        let member_coverage = related_admission
+            .offered_decode_coverage(&member_source)
+            .unwrap();
+        assert!(member_coverage.point.is_none());
+        assert_eq!(
+            member_coverage.explicit_absence_or_deletion,
+            Some(crate::adapter::CoverageAbsence {
+                stream_key: member_source.stream_key,
+                object_key: member_source.object_key,
+                generation: 2,
+                kind: CoverageAbsenceKind::Deleted,
+            })
+        );
+        assert_eq!(
+            member_coverage.completeness,
+            CoverageSetCompleteness::Complete
+        );
+        assert!(related_admission.pop_next().is_none());
+
+        std::fs::create_dir_all(root.join("teams/oversized-team")).unwrap();
+        std::fs::write(
+            root.join("teams/oversized-team/config.json"),
+            vec![b'x'; 4_097],
+        )
+        .unwrap();
+        for (team_name, native_fact_key, expect_oversized) in [
+            ("missing-team", b"missing-owner".as_slice(), false),
+            ("oversized-team", b"oversized-owner".as_slice(), true),
+        ] {
+            let snapshot =
+                ScopedObservationScopeJoinSnapshot::from_updates_for_test(vec![join_update(
+                    native_fact_key,
+                    team_name.as_bytes(),
+                )])
+                .unwrap();
+            let pass = prepared.host().begin_pass().unwrap();
+            let batch = prepared
+                .execute_related_sources(
+                    &pass,
+                    prepared.plan_related_sources(&snapshot).unwrap(),
+                    None,
+                    AccessPhase::Initial,
+                    600,
+                )
+                .unwrap();
+            pass.finish();
+            let (mut observations, mut memberships, retired_sources, next_state) =
+                batch.into_parts();
+            assert_eq!(observations.len(), 1);
+            assert_eq!(memberships.len(), 1);
+            assert!(retired_sources.is_empty());
+            assert_eq!(next_state.sources().len(), 1);
+            let (_, observation) = observations.pop().unwrap().into_parts();
+            let authority = memberships.pop().unwrap();
+            let member_source = authority.member_sources().next().unwrap().clone();
+            let pass_id = authority.access_pass_id();
+            let mut admission = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+                max_data_events: 1,
+                max_retained_native_bytes: 1,
+                max_control_items: 1,
+                max_coverage_objects: 2,
+            })
+            .unwrap();
+            admission
+                .record_related_relation_membership(
+                    prepared.host(),
+                    ScopedAppendDeliveryPhase::Bootstrap,
+                    ScopedRelationMembershipObservation::from_related_membership(authority)
+                        .unwrap(),
+                )
+                .unwrap();
+            let receipt = admission
+                .admit_related_object(pass_id, ScopedAppendDeliveryPhase::Bootstrap, observation)
+                .unwrap();
+            assert_eq!(receipt.data_events, 0);
+            assert_eq!(receipt.retained_native_bytes, 0);
+            assert_eq!(receipt.control_items, 0);
+            assert!(admission.pop_next().is_none());
+            let coverage = admission.offered_decode_coverage(&member_source).unwrap();
+            if expect_oversized {
+                assert!(coverage.explicit_absence_or_deletion.is_none());
+                assert!(matches!(
+                    coverage.point.as_ref().map(|point| &point.status),
+                    Some(CoverageStatus::Unavailable { reason }) if reason == "oversized"
+                ));
+                assert_eq!(coverage.explicit_errors.len(), 1);
+                assert_eq!(coverage.explicit_errors[0].code, "oversized");
+                assert_eq!(coverage.completeness, CoverageSetCompleteness::Unavailable);
+            } else {
+                assert!(coverage.point.is_none());
+                assert_eq!(
+                    coverage
+                        .explicit_absence_or_deletion
+                        .as_ref()
+                        .map(|absence| (absence.generation, absence.kind)),
+                    Some((1, CoverageAbsenceKind::Absent))
+                );
+                assert!(coverage.explicit_errors.is_empty());
+                assert_eq!(coverage.completeness, CoverageSetCompleteness::Complete);
+            }
+        }
     }
 
     #[cfg(unix)]
