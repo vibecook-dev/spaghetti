@@ -5,7 +5,7 @@
 //! durable ingestion, which is what makes the observer's `SemanticRevisionRef`
 //! values equal to the durable ones for the same revision.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::adapter::{
     AdapterObjectContext, AgentAdapter, DecoderId, DriverSpec, Fact, FactSemanticContext,
@@ -87,6 +87,9 @@ enum Driver {
 /// A single in-scope object the observer follows.
 pub(crate) struct ObservedObject {
     member: ScopeMember,
+    /// Resolved access root. The adapter declares where each named root lives;
+    /// `home` is the agent root itself, not a `home/` subdirectory.
+    root: PathBuf,
     driver: Driver,
     decoder: DecoderId,
     retention: RawRetentionPolicy,
@@ -148,6 +151,11 @@ impl ObservedObject {
         )
         .map_err(|error| ObserverError::Adapter(error.to_string()))?;
 
+        let root = instance
+            .root(&member.key.root_name)
+            .map_err(|error| ObserverError::Adapter(error.to_string()))?
+            .to_path_buf();
+
         let media_type = if matches!(member.driver, DriverSpec::AppendDelimited(_)) {
             JSONL_MEDIA_TYPE
         } else {
@@ -167,6 +175,7 @@ impl ObservedObject {
             decoder: member.decoder.clone(),
             retention: member.retention,
             member,
+            root,
             driver,
             object_context,
             semantic_context,
@@ -192,14 +201,9 @@ impl ObservedObject {
     }
 
     /// Read every complete record newer than the checkpoint and decode it.
-    pub(crate) fn reconcile(
-        &mut self,
-        adapter: &dyn AgentAdapter,
-        agent_root: &Path,
-        observed_at: i64,
-    ) -> ObjectPass {
+    pub(crate) fn reconcile(&mut self, adapter: &dyn AgentAdapter, observed_at: i64) -> ObjectPass {
         self.origin.observed_at = observed_at;
-        let root = agent_root.join(&self.member.key.root_name);
+        let root = self.root.clone();
         match &mut self.driver {
             Driver::Append { .. } => self.reconcile_append(adapter, &root),
             Driver::Replace { .. } => self.reconcile_replace(adapter, &root),

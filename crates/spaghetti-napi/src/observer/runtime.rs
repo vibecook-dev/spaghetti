@@ -247,7 +247,7 @@ impl ObserverRuntime {
             let Some(object) = self.objects.get_mut(&key) else {
                 continue;
             };
-            let pass = object.reconcile(&self.adapter, &self.request.agent_root, observed_at);
+            let pass = object.reconcile(&self.adapter, observed_at);
             let generation = object.generation();
             more |= pass.more_available;
 

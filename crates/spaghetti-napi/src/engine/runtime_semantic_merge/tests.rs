@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::*;
@@ -65,18 +64,19 @@ fn upsert_event(event_id: &str, example: &UsageExampleWire) -> ScopedUsageObserv
     }
 }
 
-/// A retraction event for the same fact, as the observer emits one when a
-/// source object resets under it.
-fn reset_event(event_id: &str, example: &UsageExampleWire) -> ScopedUsageObserverEvent {
+/// A retraction event for the same fact, as the observer emits one when the
+/// object that owned it resets or disappears.
+fn retract_event(
+    event_id: &str,
+    example: &UsageExampleWire,
+    retraction: ScopedUsageRetraction,
+) -> ScopedUsageObserverEvent {
     ScopedUsageObserverEvent {
         event_id: event_id.to_owned(),
         fact_id: example.fact_id,
         semantic_revision_ref: example.semantic_revision_ref,
         operation: ScopedUsageOperation::Retract,
-        retraction: Some(ScopedUsageRetraction::Reset {
-            old_generation: 1,
-            new_generation: 2,
-        }),
+        retraction: Some(retraction),
         revision: example.revision.clone(),
     }
 }
@@ -868,7 +868,14 @@ fn reset_retraction_applies_before_replay() {
     let fixture = runtime_fixture();
     let example = &fixture.usage.native_message;
     let upsert = upsert_event("evt-upsert", example);
-    let reset = reset_event("evt-reset", example);
+    let reset = retract_event(
+        "evt-reset",
+        example,
+        ScopedUsageRetraction::Reset {
+            old_generation: 1,
+            new_generation: 2,
+        },
+    );
     assert_eq!(upsert.fact_id, reset.fact_id);
     assert_eq!(upsert.semantic_revision_ref, reset.semantic_revision_ref);
 
@@ -901,6 +908,21 @@ fn reset_retraction_applies_before_replay() {
     assert_eq!(
         merged.contributions[0].origin,
         MergedContributionOrigin::Overlay
+    );
+
+    // A deleted source object retracts the same way a reset does.
+    let deleted = retract_event(
+        "evt-deleted",
+        example,
+        ScopedUsageRetraction::SourceDeleted { generation: 2 },
+    );
+    let after_delete =
+        merge_durable_and_scoped_usage(&durable, &baseline, &[upsert, deleted], &partial)
+            .expect("source-deleted merge");
+    assert_eq!(after_delete.delivered_observer_occurrences.len(), 2);
+    assert_eq!(
+        after_delete.delivered_observer_occurrences[0].event_id,
+        "evt-deleted"
     );
 }
 

@@ -167,3 +167,75 @@ fn attaching_before_the_root_exists_bootstraps_empty_and_then_follows_it() {
     );
     observer.close();
 }
+
+#[test]
+fn a_sidecar_joins_the_scope_only_when_evidence_names_it() {
+    let fixture = SessionFixture::new();
+    fixture.append(
+        &fixture.transcript(),
+        &[assistant_record("a-1", "resp-1", 5)],
+    );
+
+    let todo = r#"[{"content":"fixture","status":"pending","activeForm":"fixture"}]"#.to_string();
+    // The root actor's own sidecar: the transcript decode emits scope-join
+    // evidence naming it, so bootstrap reaches it in the same pass set.
+    fixture.append_once(&fixture.todo_sidecar(SESSION), &[todo.clone()]);
+    // A sidecar for an actor nothing in this session mentions. Reaching it
+    // would mean enumerating a global root, which RFC 012D §5 forbids.
+    fixture.append_once(&fixture.todo_sidecar("unnamed-actor"), &[todo]);
+
+    let observer = fixture.open();
+    let bootstrap = drain_bootstrap(&observer);
+    let paths = coverage_paths(&bootstrap);
+
+    assert!(
+        paths.contains(&format!("todos/{SESSION}-agent-{SESSION}.json")),
+        "the sidecar named by scope-join evidence was not followed: {paths:?}"
+    );
+    assert!(
+        !paths.iter().any(|path| path.contains("unnamed-actor")),
+        "an unrelated sidecar was opened: {paths:?}"
+    );
+    observer.close();
+}
+
+#[test]
+fn one_unreadable_child_does_not_stop_its_siblings() {
+    let fixture = SessionFixture::new();
+    fixture.append(
+        &fixture.transcript(),
+        &[assistant_record("a-1", "resp-1", 5)],
+    );
+    fixture.append(
+        &fixture.subagent("healthy"),
+        &[subagent_record("healthy", "c-1")],
+    );
+    // A directory where a transcript should be: the driver cannot open it.
+    std::fs::create_dir_all(fixture.subagent("broken")).expect("broken child");
+
+    let observer = fixture.open();
+    let events = collect_until(&observer, Duration::from_secs(10), |events| {
+        events
+            .iter()
+            .any(|event| matches!(event, ObserverEvent::BootstrapComplete(_)))
+            && events.iter().any(|event| match event {
+                ObserverEvent::ActorRun(event) => event.source.object_path.contains("healthy"),
+                _ => false,
+            })
+    });
+
+    assert!(
+        events.iter().any(|event| match event {
+            ObserverEvent::ActorRun(event) => event.source.object_path.contains("healthy"),
+            _ => false,
+        }),
+        "the healthy sibling was never read"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ObserverEvent::BootstrapComplete(_))),
+        "one unreadable object must not prevent bootstrap from completing"
+    );
+    observer.close();
+}
