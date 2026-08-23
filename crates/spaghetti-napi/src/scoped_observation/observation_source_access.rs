@@ -2598,6 +2598,50 @@ impl ScopedObservationRelatedObjectObservation {
         }
     }
 
+    pub(super) fn is_initial(&self) -> bool {
+        matches!(self, Self::Initial(_))
+    }
+
+    pub(super) fn is_refresh_oversized(&self) -> bool {
+        matches!(
+            self,
+            Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Oversized { .. })
+        )
+    }
+
+    pub(super) fn is_removed(&self) -> bool {
+        matches!(
+            self,
+            Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Removed(_))
+        )
+    }
+
+    pub(super) fn observed_at(&self) -> Option<i64> {
+        match self {
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Present(snapshot))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Present(snapshot))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Removed(snapshot)) => {
+                Some(snapshot.record.observed_at)
+            }
+            Self::Initial(ScopedObservationRelatedObjectInitialObservation::Unavailable {
+                ..
+            })
+            | Self::Initial(ScopedObservationRelatedObjectInitialObservation::RetryTransient {
+                ..
+            })
+            | Self::Initial(ScopedObservationRelatedObjectInitialObservation::Oversized {
+                ..
+            })
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::RetryTransient {
+                ..
+            })
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Unchanged(_))
+            | Self::Refresh(ScopedObservationRelatedObjectRefreshObservation::Oversized {
+                ..
+            }) => None,
+        }
+    }
+
     pub(super) fn coverage_state(&self) -> Option<ScopedObservationRelatedObjectCoverageState> {
         match self {
             Self::Initial(ScopedObservationRelatedObjectInitialObservation::Unavailable {

@@ -462,8 +462,9 @@ pub(crate) mod tests {
         ScopedObservationSourceOwnerRunExit, ScopedObservationStartupError,
         ScopedObservationStartupReconcileAction, ScopedObservationTrustedAccessRequest,
         ScopedObservationUnknownWireNegotiation, ScopedObservationWatcherHintAction,
-        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectionDeliveryError,
-        ScopedQueuedObservationFrame, ScopedRelationMembershipObservation, ScopedReplacementMode,
+        ScopedObservationWatcherPhase, ScopedObserverFailureReason, ScopedProjectedObservation,
+        ScopedProjectionDeliveryError, ScopedQueuedObservationFrame,
+        ScopedRelationMembershipObservation, ScopedReplacementMode,
         ScopedReplacementRepresentation, ScopedReplacementStageError, ScopedResyncReason,
         ScopedRootIdentityRequest, ScopedScopeRelationState, ScopedSourceFailureClass,
         ScopedSourceObjectFailureCode, ScopedSourceObjectRetryState,
@@ -473,9 +474,9 @@ pub(crate) mod tests {
         AccessOutcome, AccessPhase, AppendDelimitedConfig, AppendDelimitedFile, AppendItem,
         AppendRead, AppendTransition, AuthorizedScopeAccessPlan, DirectoryEntryKind,
         DirectorySelection, DirtyHint, DirtyReason, DirtyScope, HintEnqueue, IngestPriority,
-        RecordHash, RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport,
-        ScopeAccessRequest, ScopeIdentityInput, SharedSourcePassPool, SourceCursor,
-        SourceMediaType, SourceRecord, SourceRecordState,
+        RecordOrigin, ReplaceDocumentConfig, Revision, ScopeAccessReport, ScopeAccessRequest,
+        ScopeIdentityInput, SharedSourcePassPool, SourceCursor, SourceMediaType, SourceRecord,
+        SourceRecordState,
     };
 
     use super::*;
@@ -2057,6 +2058,9 @@ pub(crate) mod tests {
             if !self.decode_statefully {
                 return Ok(DecodeDisposition::IgnoredKnown);
             }
+            if record.state == SourceRecordState::Absent {
+                return Ok(DecodeDisposition::IgnoredKnown);
+            }
             if record.payload == b"stream-fatal" {
                 return Err(AdapterError::new(
                     AdapterErrorClass::StreamFatal,
@@ -3289,6 +3293,11 @@ pub(crate) mod tests {
                 max_coverage_objects: 2,
             })
             .unwrap();
+        let mut related_projection =
+            ScopedObservationProjectionSink::new(ScopedObservationProjectionLimits {
+                max_usage_v2_entities: 8,
+            })
+            .unwrap();
         related_admission
             .record_related_relation_membership(
                 prepared.host(),
@@ -3325,30 +3334,43 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(receipt.data_events, 1);
-        assert_eq!(receipt.control_items, 0);
+        assert_eq!(receipt.control_items, 1);
+        let related_object_token = receipt.object_token_for_test();
         assert!(related_admission
             .offered_decode_coverage(&membership_source)
             .is_some());
         assert!(related_admission
             .offered_decode_coverage(&member_source)
             .is_none());
-        match related_admission.pop_next() {
-            Some(ScopedQueuedObservationFrame::Decoded { item, source, .. }) => {
-                assert_eq!(source, member_source);
-                match *item {
-                    ScopedDecodedAppendItem::Record {
-                        disposition, batch, ..
-                    } => {
-                        assert_eq!(disposition, DecodeDisposition::PreservedUnknown);
-                        assert_eq!(batch.facts().len(), 1);
-                    }
-                    ScopedDecodedAppendItem::DriverQuarantine(_) => {
-                        panic!("expected one admitted related record")
-                    }
-                }
-            }
-            Some(_) | None => panic!("expected one admitted related decoded frame"),
-        }
+        let projected = related_admission
+            .project_next(&mut related_projection)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            projected.as_slice(),
+            [ScopedProjectedObservation::SourcePresence {
+                object_token,
+                source,
+                change: ScopedAppendPresenceChange::Created { generation: 1 },
+                ..
+            }] if *object_token == related_object_token && source == &member_source
+        ));
+        assert_eq!(
+            related_projection.unknown_evidence_owner_count_for_test(),
+            0
+        );
+        assert!(related_admission
+            .offered_decode_coverage(&member_source)
+            .is_none());
+        assert!(related_admission
+            .project_next(&mut related_projection)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            related_projection.unknown_evidence_owner_count_for_test(),
+            1
+        );
         let member_coverage = related_admission
             .offered_decode_coverage(&member_source)
             .unwrap();
@@ -3387,21 +3409,17 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(receipt.data_events, 1);
-        match related_admission.pop_next() {
-            Some(ScopedQueuedObservationFrame::Decoded { item, source, .. }) => {
-                assert_eq!(source, member_source);
-                match *item {
-                    ScopedDecodedAppendItem::Record { evidence, .. } => {
-                        assert_eq!(evidence.state, SourceRecordState::Present);
-                        assert_eq!(evidence.payload_hash, RecordHash::digest(corrected_payload));
-                    }
-                    ScopedDecodedAppendItem::DriverQuarantine(_) => {
-                        panic!("expected one admitted related correction")
-                    }
-                }
-            }
-            Some(_) | None => panic!("expected one admitted related correction frame"),
-        }
+        assert_eq!(receipt.control_items, 0);
+        assert_eq!(receipt.object_token_for_test(), related_object_token);
+        assert!(related_admission
+            .project_next(&mut related_projection)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            related_projection.unknown_evidence_owner_count_for_test(),
+            2
+        );
         assert_eq!(
             related_admission
                 .offered_decode_coverage(&member_source)
@@ -3437,20 +3455,44 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(receipt.data_events, 1);
-        match related_admission.pop_next() {
-            Some(ScopedQueuedObservationFrame::Decoded { item, source, .. }) => {
-                assert_eq!(source, member_source);
-                match *item {
-                    ScopedDecodedAppendItem::Record { evidence, .. } => {
-                        assert_eq!(evidence.state, SourceRecordState::Absent);
-                    }
-                    ScopedDecodedAppendItem::DriverQuarantine(_) => {
-                        panic!("expected one admitted related removal")
-                    }
-                }
-            }
-            Some(_) | None => panic!("expected one admitted related removal frame"),
-        }
+        assert_eq!(receipt.control_items, 1);
+        assert_eq!(receipt.object_token_for_test(), related_object_token);
+        let projected = related_admission
+            .project_next(&mut related_projection)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            projected.as_slice(),
+            [ScopedProjectedObservation::SourcePresence {
+                object_token,
+                source,
+                change: ScopedAppendPresenceChange::Deleted { generation: 1 },
+                ..
+            }] if *object_token == related_object_token && source == &member_source
+        ));
+        assert_eq!(
+            related_projection.unknown_evidence_owner_count_for_test(),
+            0
+        );
+        assert_eq!(
+            related_admission
+                .offered_decode_coverage(&member_source)
+                .unwrap()
+                .point
+                .as_ref()
+                .unwrap()
+                .status,
+            CoverageStatus::ExactSnapshot
+        );
+        assert!(related_admission
+            .project_next(&mut related_projection)
+            .unwrap()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            related_projection.unknown_evidence_owner_count_for_test(),
+            0
+        );
         let member_coverage = related_admission
             .offered_decode_coverage(&member_source)
             .unwrap();

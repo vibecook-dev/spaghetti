@@ -1060,6 +1060,13 @@ pub struct ScopedAdmissionReceipt {
     pub control_items: u32,
 }
 
+impl ScopedAdmissionReceipt {
+    #[cfg(test)]
+    pub(crate) fn object_token_for_test(&self) -> u64 {
+        self.object_token
+    }
+}
+
 pub enum ScopedQueuedObservationFrame {
     Presence {
         object_token: u64,
@@ -1366,6 +1373,7 @@ pub struct ScopedObservationAdmissionLane {
         BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
     dynamic_relation_members: BTreeMap<Arc<str>, BTreeSet<ScopedSourceObjectIdentity>>,
     dynamic_relation_authorities: BTreeMap<Arc<str>, ScopedRelationMembershipAuthority>,
+    dynamic_member_object_tokens: BTreeMap<ScopedSourceObjectIdentity, u64>,
     dynamic_member_decoder_states: BTreeMap<ScopedSourceObjectIdentity, Vec<u8>>,
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
@@ -1410,6 +1418,7 @@ impl ScopedObservationAdmissionLane {
             relation_membership_objects: BTreeMap::new(),
             dynamic_relation_members: BTreeMap::new(),
             dynamic_relation_authorities: BTreeMap::new(),
+            dynamic_member_object_tokens: BTreeMap::new(),
             dynamic_member_decoder_states: BTreeMap::new(),
             pending_coverage_updates: VecDeque::new(),
             offered_decode_coverage: BTreeMap::new(),
@@ -1872,6 +1881,7 @@ impl ScopedObservationAdmissionLane {
         if !reserved
             || self.relation_membership_objects.contains_key(&source)
             || self.known_coverage_objects.contains_key(&source)
+            || self.dynamic_member_object_tokens.contains_key(&source)
         {
             return Err(fail(ScopedAdmissionError::InvalidCoverage, lifecycle));
         }
@@ -1921,6 +1931,8 @@ impl ScopedObservationAdmissionLane {
                 };
                 self.known_coverage_objects
                     .insert(source.clone(), membership_identity);
+                self.dynamic_member_object_tokens
+                    .insert(source.clone(), object_token);
                 self.dynamic_member_decoder_states.remove(&source);
                 self.stage_coverage_update(
                     self.offered_lane_ordinal,
@@ -2043,6 +2055,8 @@ impl ScopedObservationAdmissionLane {
                 self.queued_retained_native_bytes = next_bytes;
                 self.known_coverage_objects
                     .insert(source.clone(), membership_identity);
+                self.dynamic_member_object_tokens
+                    .insert(source.clone(), object_token);
                 match next_decoder_state {
                     Some(state) => {
                         self.dynamic_member_decoder_states
@@ -2118,6 +2132,7 @@ impl ScopedObservationAdmissionLane {
             object_key: Arc::from(source.object_key.as_bytes().as_slice()),
             coverage_domains: Vec::new(),
         };
+        let source_is_new = !self.known_coverage_objects.contains_key(&source);
         if !authority_matches
             || !member_is_reserved
             || self.relation_membership_objects.contains_key(&source)
@@ -2125,6 +2140,10 @@ impl ScopedObservationAdmissionLane {
                 .known_coverage_objects
                 .get(&source)
                 .is_some_and(|known| known != &membership_identity)
+            || source_is_new != !self.dynamic_member_object_tokens.contains_key(&source)
+            || (source_is_new && !observation.is_initial())
+            || (!source_is_new && observation.is_initial())
+            || (!source_is_new && observation.is_refresh_oversized())
         {
             return Err(fail(ScopedAdmissionError::InvalidCoverage, observation));
         }
@@ -2240,7 +2259,49 @@ impl ScopedObservationAdmissionLane {
             }
         };
 
-        let (next_events, next_bytes, lane_ordinal, after_ordinal) = if has_decoded_frame {
+        let prior_was_absent = self
+            .offered_decode_coverage
+            .get(&source)
+            .is_some_and(|coverage| coverage.explicit_absence_or_deletion.is_some());
+        let presence_change = match coverage_state {
+            ScopedObservationRelatedObjectCoverageState::Present { generation, .. }
+                if source_is_new || prior_was_absent =>
+            {
+                Some(ScopedAppendPresenceChange::Created { generation })
+            }
+            ScopedObservationRelatedObjectCoverageState::Absent { generation, .. }
+                if observation.is_removed() && !prior_was_absent =>
+            {
+                let Some(previous_generation) =
+                    generation.checked_sub(1).filter(|value| *value > 0)
+                else {
+                    return Err(fail(ScopedAdmissionError::InvalidCoverage, observation));
+                };
+                Some(ScopedAppendPresenceChange::Deleted {
+                    generation: previous_generation,
+                })
+            }
+            ScopedObservationRelatedObjectCoverageState::Present { .. }
+            | ScopedObservationRelatedObjectCoverageState::Absent { .. }
+            | ScopedObservationRelatedObjectCoverageState::Oversized { .. } => None,
+        };
+        let control_observed_at = match presence_change {
+            Some(_) => match observation.observed_at() {
+                Some(observed_at) => Some(observed_at),
+                None => return Err(fail(ScopedAdmissionError::InvalidCoverage, observation)),
+            },
+            None => None,
+        };
+
+        let control_items = usize::from(presence_change.is_some());
+        let Some(next_control_items) = self.controls.len().checked_add(control_items) else {
+            return Err(fail(ScopedAdmissionError::CapacityExhausted, observation));
+        };
+        if next_control_items > self.limits.max_control_items {
+            return Err(fail(ScopedAdmissionError::ControlQueueFull, observation));
+        }
+        let frame_count = control_items + usize::from(has_decoded_frame);
+        let (next_events, next_bytes) = if has_decoded_frame {
             let Some(next_events) = self.queued_data_events.checked_add(measurement.0) else {
                 return Err(fail(ScopedAdmissionError::CapacityExhausted, observation));
             };
@@ -2257,26 +2318,28 @@ impl ScopedObservationAdmissionLane {
                     observation,
                 ));
             }
-            let Some(after_ordinal) = self.next_lane_ordinal.checked_add(1) else {
-                return Err(fail(ScopedAdmissionError::CapacityExhausted, observation));
-            };
-            (
-                next_events,
-                next_bytes,
-                self.next_lane_ordinal,
-                after_ordinal,
-            )
+            (next_events, next_bytes)
         } else {
-            (
-                self.queued_data_events,
-                self.queued_retained_native_bytes,
-                self.offered_lane_ordinal,
-                self.next_lane_ordinal,
-            )
+            (self.queued_data_events, self.queued_retained_native_bytes)
         };
-        let object_token = match next_scoped_object_token() {
-            Ok(token) => token,
-            Err(_) => return Err(fail(ScopedAdmissionError::CapacityExhausted, observation)),
+        let after_ordinal = if frame_count == 0 {
+            self.next_lane_ordinal
+        } else {
+            let frame_count = match u64::try_from(frame_count) {
+                Ok(frame_count) => frame_count,
+                Err(_) => return Err(fail(ScopedAdmissionError::CapacityExhausted, observation)),
+            };
+            match self.next_lane_ordinal.checked_add(frame_count) {
+                Some(after_ordinal) => after_ordinal,
+                None => return Err(fail(ScopedAdmissionError::CapacityExhausted, observation)),
+            }
+        };
+        let object_token = match self.dynamic_member_object_tokens.get(&source).copied() {
+            Some(token) => token,
+            None => match next_scoped_object_token() {
+                Ok(token) => token,
+                Err(_) => return Err(fail(ScopedAdmissionError::CapacityExhausted, observation)),
+            },
         };
         let admission_token = 1;
         let admission_parts = match observation.into_admission_parts() {
@@ -2289,7 +2352,21 @@ impl ScopedObservationAdmissionLane {
             }
         };
 
+        let mut next_frame_ordinal = self.next_lane_ordinal;
+        if let Some(change) = presence_change {
+            self.controls.push_back(QueuedControlFrame {
+                object_token,
+                source: source.clone(),
+                lane_ordinal: next_frame_ordinal,
+                observed_at: control_observed_at
+                    .expect("a related presence change retains its source observation time"),
+                phase,
+                kind: QueuedControlKind::Presence(change),
+            });
+            next_frame_ordinal += 1;
+        }
         if let Some(parts) = admission_parts {
+            debug_assert!(has_decoded_frame);
             let ScopedObservationRelatedObjectAdmissionParts {
                 binding,
                 object_context: _object_context,
@@ -2314,23 +2391,38 @@ impl ScopedObservationAdmissionLane {
             self.decoded.push_back(QueuedDecodedFrame {
                 object_token,
                 source: source.clone(),
-                lane_ordinal,
+                lane_ordinal: next_frame_ordinal,
                 phase,
                 item: Box::new(item),
                 data_events: measurement.0,
                 retained_native_bytes: measurement.1,
             });
-            self.next_lane_ordinal = after_ordinal;
-            self.queued_data_events = next_events;
-            self.queued_retained_native_bytes = next_bytes;
+            next_frame_ordinal += 1;
         } else {
             debug_assert!(!has_decoded_frame);
         }
+        debug_assert_eq!(next_frame_ordinal, after_ordinal);
+        if frame_count > 0 {
+            self.next_lane_ordinal = after_ordinal;
+        }
+        self.queued_data_events = next_events;
+        self.queued_retained_native_bytes = next_bytes;
 
         self.known_coverage_objects
             .insert(source.clone(), membership_identity);
+        if source_is_new {
+            self.dynamic_member_object_tokens
+                .insert(source.clone(), object_token);
+        }
+        let through_lane_ordinal = if frame_count == 0 {
+            self.offered_lane_ordinal
+        } else {
+            after_ordinal
+                .checked_sub(1)
+                .expect("related admission frames start at lane ordinal one")
+        };
         self.stage_coverage_update(
-            lane_ordinal,
+            through_lane_ordinal,
             access_pass_id,
             ScopedCoveragePassEvidence::AccessAttempt,
             coverage,
@@ -2338,10 +2430,10 @@ impl ScopedObservationAdmissionLane {
         Ok(ScopedAdmissionReceipt {
             object_token,
             admission_token,
-            through_lane_ordinal: lane_ordinal,
+            through_lane_ordinal,
             data_events: measurement.0,
             retained_native_bytes: measurement.1,
-            control_items: 0,
+            control_items: control_items as u32,
         })
     }
 
@@ -13099,6 +13191,11 @@ impl ScopedObservationProjectionSink {
 
     pub fn usage_v2_entity_count(&self) -> usize {
         self.usage_v2.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unknown_evidence_owner_count_for_test(&self) -> usize {
+        self.unknown_evidence_owners.len()
     }
 
     #[cfg(test)]
@@ -25029,6 +25126,20 @@ fn validate_observation_relation_coverage(
             .any(|source| admission.relation_membership_objects.contains_key(source))
         || admission.dynamic_relation_members.len() != admission.relation_membership_objects.len()
         || admission.dynamic_relation_authorities.len() != admission.dynamic_relation_members.len()
+        || admission.dynamic_member_object_tokens.keys().any(|source| {
+            !admission
+                .dynamic_relation_members
+                .values()
+                .any(|members| members.contains(source))
+                || !admission.known_coverage_objects.contains_key(source)
+        })
+        || admission
+            .dynamic_member_object_tokens
+            .values()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != admission.dynamic_member_object_tokens.len()
         || admission
             .dynamic_member_decoder_states
             .keys()
@@ -25060,6 +25171,7 @@ fn validate_observation_relation_coverage(
                     .known_coverage_objects
                     .get(source)
                     .is_none_or(|membership| membership.relation_id != *relation_id)
+                    || !admission.dynamic_member_object_tokens.contains_key(source)
             })
         {
             return Err(ScopedCoverageAssemblyError::DeclaredObjectCoverageMismatch);
