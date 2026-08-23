@@ -19,7 +19,13 @@ import path from 'node:path';
 import { mkdtempSync, mkdirSync, appendFileSync, writeFileSync, rmSync } from 'node:fs';
 
 import { loadNativeAddon } from '../native.js';
-import { isSemanticEvent, observeSession, type ObserverEvent, type SessionObserver } from '../observe-session.js';
+import {
+  isSemanticEvent,
+  observeSession,
+  type ObserveSessionOptions,
+  type ObserverEvent,
+  type SessionObserver,
+} from '../observe-session.js';
 
 const native = loadNativeAddon();
 const SESSION = '01234567-89ab-cdef-0123-456789abcdef';
@@ -69,13 +75,16 @@ function fixtureTree(): { root: string; transcript: string; subtree: string } {
   return { root, transcript, subtree: path.join(project, SESSION) };
 }
 
-function attach(root: string, transcript: string): SessionObserver {
-  const observer = observeSession({
-    adapter_id: 'claude-code',
-    agent_root: root,
-    transcript_path: transcript,
-    poll_interval_ms: 15,
-  });
+function attach(root: string, transcript: string, options: ObserveSessionOptions = {}): SessionObserver {
+  const observer = observeSession(
+    {
+      adapter_id: 'claude-code',
+      agent_root: root,
+      transcript_path: transcript,
+      poll_interval_ms: 15,
+    },
+    options,
+  );
   open.push(observer);
   return observer;
 }
@@ -226,6 +235,54 @@ describe('observeSession', { skip: !native }, () => {
     );
     // Draining after close terminates instead of blocking on a dead attachment.
     assert.equal(observer.status().closed, true);
+  });
+
+  test('aborting the signal ends iteration cleanly rather than throwing', async () => {
+    const { root, transcript } = fixtureTree();
+    const controller = new AbortController();
+    const observer = attach(root, transcript, { signal: controller.signal });
+
+    const seen: ObserverEvent[] = [];
+    // No try/catch: an abort that rejected here would lose every event the
+    // consumer had already applied, which is the whole reason it does not.
+    for await (const event of observer) {
+      seen.push(event);
+      if (event.type === 'bootstrap_complete') controller.abort();
+    }
+
+    assert.equal(seen.at(-1)?.type, 'closed', 'the final closed event still arrives after an abort');
+    assert.ok(
+      seen.some((event) => event.type === 'bootstrap_complete'),
+      'events delivered before the abort are kept',
+    );
+    assert.equal(observer.status().closed, true);
+
+    // Propagating the abort is the consumer's call, made after the loop.
+    assert.throws(() => controller.signal.throwIfAborted());
+  });
+
+  test('an already-aborted signal closes immediately, but after the request is validated', async () => {
+    const { root, transcript } = fixtureTree();
+    const controller = new AbortController();
+    controller.abort();
+
+    // Validation still runs first, so a bad locator is not masked by the abort.
+    assert.throws(
+      () =>
+        observeSession(
+          { adapter_id: 'claude-code', agent_root: root, transcript_path: path.join(root, 'elsewhere', 'x.jsonl') },
+          { signal: controller.signal },
+        ),
+      /projects/,
+    );
+
+    const observer = attach(root, transcript, { signal: controller.signal });
+    const drained: ObserverEvent[] = [];
+    // Drains whatever was already queued, then returns instead of parking.
+    for await (const event of observer) drained.push(event);
+
+    assert.equal(observer.status().closed, true);
+    assert.equal(drained.at(-1)?.type, 'closed', 'even an immediate abort reports the close');
   });
 
   test('an invalid locator fails at attach, not as an event', () => {
