@@ -25,6 +25,16 @@ opens no database.
 **one release after** you migrate. Both can run side by side while you compare
 them.
 
+One upgrade note that is easy to miss because it has nothing to do with the
+tail: **revision ids changed in 0.8.0** for `message`, `content_block`, `tool`,
+`user_input_request`, `plan`, `task`, `native_marker`, and `effective_state`.
+They now derive from the record that proved the value rather than the value
+alone. Entity identities and session references are unchanged, and a live
+consumer that holds nothing across a restart is unaffected — but if you
+persisted a `semantic_revision_ref`, or forwarded one downstream as provenance,
+rebuild that state rather than trying to match old against new.
+[RFC 012C §3.1](../rfcs/012c-runtime-semantics-and-usage-v2.md) has the rule.
+
 ## The request
 
 ```ts
@@ -241,6 +251,7 @@ this stream delivers.
   `consumer_requested`, but only `queue_full` is produced today.
 - No `capabilities()`. The `family_manifest` on a barrier is the honest
   substitute: it reports what was actually reduced.
-- The per-family value types are importable by name from the package entry
-  point (`RuntimeSemanticValue`, `ToolRevisionFact`, …); structural narrowing
-  stays available and needs no import.
+- Observer bootstrap is decode-bound: 635 ms for a 43.7 MB tree against a
+  500 ms / 50 MB budget. Filed as a follow-up (a primed hasher and a per-batch
+  key prefix in `adapter/facts.rs`); steady-state delivery is unaffected at
+  8.3 ms p95.

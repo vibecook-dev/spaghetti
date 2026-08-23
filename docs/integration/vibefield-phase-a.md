@@ -168,6 +168,24 @@ partial or incomparable coverage proves nothing about absence.
 **Not shipped:** no code in this repository performs that deduplication. The
 references and the watermark are the contract; the joiner is yours.
 
+> **Revision ids changed in 0.8.0 for eight families.** `message`,
+> `content_block`, `tool`, `user_input_request`, `plan`, `task`,
+> `native_marker`, and `effective_state` now derive a revision from the record
+> that proved the value, not from the value alone — those entities outlive any
+> single record, so two records can legitimately prove the same value and only
+> the record tells the revisions apart.
+>
+> **Entity references are unchanged.** `SessionRef`, `ProjectRef`, and every
+> `ExternalEntityRef` keep their values across the upgrade. Only
+> `fact_revision_id` moved, and only for those eight families — usage-v2 and
+> actor-affiliation revisions are unchanged.
+>
+> If you persisted `SemanticRevisionRef` values or derived state keyed by them,
+> **rebuild that state**. Old and new ids do not compare equal and nothing
+> translates between them. Spaghetti's own rebuild is forced by schema v64;
+> yours is not. The rule is
+> [RFC 012C §3.1](../rfcs/012c-runtime-semantics-and-usage-v2.md).
+
 ## 6. Readiness — knowing what you are reading
 
 ```ts
@@ -231,5 +249,7 @@ Full detail and the porting table:
 - **No policy gating.** Native ids and locators are returned to any local
   caller; the petition's authorized-view distinction is not implemented.
 - **First run after 0.8.0 rebuilds the index.** The catalog is back in about a
-  second; history and search take hours on a large corpus. Read
-  `getReadiness()` rather than assuming an empty query means empty data.
+  quarter of a second; complete history follows in about 3 minutes on a 3.2 GB
+  corpus and search a few seconds after that. Read `getReadiness()` rather than
+  assuming an empty query means empty data — and expect `projection_pending`
+  from search until its field reports `ready`.
