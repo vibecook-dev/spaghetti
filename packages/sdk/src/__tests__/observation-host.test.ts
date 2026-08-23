@@ -475,6 +475,51 @@ describe('history query contract survives the catalog', { skip: !native }, () =>
       );
     }
   });
+
+  test('getOverview, search, and listMemoryDocuments are unchanged too', async () => {
+    const fixture = multiAdapterFixture();
+    const host = await openObservationHost({
+      ...fixture,
+      queryWorkers: 1,
+      ownerLabel: 'history-contract-reads-test',
+    });
+    hosts.push(host);
+    await host.whenObserving();
+
+    const baseline = JSON.parse(
+      readFileSync(new URL('./fixtures/history-contract-baseline.json', import.meta.url), 'utf8'),
+    ) as HistoryBaseline;
+
+    const overview = (await host.client.getOverview()) as unknown as Record<string, unknown>;
+    assert.deepEqual(
+      Object.fromEntries(OVERVIEW_CONTRACT_FIELDS.map((field) => [field, overview[field]])),
+      baseline.overview,
+      'getOverview still reports the same corpus it did before the catalog',
+    );
+    assert.equal(overview.schemaVersion, 64, 'the catalog owns the schema bump this compares across');
+
+    for (const expected of baseline.searches) {
+      const page = await host.client.search({ text: expected.text, limit: 50 });
+      assert.deepEqual(
+        normalizePage(page as unknown as Record<string, unknown>),
+        normalizePage(expected.page),
+        `search("${expected.text}") must return the same hits, in the same order, with the same snippets and scores`,
+      );
+    }
+
+    const projects = await host.client.listProjects({ limit: 200 });
+    for (const project of projects.items) {
+      const key = projectKey(project);
+      const expected = baseline.memoryByProject[key];
+      assert.ok(expected, `baseline is missing memory documents for ${key}`);
+      const page = await host.client.listMemoryDocuments({ projectId: project.projectId, limit: 50 });
+      assert.deepEqual(
+        normalizePage(page as unknown as Record<string, unknown>),
+        normalizePage(expected),
+        `listMemoryDocuments for ${key} must be unchanged`,
+      );
+    }
+  });
 });
 
 /** Copy a row without the named keys. */
@@ -504,6 +549,58 @@ interface HistoryBaseline {
   projectsContractVersion: number;
   projects: Array<Record<string, unknown>>;
   sessionsByProject: Record<string, { contractVersion: number; items: Array<Record<string, unknown>> }>;
+  overview: Record<string, unknown>;
+  searches: Array<{ text: string; page: Record<string, unknown> }>;
+  memoryByProject: Record<string, Record<string, unknown>>;
+}
+
+/**
+ * Counts are `getOverview`'s contract. `commitSeq`, the change-log counters,
+ * and `writerDataVersion` all move because the catalog commits rows of its
+ * own, and `schemaVersion` moves because this lane bumps it — those are the
+ * intended differences, not regressions.
+ */
+const OVERVIEW_CONTRACT_FIELDS = [
+  'projects',
+  'sessions',
+  'messages',
+  'canonicalSessions',
+  'canonicalMessages',
+  'journalMode',
+  'queryOnly',
+  'readOnly',
+] as const;
+
+/**
+ * Row identity and ingest bookkeeping vary per run: opaque ids derive from a
+ * temp source root, `observedAtUnixMs` is wall-clock, and object/generation/
+ * commit numbers move with the number of commits. Native keys, text, and
+ * ordering are the contract.
+ */
+const VOLATILE_ROW_FIELDS = [
+  'messageId',
+  'projectId',
+  'sessionId',
+  'runId',
+  'parentRunId',
+  'documentId',
+  'decisiveFactId',
+  'observedAtUnixMs',
+  'sourceObjectId',
+  'sourceGeneration',
+  'sourceInstanceId',
+  'lastCommitSeq',
+] as const;
+
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  return omit(row, VOLATILE_ROW_FIELDS);
+}
+
+/** Compare a page by its declared contract and its rows, not its watermark. */
+function normalizePage(page: Record<string, unknown>): Record<string, unknown> {
+  const rest = omit(page, ['atCommitSeq', 'projectId', 'nextCursor']);
+  const items = Array.isArray(page.items) ? (page.items as Array<Record<string, unknown>>).map(normalizeRow) : [];
+  return { ...rest, items };
 }
 
 function projectKey(project: { adapterId: string; nativeProjectKey: string }): string {
