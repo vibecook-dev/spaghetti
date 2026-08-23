@@ -80,6 +80,20 @@ export function normalizeTransportError(error: unknown, diagnosticId: string): S
   if (/unsupported/.test(lower)) {
     return { code: 'unsupported_capability', message: 'The requested capability is not supported.' };
   }
+  // A cold engine builds full-text search after the catalog is already
+  // answerable, and `search` fails closed until finalization. That is a
+  // *pending projection*, not an internal failure: without this it fell
+  // through to `internal` and a consumer showed the user a diagnostic id for
+  // a state that resolves on its own. The readiness vector reports the same
+  // thing as `search: pending` / `indexing`.
+  if (/query bootstrap|bootstrap.*(?:in progress|incomplete)/.test(lower)) {
+    return {
+      code: 'projection_pending',
+      message: 'Full-text search is still being indexed.',
+      projection: 'search',
+      reason: 'query_bootstrap',
+    };
+  }
   if (/projection/.test(lower) && /pending|not ready|stale/.test(lower)) {
     return { code: 'projection_pending', message: 'The requested projection is not ready.' };
   }

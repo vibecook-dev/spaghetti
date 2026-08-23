@@ -49,7 +49,14 @@ afterEach(async () => {
     await engine.dispose();
   }
   for (const dir of tempDirs.splice(0)) {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    // `dispose()` resolving does not prove the native SQLite handle closed on
+    // this tick, so removal can lose the race under load. A leaked temp dir is
+    // not a test failure; say so loudly and carry on.
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (error) {
+      console.warn(`[persistent-engine] temp dir not removed: ${String(error)}`);
+    }
   }
 });
 

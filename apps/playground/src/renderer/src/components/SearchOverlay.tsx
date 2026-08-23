@@ -29,6 +29,12 @@ export interface SearchOverlayProps {
   scopeProject?: { projectId: string; members: ProjectMember[]; folderName?: string } | null;
   onNavigate: (target: SearchNavigateTarget) => void;
   isDark?: boolean;
+  /**
+   * Whether the full-text index exists yet. A cold engine answers the catalog
+   * long before search finalizes, and `search` fails closed until it does —
+   * which is a state to explain, not an error to show.
+   */
+  searchIndexing?: boolean;
 }
 
 const LIMIT = 40;
@@ -40,6 +46,7 @@ export function SearchOverlay({
   scopeProject,
   onNavigate,
   isDark = true,
+  searchIndexing = false,
 }: SearchOverlayProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
@@ -222,7 +229,15 @@ export function SearchOverlay({
         </div>
 
         <div className="flex-1 overflow-y-auto min-h-0 scrollbar-hide">
-          {error ? (
+          {searchIndexing ? (
+            // Readiness says the index is still being built, so a failed query
+            // here is expected and temporary. Show that rather than an error:
+            // the engine answers the catalog long before search finalizes.
+            <EmptyState
+              title="Building the search index…"
+              detail="Full-text search becomes available when the first index finishes. Everything else already works."
+            />
+          ) : error ? (
             <div className="px-4 py-3 font-mono text-[11px] text-sanguine">{error}</div>
           ) : !text.trim() ? (
             <EmptyState

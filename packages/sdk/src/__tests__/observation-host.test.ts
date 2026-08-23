@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { SpaghettiClient, SpaghettiClientError, SpaghettiEngine } from '../index.js';
 import {
+  NapiTransport,
+  openSpaghettiClient,
+  openSpaghettiEngine,
   createObservationService,
   loadNativeAddon,
   openObservationHost,
@@ -20,14 +24,25 @@ const native = loadNativeAddon();
 const here = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.resolve(here, '../../../../crates/spaghetti-napi/fixtures');
 const hosts: ObservationHost[] = [];
+const engines: SpaghettiEngine[] = [];
+const clients: SpaghettiClient[] = [];
 const services: ObservationService[] = [];
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+  for (const client of clients.splice(0)) await client.dispose();
+  for (const engine of engines.splice(0)) await engine.dispose();
   for (const service of services.splice(0)) await service.dispose();
   for (const host of hosts.splice(0)) await host.dispose();
   for (const directory of tempDirs.splice(0)) {
-    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    // `dispose()` resolving does not prove the native SQLite handle closed on
+    // this tick, so removal can lose the race under load. A leaked temp dir is
+    // not a test failure; say so loudly and carry on.
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (error) {
+      console.warn(`[observation-host] temp dir not removed: ${String(error)}`);
+    }
   }
 });
 
@@ -123,6 +138,52 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.equal(host.status.state, 'running');
     assert.ok((await host.client.getStats()).searchableMessages >= 0);
     assert.equal(startup.at(-1)?.stage, 'ready');
+  });
+
+  test('searching before the index exists says so, instead of reporting an internal failure', async () => {
+    // Driven through a bare engine rather than the host: the host finalizes
+    // query bootstrap for you, so asserting against it would be a race — the
+    // index can finish before the assertion runs. Here nothing calls
+    // `completeQueryBootstrap()`, so the pending state is deterministic and
+    // this test cannot pass vacuously.
+    const fixture = multiAdapterFixture();
+    const engine = await openSpaghettiEngine({
+      dbPath: fixture.dbPath,
+      ownerLabel: 'search-pending-engine-test',
+      queryWorkers: 1,
+      bootstrapQueryStructures: true,
+    });
+    engines.push(engine);
+    await engine.startObservation({
+      adapterId: fixture.sources[0]!.adapterId,
+      roots: [...fixture.sources[0]!.roots],
+    });
+
+    const client = await openSpaghettiClient({
+      transport: new NapiTransport({ engine, ownsEngine: false }),
+      clientName: 'search-pending-test',
+    });
+    clients.push(client);
+
+    assert.notEqual((await engine.readiness()).search.state, 'ready', 'the index is deliberately unfinished');
+
+    // The engine fails `search` closed until query bootstrap finalizes. That
+    // is a projection that is not ready yet — a state a caller can explain to
+    // a user and that resolves on its own — not an internal failure with a
+    // diagnostic id, which is what it used to surface as.
+    await assert.rejects(client.search({ text: 'the', limit: 5 }), (error: SpaghettiClientError) => {
+      assert.equal(error.code, 'projection_pending');
+      assert.equal(error.projection, 'search');
+      assert.equal(error.reason, 'query_bootstrap');
+      assert.equal(error.diagnosticId, undefined, 'a pending projection is not a diagnostic');
+      assert.match(error.message, /indexed/i);
+      return true;
+    });
+
+    // Finishing the bootstrap is what clears it, and the same query succeeds.
+    await engine.completeQueryBootstrap();
+    const page = await client.search({ text: 'the', limit: 5 });
+    assert.ok(page.contractVersion >= 1, 'search answers once its index exists');
   });
 
   test('owns one database, runs all registered adapters, and reopens without duplication', async () => {

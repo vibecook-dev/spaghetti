@@ -1096,6 +1096,7 @@ function PlaygroundShell() {
         scopeProject={scopeProject}
         onNavigate={onSearchNavigate}
         isDark={isDark}
+        searchIndexing={readiness !== null && readiness.search.state !== 'ready'}
       />
       <SettingsDialog
         open={settingsOpen}

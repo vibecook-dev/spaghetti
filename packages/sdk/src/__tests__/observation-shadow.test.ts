@@ -188,7 +188,14 @@ afterEach(async () => {
   for (const shadow of shadows.splice(0)) await shadow.dispose();
   for (const service of legacyServices.splice(0)) await service.dispose();
   for (const directory of tempDirs.splice(0)) {
-    rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    // `dispose()` resolving does not prove the native SQLite handle closed on
+    // this tick, so removal can lose the race under load. A leaked temp dir is
+    // not a test failure; say so loudly and carry on.
+    try {
+      rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (error) {
+      console.warn(`[observation-shadow] temp dir not removed: ${String(error)}`);
+    }
   }
 });
 
