@@ -3708,7 +3708,7 @@ mod tests {
             .is_some());
         let scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+            "/fixtures/contracts/rfc012a-incomplete-scope-program-v1.json"
         )))
         .unwrap();
         assert_eq!(scope.status, ScopeProgramStatus::Incomplete);
@@ -3944,7 +3944,7 @@ mod tests {
         let adapter = ClaudeCodeAdapter::new();
         let candidate_scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+            "/fixtures/contracts/rfc012a-incomplete-scope-program-v1.json"
         )))
         .unwrap();
         let program = candidate_scope
@@ -3981,7 +3981,7 @@ mod tests {
 
         let source_declaration: Value = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/candidate-2026-08-15/source-declarations.json"
+            "/../../agent-support/claude-code/candidate-2026-08-21/source-declarations.json"
         )))
         .unwrap();
         let persisted = source_declaration["streams"]
@@ -6267,7 +6267,7 @@ mod tests {
     fn native_team_config_and_subagent_metadata_share_canonical_affiliation_keys() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture = repository
-            .join("agent-support/claude-code/candidate-2026-08-15/fixtures/team-affiliation");
+            .join("agent-support/claude-code/candidate-2026-08-21/fixtures/team-affiliation");
         let team_fixture: Value =
             serde_json::from_slice(&std::fs::read(fixture.join("team-config.json")).unwrap())
                 .unwrap();

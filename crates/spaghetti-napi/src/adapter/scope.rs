@@ -915,7 +915,7 @@ mod tests {
         for bytes in [
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
+                "/fixtures/contracts/rfc012a-incomplete-scope-program-v1.json"
             ))
             .as_slice(),
             include_bytes!(concat!(
