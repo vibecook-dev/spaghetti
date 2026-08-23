@@ -1,11 +1,15 @@
 use std::fs::File;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+#[cfg(test)]
+use std::io::Cursor;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
+#[cfg(test)]
+use super::file::FileStamp;
 use super::file::{file_identity, open_confined_file, parent_and_file_name};
 use super::model::{io_error, CursorReader};
 use super::{
-    DriverQuarantine, FileIdentity, FileStamp, RecordHash, RecordOrigin, Revision, SourceCursor,
+    DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
     SourceDriverError, SourceRecord,
 };
 
@@ -248,6 +252,7 @@ impl AppendDelimitedFile {
         )
     }
 
+    #[cfg(test)]
     /// Frame bytes that were already captured by a descriptor-confined stable
     /// read. This performs no native I/O: the caller remains responsible for
     /// access accounting and for retaining the exact `FileStamp` paired with

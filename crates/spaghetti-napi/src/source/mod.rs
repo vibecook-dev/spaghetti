@@ -19,12 +19,8 @@ mod sqlite_snapshot;
 #[cfg(test)]
 mod conformance;
 
-pub(crate) use access::{
-    validate_evidence_locator_template, validate_relation_id,
-    AuthorizedObservationDirectoryEntryReservation, AuthorizedObservationDirectoryReadAuthority,
-    AuthorizedObservationDirectoryRootAuthority, AuthorizedObservationRuntimeStreamReservation,
-    MAX_IDENTITY_VALUE_BYTES,
-};
+#[cfg(test)]
+pub(crate) use access::validate_evidence_locator_template;
 pub use access::{
     AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
     AccessOperation, AccessOutcome, AccessPhase, AccessReservation, AccessReservationRequest,
@@ -37,17 +33,14 @@ pub use append_delimited::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
     AppendTransition,
 };
-pub(crate) use directory_snapshot::{
-    AuditedDirectoryScanError, DirectoryEntryAuditReservation, DirectoryEntryAuditor,
-};
 pub use directory_snapshot::{
     DirectoryChange, DirectoryChangeKind, DirectoryCheckpoint, DirectoryEntryKind,
     DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySelector, DirectorySnapshot,
     DirectorySnapshotConfig,
 };
+pub(crate) use file::confined_relative_path_key;
 pub use file::platform_path_key;
-pub(crate) use file::{confined_relative_path_from_key, confined_relative_path_key};
-pub(crate) use file::{read_prefix_confined, read_stable_file_confined, FileStamp, StableRead};
+pub(crate) use file::{read_prefix_confined, read_stable_file_confined, StableRead};
 pub use key_value_snapshot::{
     KeyValueCheckpoint, KeyValueRead, KeyValueRecord, KeyValueSnapshot, KeyValueSnapshotConfig,
 };

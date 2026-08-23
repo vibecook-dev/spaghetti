@@ -1,8 +1,8 @@
 use std::path::Path;
 
-use super::file::{
-    read_stable_file, read_stable_file_confined, stamp_revision, FileStamp, StableRead,
-};
+#[cfg(test)]
+use super::file::FileStamp;
+use super::file::{read_stable_file, read_stable_file_confined, stamp_revision, StableRead};
 use super::model::CursorReader;
 use super::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,
@@ -192,6 +192,7 @@ impl ReplaceDocument {
         )
     }
 
+    #[cfg(test)]
     /// Frame content already obtained through a confined stable read. The
     /// caller keeps ownership until every retained byte/stamp/revision bound
     /// has passed, so another topology can fail without losing retry input.
@@ -224,6 +225,7 @@ impl ReplaceDocument {
         )
     }
 
+    #[cfg(test)]
     /// Frame an already-completed confined read without reopening the native
     /// object. Callers use this after their own access reservation has
     /// accounted the exact outcome and byte count.

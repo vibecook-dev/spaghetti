@@ -100,6 +100,7 @@ impl SharedSourcePassPool {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn concurrency_limit(&self) -> usize {
         self.lock_state().concurrency_limit
     }
@@ -116,10 +117,6 @@ impl SharedSourcePassPool {
     }
 
     #[cfg(test)]
-    pub(crate) async fn acquire_for_test(&self) -> SharedSourcePassPermit {
-        self.acquire().await
-    }
-
     pub(crate) async fn acquire(&self) -> SharedSourcePassPermit {
         self.acquire_priority(IngestPriority::Interactive).await
     }
