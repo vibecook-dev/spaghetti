@@ -89,26 +89,6 @@ pub struct WriterPerformanceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeUsageCompatibilityTelemetrySnapshot {
-    pub samples: u64,
-    pub ready_samples: u64,
-    pub not_ready_samples: u64,
-    pub equal_samples: u64,
-    pub different_samples: u64,
-    pub incomparable_samples: u64,
-    pub equal_buckets: u64,
-    pub legacy_higher_buckets: u64,
-    pub v2_higher_buckets: u64,
-    pub incomparable_buckets: u64,
-    /// Sum across sampling executions, so repeated sampling is intentionally
-    /// visible rather than pretending to be a deduplicated corpus total.
-    pub sampled_absolute_delta_tokens: u64,
-    pub max_absolute_delta_tokens: u64,
-    pub first_at_commit_seq: Option<u64>,
-    pub last_at_commit_seq: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryPerformanceSnapshot {
     pub uptime_ns: u64,
     pub requests_enqueued: u64,
@@ -117,7 +97,6 @@ pub struct QueryPerformanceSnapshot {
     pub queue_depth: u64,
     pub queue_high_watermark: u64,
     pub oldest_active_ns: u64,
-    pub runtime_usage_compatibility: RuntimeUsageCompatibilityTelemetrySnapshot,
     pub timings: Vec<NamedLatencySnapshot>,
 }
 

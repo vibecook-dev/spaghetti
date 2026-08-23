@@ -13,18 +13,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::adapter::{
-    AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
-    CapabilityGranularity, CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock,
-    ContractCompleteness, DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy,
-    DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact,
-    FactBatch, MessageFact, MessageRole, ObjectSelector, QualifiedTimestamp,
-    QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality, RawRetentionPolicy,
-    RunEvidenceFact, RunFact, ScopeProgramManifest, SessionFact, SourceAccess, SourceInstance,
-    SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, SourceSnapshot,
-    StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, UsageBucketsV2,
-    UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority,
-    UsageValueProvenance,
+    ActorRunRevisionFact, ActorRunRole, AdapterDiagnostic, AdapterError, AdapterErrorClass,
+    AdapterId, AdapterManifest, AdapterObjectContext, AdapterSupportBinding, AgentAdapter,
+    Availability, CapabilityDeclaration, CapabilityGranularity, CapabilityId, CapabilitySupport,
+    ConsistencyPolicy, ContentBlock, ContractCompleteness, DecodeContext, DecodeDisposition,
+    DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind,
+    EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
+    QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality,
+    RawRetentionPolicy, RunEvidenceFact, RunFact, ScopeProgramManifest, SessionFact, SourceAccess,
+    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+    SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality,
+    UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
+    UsageValueAuthority, UsageValueProvenance,
 };
 use crate::source::{
     platform_path_key, read_stable_file_confined, AppendDelimitedConfig, DirectorySnapshotConfig,
@@ -964,6 +964,24 @@ fn decode_transcript(
                 session: session.clone(),
                 native_run_id: session_context.session_id.clone(),
                 parent_run: None,
+            }),
+        )?;
+        // RFC 012C actor identity. It is the bridge between the catalog's
+        // session and the topology-neutral keys usage-v2 contributions are
+        // written under, so a session without it would have unreachable usage.
+        output.push_native(
+            record,
+            session_context.session_id.as_bytes(),
+            Fact::ActorRunRevision(ActorRunRevisionFact {
+                actor_run: output
+                    .canonical_root_actor_run_key(session_context.session_id.as_bytes(), None)?,
+                session: output
+                    .canonical_entity_key("session", session_context.session_id.as_bytes())?,
+                role: ActorRunRole::Root,
+                parent_actor_run: None,
+                native_session_id: Some(session_context.session_id.clone()),
+                native_actor_id: None,
+                native_actor_type: None,
             }),
         )?;
         output.push(
