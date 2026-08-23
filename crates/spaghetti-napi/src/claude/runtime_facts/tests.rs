@@ -1335,3 +1335,50 @@ fn a_repetitive_transcript_gives_every_fact_its_own_revision_identity() {
         "identical usage must stay one revision; this transcript repeats it"
     );
 }
+
+/// A long plan step is shortened, not turned into an uncanonical key.
+///
+/// Truncating on a character boundary routinely lands on a space, and a
+/// runtime semantic key with trailing whitespace is rejected. Emitting one
+/// failed the whole record's decode — fail-closed decoding turning a
+/// cosmetic bound into lost evidence for every family the record carried.
+#[test]
+fn a_long_plan_step_is_shortened_rather_than_failing_the_record() {
+    let plan = format!(
+        "# {}\n- {}\n",
+        "heading word ".repeat(40),
+        "step word ".repeat(40)
+    );
+    for key in plan_step_keys(&plan) {
+        assert_eq!(key.trim(), key.as_str(), "step key must be canonical");
+        assert!(!key.is_empty());
+    }
+    let subject = plan_subject(&plan);
+    assert_eq!(
+        subject.trim(),
+        subject.as_str(),
+        "subject must be canonical"
+    );
+
+    let batch = decode_transcript(&[&assistant_line(
+        "aaaaaaaa-0000-0000-0000-000000000000",
+        "model-a",
+        serde_json::json!([{
+            "type": "tool_use",
+            "id": "toolu_plan",
+            "name": "ExitPlanMode",
+            "input": {"plan": plan},
+        }]),
+    )]);
+
+    let plans = reduce_family(&batch, "runtime.plan");
+    assert_eq!(plans.len(), 1, "a long plan is still a plan");
+    let Some(Fact::PlanRevision(revision)) = plans.values().next() else {
+        panic!("the plan family reduced to something else");
+    };
+    assert!(
+        !revision.ordered_step_keys.is_empty(),
+        "the plan keeps its steps"
+    );
+    assert!(!revision.subject.is_empty(), "the plan keeps its subject");
+}

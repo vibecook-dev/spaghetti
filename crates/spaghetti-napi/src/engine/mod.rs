@@ -178,6 +178,15 @@ pub enum EngineError {
     #[error("{worker} worker is unavailable")]
     WorkerUnavailable { worker: &'static str },
 
+    /// A background worker ran and failed. `detail` is the underlying error's
+    /// own message, which names its category — a swallowed one turned a
+    /// rejected commit into an unexplained "worker is unavailable".
+    #[error("{worker} worker failed: {detail}")]
+    WorkerFailed {
+        worker: &'static str,
+        detail: String,
+    },
+
     #[error("{worker} worker panicked during shutdown")]
     WorkerPanic { worker: &'static str },
 
