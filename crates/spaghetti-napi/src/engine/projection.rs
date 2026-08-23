@@ -6553,11 +6553,9 @@ mod tests {
         assert_eq!(baseline, semantic_snapshot(&cold));
         assert_eq!(count(&cold, "canonical_messages"), 2);
         assert_eq!(count(&cold, "usage_v2_response_contributions"), 2);
-        assert_eq!(
-            count(&cold, "fact_records"),
-            7,
-            "the actor declaration is retained with each message's activity plus its response usage"
-        );
+        // Actor declaration, per-message activity and usage, and the RFC 012C
+        // revisions the same records prove.
+        assert_eq!(count(&cold, "fact_records"), 12);
     }
 
     #[test]

@@ -30,11 +30,11 @@
     },
     "scope_program": {
       "path": "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
-      "sha256": "sha256:b28608dcf0f0a5d6d55475b121cd4162b592c4f6a5e47e7284d3ba2b2a4434a8"
+      "sha256": "sha256:d7f48d920b393ca8fbc6767e3262619955ffa82e5d6ea43909087836d89101ad"
     },
     "evidence": {
       "path": "agent-support/claude-code/candidate-2026-08-21/evidence.json",
-      "sha256": "sha256:0d001404dfd38d7426ee6a0bc3d74182c21d3c48a9ea90fac52ee631ea4180ac"
+      "sha256": "sha256:c543a6d524728861e1c3e4dfbe8f0f40fd584fd550b4311a6b95b5a45221c18a"
     },
     "conformance": {
       "path": "agent-support/claude-code/candidate-2026-08-21/conformance.json",
@@ -43,9 +43,9 @@
   },
   "versions": {
     "adapter_package": "0.7.0",
-    "decoder_contract": 22,
+    "decoder_contract": 23,
     "decoder_state": [
-      1
+      2
     ],
     "source_record_identity": 1,
     "fact_identity": 1,
