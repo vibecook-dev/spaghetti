@@ -6,8 +6,28 @@
  * §5.4 — change the Rust definition and regenerate instead.
  */
 
+export type { ActorAttribution } from './ActorAttribution.js';
+export type { ActorRef } from './ActorRef.js';
 export type { CanonicalEntityKey } from './CanonicalEntityKey.js';
+export type { ClosedEvent } from './ClosedEvent.js';
 export type { ExternalEntityRef } from './ExternalEntityRef.js';
 export type { FactRevisionId } from './FactRevisionId.js';
+export type { FamilyManifestEntry } from './FamilyManifestEntry.js';
 export type { NativeIdentity } from './NativeIdentity.js';
+export type { ObjectCoverage } from './ObjectCoverage.js';
+export type { ObserveSessionRequest } from './ObserveSessionRequest.js';
+export type { ObserverBarrier } from './ObserverBarrier.js';
+export type { ObserverErrorEvent } from './ObserverErrorEvent.js';
+export type { ObserverEvent } from './ObserverEvent.js';
+export type { ObserverEventId } from './ObserverEventId.js';
+export type { ObserverFamily } from './ObserverFamily.js';
+export type { ObserverPhase } from './ObserverPhase.js';
+export type { OverflowEvent } from './OverflowEvent.js';
+export type { OverflowReason } from './OverflowReason.js';
+export type { ResetEvent } from './ResetEvent.js';
+export type { SemanticEvent } from './SemanticEvent.js';
+export type { SemanticOperation } from './SemanticOperation.js';
 export type { SemanticRevisionRef } from './SemanticRevisionRef.js';
+export type { SourceErrorEvent } from './SourceErrorEvent.js';
+export type { SourcePosition } from './SourcePosition.js';
+export type { UnknownEvidenceEvent } from './UnknownEvidenceEvent.js';

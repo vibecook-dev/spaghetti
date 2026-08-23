@@ -59,7 +59,6 @@ rustix.workspace = true
 
 # Rust -> TypeScript binding generation (RFC 012 landing; see
 # scripts/generate-types.mjs and packages/sdk/src/generated/).
-ts-rs = { version = "12", features = ["serde-compat"] }
 
 # Time formatting
 time.workspace = true
