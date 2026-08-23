@@ -50,6 +50,15 @@ describe('Grok product surface', { skip: !native }, () => {
       live: false,
     });
     await service.initialize();
+    // A cold host builds in query-bootstrap mode (L7): history lands first and
+    // `search` fails closed with BootstrapInProgress until FTS finalization.
+    // Every assertion below reads history or search, so wait for both.
+    const deadline = Date.now() + 120_000;
+    while (Date.now() < deadline) {
+      const readiness = await service.getReadiness();
+      if (readiness.history.state === 'ready' && readiness.search.state === 'ready') break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   });
 
   after(async () => {
