@@ -139,8 +139,8 @@ prerequisite for early vertical slices.
 | C2. Usage-v2 shadow projection           | 012C                | In progress | private parity; complete coverage/topology gate open                                 |
 | C3. Durable usage migration              | 012C                | Gate met    | transactional switch, rollback, and compatibility-window proof                       |
 | C4. Runtime semantic downstream suite    | 012C                | In progress | Rust all-family merge/digests landed; remaining integration matrices open            |
-| D1. Store-free observer kernel           | 012D                | In progress | native/SDK owner and epoch transport landed; related-object composition open          |
-| D2. Claude scope composition             | 012D                | In progress | configured directory bootstrap/replay/poll landed; sibling/referenced joins open      |
+| D1. Store-free observer kernel           | 012D                | In progress | native/SDK owner, epoch transport, and related replay landed; public completion open  |
+| D2. Claude scope composition             | 012D                | In progress | generic directory/related replay landed; real Claude multi-hop composition open       |
 | D3. Control lane and epoch replacement   | 012D                | In progress | internal interaction replacement; six-family portable union; interaction wire open   |
 | D4. SDK and Chopsticks migration         | 012D                | In progress | owned observer shadow landed; all-family/released integration open                    |
 | D5. Observer performance calibration     | 012D                | In progress | partial timings; memory/access/slow-consumer report open                             |
@@ -2988,10 +2988,15 @@ polls release unused append access, force one full replacement, and complete
 the exact logical poll only after the replacement watermark is applied. A poll
 admitted after that replacement starts remains pending for the next epoch.
 Membership is revalidated after member reads, and replacement coverage binds
-the newly decoded child state. Built-in support remains Candidate and cannot
-authorize this path. `SiblingObject`, `ReferencedObjectFromField`, and the
-other evidence-derived relations still need a bounded adapter join over
-already decoded facts before the Claude program can execute or be promoted.
+the newly decoded child state. Configured `SiblingObject` and
+`ReferencedObjectFromField` relations now also execute from reducer-retained,
+adapter-produced join evidence through pass-bound reads. They enter bootstrap
+coverage and replay inside each fresh whole-epoch stage without carrying stale
+native state. The real Claude multi-hop composition, including join-derived
+directory parameters, remains open. Built-in support remains Candidate and
+cannot authorize this path. The active 2026-08-21 durable-path Candidate keeps
+only a bounded root-transcript scope declaration; the broader incomplete
+relation worksheet remains in the 2026-08-15 Candidate package.
 
 Earlier landing status (2026-08-21): D2 remained `In progress`.
 Decoder-executed
@@ -3011,7 +3016,8 @@ directory checkpoint as AccessAttempt evidence before bootstrap completion.
 Bootstrap without membership remains `IncompleteScopePass`. Candidate support
 still cannot carry a Promoted dynamic program. This is not Candidate-program
 authorization or a Claude support status flip. No Claude release is promoted;
-the candidate holds the full RFC 012D relation set but cannot authorize it.
+the 2026-08-15 Candidate worksheet holds the full incomplete RFC 012D relation
+set, while the active 2026-08-21 durable-path Candidate intentionally does not.
 The former `9f9749b` authorize-time rejection
 of uncomposed observation primitives is replaced by bootstrap-complete-time
 membership evidence for those relations. Evidence-derived artifact relations

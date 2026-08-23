@@ -80,7 +80,7 @@
       "capability_id": "root-descendant-observation",
       "topology": "scoped",
       "level": "unsupported",
-      "notes": "Scoped observation stays unsupported; candidate retains the full RFC 012D program."
+      "notes": "Scoped observation stays unsupported; this durable-path candidate retains only the bounded root-transcript scope declaration."
     },
     {
       "capability_id": "interaction-lifecycle",
