@@ -2908,6 +2908,7 @@ mod tests {
         revision: NativeRuntimeMarkerRevisionFact,
     ) -> NativeMarkerRevisionSlotWire {
         let semantic_revision_key = revision.semantic_revision_key().unwrap();
+        let bound = object_scoped_native_revision_key(source_record_id, &semantic_revision_key);
         NativeMarkerRevisionSlotWire {
             correlated_native_id: revision.correlated_native_id,
             value: revision.value,
@@ -2918,23 +2919,14 @@ mod tests {
             operation: revision.operation,
             semantic_revision_key_hex: hex_digest(&semantic_revision_key),
             semantic_revision_ref: SemanticRevisionRef::new(
-                FactRevisionId::derive(
-                    fact_id,
-                    1,
-                    &object_scoped_native_revision_key(source_record_id, &semantic_revision_key),
-                )
-                .unwrap(),
+                FactRevisionId::derive(fact_id, 1, &bound).unwrap(),
             ),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn committed_native_marker_example(
-        adapter_id: &str,
-        source_instance_key: &CanonicalSourceInstanceKey,
-        session: CanonicalEntityKey,
-        actor_run: CanonicalEntityKey,
-        source_record_id: &SourceRecordId,
+        context: &EffectiveStateFixtureWire,
         native_marker_id: &str,
         correlated_native_id: Option<&str>,
         current_value: NativeRuntimeMarkerValue,
@@ -2948,8 +2940,8 @@ mod tests {
                         completeness: ContractCompleteness,
                         operation: UserInputOperation,
                         effective_at: i64| NativeRuntimeMarkerRevisionFact {
-            session,
-            actor_run,
+            session: context.session,
+            actor_run: context.actor_run,
             native_marker_id: native_marker_id.to_owned(),
             correlated_native_id: correlated_native_id.map(str::to_owned),
             value,
@@ -2970,8 +2962,8 @@ mod tests {
         );
         let stable_native_key = current_revision.stable_native_fact_key().unwrap();
         let fact_id = CanonicalFactId::native(
-            adapter_id,
-            source_instance_key,
+            &context.adapter_id,
+            &context.source_instance_key,
             NATIVE_MARKER_FAMILY,
             &stable_native_key,
         )
@@ -2994,17 +2986,14 @@ mod tests {
             UserInputOperation::Upsert,
             base_time + 3,
         );
+        let record = &context.source_record_id;
         NativeMarkerExampleWire {
             native_marker_id: native_marker_id.to_owned(),
             fact_id,
-            current: committed_native_marker_slot(&fact_id, source_record_id, current_revision),
-            correction: committed_native_marker_slot(
-                &fact_id,
-                source_record_id,
-                correction_revision,
-            ),
-            retract: committed_native_marker_slot(&fact_id, source_record_id, retract_revision),
-            partial: committed_native_marker_slot(&fact_id, source_record_id, partial_revision),
+            current: committed_native_marker_slot(&fact_id, record, current_revision),
+            correction: committed_native_marker_slot(&fact_id, record, correction_revision),
+            retract: committed_native_marker_slot(&fact_id, record, retract_revision),
+            partial: committed_native_marker_slot(&fact_id, record, partial_revision),
         }
     }
 
@@ -3012,7 +3001,7 @@ mod tests {
     fn rfc012c_native_marker_fixture_is_rust_generated_and_strict() {
         let context = decode_rfc012c_effective_state_v1(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
         let fixture = NativeMarkerFixtureWire {
-            adapter_id: context.adapter_id,
+            adapter_id: context.adapter_id.clone(),
             actor_run: context.actor_run,
             family: NATIVE_MARKER_FAMILY.to_owned(),
             family_version: FAMILY_VERSION,
@@ -3022,11 +3011,7 @@ mod tests {
             source_instance_key: context.source_instance_key,
             source_record_id: context.source_record_id,
             compaction: committed_native_marker_example(
-                "fixture-adapter",
-                &context.source_instance_key,
-                context.session,
-                context.actor_run,
-                &context.source_record_id,
+                &context,
                 "compaction-1",
                 None,
                 NativeRuntimeMarkerValue::Compaction {
@@ -3049,11 +3034,7 @@ mod tests {
                 1_776_211_200_000,
             ),
             progress: committed_native_marker_example(
-                "fixture-adapter",
-                &context.source_instance_key,
-                context.session,
-                context.actor_run,
-                &context.source_record_id,
+                &context,
                 "progress-1",
                 Some("tool-1"),
                 NativeRuntimeMarkerValue::Progress {
@@ -3079,11 +3060,7 @@ mod tests {
                 1_776_211_200_100,
             ),
             queue: committed_native_marker_example(
-                "fixture-adapter",
-                &context.source_instance_key,
-                context.session,
-                context.actor_run,
-                &context.source_record_id,
+                &context,
                 "queue-1",
                 Some("tool-1"),
                 NativeRuntimeMarkerValue::Queue {

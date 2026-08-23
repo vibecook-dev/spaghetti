@@ -11,10 +11,10 @@ use crate::source::SourceRecord;
 
 use super::disposition::RecordMappingDisposition;
 use super::{
-    AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness, DependencyRevision,
-    FactRevisionId, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue,
-    QualifiedValueQuality, SemanticRevisionRef, SourceRecordId, TimestampQuality,
+    bound_fact_revision_id, AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey,
+    CanonicalFactId, CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness,
+    DependencyRevision, FactRevisionId, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue,
+    QualifiedValueQuality, RevisionBinding, SemanticRevisionRef, SourceRecordId, TimestampQuality,
 };
 
 const FACT_HASH_BYTES: usize = 32;
@@ -253,56 +253,6 @@ impl FactSemanticContext {
         push_component(&mut key, stable_native_fact_key);
         Ok(key)
     }
-}
-
-/// How one fact family binds its RFC 012A revision identity.
-///
-/// RFC 012A §4.5 defines `FactRevisionId` as its fact identity plus a
-/// *source revision or semantic revision*. Which of the two a family uses is
-/// a property of the family, not of the emitting call, so it is named here
-/// rather than inferred from whether a key happened to be supplied.
-#[derive(Clone, Copy)]
-enum RevisionBinding<'a> {
-    /// The primary source record alone owns the change.
-    SourceRecord,
-    /// The family's canonical value revision key alone owns the change. Two
-    /// records proving the same value therefore prove one revision, which is
-    /// what makes re-asserted usage and snapshot evidence idempotent.
-    Value(&'a [u8]),
-    /// The value and the record that proved it jointly own the change.
-    ValueAtSourceRecord(&'a [u8]),
-}
-
-/// Compose the canonical revision key for an object-scoped native fact: what
-/// the record proved, and which record proved it.
-///
-/// An object-scoped family keys its facts by an entity that outlives any one
-/// record — `runtime.effective-state` keys one revisioned entity per actor and
-/// dimension, `runtime.tool` keys one call across the records that open and
-/// answer it. A value key alone is therefore not an identity for them: a
-/// dimension that returns to an earlier value (a session moving between two
-/// models, or between two permission modes and back) re-derives a
-/// byte-identical value key and would claim the earlier revision's identity,
-/// as would any family whose native record is repeated verbatim — which real
-/// transcripts do.
-///
-/// `SourceRecordId` is the discriminator that legitimately differs. It is the
-/// record's declared position in its object under a fixed generation and
-/// framing contract, so it is deterministic, object-scoped, and identical on
-/// replay; RFC 012A §4.5's excluded inputs — `observed_at`, scheduling order,
-/// topology, queue sequence, batch ordinal — stay out of it. Families that
-/// want a re-asserted value to *be* the earlier revision keep
-/// [`RevisionBinding::Value`] instead.
-pub(crate) fn object_scoped_native_revision_key(
-    source_record_id: &SourceRecordId,
-    value_semantic_revision_key: &[u8],
-) -> [u8; FACT_HASH_BYTES] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"spaghetti/rfc012a/object-scoped-native-revision-v1\0");
-    hasher.update(&(value_semantic_revision_key.len() as u64).to_be_bytes());
-    hasher.update(value_semantic_revision_key);
-    hasher.update(source_record_id.as_bytes());
-    *hasher.finalize().as_bytes()
 }
 
 /// Parallel RFC 012A identity carried while the RFC 011 store key remains the
@@ -3090,57 +3040,6 @@ impl Fact {
         }
     }
 
-    /// Bind an already-derived revision key to this family's RFC 012A
-    /// revision identity rule.
-    ///
-    /// The rule belongs to the family, not to the call that emitted it: the
-    /// durable coordinator, the scoped observer, and the RFC 012C reducers all
-    /// have to agree on what a revision *is*, and they reach a fact by
-    /// different paths.
-    fn revision_binding<'a>(&self, revision_key: Option<&'a [u8]>) -> RevisionBinding<'a> {
-        let Some(revision_key) = revision_key else {
-            return RevisionBinding::SourceRecord;
-        };
-        if self.revision_binds_source_record() {
-            RevisionBinding::ValueAtSourceRecord(revision_key)
-        } else {
-            RevisionBinding::Value(revision_key)
-        }
-    }
-
-    /// Whether this family's revision identity names the record that proved
-    /// the value.
-    ///
-    /// The RFC 012C runtime families key their facts by an entity that
-    /// outlives any single record — an actor's model, a tool call answered
-    /// several records later — so two records can prove the same value for one
-    /// entity. Those are two revisions, and only the record tells them apart;
-    /// see [`object_scoped_native_revision_key`].
-    ///
-    /// The families that answer `false` are the ones where a repeated value is
-    /// deliberately *one* revision: re-asserted usage, an unchanged actor
-    /// affiliation, and a re-read artifact snapshot are idempotent by
-    /// construction, and their commit paths are written to tolerate the
-    /// repeat rather than to distinguish it.
-    fn revision_binds_source_record(&self) -> bool {
-        match self {
-            Self::UserInputRequestRevision(_)
-            | Self::MessageRevision(_)
-            | Self::ContentBlockRevision(_)
-            | Self::NativeRuntimeMarkerRevision(_)
-            | Self::TaskRevision(_)
-            | Self::PlanRevision(_)
-            | Self::ToolRevision(_)
-            | Self::EffectiveStateRevision(_) => true,
-            Self::ActorRunRevision(_)
-            | Self::ActorAffiliationRevision(_)
-            | Self::UsageRevisionV2(_)
-            | Self::ArtifactMetadataSnapshot(_)
-            | Self::ArtifactContent(_) => false,
-            _ => false,
-        }
-    }
-
     fn required_value_semantic_revision_key(
         &self,
     ) -> Result<Option<[u8; FACT_HASH_BYTES]>, AdapterError> {
@@ -3355,14 +3254,7 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
-        if value
-            .required_value_semantic_revision_key()?
-            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
-        {
-            return Err(AdapterError::invalid_contract(
-                "fact family requires its canonical value semantic revision key",
-            ));
-        }
+        Self::require_canonical_value_revision(&value, source_or_semantic_revision)?;
         let semantic_key = self
             .semantic_context
             .as_ref()
@@ -3470,14 +3362,7 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
-        if value
-            .required_value_semantic_revision_key()?
-            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
-        {
-            return Err(AdapterError::invalid_contract(
-                "fact family requires its canonical value semantic revision key",
-            ));
-        }
+        Self::require_canonical_value_revision(&value, source_or_semantic_revision)?;
         let semantic = self.semantic_revision(
             record,
             value.kind(),
@@ -3517,14 +3402,7 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
-        if value
-            .required_value_semantic_revision_key()?
-            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
-        {
-            return Err(AdapterError::invalid_contract(
-                "fact family requires its canonical value semantic revision key",
-            ));
-        }
+        Self::require_canonical_value_revision(&value, source_or_semantic_revision)?;
         let semantic = self.semantic_revision(
             record,
             value.kind(),
@@ -3533,6 +3411,23 @@ impl FactBatch {
             value.revision_binding(Some(source_or_semantic_revision)),
         )?;
         self.push_internal(record, value, Some(semantic))
+    }
+
+    /// A family with a canonical value revision key cannot be emitted under a
+    /// different one.
+    fn require_canonical_value_revision(
+        value: &Fact,
+        source_or_semantic_revision: &[u8],
+    ) -> Result<(), AdapterError> {
+        if value
+            .required_value_semantic_revision_key()?
+            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
+        {
+            return Err(AdapterError::invalid_contract(
+                "fact family requires its canonical value semantic revision key",
+            ));
+        }
+        Ok(())
     }
 
     fn push_internal(
@@ -3622,17 +3517,8 @@ impl FactBatch {
             )
         }
         .map_err(semantic_identity_error)?;
-        let composed;
-        let revision_key = match binding {
-            RevisionBinding::SourceRecord => source_record_id.as_bytes(),
-            RevisionBinding::Value(value_key) => value_key,
-            RevisionBinding::ValueAtSourceRecord(value_key) => {
-                composed = object_scoped_native_revision_key(&source_record_id, value_key);
-                composed.as_slice()
-            }
-        };
-        let fact_revision_id =
-            FactRevisionId::derive(&fact_id, 1, revision_key).map_err(semantic_identity_error)?;
+        let fact_revision_id = bound_fact_revision_id(&fact_id, 1, binding, &source_record_id)
+            .map_err(semantic_identity_error)?;
         Ok(FactSemanticRevision {
             source_record_id,
             fact_id,

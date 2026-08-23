@@ -570,6 +570,114 @@ impl FactRevisionId {
     }
 }
 
+/// How one fact family binds its RFC 012A revision identity.
+///
+/// RFC 012A §4.5 defines `FactRevisionId` as its fact identity plus a
+/// *source revision or semantic revision*. Which of the two a family uses is
+/// a property of the family, not of the emitting call, so it is named here
+/// rather than inferred from whether a key happened to be supplied.
+#[derive(Clone, Copy)]
+pub(crate) enum RevisionBinding<'a> {
+    /// The primary source record alone owns the change.
+    SourceRecord,
+    /// The family's canonical value revision key alone owns the change. Two
+    /// records proving the same value therefore prove one revision, which is
+    /// what makes re-asserted usage and snapshot evidence idempotent.
+    Value(&'a [u8]),
+    /// The value and the record that proved it jointly own the change.
+    ValueAtSourceRecord(&'a [u8]),
+}
+
+/// Compose the canonical revision key for an object-scoped native fact: what
+/// the record proved, and which record proved it.
+///
+/// An object-scoped family keys its facts by an entity that outlives any one
+/// record — `runtime.effective-state` keys one revisioned entity per actor and
+/// dimension, `runtime.tool` keys one call across the records that open and
+/// answer it. A value key alone is therefore not an identity for them: a
+/// dimension that returns to an earlier value (a session moving between two
+/// models, or between two permission modes and back) re-derives a
+/// byte-identical value key and would claim the earlier revision's identity,
+/// as would any family whose native record is repeated verbatim — which real
+/// transcripts do.
+///
+/// `SourceRecordId` is the discriminator that legitimately differs. It is the
+/// record's declared position in its object under a fixed generation and
+/// framing contract, so it is deterministic, object-scoped, and identical on
+/// replay; RFC 012A §4.5's excluded inputs — `observed_at`, scheduling order,
+/// topology, queue sequence, batch ordinal — stay out of it. Families that
+/// want a re-asserted value to *be* the earlier revision keep
+/// [`RevisionBinding::Value`] instead.
+pub(crate) fn object_scoped_native_revision_key(
+    source_record_id: &SourceRecordId,
+    value_semantic_revision_key: &[u8],
+) -> [u8; DIGEST_BYTES] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012a/object-scoped-native-revision-v1\0");
+    hasher.update(&(value_semantic_revision_key.len() as u64).to_be_bytes());
+    hasher.update(value_semantic_revision_key);
+    hasher.update(source_record_id.as_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Which rule a fact family's revision identity follows.
+///
+/// This lives beside the identity derivations rather than beside `Fact`
+/// because it answers an identity question, and because the durable
+/// coordinator, the scoped observer, and the RFC 012C reducers all have to
+/// agree on the answer while reaching a fact by different paths.
+impl super::Fact {
+    /// Bind an already-derived revision key to this family's rule.
+    ///
+    /// The RFC 012C runtime families bind their record. They key their facts
+    /// by an entity that outlives any single record — an actor's model, a tool call
+    /// answered several records later — so two records can prove the same
+    /// value for one entity, and only the record tells those revisions apart.
+    /// The families that answer `false` are the ones where a repeated value is
+    /// deliberately *one* revision: re-asserted usage, an unchanged actor
+    /// affiliation, and a re-read artifact snapshot are idempotent by
+    /// construction, and their commit paths tolerate the repeat rather than
+    /// distinguishing it.
+    pub(crate) fn revision_binding<'a>(
+        &self,
+        revision_key: Option<&'a [u8]>,
+    ) -> RevisionBinding<'a> {
+        let Some(revision_key) = revision_key else {
+            return RevisionBinding::SourceRecord;
+        };
+        match self {
+            Self::UserInputRequestRevision(_)
+            | Self::MessageRevision(_)
+            | Self::ContentBlockRevision(_)
+            | Self::NativeRuntimeMarkerRevision(_)
+            | Self::TaskRevision(_)
+            | Self::PlanRevision(_)
+            | Self::ToolRevision(_)
+            | Self::EffectiveStateRevision(_) => RevisionBinding::ValueAtSourceRecord(revision_key),
+            _ => RevisionBinding::Value(revision_key),
+        }
+    }
+}
+
+/// Derive a fact revision identity under one family's binding.
+pub(crate) fn bound_fact_revision_id(
+    fact_id: &CanonicalFactId,
+    revision_contract_version: u32,
+    binding: RevisionBinding<'_>,
+    source_record_id: &SourceRecordId,
+) -> Result<FactRevisionId, SemanticContractError> {
+    let composed;
+    let revision = match binding {
+        RevisionBinding::SourceRecord => source_record_id.as_bytes(),
+        RevisionBinding::Value(key) => key,
+        RevisionBinding::ValueAtSourceRecord(key) => {
+            composed = object_scoped_native_revision_key(source_record_id, key);
+            composed.as_slice()
+        }
+    };
+    FactRevisionId::derive(fact_id, revision_contract_version, revision)
+}
+
 /// RFC 012A topology-independent entity reference. VibeField's `SessionRef`
 /// and `ProjectRef` are this type; the TypeScript binding is generated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
