@@ -13,6 +13,7 @@ import {
   type ObservationHostProgress,
   type ObservationHostSource,
   type ObservationService,
+  type SpaghettiReadiness,
 } from '../index.js';
 
 const native = loadNativeAddon();
@@ -29,6 +30,20 @@ afterEach(async () => {
     rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+/**
+ * A cold build defers the full-text structures and rebuilds them once, so
+ * `search` fails closed with `BootstrapInProgress` until that finishes. Every
+ * assertion about search results waits for the readiness vector to say so.
+ */
+async function awaitSearchReady(source: { getReadiness(): Promise<SpaghettiReadiness> }): Promise<void> {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    if ((await source.getReadiness()).search.state === 'ready') return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('full-text bootstrap did not finish within 120s');
+}
 
 function multiAdapterFixture(): { dbPath: string; sources: ObservationHostSource[] } {
   const directory = mkdtempSync(path.join(tmpdir(), 'spaghetti-observation-host-'));
@@ -121,16 +136,24 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     });
     hosts.push(host);
 
-    assert.equal(host.status.state, 'running');
+    // A cold build defers the search-only structures by default, so the host
+    // opens in `bootstrapping` and reaches `running` when that rebuild
+    // finalizes behind the catalog.
+    assert.equal(host.status.state, 'bootstrapping');
     // Catalog-first: the host returns before watchers finish starting, so a
     // caller that needs history says so explicitly.
     await host.whenObserving();
     assert.equal(host.status.observation.supervisorsRunning, 3);
+    const bootstrapDeadline = Date.now() + 120_000;
+    while (host.status.state === 'bootstrapping' && Date.now() < bootstrapDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(host.status.state, 'running');
     assert.equal(host.clientInfo.transportKind, 'napi');
     assert.equal((await host.snapshot()).health.healthy, true);
     assert.deepEqual(
       startup.map((progress) => progress.stage),
-      ['opening', 'discovering-catalog', 'catalog-ready', 'ready'],
+      ['opening', 'discovering-catalog', 'catalog-ready', 'finalizing', 'ready'],
     );
     const committed = startup.find((progress) => progress.stage === 'catalog-ready')?.catalog;
     assert.ok(committed, 'catalog-ready reports what discovery committed');
@@ -363,6 +386,7 @@ describe('multi-adapter observation host', { skip: !native }, () => {
 
     const rename = codexSessions.find((session) => session.sessionId.includes('019c0001'))!;
     assert.ok(rename);
+    await awaitSearchReady(service);
     const scoped = await service.search({
       text: 'Rename the parser module.',
       projectSlug: rename.projectSlug,
@@ -498,6 +522,7 @@ describe('history query contract survives the catalog', { skip: !native }, () =>
     );
     assert.equal(overview.schemaVersion, 64, 'the catalog owns the schema bump this compares across');
 
+    await awaitSearchReady({ getReadiness: () => host.readiness() });
     for (const expected of baseline.searches) {
       const page = await host.client.search({ text: expected.text, limit: 50 });
       assert.deepEqual(
