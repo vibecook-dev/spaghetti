@@ -11,6 +11,7 @@ export default tseslint.config(
     },
   },
   {
-    ignores: ['**/dist/**', '**/node_modules/**', '**/*.js', '**/*.cjs'],
+    // packages/sdk/src/generated is ts-rs output; see scripts/generate-types.mjs.
+    ignores: ['**/dist/**', '**/node_modules/**', '**/*.js', '**/*.cjs', 'packages/sdk/src/generated/**'],
   },
 );

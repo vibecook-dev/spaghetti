@@ -13,6 +13,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use serde::de::{Error as _, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use ts_rs::TS;
 
 pub const EXTERNAL_ENTITY_REFERENCE_VERSION: u32 = 1;
 pub const SEMANTIC_REFERENCE_CONTRACT_VERSION: u32 = 1;
@@ -255,7 +256,10 @@ where
 
 macro_rules! opaque_digest_type {
     ($name:ident) => {
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        /// Serializes as the opaque `v1:<base64url-digest>` reference string;
+        /// TypeScript therefore sees a plain `string`.
+        #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, TS)]
+        #[ts(as = "String")]
         pub struct $name([u8; DIGEST_BYTES]);
 
         impl $name {
@@ -566,7 +570,10 @@ impl FactRevisionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// RFC 012A topology-independent entity reference. VibeField's `SessionRef`
+/// and `ProjectRef` are this type; the TypeScript binding is generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 pub struct ExternalEntityRef {
     pub external_entity_reference_version: u32,
     pub entity_key: CanonicalEntityKey,
@@ -613,7 +620,9 @@ impl<'de> Deserialize<'de> for ExternalEntityRef {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// RFC 012A revision reference shared by durable queries and the observer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
 pub struct SemanticRevisionRef {
     pub semantic_reference_contract_version: u32,
     pub fact_revision_id: FactRevisionId,
@@ -660,8 +669,10 @@ impl<'de> Deserialize<'de> for SemanticRevisionRef {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A native (agent-product-issued) identifier, when one is provable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(export)]
 pub struct NativeIdentity {
     pub native_namespace: String,
     pub native_id: String,

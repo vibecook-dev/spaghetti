@@ -2011,7 +2011,8 @@ export interface SpaghettiEngineAdapterObservationOptions extends SpaghettiEngin
   adapterId: string;
 }
 
-export interface SpaghettiEngineConfiguredObservationSourceOptions extends SpaghettiEngineAdapterObservationOptions {}
+/** One source in a configured startup unit. Alias, not a narrowing. */
+export type SpaghettiEngineConfiguredObservationSourceOptions = SpaghettiEngineAdapterObservationOptions;
 
 export interface SpaghettiEngineConfiguredObservationOptions {
   /** Complete source set planned as one startup unit before history scans begin. */
@@ -2041,20 +2042,6 @@ export interface SpaghettiEngineReconcileResult {
   dependencyTraceEntriesDropped: number;
   commits: number;
   lastCommitSeq?: number;
-}
-
-/**
- * Low-level JSON-only owner for one store-free RFC 012D attachment.
- * Application receipts are retained by Rust and never enter this interface.
- */
-export interface NativeScopedObservation {
-  capabilitiesJson(): string;
-  nextEventJson(): Promise<string | null>;
-  acknowledgeApplied(): Promise<void>;
-  pollJson(): Promise<string>;
-  readyOffered(): Promise<void>;
-  resyncOffered(): Promise<void>;
-  close(): Promise<void>;
 }
 
 /** Async handle backed by one persistent Rust engine lifecycle. */
@@ -2212,8 +2199,6 @@ export interface NativeAddon {
   nativeVersion(): string;
   /** Open the persistent RFC 011 engine shell off the JavaScript thread. */
   openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promise<SpaghettiEngine>;
-  /** Open the strict, store-free RFC 012D JSON transport. */
-  openScopedObservationJson(requestJson: string): Promise<NativeScopedObservation>;
 }
 
 /**
@@ -2341,24 +2326,6 @@ export function openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promis
     throw new Error('Persistent SpaghettiEngine requires the native addon, but it could not be loaded.');
   }
   return addon.openSpaghettiEngine(options).then(withAbortSignalPreflight);
-}
-
-/**
- * Open the low-level RFC 012D JSON owner. Applications should normally use
- * `observeSession()`, which validates every returned contextual wire and owns
- * application acknowledgement ordering.
- */
-export function openNativeScopedObservationJson(requestJson: string): Promise<NativeScopedObservation> {
-  const addon = loadNativeAddon();
-  if (!addon) {
-    const failure = nativeLoadFailure();
-    if (failure) throw failure;
-    throw new Error('Scoped observation requires the native addon, but it could not be loaded.');
-  }
-  if (typeof addon.openScopedObservationJson !== 'function') {
-    throw new Error('The loaded native addon does not implement the RFC 012D observer transport.');
-  }
-  return addon.openScopedObservationJson(requestJson);
 }
 
 /**
