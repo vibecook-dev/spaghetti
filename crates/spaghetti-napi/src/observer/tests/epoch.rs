@@ -28,7 +28,7 @@ fn a_saturated_live_queue_reports_continuity_loss_instead_of_dropping_events() {
     let observer = open_observer(&request).expect("observer attaches");
     let _bootstrap = drain_bootstrap(&observer);
 
-    fixture.append(&fixture.transcript(), &burst(40)[4..].to_vec());
+    fixture.append(&fixture.transcript(), &burst(40)[4..]);
     std::thread::sleep(Duration::from_millis(500));
 
     let events = collect_until(&observer, Duration::from_secs(30), |events| {
