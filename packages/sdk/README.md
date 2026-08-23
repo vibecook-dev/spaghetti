@@ -181,6 +181,13 @@ Deduplicate on `(scope_epoch, event_id)`; `sequence` is the delivery order
 inside one attachment and is not comparable across attachments or to a durable
 commit sequence.
 
+A step-by-step port — request shape, epoch and resync handling, a field-by-field
+porting table, and a suggested migration order — is in
+[docs/integration/chopsticks-observe-session.md](../../docs/integration/chopsticks-observe-session.md).
+If you are building an aggregator over stable identity and durable watermarks
+instead, see
+[docs/integration/vibefield-phase-a.md](../../docs/integration/vibefield-phase-a.md).
+
 ### Typing the payload
 
 Every event type is generated from Rust — regenerate with `pnpm generate:types`
