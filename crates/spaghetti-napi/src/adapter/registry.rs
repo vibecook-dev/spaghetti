@@ -2666,7 +2666,7 @@ pub(crate) mod tests {
         assert_eq!(prepared.objects().len(), 1);
         assert!(prepared.directory_bindings().is_empty());
         assert_eq!(prepared.related_relation_bindings().len(), 1);
-        assert_eq!(prepared.required_coverage_objects(), 5);
+        assert_eq!(prepared.required_coverage_objects(), 6);
 
         let source_key = CanonicalSourceInstanceKey::derive(1, b"related-planner").unwrap();
         let join_update =

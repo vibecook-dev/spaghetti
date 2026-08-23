@@ -2331,7 +2331,8 @@ impl PreparedScopedObservationAttachment {
             let max_objects = usize::try_from(binding.bounds.max_objects)
                 .map_err(|_| invalid_configured_runtime())?;
             required_coverage_objects = required_coverage_objects
-                .checked_add(max_objects)
+                .checked_add(1)
+                .and_then(|count| count.checked_add(max_objects))
                 .ok_or_else(invalid_configured_runtime)?;
             prepared_related_bindings.push(binding);
         }
