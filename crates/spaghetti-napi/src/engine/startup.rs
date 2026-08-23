@@ -246,6 +246,29 @@ impl Drop for ConfiguredObservationStartupRuntime {
     }
 }
 
+/// Turn a terminal startup state into the caller's answer.
+///
+/// Report what actually failed: callers previously saw only "configured
+/// observation startup worker is unavailable", which hid a rejected fact
+/// commit behind a message about liveness.
+fn configured_observation_startup_result(
+    progress: ConfiguredObservationStartupProgress,
+) -> Result<(), EngineError> {
+    match progress.state {
+        ConfiguredObservationStartupState::Installed => Ok(()),
+        ConfiguredObservationStartupState::Starting => {
+            unreachable!("wait returns a terminal state")
+        }
+        ConfiguredObservationStartupState::Failed => Err(EngineError::WorkerFailed {
+            worker: "configured observation startup",
+            detail: progress
+                .failure
+                .unwrap_or_else(|| "startup reported no detail".to_string()),
+        }),
+        ConfiguredObservationStartupState::Stopped => Err(EngineError::ShuttingDown),
+    }
+}
+
 fn finish_configured_observation_startup(
     engine: Weak<SpaghettiEngineCore>,
     starting: Vec<StartingObservationSupervisor>,
@@ -465,23 +488,7 @@ impl SpaghettiEngineCore {
         let Some(shared) = shared else {
             return Ok(());
         };
-        let progress = shared.wait();
-        match progress.state {
-            ConfiguredObservationStartupState::Installed => Ok(()),
-            ConfiguredObservationStartupState::Starting => {
-                unreachable!("wait returns a terminal state")
-            }
-            // Report what actually failed. Callers previously saw only
-            // "configured observation startup worker is unavailable", which
-            // hid a rejected fact commit behind a message about liveness.
-            ConfiguredObservationStartupState::Failed => Err(EngineError::WorkerFailed {
-                worker: "configured observation startup",
-                detail: progress
-                    .failure
-                    .unwrap_or_else(|| "startup reported no detail".to_string()),
-            }),
-            ConfiguredObservationStartupState::Stopped => Err(EngineError::ShuttingDown),
-        }
+        configured_observation_startup_result(shared.wait())
     }
 
     pub(super) fn clear_configured_observation_startup(&self) -> Result<(), EngineError> {
@@ -582,4 +589,71 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The failure a background startup hit reaches the caller.
+    ///
+    /// A rejected fact commit used to arrive as "configured observation
+    /// startup worker is unavailable" — a message about liveness, for a
+    /// database constraint. Finding the real cause meant bypassing the
+    /// configured path and calling `startObservation` directly.
+    #[test]
+    fn a_failed_startup_reports_what_failed() {
+        let commit = EngineError::InvalidCommit(
+            "UNIQUE constraint failed: fact_records.semantic_fact_revision_id".to_string(),
+        );
+        let error = configured_observation_startup_result(ConfiguredObservationStartupProgress {
+            state: ConfiguredObservationStartupState::Failed,
+            failure: Some(commit.to_string()),
+        })
+        .expect_err("a failed startup is an error");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("fact_records.semantic_fact_revision_id"),
+            "the underlying failure must survive: {message}"
+        );
+        assert!(
+            message.contains("invalid observation commit"),
+            "the underlying category must survive: {message}"
+        );
+        assert!(
+            !message.contains("unavailable"),
+            "a failed startup is not an absent worker: {message}"
+        );
+    }
+
+    /// A startup that finished normally, or was stopped, is unchanged.
+    #[test]
+    fn an_installed_startup_is_not_an_error_and_a_stopped_one_is_shutdown() {
+        assert!(
+            configured_observation_startup_result(ConfiguredObservationStartupProgress {
+                state: ConfiguredObservationStartupState::Installed,
+                failure: None,
+            })
+            .is_ok()
+        );
+        assert!(matches!(
+            configured_observation_startup_result(ConfiguredObservationStartupProgress {
+                state: ConfiguredObservationStartupState::Stopped,
+                failure: None,
+            }),
+            Err(EngineError::ShuttingDown)
+        ));
+    }
+
+    /// A panicking startup keeps its panic message.
+    #[test]
+    fn a_panicking_startup_keeps_its_message() {
+        let payload = std::panic::catch_unwind(|| panic!("decode spine gave up"))
+            .expect_err("the closure panics");
+        assert_eq!(panic_message(payload.as_ref()), "decode spine gave up");
+
+        let unknown: Box<dyn std::any::Any + Send> = Box::new(7_u8);
+        assert_eq!(panic_message(unknown.as_ref()), "unknown panic payload");
+    }
 }
