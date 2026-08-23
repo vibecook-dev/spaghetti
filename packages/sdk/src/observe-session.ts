@@ -72,6 +72,30 @@ export interface ObserveSessionOptions {
    * that arrives during the wait resolves it immediately.
    */
   waitTimeoutMs?: number;
+  /**
+   * Ends the attachment when aborted.
+   *
+   * A live session never ends on its own, so a parked `for await` has nothing
+   * to return until something closes the observer. This is that something,
+   * for a consumer that already has a signal — a session switch, a shutdown
+   * handler — and does not want to thread `close()` through it.
+   *
+   * Aborting is a clean stop, not an error: whatever is already queued is
+   * still delivered, the final `closed` event still arrives, and the loop
+   * returns instead of throwing. That is deliberate — a consumer applying
+   * events cannot lose the ones it already has to a rejection it did not ask
+   * for. When the abort *should* propagate, ask for it after the loop:
+   *
+   * ```ts
+   * for await (const event of observer) apply(event);
+   * signal.throwIfAborted();
+   * ```
+   *
+   * An already-aborted signal is honoured immediately. The request is still
+   * validated first, so a bad locator still throws from `observeSession`
+   * rather than being masked by the abort.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -112,18 +136,43 @@ export function observeSession(request: ObserveSessionRequest, options: ObserveS
   let closing = false;
   let finished = false;
   let closed: Promise<void> | undefined;
+  let detachAbort: (() => void) | undefined;
 
   function close(): Promise<void> {
     closing = true;
+    detachAbort?.();
+    detachAbort = undefined;
     closed ??= native.close();
     return closed;
   }
 
+  if (options.signal) {
+    const signal = options.signal;
+    // Closing from the handler also wakes a `waitForEvents` that is parked
+    // right now, so an abort is noticed immediately rather than after
+    // `waitTimeoutMs`. The `catch` only marks the promise handled — a
+    // consumer that later awaits `close()` still sees the failure.
+    if (signal.aborted) {
+      void close().catch(() => {});
+    } else {
+      const onAbort = () => void close().catch(() => {});
+      signal.addEventListener('abort', onAbort, { once: true });
+      detachAbort = () => signal.removeEventListener('abort', onAbort);
+    }
+  }
+
   async function fill(): Promise<void> {
-    // Once closing, never block: the native side has stopped admitting
-    // events, so `poll` drains what is left (including the final `closed`)
-    // and then returns empty forever.
-    const json = closing ? native.poll(batchSize) : await native.waitForEvents(waitTimeoutMs, batchSize);
+    let json: string;
+    if (closing) {
+      // Wait for the native shutdown to finish before draining. `close()` is
+      // what enqueues the final `closed` event, so polling ahead of it reads
+      // an empty queue and ends the iteration one event short — which is
+      // exactly what an abort mid-loop used to do.
+      await close();
+      json = native.poll(batchSize);
+    } else {
+      json = await native.waitForEvents(waitTimeoutMs, batchSize);
+    }
     buffer = JSON.parse(json) as ObserverEvent[];
     cursor = 0;
   }

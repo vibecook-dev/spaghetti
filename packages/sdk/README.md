@@ -149,7 +149,19 @@ first rather than receive its own copy.
 A live session has no natural end, so `for await` parks on the next event
 rather than returning. Call `close()` from elsewhere — a signal handler, a
 session switch — to end the iteration; the loop then drains what is already
-queued and stops.
+queued and stops. When you already hold an `AbortSignal`, pass it instead:
+
+```ts
+const observer = observeSession(request, { signal: controller.signal });
+for await (const event of observer) apply(event);
+// Aborting ended the loop cleanly. Propagate it only if you want to:
+controller.signal.throwIfAborted();
+```
+
+Aborting is a clean stop, not an error: queued events and the final `closed`
+event are still delivered and the loop returns rather than throwing, so a
+consumer applying events never loses the ones it already has to a rejection it
+did not ask for.
 
 > **Known deviation (as of 0.8.0-dev).** On a session tree whose per-family
 > revision count exceeds 65,536, `bootstrap_complete` is emitted early: the
