@@ -8,6 +8,7 @@ mod append_delimited;
 mod directory_snapshot;
 mod file;
 mod key_value_snapshot;
+mod locator;
 mod model;
 mod presence_object;
 mod recovery;
@@ -19,15 +20,13 @@ mod sqlite_snapshot;
 #[cfg(test)]
 mod conformance;
 
-#[cfg(test)]
-pub(crate) use access::validate_evidence_locator_template;
 pub use access::{
     AccessBudget, AccessBudgetError, AccessBudgetSnapshot, AccessLimit, AccessObjectToken,
     AccessOperation, AccessOutcome, AccessPhase, AccessReservation, AccessReservationRequest,
     AccessTraceEntry, AuthorizedScopeAccessPlan, ScopeAccessBounds, ScopeAccessDenial,
     ScopeAccessPlan, ScopeAccessReport, ScopeAccessReportDigest, ScopeAccessRequest,
-    ScopeAccessReservation, ScopeIdentityInput, ACCESS_TRACE_CONTRACT_VERSION,
-    DEFAULT_ACCESS_TRACE_CAPACITY, SCOPE_ACCESS_REPORT_CONTRACT_VERSION,
+    ScopeAccessReservation, ACCESS_TRACE_CONTRACT_VERSION, DEFAULT_ACCESS_TRACE_CAPACITY,
+    SCOPE_ACCESS_REPORT_CONTRACT_VERSION,
 };
 pub use append_delimited::{
     AppendCheckpoint, AppendDelimitedConfig, AppendDelimitedFile, AppendItem, AppendRead,
@@ -43,6 +42,10 @@ pub use file::platform_path_key;
 pub(crate) use file::{read_prefix_confined, read_stable_file_confined, StableRead};
 pub use key_value_snapshot::{
     KeyValueCheckpoint, KeyValueRead, KeyValueRecord, KeyValueSnapshot, KeyValueSnapshotConfig,
+};
+pub use locator::{
+    render_confined_locator, validate_bound_locator_template, validate_evidence_locator_template,
+    validate_relation_id, LocatorError, ScopeIdentityInput, MAX_RENDERED_SCOPE_LOCATOR_BYTES,
 };
 pub use model::{
     DriverQuarantine, FileIdentity, RecordHash, RecordOrigin, Revision, SourceCursor,

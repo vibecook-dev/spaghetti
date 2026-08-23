@@ -181,19 +181,31 @@ Deduplicate on `(scope_epoch, event_id)`; `sequence` is the delivery order
 inside one attachment and is not comparable across attachments or to a durable
 commit sequence.
 
+A step-by-step port — request shape, epoch and resync handling, a field-by-field
+porting table, and a suggested migration order — is in
+[docs/integration/chopsticks-observe-session.md](../../docs/integration/chopsticks-observe-session.md).
+If you are building an aggregator over stable identity and durable watermarks
+instead, see
+[docs/integration/vibefield-phase-a.md](../../docs/integration/vibefield-phase-a.md).
+
 ### Typing the payload
 
 Every event type is generated from Rust — regenerate with `pnpm generate:types`
-rather than editing anything under `src/generated/`. `SemanticEvent.value` is
-still `unknown`: the per-family value types come from `adapter/facts.rs` in
-Wave 2. Until then, narrow on `family` and validate the value at your own
-boundary.
+rather than editing anything under `src/generated/`. `SemanticEvent.value` is a
+`RuntimeSemanticValue`: one externally tagged variant per RFC 012C family,
+generated from the same `adapter/facts.rs` types the decoder emits. Narrowing on
+`family` narrows the value with it, so there is nothing left to cast.
 
 ```ts
-if (isSemanticEvent(event) && event.family === 'usage_v2') {
-  const usage = event.value as MyUsageShape; // your own contract, for now
+if (isSemanticEvent(event) && event.family === 'tool' && event.value) {
+  // value is { ToolRevision: ToolRevisionFact }
+  const tool = event.value.ToolRevision;
+  console.log(tool.tool_name, tool.kind, tool.correlated_native_id);
 }
 ```
+
+`value` is `null` for a retraction — the family's reducer removed the entity,
+so there is no current value to carry. Every other event has one.
 
 ## Architecture and compatibility
 

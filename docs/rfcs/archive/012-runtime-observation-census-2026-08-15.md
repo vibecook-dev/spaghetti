@@ -3,10 +3,10 @@
 - **Status:** Static semantic census complete; dynamic scoped-observer
   conformance remains an implementation gate
 - **Architecture:**
-  [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
+  [RFC 012](../012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Plan:** [RFC 012 implementation plan](./012-implementation-plan.md)
-- **Contract consumers:** [RFC 012C](./012c-runtime-semantics-and-usage-v2.md)
-  and [RFC 012D](./012d-session-scoped-observation.md)
+- **Contract consumers:** [RFC 012C](../012c-runtime-semantics-and-usage-v2.md)
+  and [RFC 012D](../012d-session-scoped-observation.md)
 - **Related evidence:**
   [catalog and diagnostic census](./012-phase-0-census-2026-08-15.md)
 

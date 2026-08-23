@@ -214,8 +214,8 @@ impl ObservedObject {
 
     /// The declared relation that admitted this object. RFC 012D section 5
     /// requires every opened object to be attributable to exactly one.
-    pub(crate) fn relation_id(&self) -> &'static str {
-        self.member.relation_id
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.member.relation_id
     }
 
     pub(crate) fn generation(&self) -> u64 {
