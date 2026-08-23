@@ -41,8 +41,12 @@ import type { SpaghettiEnginePerformanceStats } from '../packages/sdk/src/native
 
 type Scenario = 'cold' | 'live-append' | 'warm-unchanged' | 'warm-append';
 
-/** How often the benchmark asks the host whether history has converged. */
-const CONVERGENCE_POLL_MS = 25;
+/**
+ * How often the benchmark asks the host whether history has converged. Readers
+ * block WAL checkpoints, so this stays coarse enough that the measurement does
+ * not hold the writer back.
+ */
+const CONVERGENCE_POLL_MS = 250;
 /** How long to observe background convergence before driving repair passes. */
 const CONVERGENCE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 /** How long to wait for the deferred full-text structures after history. */
