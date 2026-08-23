@@ -45,6 +45,11 @@
  *     (`search_fts_*`) are not diffed — they are a function of `messages`
  *     and derive from trigger output. We sanity-check the row count
  *     matches `messages` on both sides and leave it at that.
+ *   - RFC 012 schema ownership: the retained TypeScript oracle remains on
+ *     schema v62 with the additive `usage_contributions` / `usage_totals`
+ *     tables, while native schema v64 deliberately retired those tables in
+ *     favour of fact reduction. The schema version marker and retired tables
+ *     are excluded; every table that still exists in both engines is diffed.
  *
  * Run examples:
  *   tsx scripts/ingest-diff.ts                              # cold mode, default Claude fixture
@@ -499,18 +504,18 @@ const RFC011_SCHEMA_TABLES = [
   'workflow_member_event_assertions',
   'canonical_workflows',
   'canonical_workflow_members',
-  'usage_contributions',
-  'usage_totals',
 ] as const;
 
 const TABLE_SPECS: TableSpec[] = [
   {
     name: 'schema_meta',
     orderBy: 'key',
-    // TS-engine-local / lifecycle markers that native cold ingest never writes:
+    // Cross-engine version and TS-engine-local / lifecycle markers:
+    // - version: retained TS oracle is schema v62; landed native schema is v64
     // - heal_msg_index_v1: Claude TS one-shot heal
     // - *_extract_version: stamped by lifecycle attachShared after native returns
-    where: "key NOT IN ('heal_msg_index_v1', 'grok_extract_version', 'codex_extract_version')",
+    where:
+      "key NOT IN ('version', 'heal_msg_index_v1', 'grok_extract_version', 'codex_extract_version')",
   },
   {
     name: 'source_instances',
@@ -744,14 +749,6 @@ const TABLE_SPECS: TableSpec[] = [
   {
     name: 'canonical_workflow_members',
     orderBy: 'workflow_key, native_agent_id',
-  },
-  {
-    name: 'usage_contributions',
-    orderBy: 'fact_id',
-  },
-  {
-    name: 'usage_totals',
-    orderBy: 'session_key',
   },
   {
     name: 'projects',

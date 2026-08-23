@@ -17,7 +17,7 @@ from typing import Any, Mapping
 
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CANDIDATE = ROOT / "agent-support/claude-code/candidate-2026-08-21"
+DEFAULT_CANDIDATE = ROOT / "agent-support/claude-code/2026-08-21"
 MAX_REVIEW_BYTES = 4 * 1024 * 1024
 PLACEHOLDER_REVIEWERS = {"rfc012-integrator", "automation", "unknown", "pending"}
 
@@ -132,16 +132,14 @@ def validate_compatible_cycle_telemetry(
             _required_object(cycle, key, f"telemetry cycle {index}")
 
 
-def run_preflight(
-    candidate: Path,
-    sanitizer_approval_path: Path,
-    performance_report_path: Path,
-    telemetry_path: Path,
-) -> str:
+def _candidate_promotion_identity(candidate: Path) -> tuple[str, str]:
     release_path = candidate / "support-release.json"
     release = _load_object(release_path, "candidate support release")
-    if release.get("status") != "candidate":
+    scope = _load_object(candidate / "scope-programs.json", "candidate scope program")
+    if scope.get("status") != "candidate":
         raise PromotionPreflightError("promotion input must still be a candidate")
+    if release.get("version") != candidate.name:
+        raise PromotionPreflightError("candidate directory must match its release version")
     blockers = release.get("promotion_blockers")
     if not isinstance(blockers, list) or not blockers:
         raise PromotionPreflightError("candidate must retain explicit promotion blockers")
@@ -159,6 +157,16 @@ def run_preflight(
     if not isinstance(support_release_id, str) or not support_release_id:
         raise PromotionPreflightError("candidate support-release ID is invalid")
     candidate_digest = _sha256(release_path)
+    return support_release_id, candidate_digest
+
+
+def run_preflight(
+    candidate: Path,
+    sanitizer_approval_path: Path,
+    performance_report_path: Path,
+    telemetry_path: Path,
+) -> str:
+    support_release_id, candidate_digest = _candidate_promotion_identity(candidate)
     validate_sanitizer_approval(
         _load_object(sanitizer_approval_path, "sanitizer approval"),
         support_release_id=support_release_id,

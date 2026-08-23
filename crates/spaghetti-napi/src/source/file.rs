@@ -506,7 +506,7 @@ mod tests {
         std::fs::rename(&before_path, &after_path).unwrap();
         let after = file_identity(&after_path, &std::fs::metadata(&after_path).unwrap());
 
-        assert!(matches!(before, FileIdentity::Windows { .. }));
+        assert!(matches!(&before, FileIdentity::Windows { .. }));
         assert_eq!(before, after);
     }
 

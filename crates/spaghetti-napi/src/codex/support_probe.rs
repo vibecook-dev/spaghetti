@@ -196,7 +196,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::adapter::{CompatibilityClass, SupportCatalog};
+    use crate::adapter::{CompatibilityClass, CompatibilityReason, SupportCatalog};
 
     fn write_rollout(root: &Path, day: &str, name: &str, version: &str) {
         let directory = root.join("sessions/2026/08").join(day);
@@ -226,10 +226,24 @@ mod tests {
         let catalog =
             SupportCatalog::new([crate::codex::verified_support_release().unwrap()]).unwrap();
         let decision = catalog.classify(&probe).unwrap();
-        assert_eq!(
-            decision.compatibility_class(),
-            CompatibilityClass::RecognizedUnverified
-        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                decision.compatibility_class(),
+                CompatibilityClass::RecognizedUnverified
+            );
+            assert_eq!(
+                decision.reason(),
+                CompatibilityReason::NoMatchingPromotedRelease
+            );
+            assert!(decision.permissions().bounded_drift);
+        } else {
+            assert_eq!(
+                decision.compatibility_class(),
+                CompatibilityClass::UnknownOrIncompatible
+            );
+            assert_eq!(decision.reason(), CompatibilityReason::PlatformNotDeclared);
+            assert!(!decision.permissions().bounded_drift);
+        }
         assert!(!decision.permissions().catalog);
         assert!(!decision.permissions().durable);
     }

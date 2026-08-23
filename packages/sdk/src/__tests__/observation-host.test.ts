@@ -587,9 +587,9 @@ describe('history query contract survives the catalog', { skip: !native }, () =>
     for (const expected of baseline.searches) {
       const page = await host.client.search({ text: expected.text, limit: 50 });
       assert.deepEqual(
-        normalizePage(page as unknown as Record<string, unknown>),
-        normalizePage(expected.page),
-        `search("${expected.text}") must return the same hits, in the same order, with the same snippets and scores`,
+        normalizeSearchPage(page as unknown as Record<string, unknown>),
+        normalizeSearchPage(expected.page),
+        `search("${expected.text}") must return the same hits, in the same order, with the same snippets and portable scores`,
       );
     }
 
@@ -687,6 +687,23 @@ function normalizePage(page: Record<string, unknown>): Record<string, unknown> {
   const rest = omit(page, ['atCommitSeq', 'projectId', 'nextCursor']);
   const items = Array.isArray(page.items) ? (page.items as Array<Record<string, unknown>>).map(normalizeRow) : [];
   return { ...rest, items };
+}
+
+/**
+ * SQLite's BM25 implementation can differ by one floating-point ULP across
+ * bundled SQLite builds. Keep exact hit ordering and every other field, while
+ * comparing scores at 15 significant digits (well below a ranking-relevant
+ * difference for this frozen corpus).
+ */
+function normalizeSearchPage(page: Record<string, unknown>): Record<string, unknown> {
+  const normalized = normalizePage(page);
+  const items = (normalized.items as Array<Record<string, unknown>>).map((item) => ({
+    ...item,
+    ...(typeof item.score === 'number' && Number.isFinite(item.score)
+      ? { score: Number(item.score.toPrecision(15)) }
+      : {}),
+  }));
+  return { ...normalized, items };
 }
 
 function projectKey(project: { adapterId: string; nativeProjectKey: string }): string {

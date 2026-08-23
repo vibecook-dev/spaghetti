@@ -29,7 +29,9 @@ from scripts.agent_support.contracts import (
 )
 from scripts.agent_support.sanitize_fixture import sanitize_document, scan_prohibited
 from scripts.agent_support.promote_claude_durable import (
+    DEFAULT_CANDIDATE,
     PromotionPreflightError,
+    _candidate_promotion_identity,
     _load_object,
     validate_compatible_cycle_telemetry,
     validate_performance_report,
@@ -656,6 +658,11 @@ class AccessBudgetTests(unittest.TestCase):
 
 
 class SchemaAndRepositoryTests(unittest.TestCase):
+    def test_promotion_preflight_default_is_the_retained_candidate(self) -> None:
+        release_id, digest = _candidate_promotion_identity(DEFAULT_CANDIDATE)
+        self.assertEqual(release_id, "claude-code-support-2026-08-21")
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+
     def test_promotion_preflight_rejects_symlinked_review_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

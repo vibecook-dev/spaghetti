@@ -197,6 +197,11 @@ def _safe_repo_path(raw_path: str) -> tuple[Path | None, str | None]:
     return resolved, None
 
 
+def _repo_relative_path(path: Path) -> str:
+    """Render repository paths in the portable form required by manifests."""
+    return path.relative_to(REPO_ROOT).as_posix()
+
+
 def _duplicates(values: Iterable[str]) -> set[str]:
     seen: set[str] = set()
     duplicates: set[str] = set()
@@ -229,7 +234,7 @@ class Bundle:
 
     @property
     def label(self) -> str:
-        return str(self.directory.relative_to(REPO_ROOT))
+        return _repo_relative_path(self.directory)
 
     def document(self, name: str) -> Any:
         return self.documents[name]
@@ -242,16 +247,16 @@ def _load_bundle(release_path: Path, schemas: Mapping[str, Mapping[str, Any]]) -
     for filename, schema_filename in DOCUMENT_SCHEMAS.items():
         path = directory / filename
         if not path.is_file():
-            errors.append(f"{directory.relative_to(REPO_ROOT)}: missing {filename}")
+            errors.append(f"{_repo_relative_path(directory)}: missing {filename}")
             continue
         try:
             document = _load_json(path)
         except (OSError, json.JSONDecodeError) as error:
-            errors.append(f"{path.relative_to(REPO_ROOT)}: invalid JSON: {error}")
+            errors.append(f"{_repo_relative_path(path)}: invalid JSON: {error}")
             continue
         documents[filename] = document
         schema_errors = validate_json_schema(document, schemas[schema_filename])
-        errors.extend(f"{path.relative_to(REPO_ROOT)}: {error}" for error in schema_errors)
+        errors.extend(f"{_repo_relative_path(path)}: {error}" for error in schema_errors)
     if errors or len(documents) != len(DOCUMENT_SCHEMAS):
         return None, errors
     return Bundle(directory, documents), []
@@ -289,7 +294,7 @@ def _validate_evidence(bundle: Bundle) -> tuple[list[str], set[str]]:
     committed_fixtures = set(fixture_root.rglob("*.json")) if fixture_root.is_dir() else set()
     for fixture in sorted(committed_fixtures):
         findings = scan_fixture_file(fixture)
-        errors.extend(f"{fixture.relative_to(REPO_ROOT)}: {finding}" for finding in findings)
+        errors.extend(f"{_repo_relative_path(fixture)}: {finding}" for finding in findings)
         try:
             fixture_value = _load_json(fixture)
         except (OSError, json.JSONDecodeError):
@@ -297,13 +302,13 @@ def _validate_evidence(bundle: Bundle) -> tuple[list[str], set[str]]:
         metadata = fixture_value.get("_fixture") if isinstance(fixture_value, dict) else None
         if not isinstance(metadata, dict) or metadata.get("sanitizer_version") != SANITIZER_VERSION:
             errors.append(
-                f"{fixture.relative_to(REPO_ROOT)}: missing or unsupported RFC 012A "
+                f"{_repo_relative_path(fixture)}: missing or unsupported RFC 012A "
                 f"fixture metadata (expected sanitizer_version {SANITIZER_VERSION})"
             )
         if fixture not in referenced_fixtures:
-            errors.append(f"{fixture.relative_to(REPO_ROOT)}: fixture is not referenced by an evidence claim")
+            errors.append(f"{_repo_relative_path(fixture)}: fixture is not referenced by an evidence claim")
     for fixture in sorted(referenced_fixtures - committed_fixtures):
-        errors.append(f"{fixture.relative_to(REPO_ROOT)}: fixture evidence is outside its candidate fixture directory")
+        errors.append(f"{_repo_relative_path(fixture)}: fixture evidence is outside its candidate fixture directory")
     if evidence["sanitizer"]["prohibited_scan"] == "pass" and any("fixtures/" in error for error in errors):
         errors.append(f"{bundle.label}/evidence.json: prohibited_scan says pass but fixture scanning failed")
     return errors, claim_set
@@ -647,7 +652,7 @@ def _validate_release(bundle: Bundle) -> list[str]:
         errors.append(f"{bundle.label}: conformance support-release ID does not match ledger")
     if release["artifact_compatibility"]["family"] != ads["native_artifact"]["family"]:
         errors.append(f"{bundle.label}: artifact family differs between ADS and ledger")
-    if ads["scope_program_manifest"] != str((bundle.directory / "scope-programs.json").relative_to(REPO_ROOT)):
+    if ads["scope_program_manifest"] != _repo_relative_path(bundle.directory / "scope-programs.json"):
         errors.append(f"{bundle.label}/ads.json: scope_program_manifest does not name this bundle")
 
     expected_reference_files = {
@@ -659,7 +664,7 @@ def _validate_release(bundle: Bundle) -> list[str]:
     }
     for reference_name, filename in expected_reference_files.items():
         reference = release["references"][reference_name]
-        expected_path = str((bundle.directory / filename).relative_to(REPO_ROOT))
+        expected_path = _repo_relative_path(bundle.directory / filename)
         if reference["path"] != expected_path:
             errors.append(f"{bundle.label}/support-release.json: {reference_name} path must be {expected_path}")
         if reference["sha256"] != _sha256(bundle.directory / filename):
@@ -822,10 +827,10 @@ def validate_repository() -> tuple[list[Bundle], list[str]]:
         try:
             schema = _load_json(path)
         except (OSError, json.JSONDecodeError) as error:
-            errors.append(f"{path.relative_to(REPO_ROOT)}: invalid schema JSON: {error}")
+            errors.append(f"{_repo_relative_path(path)}: invalid schema JSON: {error}")
             continue
         if not isinstance(schema, dict) or "$id" not in schema:
-            errors.append(f"{path.relative_to(REPO_ROOT)}: schema must be an object with $id")
+            errors.append(f"{_repo_relative_path(path)}: schema must be an object with $id")
             continue
         schemas[filename] = schema
     if len(schemas) != len(DOCUMENT_SCHEMAS):

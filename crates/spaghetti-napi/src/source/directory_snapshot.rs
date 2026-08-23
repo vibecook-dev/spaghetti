@@ -630,8 +630,6 @@ fn next_generation(current: u64) -> Result<u64, SourceDriverError> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-
     use tempfile::TempDir;
 
     use super::*;
@@ -868,6 +866,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn non_utf8_names_keep_binary_identity_separate_from_display() {
+        use std::ffi::OsString;
         use std::os::unix::ffi::OsStringExt;
         use std::path::PathBuf;
 
