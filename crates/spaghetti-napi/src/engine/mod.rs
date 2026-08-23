@@ -23,7 +23,7 @@ mod projection;
 mod query_identity;
 mod query_pool;
 mod runtime_query;
-mod runtime_semantic_merge;
+pub(crate) mod runtime_semantic_merge;
 mod runtime_semantic_projection;
 mod runtime_usage_query;
 mod runtime_usage_totals_query;

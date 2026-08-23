@@ -28,7 +28,6 @@ export {
   type ClaudeCodeLiveUpdates,
   type ClaudeCodeLiveDiskIngest,
   watchSessionTranscript,
-  watchSessionObservationShadow,
 } from './live/index.js';
 
 export interface ClaudeCodeSourceOptions {

@@ -31,3 +31,6 @@ __pycache__/
 # Live-tail checkpoint state (runtime artifact, never committed)
 .spaghetti-live-state.json
 .spaghetti-live-state.json.tmp
+
+# ts-rs default export location; the tracked copy lives in packages/sdk/src/generated (pnpm generate:types)
+crates/spaghetti-napi/bindings/

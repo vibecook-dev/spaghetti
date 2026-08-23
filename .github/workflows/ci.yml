@@ -31,7 +31,8 @@ jobs:
         run: pnpm build
       # `pnpm build` regenerates committed artifacts: the napi type surface
       # (crates/spaghetti-napi/index.d.ts), Cargo.lock, and the SDK's bundled
-      # parse-worker.js. Nothing checked they stayed current, so they rotted
+      # parse-worker.js; `pnpm generate:types` regenerates the ts-rs bindings in
+      # packages/sdk/src/generated. Nothing checked they stayed current, so they rotted
       # silently — parse-worker.js had drifted into a fork of the project
       # parser still importing the long-deleted `packages/core`, and would
       # have kept its own stale copy of any parser fix.
@@ -47,9 +48,20 @@ jobs:
       # identical bytes on every host. Running it once is the whole signal,
       # and confining it to one runner avoids failing on incidental
       # cross-platform differences in generated output.
+      # The ts-rs bindings (packages/sdk/src/generated/) are not a `pnpm build`
+      # product — they come from `cargo test --lib export_bindings`, so they get
+      # their own regeneration step before the diff below can judge them.
+      - name: Generate Rust -> TypeScript bindings
+        if: matrix.os == 'ubuntu-latest'
+        run: pnpm generate:types
       - name: Generated files are current
         if: matrix.os == 'ubuntu-latest'
-        run: git diff --exit-code -- Cargo.lock crates/spaghetti-napi packages/sdk/src/workers/parse-worker.js
+        run: >-
+          git diff --exit-code --
+          Cargo.lock
+          crates/spaghetti-napi
+          packages/sdk/src/generated
+          packages/sdk/src/workers/parse-worker.js
       - name: Typecheck
         run: pnpm typecheck
       # Runners have no ~/.claude, so the real-data half of every validator

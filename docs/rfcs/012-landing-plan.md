@@ -171,14 +171,27 @@ it is the largest and depends on L2's codegen).
 
 ### Wave 2 — after Wave 1 merges
 
-- **L5 adapters/012A**: collapse per-adapter triplicates; `adapter/registry.rs`
-  tests → `tests.rs` and shrink; one `version` field replacing
-  candidate/promoted; promote real Claude/Codex/Grok support releases; delete
-  `candidate-2026-08-15`; keep fixture-agent as a test fixture only.
+- **L5 adapters/012A** (now the critical path for Chopsticks): the Claude
+  decoder emits only 3 of the 11 RFC 012C fact families (actor-run,
+  actor-affiliation, usage-v2); message, content-block, tool, effective-state,
+  user-input-request, task, plan, and native-marker have reducers, fixtures and
+  observer wire but **no emitter**. L5 makes the Claude adapter emit them
+  (RFC 012A: adapters emit facts only), with `ts_rs::TS` on `adapter/facts.rs`
+  so `SemanticEvent.value` is typed; then collapse per-adapter triplicates;
+  one `version` field replacing candidate/promoted; promote real
+  Claude/Codex/Grok support releases; delete `candidate-2026-08-15`; restore
+  the 08-15 scope relation set so `observer/scope.rs` evaluates the declared
+  `ScopeProgram` instead of resolving locators in Rust; keep fixture-agent as
+  a test fixture only.
 - **L6 napi surface**: collapse `Engine*` mirror DTOs to what napi-rs
-  needs; readiness vector as the only status surface.
-- **L7 perf**: measure §6 on the production-shaped corpus; fix regressions;
-  publish one report.
+  needs; delete the 2,455-line hand-written mirror of `index.d.ts` in
+  `packages/sdk/src/native.ts` (import the generated `@vibecook/spaghetti-sdk-native`
+  types instead); readiness vector as the only status surface.
+- **L7 perf**: observer bootstrap is 15 ms/MB (662 ms for a 43.7 MB root;
+  budget 500 ms @ 50 MB) and per-append latency scales with member count
+  (38 ms p50 at 674 objects) because every reconciliation pass re-opens every
+  member — implement a watcher-directed dirty set; then measure all §6 budgets
+  on the production-shaped corpus and publish one report.
 - **L8 docs**: trim 012B/C/D to ≤ 300-line semantic contracts matching what
   shipped; archive censuses/runbooks under `docs/rfcs/archive/`; README and
   CHANGELOG updated.
@@ -194,10 +207,10 @@ it is the largest and depends on L2's codegen).
 
 | Item | State | Evidence |
 | --- | --- | --- |
-| Wave 0 | in progress 2026-08-23 | this file; `allow(dead_code)` removed; ratchets |
-| L1 observer | not started | — |
-| L2 sdk-api | not started | — |
-| L3 usage | not started | — |
-| L4 catalog | not started | — |
+| Wave 0 | done 2026-08-23 (local `main` `3db39a7`) | plan + lane briefs landed; `allow(dead_code)` removed (`a08c013`); code-shape ratchet in `validate-all.sh` (`8753f28`); lane worktrees `land-l1..l4` on the SSD; push of `main` + archive branch awaiting owner go-ahead |
+| L1 observer | **merged** `90e6bec` + `4a19e28` (2026-08-23) | `crates/spaghetti-napi/src/observer/` 3,310 prod / 1,201 test LOC (budget 6k/4k); 97,486 lines deleted (scoped_observation tree, rfc012d fixtures/contracts, observation_contract, `adapter/registry.rs` 17,800→992); all 11 families on the wire, 23 behavioral file tests + Node smoke test; `SpaghettiSessionObserver` napi class, ts-rs types generated; adapter-neutral (resolves `dyn AgentAdapter` from the registry); perf: append→consumer p50 0.2 ms (1 object) / 38 ms (674 objects), bootstrap 662 ms for 43.7 MB (budget missed ~1.5×, see Wave 2 L7); JSON-string transport measured 2.3–2.6× faster than napi object marshalling; Rust 921/921, SDK 424/0, CLI 110/0, validate-all 9/9 |
+| L2 sdk-api | Phase A **merged** `a0bc677` (2026-08-23); Phase B (`observeSession` wrapper) waits on L1 | ts-rs pipeline + `pnpm generate:types` + CI diff; 13,694 lines of hand-written contracts/shims deleted; barrel 38 → 15 export statements (allowlist); VibeField Phase A refs generated (`packages/sdk/src/vibefield.ts` + test on real engine output); `watchSessionTranscript` restored to the barrel (it was missing at base); Rust 1204/1204, SDK 421/0, CLI 110/0, validate-all 9/9 |
+| L3 usage | in progress (Opus lane, branch `land/l3-usage`) | — |
+| L4 catalog | in progress (Opus lane, branch `land/l4-catalog`) | — |
 | Wave 2 | not started | — |
 | Wave 3 | not started | — |

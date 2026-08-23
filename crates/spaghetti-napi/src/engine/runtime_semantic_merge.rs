@@ -791,4 +791,4 @@ pub(crate) fn parse_rfc012c_interaction_v1_json(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

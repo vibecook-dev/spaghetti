@@ -297,13 +297,13 @@
         },
         {
           "kind": "code_reference",
-          "path": "crates/spaghetti-napi/src/scoped_observation.rs",
+          "path": "crates/spaghetti-napi/src/observer/state.rs",
           "sha256": null,
           "locator": "selected actor-run, actor-affiliation, and usage-v2 envelope mapping"
         },
         {
           "kind": "conformance_test",
-          "path": "crates/spaghetti-napi/src/scoped_observation.rs",
+          "path": "crates/spaghetti-napi/src/observer/state.rs",
           "sha256": null,
           "locator": "rfc012c_fixture_identities_survive_selected_scoped_envelopes"
         }

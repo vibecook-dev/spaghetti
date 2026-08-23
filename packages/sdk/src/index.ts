@@ -1,78 +1,104 @@
 /**
- * @vibecook/spaghetti-sdk — canonical Rust observation/query API plus
- * transport-neutral DTOs and presentation helpers.
+ * `@vibecook/spaghetti-sdk` — the public API.
+ *
+ * ## The allowlist
+ *
+ * This file is an allowlist, not a re-export of whatever happens to be in
+ * `src/`. RFC 012 landing plan §4 makes it one because the alternative already
+ * happened: `export *` of 25 hand-written contract modules put 580 symbols on
+ * the public API that no consumer ever imported, and every one of them then had
+ * to be kept working. The rule that replaced it:
+ *
+ * > Every export below belongs to a named consumer. If you cannot name the
+ * > consumer, it does not go here — put it in the module and import it
+ * > directly from repository code.
+ *
+ * `scripts/code_shape/check_code_shape.py` counts the export statements in this
+ * file and fails when the count grows. That is a ratchet, not a budget: adding
+ * a group is a deliberate act that lowers something else or updates the
+ * baseline on purpose.
+ *
+ * `export *` is allowed only for the barrels named below, each of which is
+ * itself curated. It is never allowed for a `contracts/` module — those are
+ * internal wire validators, and the lanes replacing their callers delete them.
+ *
+ * ## Consumers
+ *
+ * | Group | Consumer | Notes |
+ * | --- | --- | --- |
+ * | Domain and API DTOs | playground, CLI | `types/`, `api`, data query shapes |
+ * | Transport-neutral client | playground, CLI, IPC hosts | `client/`, `observation` |
+ * | Native engine surface | playground, CLI | `native` |
+ * | Legacy live tail | **Chopsticks** (pinned) | see below |
+ * | Session observer | **Chopsticks** | Phase B; see the placeholder below |
+ * | VibeField Phase A | **VibeField** | generated identity + durable watermark |
+ * | Presentation helpers | playground | source display metadata |
+ * | Settings | CLI (`spag doctor`) | engine selection, db path |
+ * | Change events | playground | live invalidation |
+ *
+ * Chopsticks pins this package and imports exactly `watchSessionTranscript`,
+ * `SessionMessage`, and `SessionTranscriptTail`. Those three are load-bearing
+ * for a downstream release and do not change until `observeSession` ships and
+ * Chopsticks has migrated — the landing plan gives it one release of overlap.
  *
  * The retired TypeScript ingestion/query implementation is deliberately not
- * reachable from this package entry. Repository-only differential tests use
+ * reachable from this entry point. Repository-only differential tests use
  * `legacy-oracle.ts` directly.
  */
 
-// Public domain and compatibility DTOs (types erase from runtime bundles).
+// ── Domain and API DTOs (types erase from runtime bundles) ─────────────────
 export * from './types/index.js';
 export * from './api.js';
 export * from './data/segment-types.js';
 export * from './data/summary-types.js';
 export * from './data/timeline-query.js';
 
-// RFC 012A topology-independent identity, qualification, and coverage wire
-// contracts. Rust derives references; portable consumers validate and compare.
-export * from './contracts/rfc012a.js';
-
-// RFC 012C portable semantic values plus the bounded unknown-evidence
-// aggregate/sample snapshot. The latter is not itself query or observer
-// authority; enclosing RFC 012B/012D contracts bind scope and lifecycle.
-export * from './contracts/rfc012c.js';
-export * from './contracts/rfc012c-unknown-evidence.js';
-export {
-  mergeDurableAndScopedUsage,
-  type DurableLiveUsageMerge,
-  type DurableUsageContribution,
-  type ScopedUsageObserverEvent,
-} from './runtime/usage-v2-live-merge.js';
-
-// RFC 012D exact-version negotiation, contextual envelopes, and the first
-// store-free exact-known-object native observer owner. Artifact reads and
-// dynamic descendant composition remain gated on their full scoped contracts.
-export * from './contracts/rfc012d.js';
-export * from './contracts/rfc012d-actor-envelope.js';
-export * from './contracts/rfc012d-artifact.js';
-export * from './contracts/rfc012d-artifact-availability.js';
-export * from './contracts/rfc012d-artifact-availability-envelope.js';
-export * from './contracts/rfc012d-capability-snapshot.js';
-export * from './contracts/rfc012d-close.js';
-export * from './contracts/rfc012d-completion-envelope.js';
-export * from './contracts/rfc012d-continuity-envelope.js';
-export * from './contracts/rfc012d-event-envelope.js';
-export * from './contracts/rfc012d-known-envelope.js';
-export * from './contracts/rfc012d-replacement-manifest.js';
-export * from './contracts/rfc012d-scope-coverage.js';
-export * from './contracts/rfc012d-source-envelope.js';
-export * from './contracts/rfc012d-unknown-wire.js';
-export * from './contracts/rfc012d-usage-envelope.js';
-export * from './contracts/rfc012d-watermark.js';
-export {
-  SCOPED_OBSERVATION_REQUEST_CONTRACT_VERSION,
-  ScopedObservationRequestError,
-  ScopedObservationTransportError,
-  observeSession,
-  type SessionObservationApply,
-  type SessionObservationRequest,
-  type SessionObservationRootIdentity,
-  type SessionObserver,
-} from './scoped-observation.js';
-
-// Transport-neutral async client and the sole-owner production service.
+// ── Transport-neutral async client and the sole-owner production service ───
 export * from './client/index.js';
 export * from './observation.js';
 
-// Low-level native engine lifecycle and its typed canonical query contract.
+// ── Low-level native engine lifecycle and its typed query contract ─────────
 export * from './native.js';
 
-// Presentation-only source metadata. These helpers never inspect source data.
+// ── Legacy live tail — Chopsticks pins these three names ───────────────────
+// Superseded by `observeSession` (RFC 012 landing plan §3.1) once L1's native
+// observer lands. Kept working for one release after that, then removed.
+// `SessionMessage` reaches consumers through `./types/index.js` above.
+export { watchSessionTranscript } from './live/session-tail.js';
+export type {
+  SessionTranscriptEvent,
+  SessionTranscriptTail,
+  WatchSessionTranscriptOptions,
+} from './live/session-tail.js';
+
+// ── Store-free session observer ────────────────────────────────────────────
+// `observeSession(request): SessionObserver` lands here in Phase B, wrapping
+// L1's native observer with generated event types. The previous placeholder
+// wrapper was removed along with the native transport it wrapped: it had no
+// consumer, and shipping a second observer API to delete later is exactly the
+// accretion this landing exists to stop.
+
+// ── VibeField Phase A — generated identity and durable watermark ───────────
+export {
+  isSameEntity,
+  isSameNativeIdentity,
+  isSameRevision,
+  isSameSnapshot,
+  queryWatermark,
+  type DurableQueryWatermark,
+  type ExternalEntityRef,
+  type NativeIdentity,
+  type ProjectRef,
+  type SemanticRevisionRef,
+  type SessionRef,
+} from './vibefield.js';
+
+// ── Presentation-only source metadata. These never inspect source data. ────
 export { sourceReportsPerMessageTokens, sourceDisplayName, sourceDisplayRoot } from './sources/capabilities.js';
 
-// Transitional settings remain readable for upgrade diagnostics. Production
-// observation always uses Rust; no root export constructs a TypeScript owner.
+// ── Settings: engine selection, readable for upgrade diagnostics ───────────
+// Production observation always uses Rust; no root export constructs a
+// TypeScript owner.
 export {
   type IngestEngine,
   type SpaghettiSettings,
@@ -83,7 +109,7 @@ export {
   settingsPath,
 } from './settings.js';
 
-// Compatibility invalidation types used by existing presentation clients.
+// ── Change events: compatibility invalidation for presentation clients ─────
 export type { Change, ChangeType, ChangeTopic, SubscribeOptions, Dispose } from './live/change-events.js';
 export {
   isSessionMessageAdded,
