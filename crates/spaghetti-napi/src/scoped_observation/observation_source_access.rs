@@ -2339,6 +2339,25 @@ impl ScopedObservationRelatedObjectDecodedSnapshot {
 }
 
 impl ScopedObservationRelatedObjectState {
+    pub(super) fn relation_id(&self) -> &str {
+        self.identity.relation_id()
+    }
+
+    pub(super) fn object_token(&self) -> AccessObjectToken {
+        self.identity.object_token()
+    }
+
+    pub(super) fn source(&self) -> &ScopedSourceObjectIdentity {
+        self.identity.source()
+    }
+
+    pub(super) fn matches_attachment(
+        &self,
+        authority: &Arc<ScopedObservationAttachmentAuthority>,
+    ) -> bool {
+        Arc::ptr_eq(&self.identity.attachment_authority, authority)
+    }
+
     fn matches_binding(&self, binding: &ScopedObservationRelatedObjectBinding) -> bool {
         let actual = binding.identity();
         let checkpoint_matches_kind = match (&self.checkpoint, self.kind) {

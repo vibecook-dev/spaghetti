@@ -20,9 +20,10 @@ use crate::adapter::{
 };
 use crate::observation_contract::{ObservationContractOffer, ObservationContractRequest};
 use crate::source::{
-    confined_relative_path_key, platform_path_key, validate_relation_id, AccessPhase,
-    AppendDelimitedFile, AppendRead, AuthorizedScopeAccessPlan, RecordOrigin, ScopeIdentityInput,
-    SourceMediaType, MAX_IDENTITY_VALUE_BYTES,
+    confined_relative_path_key, platform_path_key, validate_relation_id, AccessObjectToken,
+    AccessOperation, AccessPhase, AppendDelimitedFile, AppendRead, AuthorizedScopeAccessPlan,
+    RecordOrigin, ScopeAccessRequest, ScopeIdentityInput, SourceMediaType,
+    MAX_IDENTITY_VALUE_BYTES,
 };
 
 use super::{
@@ -36,12 +37,14 @@ use super::{
     ScopedObservationAppendPassRequest, ScopedObservationAsyncHandle,
     ScopedObservationAsyncOwnerRunResult, ScopedObservationAsyncResyncFailure,
     ScopedObservationAsyncRuntime, ScopedObservationAsyncStoppedOwners,
-    ScopedObservationConsumerOfferError, ScopedObservationDeliveryLimits,
-    ScopedObservationDirectoryPassBinding, ScopedObservationNativeWatchBackend,
-    ScopedObservationNativeWatchCallback, ScopedObservationNativeWatcher,
-    ScopedObservationNativeWatcherRecoveryPolicy, ScopedObservationOpenDrainError,
-    ScopedObservationOwnedIdentityInput, ScopedObservationProjectionLimits,
-    ScopedObservationProjectionSink, ScopedObservationQueueLimits,
+    ScopedObservationAttachmentAuthority, ScopedObservationConsumerOfferError,
+    ScopedObservationDeliveryLimits, ScopedObservationDirectoryPassBinding,
+    ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
+    ScopedObservationNativeWatcher, ScopedObservationNativeWatcherRecoveryPolicy,
+    ScopedObservationOpenDrainError, ScopedObservationOwnedIdentityInput,
+    ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
+    ScopedObservationQueueLimits, ScopedObservationRelatedObjectInitialObservation,
+    ScopedObservationRelatedObjectRefreshObservation, ScopedObservationRelatedObjectState,
     ScopedObservationScopeJoinSnapshot, ScopedObservationSourceOwnerRetryPolicy,
     ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
     ScopedObservationTrustedAccessRequest, ScopedObservationUnknownWireNegotiation,
@@ -544,6 +547,7 @@ impl std::fmt::Debug for PreparedScopedRelatedSourceBinding {
 /// snapshot. Equal native coordinates from independent evidence owners are
 /// read once while preserving every owner group for later lifecycle proof.
 pub(crate) struct PreparedScopedRelatedReconciliationPlan {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     declared_relation_ids: BTreeSet<String>,
     sources: Vec<PreparedScopedRelatedSourceBinding>,
     snapshot_retained_bytes: usize,
@@ -567,9 +571,217 @@ impl std::fmt::Debug for PreparedScopedRelatedReconciliationPlan {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PreparedScopedRelatedReconciliationPlan")
+            .field("has_attachment_authority", &true)
             .field("declared_relation_ids", &self.declared_relation_ids)
             .field("source_count", &self.sources.len())
             .field("snapshot_retained_bytes", &self.snapshot_retained_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+fn prepared_related_source_order(
+    left: &PreparedScopedRelatedSourceBinding,
+    right: &PreparedScopedRelatedSourceBinding,
+) -> std::cmp::Ordering {
+    left.relation_id.cmp(&right.relation_id).then_with(|| {
+        left.parameter
+            .identity_inputs()
+            .iter()
+            .map(|input| (input.name(), input.value()))
+            .cmp(
+                right
+                    .parameter
+                    .identity_inputs()
+                    .iter()
+                    .map(|input| (input.name(), input.value())),
+            )
+    })
+}
+
+fn prepared_related_source_matches_definition(
+    source: &PreparedScopedRelatedSourceBinding,
+    definition: &PreparedScopedRelatedRelationBinding,
+) -> bool {
+    source.relation_id == definition.relation_id
+        && source.primitive == definition.primitive
+        && source.bounds == definition.bounds
+        && source.parameter.identity_inputs().len() == definition.identity_input_names.len()
+        && source
+            .parameter
+            .identity_inputs()
+            .iter()
+            .zip(&definition.identity_input_names)
+            .all(|(actual, expected)| actual.name() == expected)
+        && !source.evidence_groups.is_empty()
+}
+
+fn prepared_related_source_token(
+    source: &PreparedScopedRelatedSourceBinding,
+) -> Result<AccessObjectToken, ConfiguredScopedObservationRuntimeError> {
+    let mut components = Vec::with_capacity(source.parameter.identity_inputs().len() * 2);
+    for input in source.parameter.identity_inputs() {
+        components.push(input.name().as_bytes());
+        components.push(input.value());
+    }
+    AccessObjectToken::derive(source.relation_id(), &components)
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
+}
+
+/// One current related source together with the fact-owner groups that
+/// justified its exact native coordinate. Source lifecycle state alone is not
+/// enough: when a join owner retracts, later admission must be able to retire
+/// the source under the prior owner set rather than inventing membership from
+/// the still-readable native object.
+#[derive(Clone)]
+pub(crate) struct PreparedScopedRelatedRetainedSource {
+    binding: PreparedScopedRelatedSourceBinding,
+    state: ScopedObservationRelatedObjectState,
+}
+
+impl PreparedScopedRelatedRetainedSource {
+    pub(crate) fn binding(&self) -> &PreparedScopedRelatedSourceBinding {
+        &self.binding
+    }
+
+    pub(crate) fn state(&self) -> &ScopedObservationRelatedObjectState {
+        &self.state
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedRetainedSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedRelatedRetainedSource")
+            .field("binding", &self.binding)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Complete, attachment-bound related-source state after one successful
+/// reconciliation. It is intentionally non-serializable and retains no
+/// native path. A failed later pass leaves this value untouched.
+pub(crate) struct PreparedScopedRelatedReconciliationState {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    declared_relation_ids: BTreeSet<String>,
+    sources: BTreeMap<AccessObjectToken, PreparedScopedRelatedRetainedSource>,
+    snapshot_retained_bytes: usize,
+}
+
+impl PreparedScopedRelatedReconciliationState {
+    pub(crate) fn declared_relation_ids(&self) -> impl Iterator<Item = &str> {
+        self.declared_relation_ids.iter().map(String::as_str)
+    }
+
+    pub(crate) fn sources(
+        &self,
+    ) -> &BTreeMap<AccessObjectToken, PreparedScopedRelatedRetainedSource> {
+        &self.sources
+    }
+
+    pub(crate) fn snapshot_retained_bytes(&self) -> usize {
+        self.snapshot_retained_bytes
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedReconciliationState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedRelatedReconciliationState")
+            .field("has_attachment_authority", &true)
+            .field("declared_relation_ids", &self.declared_relation_ids)
+            .field("source_count", &self.sources.len())
+            .field("snapshot_retained_bytes", &self.snapshot_retained_bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One successful source attempt in deterministic plan order. Initial and
+/// refresh outcomes remain distinct so later admission can preserve exact
+/// replacement semantics without reconstructing them from checkpoints.
+pub(crate) enum PreparedScopedRelatedSourceObservation {
+    Initial(ScopedObservationRelatedObjectInitialObservation),
+    Refresh(ScopedObservationRelatedObjectRefreshObservation),
+}
+
+impl PreparedScopedRelatedSourceObservation {
+    fn refresh_state(&self) -> Option<ScopedObservationRelatedObjectState> {
+        match self {
+            Self::Initial(observation) => observation.refresh_state(),
+            Self::Refresh(observation) => observation.refresh_state(),
+        }
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedSourceObservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Initial(observation) => {
+                formatter.debug_tuple("Initial").field(observation).finish()
+            }
+            Self::Refresh(observation) => {
+                formatter.debug_tuple("Refresh").field(observation).finish()
+            }
+        }
+    }
+}
+
+pub(crate) struct PreparedScopedRelatedObservedSource {
+    object_token: AccessObjectToken,
+    observation: PreparedScopedRelatedSourceObservation,
+}
+
+impl PreparedScopedRelatedObservedSource {
+    pub(crate) fn object_token(&self) -> AccessObjectToken {
+        self.object_token
+    }
+
+    pub(crate) fn observation(&self) -> &PreparedScopedRelatedSourceObservation {
+        &self.observation
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedObservedSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedRelatedObservedSource")
+            .field("has_object_token", &true)
+            .field("observation", &self.observation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Atomic output of one related-source pass. `next_state` is complete for the
+/// current join snapshot; `retired_sources` retains the prior fact-owner and
+/// lifecycle authority needed to order later retractions. No caller-owned
+/// state changes unless this whole value is returned.
+pub(crate) struct PreparedScopedRelatedReconciliationBatch {
+    observations: Vec<PreparedScopedRelatedObservedSource>,
+    retired_sources: Vec<PreparedScopedRelatedRetainedSource>,
+    next_state: PreparedScopedRelatedReconciliationState,
+}
+
+impl PreparedScopedRelatedReconciliationBatch {
+    pub(crate) fn observations(&self) -> &[PreparedScopedRelatedObservedSource] {
+        &self.observations
+    }
+
+    pub(crate) fn retired_sources(&self) -> &[PreparedScopedRelatedRetainedSource] {
+        &self.retired_sources
+    }
+
+    pub(crate) fn next_state(&self) -> &PreparedScopedRelatedReconciliationState {
+        &self.next_state
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedRelatedReconciliationBatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedRelatedReconciliationBatch")
+            .field("observation_count", &self.observations.len())
+            .field("retired_source_count", &self.retired_sources.len())
+            .field("next_state", &self.next_state)
             .finish_non_exhaustive()
     }
 }
@@ -916,9 +1128,233 @@ impl PreparedConfiguredAppendRuntime {
             });
         }
         Ok(PreparedScopedRelatedReconciliationPlan {
+            attachment_authority: Arc::clone(&self.host.attachment_authority),
             declared_relation_ids,
             sources,
             snapshot_retained_bytes: snapshot.retained_bytes(),
+        })
+    }
+
+    /// Execute one complete, deterministic related-object pass without
+    /// mutating admission or delivery. The plan, pass, and any retained state
+    /// must all belong to this exact attachment. Every prior state is checked
+    /// before the first reservation so a foreign or partially corrupted map
+    /// cannot cause native I/O.
+    pub(crate) fn execute_related_sources(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        plan: PreparedScopedRelatedReconciliationPlan,
+        previous: Option<&PreparedScopedRelatedReconciliationState>,
+        phase: AccessPhase,
+        observed_at: i64,
+    ) -> Result<PreparedScopedRelatedReconciliationBatch, ConfiguredScopedObservationRuntimeError>
+    {
+        if pass.pass_id() == 0
+            || !Arc::ptr_eq(&self.host.state, &pass.state)
+            || !Arc::ptr_eq(&self.host.attachment_authority, &pass.attachment_authority)
+            || self.host.root_identity != pass.root_identity
+            || !Arc::ptr_eq(&self.host.attachment_authority, &plan.attachment_authority)
+            || (phase == AccessPhase::Initial && previous.is_some())
+        {
+            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+        }
+
+        let definitions = self
+            .related_relation_bindings
+            .iter()
+            .map(|binding| (binding.relation_id.as_str(), binding))
+            .collect::<BTreeMap<_, _>>();
+        let configured_relation_ids = definitions
+            .keys()
+            .map(|relation_id| (*relation_id).to_string())
+            .collect::<BTreeSet<_>>();
+        if configured_relation_ids != plan.declared_relation_ids {
+            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+        }
+
+        let mut planned_tokens = Vec::with_capacity(plan.sources.len());
+        let mut relation_source_counts = BTreeMap::<&str, usize>::new();
+        for (index, source) in plan.sources.iter().enumerate() {
+            let Some(definition) = definitions.get(source.relation_id()).copied() else {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            };
+            if !prepared_related_source_matches_definition(source, definition)
+                || source.evidence_groups.iter().any(|group| {
+                    group.is_empty()
+                        || group
+                            .windows(2)
+                            .any(|pair| pair[0].fact_id() >= pair[1].fact_id())
+                })
+                || index > 0
+                    && prepared_related_source_order(&plan.sources[index - 1], source)
+                        != std::cmp::Ordering::Less
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            let source_count = relation_source_counts
+                .entry(source.relation_id())
+                .or_default();
+            *source_count = source_count
+                .checked_add(1)
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            let max_objects = usize::try_from(definition.bounds.max_objects)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            if *source_count > max_objects {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            let token = prepared_related_source_token(source)?;
+            if planned_tokens.contains(&token) {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            planned_tokens.push(token);
+        }
+
+        if let Some(previous) = previous {
+            if !Arc::ptr_eq(
+                &self.host.attachment_authority,
+                &previous.attachment_authority,
+            ) || previous.declared_relation_ids != configured_relation_ids
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            for (token, retained) in &previous.sources {
+                let Some(definition) = definitions.get(retained.binding.relation_id()).copied()
+                else {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                };
+                if *token != retained.state.object_token()
+                    || *token != prepared_related_source_token(&retained.binding)?
+                    || retained.binding.relation_id() != retained.state.relation_id()
+                    || !retained
+                        .state
+                        .matches_attachment(&self.host.attachment_authority)
+                    || !super::source_belongs_to_root(
+                        retained.state.source(),
+                        &self.host.root_identity,
+                    )
+                    || !prepared_related_source_matches_definition(&retained.binding, definition)
+                {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+            }
+        }
+
+        let relation_ordinals = configured_relation_ids
+            .iter()
+            .enumerate()
+            .map(|(index, relation_id)| {
+                u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .map(|ordinal| (relation_id.as_str(), ordinal))
+                    .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let media_type = SourceMediaType::new("application/octet-stream")
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+        let mut observations = Vec::with_capacity(plan.sources.len());
+        let mut next_sources = BTreeMap::new();
+
+        for (index, (source, expected_token)) in
+            plan.sources.into_iter().zip(planned_tokens).enumerate()
+        {
+            let identity_inputs = source.borrowed_identity_inputs();
+            let reservation = pass
+                .reserve_observation_runtime_source(ScopeAccessRequest {
+                    relation_id: source.relation_id(),
+                    operation: AccessOperation::ObjectRead,
+                    phase,
+                    parent_token: None,
+                    identity_inputs: &identity_inputs,
+                    depth: 1,
+                    max_bytes: source.bounds.max_bytes,
+                    max_rows: 0,
+                })
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+            let actual_token = reservation.binding().object_token();
+            let source_instance_id = reservation.binding().source_instance_id();
+            if actual_token != expected_token {
+                reservation.fail_conservative();
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            let stream_id = *relation_ordinals
+                .get(source.relation_id())
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            let object_id = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            let origin = RecordOrigin {
+                source_instance_id,
+                stream_id,
+                object_id,
+                observed_at,
+                source_timestamp_hint: None,
+                media_type: media_type.clone(),
+            };
+            let observation = match previous.and_then(|state| state.sources.get(&actual_token)) {
+                Some(retained) => {
+                    if retained.binding.relation_id != source.relation_id
+                        || retained.binding.parameter != source.parameter
+                    {
+                        reservation.fail_conservative();
+                        return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                    }
+                    PreparedScopedRelatedSourceObservation::Refresh(
+                        reservation
+                            .observe_related_replace_refresh(&retained.state, &origin)
+                            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?,
+                    )
+                }
+                None => PreparedScopedRelatedSourceObservation::Initial(
+                    reservation
+                        .observe_initial_related_replace(&origin)
+                        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?,
+                ),
+            };
+            let Some(next_state) = observation.refresh_state() else {
+                return Err(ConfiguredScopedObservationRuntimeError::SourcePass);
+            };
+            if next_state.object_token() != actual_token
+                || next_state.relation_id() != source.relation_id
+                || !next_state.matches_attachment(&self.host.attachment_authority)
+                || !super::source_belongs_to_root(next_state.source(), &self.host.root_identity)
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            if next_sources
+                .insert(
+                    actual_token,
+                    PreparedScopedRelatedRetainedSource {
+                        binding: source,
+                        state: next_state,
+                    },
+                )
+                .is_some()
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            observations.push(PreparedScopedRelatedObservedSource {
+                object_token: actual_token,
+                observation,
+            });
+        }
+
+        let retired_sources = previous
+            .into_iter()
+            .flat_map(|state| state.sources.iter())
+            .filter(|(token, _)| !next_sources.contains_key(token))
+            .map(|(_, retained)| retained.clone())
+            .collect();
+        Ok(PreparedScopedRelatedReconciliationBatch {
+            observations,
+            retired_sources,
+            next_state: PreparedScopedRelatedReconciliationState {
+                attachment_authority: Arc::clone(&plan.attachment_authority),
+                declared_relation_ids: plan.declared_relation_ids,
+                sources: next_sources,
+                snapshot_retained_bytes: plan.snapshot_retained_bytes,
+            },
         })
     }
 

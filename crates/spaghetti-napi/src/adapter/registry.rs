@@ -422,7 +422,8 @@ pub(crate) mod tests {
     use crate::scoped_observation::configured_attachment::{
         prepare_configured_scoped_observation_attachment,
         ConfiguredScopedObservationRuntimeOptions, ConfiguredScopedObservationSupervisorRunResult,
-        ScopedConfiguredAttachmentRequest, ScopedConfiguredRootIdentity,
+        PreparedScopedRelatedSourceObservation, ScopedConfiguredAttachmentRequest,
+        ScopedConfiguredRootIdentity,
     };
     use crate::scoped_observation::{
         bind_observation_runtime_source_for_test,
@@ -2854,6 +2855,283 @@ pub(crate) mod tests {
         assert!(!error.to_string().contains("caller-injected-private-team"));
         assert_eq!(probe_calls.load(Ordering::Acquire), 2);
         assert_eq!(discover_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_related_reconciliation_is_atomic_owner_bound_and_path_free() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_related_object_registry(probe_calls, discover_calls);
+        let temp = TempDir::new().unwrap();
+        let root = temp
+            .path()
+            .join("configured-related-reconciliation-private-root");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::create_dir_all(root.join("teams/private-team-coordinate")).unwrap();
+        std::fs::write(root.join("sessions/session.jsonl"), b"root\n").unwrap();
+        let initial_payload = b"initial-private-related-document";
+        std::fs::write(
+            root.join("teams/private-team-coordinate/config.json"),
+            initial_payload,
+        )
+        .unwrap();
+
+        let prepared = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![root.clone()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap()
+        .unwrap()
+        .prepare_append_runtime(16, 16)
+        .unwrap();
+        let source_key = CanonicalSourceInstanceKey::derive(1, b"related-reconciler").unwrap();
+        let join_update = |native_fact_key: &[u8]| {
+            let fact_id = CanonicalFactId::native(
+                "fixture",
+                &source_key,
+                "runtime.actor-affiliation",
+                native_fact_key,
+            )
+            .unwrap();
+            ScopeJoinUpdate::new(
+                "team-config-from-evidence",
+                vec![ScopeJoinEvidence::new(
+                    fact_id,
+                    SemanticRevisionRef::new(
+                        FactRevisionId::derive(&fact_id, 1, b"related-reconciler-revision")
+                            .unwrap(),
+                    ),
+                )],
+                vec![ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
+                    "team-name",
+                    b"private-team-coordinate".to_vec(),
+                )
+                .unwrap()])
+                .unwrap()],
+            )
+            .unwrap()
+        };
+        let snapshot = ScopedObservationScopeJoinSnapshot::from_updates_for_test(vec![
+            join_update(b"first-owner"),
+            join_update(b"second-owner"),
+        ])
+        .unwrap();
+        let expected_token = AccessObjectToken::derive(
+            "team-config-from-evidence",
+            &[
+                b"team-name".as_slice(),
+                b"private-team-coordinate".as_slice(),
+            ],
+        )
+        .unwrap();
+
+        let pass = prepared.host().begin_pass().unwrap();
+        let initial = prepared
+            .execute_related_sources(
+                &pass,
+                prepared.plan_related_sources(&snapshot).unwrap(),
+                None,
+                AccessPhase::Initial,
+                100,
+            )
+            .unwrap();
+        let initial_report = pass.finish();
+        assert_eq!(initial.observations().len(), 1);
+        assert_eq!(initial.observations()[0].object_token(), expected_token);
+        let PreparedScopedRelatedSourceObservation::Initial(observation) =
+            initial.observations()[0].observation()
+        else {
+            panic!("the first related reconciliation must retain an initial observation")
+        };
+        let decoded = observation.present_snapshot().unwrap();
+        assert_eq!(decoded.generation(), 1);
+        assert_eq!(decoded.revision(), Revision::digest(initial_payload));
+        assert_eq!(initial.next_state().sources().len(), 1);
+        assert_eq!(
+            initial
+                .next_state()
+                .sources()
+                .get(&expected_token)
+                .unwrap()
+                .binding()
+                .evidence_group_count(),
+            2
+        );
+        assert_eq!(
+            initial.next_state().snapshot_retained_bytes(),
+            snapshot.retained_bytes()
+        );
+        assert_eq!(
+            initial
+                .next_state()
+                .declared_relation_ids()
+                .collect::<Vec<_>>(),
+            vec!["team-config-from-evidence"]
+        );
+        let initial_relation = initial_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(initial_relation.attempts, 1);
+        assert_eq!(initial_relation.completed, 1);
+        assert_eq!(initial_relation.bytes_read, initial_payload.len() as u64);
+
+        let corrected_payload = b"corrected-private-related-document";
+        std::fs::write(
+            root.join("teams/private-team-coordinate/config.json"),
+            corrected_payload,
+        )
+        .unwrap();
+        let corrected_join_snapshot = ScopedObservationScopeJoinSnapshot::from_updates_for_test(
+            vec![join_update(b"second-owner")],
+        )
+        .unwrap();
+        let pass = prepared.host().begin_pass().unwrap();
+        let corrected = prepared
+            .execute_related_sources(
+                &pass,
+                prepared
+                    .plan_related_sources(&corrected_join_snapshot)
+                    .unwrap(),
+                Some(initial.next_state()),
+                AccessPhase::Revalidation,
+                200,
+            )
+            .unwrap();
+        let corrected_report = pass.finish();
+        let PreparedScopedRelatedSourceObservation::Refresh(observation) =
+            corrected.observations()[0].observation()
+        else {
+            panic!("the second related reconciliation must retain a refresh observation")
+        };
+        let decoded = observation.present_snapshot_for_test().unwrap();
+        assert_eq!(decoded.generation(), 1);
+        assert_eq!(decoded.revision(), Revision::digest(corrected_payload));
+        assert_eq!(
+            corrected
+                .next_state()
+                .sources()
+                .get(&expected_token)
+                .unwrap()
+                .state()
+                .decoder_state_for_test(),
+            Some(
+                [initial_payload.as_slice(), corrected_payload.as_slice()]
+                    .concat()
+                    .as_slice()
+            )
+        );
+        assert_eq!(
+            corrected_report
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "team-config-from-evidence")
+                .unwrap()
+                .bytes_read,
+            corrected_payload.len() as u64
+        );
+        assert_eq!(
+            corrected
+                .next_state()
+                .sources()
+                .get(&expected_token)
+                .unwrap()
+                .binding()
+                .evidence_group_count(),
+            1
+        );
+        assert_eq!(
+            initial
+                .next_state()
+                .sources()
+                .get(&expected_token)
+                .unwrap()
+                .binding()
+                .evidence_group_count(),
+            2
+        );
+
+        let empty_snapshot =
+            ScopedObservationScopeJoinSnapshot::from_updates_for_test(Vec::new()).unwrap();
+        let pass = prepared.host().begin_pass().unwrap();
+        let retired = prepared
+            .execute_related_sources(
+                &pass,
+                prepared.plan_related_sources(&empty_snapshot).unwrap(),
+                Some(corrected.next_state()),
+                AccessPhase::Revalidation,
+                300,
+            )
+            .unwrap();
+        let retired_report = pass.finish();
+        assert!(retired.observations().is_empty());
+        assert!(retired.next_state().sources().is_empty());
+        assert_eq!(retired.retired_sources().len(), 1);
+        assert_eq!(
+            retired.retired_sources()[0]
+                .binding()
+                .evidence_group_count(),
+            1
+        );
+        assert_eq!(
+            retired_report
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "team-config-from-evidence")
+                .unwrap()
+                .attempts,
+            0
+        );
+
+        let foreign = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(
+                vec![root.clone()],
+                PathBuf::from("sessions/session.jsonl"),
+            ),
+        )
+        .unwrap()
+        .unwrap()
+        .prepare_append_runtime(16, 16)
+        .unwrap();
+        let foreign_plan = foreign.plan_related_sources(&snapshot).unwrap();
+        let pass = prepared.host().begin_pass().unwrap();
+        assert!(matches!(
+            prepared.execute_related_sources(
+                &pass,
+                foreign_plan,
+                None,
+                AccessPhase::Revalidation,
+                400,
+            ),
+            Err(crate::scoped_observation::configured_attachment::ConfiguredScopedObservationRuntimeError::SourceBinding)
+        ));
+        let foreign_report = pass.finish();
+        assert_eq!(
+            foreign_report
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "team-config-from-evidence")
+                .unwrap()
+                .attempts,
+            0
+        );
+
+        let rendered = format!("{initial:?} {corrected:?} {retired:?}");
+        for private in [
+            "configured-related-reconciliation-private-root",
+            "private-team-coordinate",
+            "initial-private-related-document",
+            "corrected-private-related-document",
+            "config.json",
+        ] {
+            assert!(!rendered.contains(private));
+        }
     }
 
     #[cfg(unix)]
