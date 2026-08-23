@@ -195,6 +195,27 @@ if (isSemanticEvent(event) && event.family === 'usage_v2') {
 }
 ```
 
+## Where the types come from
+
+Every shape that crosses the native boundary is declared once, in Rust, and its
+TypeScript is generated:
+
+| Direction | Generator | Lands in |
+| --- | --- | --- |
+| Query results, observer events, identity contracts | `ts-rs` (`pnpm generate:types`) | `src/generated/` |
+| Request options a caller composes | napi-rs (`pnpm --filter @vibecook/spaghetti-sdk-native build`) | `crates/spaghetti-napi/index.d.ts` |
+
+`src/native.ts` renames those into the `Spaghetti*` names this package exports;
+it declares no shapes of its own. Nothing in `src/` should ever restate a native
+shape by hand — CI diffs both generated locations and fails on drift.
+
+Results cross N-API as JSON, encoded on the Rust worker thread rather than
+marshalled field by field, and `openSpaghettiEngine` decodes them once at the
+boundary. Callers see ordinary objects; the encoding is not visible above
+`native.ts`. One consequence is worth knowing: an optional field that has no
+value is an **absent key**, never `null` — which is what the generated `field?: T`
+types mean, and what `engine-json-contract.test.ts` checks against a real engine.
+
 ## Architecture and compatibility
 
 - Rust owns discovery, bounded reads, decoding, projection transactions,

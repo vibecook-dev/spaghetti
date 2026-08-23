@@ -1672,8 +1672,8 @@ impl Task for StartConfiguredObservationTask {
             .start_configured_observation_cancellable(configured, self.cancellation.clone())
             .map_err(napi_error)?;
         encode_json(&CatalogStartup {
-            catalog_projects: outcome.catalog_projects as u64,
-            catalog_sessions: outcome.catalog_sessions as u64,
+            catalog_projects: outcome.catalog_projects,
+            catalog_sessions: outcome.catalog_sessions,
             degraded_sources: outcome.degraded_sources,
             supervisors_started: u32::try_from(outcome.supervisors_started).unwrap_or(u32::MAX),
             history_background: outcome.history_background,
