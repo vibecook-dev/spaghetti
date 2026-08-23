@@ -26,12 +26,54 @@
 | Child RFC                                                                                                    | Normative ownership                                                                     | Status   |
 | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- | -------- |
 | [RFC 012A: Agent adaptation and common-engine boundaries](./012a-agent-adaptation-and-engine-boundaries.md)  | dependency law, base/external/semantic identity, coverage, ADS/scope, support policy    | Ratified |
-| [RFC 012B: Catalog, readiness, and progressive startup](./012b-catalog-readiness-and-progressive-startup.md) | catalog/project evidence, reference resolution, coverage readiness, pagination, startup | Draft    |
-| [RFC 012C: Runtime semantic contracts and usage-v2](./012c-runtime-semantics-and-usage-v2.md)                | runtime reducers/usage/interactions, durable/live reconciliation, usage migration       | Draft    |
-| [RFC 012D: Database-free session-scoped observation](./012d-session-scoped-observation.md)                   | observer lifecycle/versioning, semantic refs/coverage, epochs, artifacts, Chopsticks    | Draft    |
+| [RFC 012B: Catalog, readiness, and progressive startup](./012b-catalog-readiness-and-progressive-startup.md) | catalog/project evidence, reference resolution, coverage readiness, pagination, startup | Implemented; ratification pending |
+| [RFC 012C: Runtime semantic contracts and usage-v2](./012c-runtime-semantics-and-usage-v2.md)                | runtime reducers/usage/interactions, durable/live reconciliation, usage migration       | Implemented; ratification pending |
+| [RFC 012D: Database-free session-scoped observation](./012d-session-scoped-observation.md)                   | observer lifecycle/versioning, semantic refs/coverage, epochs, artifacts, Chopsticks    | Implemented; ratification pending |
 
 Each child is an independent ratification unit. Approving this umbrella does
-not freeze every child API shape or numeric performance target.
+not freeze every child API shape or numeric performance target. 012B, 012C, and
+012D were trimmed on 2026-08-23 to the contract the code enforces; their full
+2026-08-15 drafts are in [archive/](./archive/).
+
+## Landing status (2026-08-23)
+
+The normative text below is unchanged and still ratified. This section says
+where each umbrella decision now lives, so a reader can tell an implemented
+invariant from an intention.
+
+**Execution authority is [the RFC 012 landing plan](./012-landing-plan.md)**:
+§3 is the landing surface (what the program must deliver, per consumer) and §8
+is the per-lane status with commits and measurements. The plans this RFC's
+front matter used to point at are retired and archived.
+
+| §3 umbrella decision | State | Where it lives |
+| --- | --- | --- |
+| 1. One decode/provenance spine | implemented | `crates/spaghetti-napi/src/{core,source}/` + `decode_runtime.rs`; the observer decodes through the same `decode_record` (`src/observer/mod.rs`) |
+| 2. Common owns mechanics, adapters own interpretation | implemented; per-adapter collapse outstanding | `src/adapter/`; lane L5 |
+| 3. Evidence-backed agent support | implemented | `agent-support/`, `scripts/agent_support/validate.py` |
+| 4. Catalog membership is a first-class fact | implemented | `src/engine/catalog/` — [012B](./012b-catalog-readiness-and-progressive-startup.md) |
+| 5. Readiness is a vector | implemented | `Readiness` in `src/engine/catalog/readiness.rs`, generated to `packages/sdk/src/generated/Readiness.ts` |
+| 6. Catalog readiness is the interactive boundary | implemented | `startConfiguredObservation`; 122 ms cold / 8 ms warm on the real corpus |
+| 7. Startup tier separate from dynamic urgency | partial | catalog-first ships; the four-tier scheduler and `requestHydration` do not — 012B §8 |
+| 8. All sources planned before full history | implemented | one bounded discovery pass per configured source, committed before history |
+| 9. Queries are pure | implemented | `src/engine/catalog/query.rs`, `src/engine/usage_query.rs` |
+| 10. One database authority | implemented | the observer opens no store; `src/observer/` has no rusqlite dependency |
+| 11. Scoped observation is first-class and non-persistent | implemented | `src/observer/` — [012D](./012d-session-scoped-observation.md) |
+| 12. Durable and scoped share semantics | implemented | `src/runtime_semantic_reducer.rs`, imported by both sinks |
+| 13. Actor identity and qualified evidence on runtime facts | implemented | `ActorRef` on every observer event; qualified buckets in `usage_query.rs` |
+| 14. Response-level Claude usage | implemented | 78.52B → 36.88B tokens, 2.129× — [012C](./012c-runtime-semantics-and-usage-v2.md) §6 |
+| 15. Explicit observer continuity | implemented | watch-before-scan, reset-before-replay, epochs, overflow → full replacement; 28 behavioural tests |
+| 16. Aggregators join evidence, not delivery accidents | implemented as types; no shipped joiner | `ExternalEntityRef`, `SemanticRevisionRef`, `atCommitSeq` — [docs/integration/vibefield-phase-a.md](../integration/vibefield-phase-a.md) |
+| 17. Product identity and contribution stay downstream | held | nothing shipped decides aliases, cross-device groups, or contribution |
+| 18. Physical extraction is incremental | held | still one crate; the ratchets in `scripts/code_shape/` enforce shape instead |
+
+Two things a reader should not infer from the table. The Claude adapter emits
+three of the eleven RFC 012C fact families today — `actor_run`,
+`actor_affiliation`, `usage_v2`; the other eight have reducers, fixtures, and
+observer wire but no emitter, and arrive with lane L5. And `SCHEMA_VERSION` 64
+forces a full rebuild at first start: the catalog appears in about 100 ms, but
+history and search converge in the background, which on a large corpus
+currently takes hours until lane L7 lands.
 
 ## 1. Summary
 

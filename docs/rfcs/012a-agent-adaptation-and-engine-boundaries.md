@@ -18,6 +18,32 @@
 - **Does not own:** catalog reducers/readiness, runtime fact semantics, durable
   queries, or the scoped-observer lifecycle
 
+## Landing status (2026-08-23)
+
+The normative text below is unchanged and still ratified. This section says
+where it is implemented. Execution authority is
+[the RFC 012 landing plan](./012-landing-plan.md) — §3 for the landing surface,
+§8 for per-lane status with commits and measurements.
+
+| 012A element | State | Where it lives |
+| --- | --- | --- |
+| Common/adapter ownership boundary, forbidden edges | implemented | `crates/spaghetti-napi/src/adapter/` declares; `src/source/` and `src/engine/` own mechanics |
+| `SourceRecord -> FactBatch` seam | implemented | `src/adapter/facts.rs`, driven through `decode_runtime.rs` for both sinks |
+| Base identity: entity, source-record, fact, revision keys | implemented | `src/adapter/semantic.rs` |
+| External and semantic reference wrappers | implemented, generated | `ExternalEntityRef`, `CanonicalEntityKey`, `SemanticRevisionRef`, `FactRevisionId`, `NativeIdentity` in `packages/sdk/src/generated/` |
+| Qualified values (missing is not zero) | implemented | per-bucket qualification in `src/engine/usage_query.rs`; see [012C](./012c-runtime-semantics-and-usage-v2.md) §3.2 |
+| Source/fact-family coverage | implemented | `SpaghettiEngine.getFactFamilyCoverage` and `replayFactFamily` in `crates/spaghetti-napi/index.d.ts` |
+| Mapping dispositions and typed-unknown preservation | implemented | `Fact::UnknownRecord`; on the observer wire as `UnknownEvidenceEvent`, carrying size and digest and never native content |
+| ADS, fixtures, support ledger, conformance, promotion | implemented | `agent-support/`, validated by `scripts/agent_support/validate.py` — 6 bundles, 1 promoted, 5 candidate |
+| Scoped-relation declarations | partial | `src/observer/scope.rs` admits every object through a named declared relation, but the relation set and its bounds are Rust constants mirroring `source-declarations.json` rather than an evaluated `ScopeProgram`; lane L5 restores that |
+| No hand-written TypeScript mirror of native output | implemented | `pnpm generate:types` (ts-rs) with a CI diff; 13,694 lines of hand-written contracts deleted and the SDK barrel curated from 38 exports to 17 |
+
+Adapter reality check: the Claude adapter emits three of the eleven RFC 012C
+fact families today — `actor_run`, `actor_affiliation`, and `usage_v2`. The
+other eight have reducers, fixtures, and observer wire but no emitter. Lane L5
+writes them, collapses the per-adapter triplicates, and replaces the
+candidate/promoted pair with one `version` field.
+
 ## 1. Summary
 
 Spaghetti standardizes agent support as a versioned, evidence-backed process.
