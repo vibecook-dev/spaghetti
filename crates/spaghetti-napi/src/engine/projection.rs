@@ -7,8 +7,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-#[cfg(test)]
-use rusqlite::TransactionBehavior;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Params, Transaction};
 
 use crate::adapter::{
@@ -6712,7 +6710,7 @@ mod tests {
             )
             .unwrap();
         let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .unwrap();
         let mut bootstrap_request = request(
             ExpectedSourceCursor::At {
@@ -11201,7 +11199,7 @@ mod tests {
             .unwrap();
 
         let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .unwrap();
         let request = request(
             ExpectedSourceCursor::Absent,

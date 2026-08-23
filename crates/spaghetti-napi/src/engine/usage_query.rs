@@ -11,7 +11,10 @@ use super::query_identity::{decode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREF
 use super::query_pool::read_committed_watermark;
 use super::EngineError;
 
-pub const USAGE_QUERY_CONTRACT_VERSION: u32 = 2;
+/// Every query pack shares one negotiated contract version with the client, so
+/// this tracks that protocol number rather than versioning usage on its own.
+/// The response-level change is carried by `SCHEMA_VERSION`, which rebuilds.
+pub const USAGE_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const MAX_USAGE_WINDOW_DAYS: u32 = 366;
 
 /// Bucket qualities that assert a number. `unknown` asserts nothing and is

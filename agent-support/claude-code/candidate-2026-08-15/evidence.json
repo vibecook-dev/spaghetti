@@ -165,18 +165,6 @@
         },
         {
           "kind": "code_reference",
-          "path": "crates/spaghetti-napi/src/engine/runtime_usage_query.rs",
-          "sha256": null,
-          "locator": "fixed-snapshot usage-v2 page, source-scoped selection, aggregate, and actor/affiliation context"
-        },
-        {
-          "kind": "code_reference",
-          "path": "crates/spaghetti-napi/src/engine/runtime_usage_totals_query.rs",
-          "sha256": null,
-          "locator": "non-mixing composite selection vector, labeled aggregate resolution, and compatibility comparison"
-        },
-        {
-          "kind": "code_reference",
           "path": "crates/spaghetti-napi/src/engine/query_pool.rs",
           "sha256": null,
           "locator": "bounded owner-lifetime runtime usage compatibility telemetry"
@@ -254,12 +242,6 @@
           "locator": "oracle contract v1 qualified response, actor, session, and aggregate report"
         },
         {
-          "kind": "code_reference",
-          "path": "scripts/usage-v2-private-parity.ts",
-          "sha256": null,
-          "locator": "ephemeral source cloning, independent before/after census, durable comparison, and aggregate-only report"
-        },
-        {
           "kind": "experiment_report",
           "path": "agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-private-parity-v1.json",
           "sha256": "sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e",
@@ -276,12 +258,6 @@
           "path": "agent-support/claude-code/candidate-2026-08-15/reports/team-affiliation-census-v1.json",
           "sha256": "sha256:3dd951eb006578dc1567a0429f05175cc64c5895944320300655b6f8b3131bdd",
           "locator": "aggregate-only root lead, child metadata, ambiguity, and transcript-presence census"
-        },
-        {
-          "kind": "code_reference",
-          "path": "scripts/usage-v2-compatibility-window.ts",
-          "sha256": "sha256:6ff762e643ce45733d13078c442db2f725a68ecefa957ffedf0b3473706a1e8d",
-          "locator": "ephemeral source cloning, independent census ingest gate, getRuntimeUsageCompatibility sampling, and aggregate-only report"
         },
         {
           "kind": "code_reference",
@@ -343,12 +319,6 @@
           "path": "scripts/runtime_observation_census/census.py",
           "sha256": null,
           "locator": "adapter-independent complete semantic snapshot repeat and non-consecutive reversion census"
-        },
-        {
-          "kind": "code_reference",
-          "path": "scripts/usage-v2-private-parity.ts",
-          "sha256": null,
-          "locator": "stable-source before/after parity, loaded native artifact binding, durable coverage, and integrity-gated host finalization"
         },
         {
           "kind": "experiment_report",

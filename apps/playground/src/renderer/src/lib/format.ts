@@ -24,30 +24,17 @@ export function formatTokens(n: number): string {
 }
 
 /** Local mirror of SDK sourceReportsPerMessageTokens (keep renderer free of Node SDK). */
-function sourceReportsTokens(sourceId?: string): boolean {
-  switch (sourceId) {
-    case 'grok':
-    case 'codex':
-    case 'claude-code':
-    case undefined:
-      return true;
-    default:
-      return true;
-  }
-}
-
 /**
  * Format token usage for display.
  * - estimated → "~1.2K"
  * - zero / n/a → "—"
  */
-export function formatTokenUsage(usage: TokenUsageLike, sourceId?: string, tokensEstimated?: boolean): string {
+export function formatTokenUsage(usage: TokenUsageLike, _sourceId?: string, tokensEstimated?: boolean): string {
   const n = totalTokens(usage);
+  // Every adapter now reports response-level usage, so the only reason to
+  // qualify a number is the evidence behind it, never which agent produced it.
   if (tokensEstimated) {
     return n > 0 ? `~${formatTokens(n)}` : '—';
-  }
-  if (sourceId && !sourceReportsTokens(sourceId)) {
-    return '—';
   }
   if (n <= 0) return '—';
   return formatTokens(n);

@@ -48,10 +48,8 @@ import {
   type SpaghettiEngineTeamPage,
   type SpaghettiEngineTeamPageOptions,
   type SpaghettiEngineToolResultPage,
-  type SpaghettiEngineUsageActivity,
-  type SpaghettiEngineUsageActivityOptions,
-  type SpaghettiEngineUsageScopeOptions,
-  type SpaghettiEngineUsageTotals,
+  type SpaghettiEngineUsage,
+  type SpaghettiEngineUsageOptions,
   type SpaghettiEngineWorkflowDetails,
   type SpaghettiEngineWorkflowMemberPage,
   type SpaghettiEngineWorkflowPage,
@@ -324,13 +322,11 @@ export interface ClaudeObservationShadow {
   listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage>;
   /** Return canonical/catalog statistics, excluding compatibility-cache rows. */
   getStats(signal?: AbortSignal): Promise<SpaghettiEngineCanonicalStats>;
-  /** Query canonical all-time usage for one project or verified session. */
-  getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals>;
-  /** Query inclusive daily usage plus separately reported untimed contributions. */
-  getUsageActivity(
-    options: SpaghettiEngineUsageActivityOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineUsageActivity>;
+  /**
+   * Query canonical response-level usage for one project or verified session.
+   * A calendar window adds the day series and the untimed remainder.
+   */
+  getUsage(options: SpaghettiEngineUsageOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsage>;
   /** Query durable run state and registry presence without PID liveness inference. */
   getRuntimeSnapshot(
     options?: SpaghettiEngineRuntimeSnapshotOptions,
@@ -497,13 +493,13 @@ export function compareClaudeObservationHistoryQueries(
  * while the canonical API exposes a component sum and usage contributions.
  */
 export function compareClaudeObservationUsage(
-  canonicalTotals: SpaghettiEngineUsageTotals,
-  canonicalActivity: SpaghettiEngineUsageActivity,
+  canonicalTotals: SpaghettiEngineUsage,
+  canonicalActivity: SpaghettiEngineUsage,
   legacy: ClaudeLegacyUsageReport,
 ): ClaudeObservationUsageParity {
   assertLegacyUsageValues('totals', legacy.totals);
   const allLegacyDays = uniqueBy(legacy.days, (day) => day.date, 'legacy usage day');
-  const canonicalDays = uniqueBy(canonicalActivity.days, (day) => day.date, 'canonical usage day');
+  const canonicalDays = uniqueBy(canonicalActivity.window?.days ?? [], (day) => day.date, 'canonical usage day');
   const scopeMismatch: string[] = [];
   if (canonicalTotals.projectId !== canonicalActivity.projectId) scopeMismatch.push('projectId');
   if ((canonicalTotals.sessionId ?? null) !== (canonicalActivity.sessionId ?? null)) scopeMismatch.push('sessionId');
@@ -535,8 +531,10 @@ export function compareClaudeObservationUsage(
   const totalsEstimatedFields = nonzeroUsageFields(canonicalTotals.aggregate.estimated);
   const activityEstimated = canonicalActivity.aggregate.estimatedContributionCount;
   const activityEstimatedFields = nonzeroUsageFields(canonicalActivity.aggregate.estimated);
-  const untimed = canonicalActivity.untimed.aggregate.contributionCount;
-  const untimedFields = nonzeroUsageFields(canonicalActivity.untimed.aggregate.combined);
+  const untimed = canonicalActivity.window?.untimed.aggregate.contributionCount ?? 0;
+  const untimedFields = canonicalActivity.window
+    ? nonzeroUsageFields(canonicalActivity.window.untimed.aggregate.combined)
+    : [];
   const exact =
     scopeMismatch.length === 0 &&
     totalMismatch.length === 0 &&
@@ -814,15 +812,8 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     return this.client.getStats(clientQueryOptions(signal));
   }
 
-  getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals> {
+  getUsage(options: SpaghettiEngineUsageOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsage> {
     return this.client.getUsage(options, clientQueryOptions(signal));
-  }
-
-  getUsageActivity(
-    options: SpaghettiEngineUsageActivityOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineUsageActivity> {
-    return this.client.getUsageActivity(options, clientQueryOptions(signal));
   }
 
   getRuntimeSnapshot(
@@ -978,7 +969,7 @@ function assertLegacyUsageValues(label: string, values: ClaudeLegacyUsageValues)
 }
 
 function usageValueMismatches(
-  canonical: SpaghettiEngineUsageTotals['aggregate']['exact'],
+  canonical: SpaghettiEngineUsage['aggregate']['exact'],
   legacy: ClaudeLegacyUsageValues,
 ): string[] {
   const fields: string[] = [];

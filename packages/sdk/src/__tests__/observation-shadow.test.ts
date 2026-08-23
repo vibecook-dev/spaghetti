@@ -331,16 +331,18 @@ describe('Claude observation shadow', () => {
       { aggregate } as never,
       {
         aggregate,
-        days: [{ date: '2026-08-12', aggregate }],
-        untimed: {
-          aggregate: {
-            ...aggregate,
-            exact: zeroTokens,
-            combined: zeroTokens,
-            quality: 'unavailable',
-            exactContributionCount: 0,
-            contributionCount: 0,
-            sessionCount: 0,
+        window: {
+          days: [{ date: '2026-08-12', aggregate }],
+          untimed: {
+            aggregate: {
+              ...aggregate,
+              exact: zeroTokens,
+              combined: zeroTokens,
+              quality: 'unavailable',
+              exactContributionCount: 0,
+              contributionCount: 0,
+              sessionCount: 0,
+            },
           },
         },
       } as never,
@@ -361,8 +363,10 @@ describe('Claude observation shadow', () => {
       { aggregate } as never,
       {
         aggregate,
-        days: [{ date: '2026-08-12', aggregate }],
-        untimed: { aggregate: { ...aggregate, contributionCount: 1 } },
+        window: {
+          days: [{ date: '2026-08-12', aggregate }],
+          untimed: { aggregate: { ...aggregate, contributionCount: 1 } },
+        },
       } as never,
       {
         totals: { ...exact, outputTokens: 3 },
@@ -1180,7 +1184,7 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
         assert.ok(canonicalProject, `missing canonical usage project ${legacyProject.slug}`);
         const [canonicalTotals, canonicalActivity] = await Promise.all([
           shadow.getUsage({ projectId: canonicalProject.projectId }),
-          shadow.getUsageActivity({
+          shadow.getUsage({
             projectId: canonicalProject.projectId,
             from: '2026-01-01',
             to: '2026-12-31',

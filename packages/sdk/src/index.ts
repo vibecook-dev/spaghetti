@@ -31,13 +31,6 @@ export * from './contracts/rfc012b-pages.js';
 // authority; enclosing RFC 012B/012D contracts bind scope and lifecycle.
 export * from './contracts/rfc012c.js';
 export * from './contracts/rfc012c-unknown-evidence.js';
-export {
-  mergeDurableAndScopedUsage,
-  type DurableLiveUsageMerge,
-  type DurableUsageContribution,
-  type ScopedUsageObserverEvent,
-} from './runtime/usage-v2-live-merge.js';
-
 // RFC 012D exact-version negotiation, contextual envelopes, and the first
 // store-free exact-known-object native observer owner. Artifact reads and
 // dynamic descendant composition remain gated on their full scoped contracts.
