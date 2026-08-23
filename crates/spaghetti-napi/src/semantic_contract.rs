@@ -822,7 +822,7 @@ fn parse_hex_digest(value: &str, label: &str) -> Result<[u8; 32], SemanticFixtur
         )));
     }
     let mut digest = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         digest[index] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16)
             .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
     }
