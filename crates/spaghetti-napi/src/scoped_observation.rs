@@ -1144,7 +1144,95 @@ pub(crate) struct ScopedRelationMembershipObservation {
     membership: ScopedCoverageMembershipIdentity,
     member_sources: BTreeSet<ScopedSourceObjectIdentity>,
     coverage: ScopedOfferedDecodeCoverage,
-    _listing_authority: ScopedObservationDirectoryListing,
+    authority: ScopedRelationMembershipAuthority,
+}
+
+enum ScopedRelationMembershipAuthority {
+    Directory(Box<ScopedObservationDirectoryListing>),
+    Related(ScopedObservationRelatedMembershipAuthority),
+}
+
+/// Complete attachment/pass-bound authority for one evidence-derived relation
+/// membership snapshot. The exact native objects were already read through
+/// the access pass; this value retains their opaque tokens, semantic source
+/// coordinates, and owner-bound membership revision without native locators.
+pub(crate) struct ScopedObservationRelatedMembershipAuthority {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    access_pass_id: u64,
+    relation_id: Arc<str>,
+    source: ScopedSourceObjectIdentity,
+    revision: Revision,
+    members: BTreeMap<AccessObjectToken, ScopedSourceObjectIdentity>,
+}
+
+impl ScopedRelationMembershipAuthority {
+    fn relation_id(&self) -> &str {
+        match self {
+            Self::Directory(listing) => listing.relation_id(),
+            Self::Related(authority) => authority.relation_id(),
+        }
+    }
+
+    fn directory_listing(&self) -> Option<&ScopedObservationDirectoryListing> {
+        match self {
+            Self::Directory(listing) => Some(listing.as_ref()),
+            Self::Related(_) => None,
+        }
+    }
+
+    fn matches_members(
+        &self,
+        access_pass_id: u64,
+        member_sources: &BTreeSet<ScopedSourceObjectIdentity>,
+    ) -> bool {
+        match self {
+            Self::Directory(_) => true,
+            Self::Related(authority) => {
+                authority.access_pass_id == access_pass_id
+                    && authority.members.len() == member_sources.len()
+                    && authority
+                        .members
+                        .values()
+                        .all(|source| member_sources.contains(source))
+            }
+        }
+    }
+}
+
+impl ScopedObservationRelatedMembershipAuthority {
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub(crate) fn access_pass_id(&self) -> u64 {
+        self.access_pass_id
+    }
+
+    pub(crate) fn source(&self) -> &ScopedSourceObjectIdentity {
+        &self.source
+    }
+
+    pub(crate) fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    pub(crate) fn member_sources(&self) -> impl Iterator<Item = &ScopedSourceObjectIdentity> {
+        self.members.values()
+    }
+}
+
+impl std::fmt::Debug for ScopedObservationRelatedMembershipAuthority {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationRelatedMembershipAuthority")
+            .field("has_attachment_authority", &true)
+            .field("access_pass_id", &self.access_pass_id)
+            .field("relation_id", &self.relation_id)
+            .field("has_source_identity", &true)
+            .field("has_revision", &true)
+            .field("member_count", &self.members.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ScopedRelationMembershipObservation {
@@ -1189,7 +1277,49 @@ impl ScopedRelationMembershipObservation {
                 explicit_errors: Vec::new(),
                 completeness: CoverageSetCompleteness::Complete,
             },
-            _listing_authority: listing,
+            authority: ScopedRelationMembershipAuthority::Directory(Box::new(listing)),
+        })
+    }
+
+    pub(crate) fn from_related_membership(
+        authority: ScopedObservationRelatedMembershipAuthority,
+    ) -> Result<Self, ScopedAdmissionError> {
+        let relation_id = authority.relation_id().to_string();
+        let source = authority.source().clone();
+        let revision = authority.revision();
+        let member_sources = authority.member_sources().cloned().collect::<BTreeSet<_>>();
+        validate_relation_id(&relation_id).map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
+        if authority.access_pass_id() == 0
+            || revision == Revision::ZERO
+            || member_sources.len() != authority.members.len()
+        {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        let position = CoveragePosition::derive(
+            CoveragePositionKind::SnapshotRevision,
+            revision.as_bytes(),
+            None,
+        )
+        .map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
+        let point =
+            scoped_decode_coverage_point(&source, 1, Some(position), CoverageStatus::ExactSnapshot)
+                .map_err(|_| ScopedAdmissionError::InvalidCoverage)?;
+        Ok(Self {
+            membership: ScopedCoverageMembershipIdentity {
+                relation_id: Arc::from(relation_id),
+                stream_key: Arc::from(source.stream_key.as_bytes().as_slice()),
+                object_key: Arc::from(source.object_key.as_bytes().as_slice()),
+                coverage_domains: Vec::new(),
+            },
+            member_sources,
+            coverage: ScopedOfferedDecodeCoverage {
+                source,
+                point: Some(point),
+                explicit_absence_or_deletion: None,
+                explicit_errors: Vec::new(),
+                completeness: CoverageSetCompleteness::Complete,
+            },
+            authority: ScopedRelationMembershipAuthority::Related(authority),
         })
     }
 }
@@ -1213,7 +1343,7 @@ pub struct ScopedObservationAdmissionLane {
     relation_membership_objects:
         BTreeMap<ScopedSourceObjectIdentity, ScopedCoverageMembershipIdentity>,
     dynamic_relation_members: BTreeMap<Arc<str>, BTreeSet<ScopedSourceObjectIdentity>>,
-    dynamic_relation_listings: BTreeMap<Arc<str>, ScopedObservationDirectoryListing>,
+    dynamic_relation_authorities: BTreeMap<Arc<str>, ScopedRelationMembershipAuthority>,
     dynamic_member_decoder_states: BTreeMap<ScopedSourceObjectIdentity, Vec<u8>>,
     pending_coverage_updates: VecDeque<PendingScopedCoverageUpdate>,
     offered_decode_coverage: BTreeMap<ScopedSourceObjectIdentity, ScopedOfferedDecodeCoverage>,
@@ -1257,7 +1387,7 @@ impl ScopedObservationAdmissionLane {
             known_coverage_objects: BTreeMap::new(),
             relation_membership_objects: BTreeMap::new(),
             dynamic_relation_members: BTreeMap::new(),
-            dynamic_relation_listings: BTreeMap::new(),
+            dynamic_relation_authorities: BTreeMap::new(),
             dynamic_member_decoder_states: BTreeMap::new(),
             pending_coverage_updates: VecDeque::new(),
             offered_decode_coverage: BTreeMap::new(),
@@ -1554,16 +1684,61 @@ impl ScopedObservationAdmissionLane {
         phase: ScopedAppendDeliveryPhase,
         observation: ScopedRelationMembershipObservation,
     ) -> Result<(), ScopedAdmissionError> {
+        if !matches!(
+            &observation.authority,
+            ScopedRelationMembershipAuthority::Directory(_)
+        ) {
+            return Err(ScopedAdmissionError::InvalidCoverage);
+        }
+        self.record_relation_membership_inner(access_pass_id, phase, observation)
+    }
+
+    /// Retain one complete evidence-derived membership snapshot only through
+    /// the host whose unforgeable attachment authority minted it. Equal root
+    /// coordinates from another observer are not interchangeable.
+    pub(crate) fn record_related_relation_membership(
+        &mut self,
+        host: &ScopedObservationAccessHost,
+        phase: ScopedAppendDeliveryPhase,
+        observation: ScopedRelationMembershipObservation,
+    ) -> Result<(), ScopedAdmissionError> {
+        let access_pass_id = match &observation.authority {
+            ScopedRelationMembershipAuthority::Related(authority)
+                if Arc::ptr_eq(&authority.attachment_authority, &host.attachment_authority)
+                    && !host.state.closed.load(Ordering::Acquire)
+                    && source_belongs_to_root(&authority.source, &host.root_identity)
+                    && host
+                        .dynamic_observation_relations
+                        .contains(&authority.relation_id) =>
+            {
+                authority.access_pass_id
+            }
+            ScopedRelationMembershipAuthority::Directory(_)
+            | ScopedRelationMembershipAuthority::Related(_) => {
+                return Err(ScopedAdmissionError::InvalidCoverage);
+            }
+        };
+        self.record_relation_membership_inner(access_pass_id, phase, observation)
+    }
+
+    fn record_relation_membership_inner(
+        &mut self,
+        access_pass_id: u64,
+        phase: ScopedAppendDeliveryPhase,
+        observation: ScopedRelationMembershipObservation,
+    ) -> Result<(), ScopedAdmissionError> {
         if access_pass_id == 0 || phase == ScopedAppendDeliveryPhase::Live || !self.is_empty() {
             return Err(ScopedAdmissionError::InvalidCoverage);
         }
         let source = observation.coverage.source.clone();
         let membership = observation.membership;
         let member_sources = observation.member_sources;
-        let listing = observation._listing_authority;
+        let authority = observation.authority;
         if source.stream_key.as_bytes() != membership.stream_key.as_ref()
             || source.object_key.as_bytes() != membership.object_key.as_ref()
             || self.known_coverage_objects.contains_key(&source)
+            || authority.relation_id() != membership.relation_id.as_ref()
+            || !authority.matches_members(access_pass_id, &member_sources)
         {
             return Err(ScopedAdmissionError::InvalidCoverage);
         }
@@ -1633,8 +1808,8 @@ impl ScopedObservationAdmissionLane {
         }
         self.dynamic_relation_members
             .insert(membership.relation_id.clone(), member_sources);
-        self.dynamic_relation_listings
-            .insert(membership.relation_id.clone(), listing);
+        self.dynamic_relation_authorities
+            .insert(membership.relation_id.clone(), authority);
         self.stage_coverage_update(
             self.offered_lane_ordinal,
             access_pass_id,
@@ -2168,7 +2343,9 @@ impl ScopedObservationAdmissionLane {
         &self,
         relation_id: &str,
     ) -> Option<&ScopedObservationDirectoryListing> {
-        self.dynamic_relation_listings.get(relation_id)
+        self.dynamic_relation_authorities
+            .get(relation_id)
+            .and_then(ScopedRelationMembershipAuthority::directory_listing)
     }
 
     pub(crate) fn directory_member_decoder_state(
@@ -20496,6 +20673,88 @@ impl ScopedObservationAccessHost {
         &self.compatibility
     }
 
+    /// Seal the complete member set produced by one configured related-source
+    /// reconciliation. The caller supplies only path-free identities already
+    /// minted by this attachment; the host derives the separate membership
+    /// source and binds it to the exact active pass.
+    fn bind_related_relation_membership(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        relation_id: &str,
+        revision: Revision,
+        members: BTreeMap<AccessObjectToken, ScopedSourceObjectIdentity>,
+    ) -> Result<ScopedObservationRelatedMembershipAuthority, ScopedObservationAccessError> {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationAccessError::Closed);
+        }
+        if pass.pass_id == 0
+            || !Arc::ptr_eq(&self.state, &pass.state)
+            || !Arc::ptr_eq(&self.attachment_authority, &pass.attachment_authority)
+            || self.root_identity != pass.root_identity
+            || revision == Revision::ZERO
+            || !self
+                .dynamic_observation_relations
+                .iter()
+                .any(|declared| declared.as_ref() == relation_id)
+        {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "related relation membership does not match the active attachment".to_string(),
+            ));
+        }
+        let mut unique_sources = BTreeSet::new();
+        if members.values().any(|source| {
+            !source_belongs_to_root(source, &self.root_identity)
+                || !unique_sources.insert(source.clone())
+        }) {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "related relation membership contains an invalid source".to_string(),
+            ));
+        }
+        let mut membership_stream_identity =
+            Vec::with_capacity(64 + self.program_id.len() + relation_id.len());
+        membership_stream_identity
+            .extend_from_slice(b"spaghetti/rfc012d/related-membership-stream/v1\0");
+        membership_stream_identity.extend_from_slice(&(self.program_id.len() as u64).to_be_bytes());
+        membership_stream_identity.extend_from_slice(self.program_id.as_bytes());
+        let stream_key = CoverageStreamKey::derive(
+            self.root_identity.adapter_id.as_str(),
+            &membership_stream_identity,
+        )
+        .map_err(|_| {
+            ScopedObservationAccessError::InvalidGrant(
+                "related relation membership identity is invalid".to_string(),
+            )
+        })?;
+        let object_key = CoverageObjectKey::derive(
+            "scoped-related-relation-membership-v1",
+            relation_id.as_bytes(),
+        )
+        .map_err(|_| {
+            ScopedObservationAccessError::InvalidGrant(
+                "related relation membership identity is invalid".to_string(),
+            )
+        })?;
+        let source = ScopedSourceObjectIdentity {
+            adapter_id: self.root_identity.adapter_id.clone(),
+            source_instance_key: self.root_identity.source_instance_key,
+            stream_key,
+            object_key,
+        };
+        if unique_sources.contains(&source) {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "related relation membership collides with a member source".to_string(),
+            ));
+        }
+        Ok(ScopedObservationRelatedMembershipAuthority {
+            attachment_authority: Arc::clone(&self.attachment_authority),
+            access_pass_id: pass.pass_id,
+            relation_id: Arc::from(relation_id),
+            source,
+            revision,
+            members,
+        })
+    }
+
     /// Scan one declared `ChildDirectoryByNativeId` relation through the exact
     /// active reconciliation pass. Membership is not implied by KnownObject
     /// grants: the caller must retain and admit the resulting listing before
@@ -24478,7 +24737,7 @@ fn validate_observation_relation_coverage(
             .keys()
             .any(|source| admission.relation_membership_objects.contains_key(source))
         || admission.dynamic_relation_members.len() != admission.relation_membership_objects.len()
-        || admission.dynamic_relation_listings.len() != admission.dynamic_relation_members.len()
+        || admission.dynamic_relation_authorities.len() != admission.dynamic_relation_members.len()
         || admission
             .dynamic_member_decoder_states
             .keys()
@@ -24496,9 +24755,9 @@ fn validate_observation_relation_coverage(
         if known_objects.contains_key(relation_id.as_ref())
             || scope_relations.get(relation_id.as_ref()) != Some(&false)
             || admission
-                .dynamic_relation_listings
+                .dynamic_relation_authorities
                 .get(relation_id)
-                .is_none_or(|listing| listing.relation_id() != relation_id.as_ref())
+                .is_none_or(|authority| authority.relation_id() != relation_id.as_ref())
             || admission
                 .relation_membership_objects
                 .values()
@@ -26648,7 +26907,7 @@ mod projection_tests {
         );
         assert!(too_small.relation_membership_objects.is_empty());
         assert!(too_small.dynamic_relation_members.is_empty());
-        assert!(too_small.dynamic_relation_listings.is_empty());
+        assert!(too_small.dynamic_relation_authorities.is_empty());
         assert!(too_small.dynamic_member_decoder_states.is_empty());
         assert!(too_small.offered_decode_coverage.is_empty());
 

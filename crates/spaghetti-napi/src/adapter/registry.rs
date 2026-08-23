@@ -2930,6 +2930,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let pass = prepared.host().begin_pass().unwrap();
+        let initial_pass_id = pass.pass_id();
         let initial = prepared
             .execute_related_sources(
                 &pass,
@@ -2951,6 +2952,18 @@ pub(crate) mod tests {
         assert_eq!(decoded.generation(), 1);
         assert_eq!(decoded.revision(), Revision::digest(initial_payload));
         assert_eq!(initial.next_state().sources().len(), 1);
+        assert_eq!(initial.memberships().len(), 1);
+        assert_eq!(
+            initial.memberships()[0].relation_id(),
+            "team-config-from-evidence"
+        );
+        assert_eq!(initial.memberships()[0].access_pass_id(), initial_pass_id);
+        assert_eq!(initial.memberships()[0].member_sources().count(), 1);
+        assert_ne!(
+            initial.memberships()[0].source(),
+            decoded.identity().source()
+        );
+        let initial_membership_revision = initial.memberships()[0].revision();
         assert_eq!(
             initial
                 .next_state()
@@ -3045,6 +3058,10 @@ pub(crate) mod tests {
                 .evidence_group_count(),
             1
         );
+        assert_ne!(
+            corrected.memberships()[0].revision(),
+            initial_membership_revision
+        );
         assert_eq!(
             initial
                 .next_state()
@@ -3071,6 +3088,12 @@ pub(crate) mod tests {
         let retired_report = pass.finish();
         assert!(retired.observations().is_empty());
         assert!(retired.next_state().sources().is_empty());
+        assert_eq!(retired.memberships().len(), 1);
+        assert_eq!(retired.memberships()[0].member_sources().count(), 0);
+        assert_ne!(
+            retired.memberships()[0].revision(),
+            corrected.memberships()[0].revision()
+        );
         assert_eq!(retired.retired_sources().len(), 1);
         assert_eq!(
             retired.retired_sources()[0]
@@ -3132,6 +3155,82 @@ pub(crate) mod tests {
         ] {
             assert!(!rendered.contains(private));
         }
+
+        let (_observations, mut memberships, retired_sources, next_state) = retired.into_parts();
+        assert_eq!(memberships.len(), 1);
+        assert_eq!(retired_sources.len(), 1);
+        assert!(next_state.sources().is_empty());
+        let authority = memberships.pop().unwrap();
+        let membership_source = authority.source().clone();
+        let membership_pass_id = authority.access_pass_id();
+        assert!(membership_pass_id > 0);
+        let membership =
+            ScopedRelationMembershipObservation::from_related_membership(authority).unwrap();
+        let mut admission = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+            max_data_events: 8,
+            max_retained_native_bytes: 8_192,
+            max_control_items: 8,
+            max_coverage_objects: 2,
+        })
+        .unwrap();
+        admission
+            .record_related_relation_membership(
+                prepared.host(),
+                ScopedAppendDeliveryPhase::Correction,
+                membership,
+            )
+            .unwrap();
+        assert!(admission
+            .directory_relation_listing("team-config-from-evidence")
+            .is_none());
+        let membership_coverage = admission
+            .offered_decode_coverage(&membership_source)
+            .unwrap();
+        assert_eq!(
+            membership_coverage.point.as_ref().unwrap().status,
+            CoverageStatus::ExactSnapshot
+        );
+        assert_eq!(
+            membership_coverage.completeness,
+            CoverageSetCompleteness::Complete
+        );
+
+        let foreign_pass = foreign.host().begin_pass().unwrap();
+        let foreign_batch = foreign
+            .execute_related_sources(
+                &foreign_pass,
+                foreign.plan_related_sources(&snapshot).unwrap(),
+                None,
+                AccessPhase::Revalidation,
+                500,
+            )
+            .unwrap();
+        foreign_pass.finish();
+        let (_, mut foreign_memberships, _, _) = foreign_batch.into_parts();
+        let foreign_authority = foreign_memberships.pop().unwrap();
+        let foreign_membership_source = foreign_authority.source().clone();
+        let foreign_membership =
+            ScopedRelationMembershipObservation::from_related_membership(foreign_authority)
+                .unwrap();
+        let mut foreign_admission =
+            ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
+                max_data_events: 8,
+                max_retained_native_bytes: 8_192,
+                max_control_items: 8,
+                max_coverage_objects: 3,
+            })
+            .unwrap();
+        assert_eq!(
+            foreign_admission.record_related_relation_membership(
+                prepared.host(),
+                ScopedAppendDeliveryPhase::Correction,
+                foreign_membership,
+            ),
+            Err(ScopedAdmissionError::InvalidCoverage)
+        );
+        assert!(foreign_admission
+            .offered_decode_coverage(&foreign_membership_source)
+            .is_none());
     }
 
     #[cfg(unix)]

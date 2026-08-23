@@ -22,7 +22,7 @@ use crate::observation_contract::{ObservationContractOffer, ObservationContractR
 use crate::source::{
     confined_relative_path_key, platform_path_key, validate_relation_id, AccessObjectToken,
     AccessOperation, AccessPhase, AppendDelimitedFile, AppendRead, AuthorizedScopeAccessPlan,
-    RecordOrigin, ScopeAccessRequest, ScopeIdentityInput, SourceMediaType,
+    RecordOrigin, Revision, ScopeAccessRequest, ScopeIdentityInput, SourceMediaType,
     MAX_IDENTITY_VALUE_BYTES,
 };
 
@@ -43,7 +43,8 @@ use super::{
     ScopedObservationNativeWatcher, ScopedObservationNativeWatcherRecoveryPolicy,
     ScopedObservationOpenDrainError, ScopedObservationOwnedIdentityInput,
     ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
-    ScopedObservationQueueLimits, ScopedObservationRelatedObjectInitialObservation,
+    ScopedObservationQueueLimits, ScopedObservationRelatedMembershipAuthority,
+    ScopedObservationRelatedObjectInitialObservation,
     ScopedObservationRelatedObjectRefreshObservation, ScopedObservationRelatedObjectState,
     ScopedObservationScopeJoinSnapshot, ScopedObservationSourceOwnerRetryPolicy,
     ScopedObservationStartupError, ScopedObservationStartupReconcileAction,
@@ -627,6 +628,57 @@ fn prepared_related_source_token(
         .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
 }
 
+fn hash_related_membership_component(hasher: &mut blake3::Hasher, value: &[u8]) {
+    hasher.update(&(value.len() as u64).to_be_bytes());
+    hasher.update(value);
+}
+
+fn prepared_related_membership_revision(
+    relation_id: &str,
+    sources: &BTreeMap<AccessObjectToken, PreparedScopedRelatedRetainedSource>,
+) -> Revision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/related-membership-revision/v1\0");
+    hash_related_membership_component(&mut hasher, relation_id.as_bytes());
+    let member_count = sources
+        .values()
+        .filter(|source| source.binding.relation_id() == relation_id)
+        .count();
+    hasher.update(&(member_count as u64).to_be_bytes());
+    for (token, retained) in sources
+        .iter()
+        .filter(|(_, source)| source.binding.relation_id() == relation_id)
+    {
+        hash_related_membership_component(&mut hasher, token.as_bytes());
+        hash_related_membership_component(
+            &mut hasher,
+            retained.state.source().stream_key.as_bytes(),
+        );
+        hash_related_membership_component(
+            &mut hasher,
+            retained.state.source().object_key.as_bytes(),
+        );
+        hasher.update(&(retained.binding.evidence_groups.len() as u64).to_be_bytes());
+        for group in &retained.binding.evidence_groups {
+            hasher.update(&(group.len() as u64).to_be_bytes());
+            for evidence in group {
+                hash_related_membership_component(&mut hasher, evidence.fact_id().as_bytes());
+                let semantic_revision_ref = evidence.semantic_revision_ref();
+                hasher.update(
+                    &semantic_revision_ref
+                        .semantic_reference_contract_version
+                        .to_be_bytes(),
+                );
+                hash_related_membership_component(
+                    &mut hasher,
+                    semantic_revision_ref.fact_revision_id.as_bytes(),
+                );
+            }
+        }
+    }
+    Revision::from_bytes(*hasher.finalize().as_bytes())
+}
+
 /// One current related source together with the fact-owner groups that
 /// justified its exact native coordinate. Source lifecycle state alone is not
 /// enough: when a join owner retracts, later admission must be able to retire
@@ -757,6 +809,7 @@ impl std::fmt::Debug for PreparedScopedRelatedObservedSource {
 /// state changes unless this whole value is returned.
 pub(crate) struct PreparedScopedRelatedReconciliationBatch {
     observations: Vec<PreparedScopedRelatedObservedSource>,
+    memberships: Vec<ScopedObservationRelatedMembershipAuthority>,
     retired_sources: Vec<PreparedScopedRelatedRetainedSource>,
     next_state: PreparedScopedRelatedReconciliationState,
 }
@@ -770,8 +823,28 @@ impl PreparedScopedRelatedReconciliationBatch {
         &self.retired_sources
     }
 
+    pub(crate) fn memberships(&self) -> &[ScopedObservationRelatedMembershipAuthority] {
+        &self.memberships
+    }
+
     pub(crate) fn next_state(&self) -> &PreparedScopedRelatedReconciliationState {
         &self.next_state
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<PreparedScopedRelatedObservedSource>,
+        Vec<ScopedObservationRelatedMembershipAuthority>,
+        Vec<PreparedScopedRelatedRetainedSource>,
+        PreparedScopedRelatedReconciliationState,
+    ) {
+        (
+            self.observations,
+            self.memberships,
+            self.retired_sources,
+            self.next_state,
+        )
     }
 }
 
@@ -780,6 +853,7 @@ impl std::fmt::Debug for PreparedScopedRelatedReconciliationBatch {
         formatter
             .debug_struct("PreparedScopedRelatedReconciliationBatch")
             .field("observation_count", &self.observations.len())
+            .field("membership_count", &self.memberships.len())
             .field("retired_source_count", &self.retired_sources.len())
             .field("next_state", &self.next_state)
             .finish_non_exhaustive()
@@ -1340,6 +1414,20 @@ impl PreparedConfiguredAppendRuntime {
             });
         }
 
+        let memberships = configured_relation_ids
+            .iter()
+            .map(|relation_id| {
+                let members = next_sources
+                    .iter()
+                    .filter(|(_, retained)| retained.binding.relation_id() == relation_id)
+                    .map(|(token, retained)| (*token, retained.state.source().clone()))
+                    .collect::<BTreeMap<_, _>>();
+                let revision = prepared_related_membership_revision(relation_id, &next_sources);
+                self.host
+                    .bind_related_relation_membership(pass, relation_id, revision, members)
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let retired_sources = previous
             .into_iter()
             .flat_map(|state| state.sources.iter())
@@ -1348,6 +1436,7 @@ impl PreparedConfiguredAppendRuntime {
             .collect();
         Ok(PreparedScopedRelatedReconciliationBatch {
             observations,
+            memberships,
             retired_sources,
             next_state: PreparedScopedRelatedReconciliationState {
                 attachment_authority: Arc::clone(&plan.attachment_authority),
