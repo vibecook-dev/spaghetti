@@ -9,6 +9,7 @@ mod catalog;
 mod contract;
 mod disposition;
 mod facts;
+mod probe;
 mod registry;
 mod runtime_value;
 mod scope;
@@ -63,6 +64,7 @@ pub use facts::{
     UserInputRequestRevisionFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
     WorkflowSnapshotFact, WorkflowStatus,
 };
+pub(crate) use probe::{bounded_file_bytes, platform_id, probe_error, sorted_directory_entries};
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use runtime_value::RuntimeSemanticValue;
 pub use scope::{
