@@ -54,6 +54,7 @@ pub struct ReadinessField {
     /// Commit sequence the evidence for this field was read at.
     pub committed_at_seq: u64,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 

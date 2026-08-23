@@ -1,1304 +1,276 @@
 # RFC 012C: Runtime semantic contracts and usage-v2
 
-- **Status:** Draft child RFC; proposed semantic migration and fact contract
-- **Created:** 2026-08-15
+- **Status:** Implemented (landing 2026-08-23); ratification pending owner review
+- **Created:** 2026-08-15 · **Trimmed to what shipped:** 2026-08-23
 - **Parent:** [RFC 012 umbrella](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Depends on:** [RFC 012A](./012a-agent-adaptation-and-engine-boundaries.md)
-- **Program plan:** [RFC 012 implementation plan](./012-implementation-plan.md)
-- **Evidence:** [Phase 0B runtime census](./012-runtime-observation-census-2026-08-15.md)
-- **Owns:** common runtime revision/reducer/replacement law; actor/run,
-  affiliation, message/content, response-level usage, effective-state,
-  plan/task/tool/progress, and structured-interaction facts; capability quality;
-  aggregate-facing durable/live runtime reconciliation; and usage-v2 durable
-  migration semantics
-- **Does not own:** source access/decoding mechanics, observer delivery epochs
-  and queues, catalog readiness, process-lifetime runtime identity,
-  model-capacity catalogs, burn-rate formulas, Git analytics, or contribution
-  claims
-
-## 1. Summary
-
-Spaghetti will represent runtime evidence as revisioned, provenance-bearing
-facts that are independent of durable or ephemeral delivery. Claude usage moves
-from additive JSONL-row contributions to one replaceable snapshot per native
-response. Actor/run identity is mandatory; team and workflow affiliations are
-orthogonal metadata and never create a second token contribution.
-
-Every usage bucket uses RFC 012A's qualified-value contract. Missing or
-unsupported buckets remain unknown rather than becoming zero. Model, effort,
-session mode, permission mode, plans, tasks, tools, progress, compaction, and
-user-input interactions likewise preserve what native evidence actually proves
-and when it proves it.
-
-RFC 012D transports these facts to live consumers. This RFC defines their
-semantic identity and reduction regardless of transport.
-
-## 2. Evidence
-
-The selected production corpus contained:
-
-- 342,861 usage-bearing assistant rows;
-- 149,077 file-scoped response groups;
-- 193,784 repeated rows;
-- 57,150 groups with evolving counters;
-- 111 downward-correction groups;
-- 268 rows without `requestId`; and
-- eight request IDs associated with multiple message IDs.
-
-Therefore a usage-bearing transcript row is not an additive token event, and
-`requestId` is not a sufficient response identity. The current semantic model
-must change rather than preserve an incorrect oracle.
-
-The same census found native evidence for model IDs, tool calls/results,
-compaction/progress, modes, plans/tasks, actor relationships, teams/workflows,
-and structured questions, but quality and timing vary. The common facts cannot
-claim instantaneous state transitions when evidence is only observed on a
-later response.
-
-## 3. Decisions
-
-1. Usage is one response-keyed snapshot contribution with ordered revisions,
-   not one additive contribution per source row.
-2. Claude uses non-empty native `message.id` as the primary response key within
-   source instance/object/generation. `requestId` remains optional correlation
-   metadata.
-3. Every token bucket is a `QualifiedValue<u64>`. Unknown, omitted, and exact
-   zero remain distinguishable.
-4. Later response snapshots replace prior bucket contributions, including
-   downward corrections. Exact repeats do not change totals.
-5. Actor/run attribution is mandatory before usage contributes to canonical
-   totals. Affiliations are not part of contribution identity.
-6. Runtime state is dimensioned and revisioned; configured intent and observed
-   effective state are different evidence qualities.
-7. User-input requests are a distinct typed lifecycle, not generic permission
-   requests or opaque tool payloads.
-8. Unknown native fields/families remain bounded evidence and drift signals.
-9. `usage-v2` is an explicit fact, storage, query, and migration version with an
-   independent oracle and rollback projection.
-10. Spaghetti supplies canonical revisions and evidence quality. It does not
-    own model-capacity catalogs or presentation burn-rate formulas.
-11. Every runtime family has deterministic entity/revision identity, one
-    declared reducer class, explicit retraction semantics, and a complete
-    replacement representation.
-12. Aggregate-facing durable runtime/history results expose the same RFC 012A
-    semantic revision references and source/family coverage as scoped
-    observation. Durable commit and observer delivery order remain distinct.
-13. Transcript tool evidence does not become repository truth or a contribution
-    claim. A normalized `code.activity` pack requires a later evidence-backed
-    contract and is not an RFC 012 release gate.
-
-## 4. Contract maturity
-
-| Element                                           | Classification     |
-| ------------------------------------------------- | ------------------ |
-| Response snapshot/upsert usage semantics          | Semantic contract  |
-| Qualified missing-versus-zero bucket semantics    | Semantic contract  |
-| Actor/affiliation contribution identity           | Semantic contract  |
-| Cross-family revision/reducer/replacement law     | Semantic contract  |
-| Durable/live runtime reconciliation               | Semantic contract  |
-| Message/content identity and correction semantics | Semantic contract  |
-| Effective-state evidence and timing rules         | Semantic contract  |
-| User-input request lifecycle                      | Semantic contract  |
-| Exact serialized/N-API field representation       | Proposed API       |
-| Godview model-capacity and burn-rate presentation | Outside Spaghetti  |
-| Legacy usage-v2 numeric difference                | Reviewed migration |
-| Normalized historical `code.activity` pack        | Future RFC         |
-
-## 5. Common runtime revision and reduction law
-
-Every native-derived runtime fact family supplies semantic equivalents of:
-
-```text
-RuntimeRevisionMeta {
-  family_contract_version
-  entity_key
-  revision_key
-  semantic_revision_ref: SemanticRevisionRef
-  ownership: {
-    source_instance_key
-    source_object
-    generation
-    snapshot_scope?
-  }
-  source_order_or_revision
-  operation: Upsert | Retract
-  actor_run_key?
-  native_time?
-  provenance
-}
-```
-
-Entity and revision keys follow RFC 012A. A decoder cannot substitute delivery
-phase, database commit, observer epoch, host time, or queue order for missing
-native/source identity. When a family has no actor, `actor_run_key` is absent by
-contract rather than guessed. `semantic_revision_ref` is the RFC 012A public
-view of this fact revision; an encoding whose embedded fact/revision identity
-does not match `entity_key` and `revision_key` is invalid.
-
-Each family declares one reducer class:
-
-```text
-RevisionedEntity       latest accepted revision per entity; explicit retract
-OwnedSetSnapshot       complete revision replaces the prior owned set
-CorrelatedLifecycle    revisioned entities plus explicit native correlation
-CurrentGenerationLog   stable events retained for current source ownership
-UsageContribution      response snapshot replacement defined in section 7
-```
-
-Common laws:
-
-1. Source order resolves revisions from one object/generation. Cross-object
-   precedence uses the fact-family authority/effective-time contract and a
-   deterministic tie-breaker, never callback order.
-2. Reset, replacement, or confirmed deletion retracts revisions owned solely by
-   the old object/generation before corrected replay.
-3. Temporary source unavailability does not invent retractions.
-4. A complete owned-set snapshot retracts prior members absent from the new
-   revision. A partial snapshot cannot prove absence.
-5. Durable and observation projections invoke the same reducer law. Storage
-   commits and delivery envelopes may add topology metadata but cannot alter
-   reduced semantic state.
-6. An RFC 012D full snapshot contains the sufficient current-generation reducer
-   input described by the family matrix in section 12. At one comparable RFC
-   012A source/family coverage vector, clean bootstrap and resync therefore
-   produce the same reduced state digest.
-
-The family-specific shapes below embed or accompany this metadata even when
-the repeated fields are omitted from illustrative pseudocode. A family cannot
-replace `RuntimeRevisionMeta` ordering, ownership, operation, or identity with
-a delivery-only field.
-
-### 5.1 Durable/live reconciliation view
-
-RFC 011 remains the durable query implementation authority. For any
-history/runtime query intended to reconcile with scoped observation, its
-semantic result is equivalent to:
-
-```text
-DurableEvidencePage<T> {
-  snapshot_id: {
-    query_pack_contract_version
-    at_commit_seq
-    readiness_epoch?
-  }
-  projection_status
-  source_coverage: SourceCoverageSet[]
-  items[] {
-    subject_refs: ExternalEntityRef[]
-    semantic_revision_ref: SemanticRevisionRef
-    value: T
-  }
-  next_cursor? {
-    snapshot_id
-    query_fingerprint
-    stable_order_key
-    semantic_entity_key
-  }
-}
-```
-
-The pseudocode models a revision-granular reconciliation view. A presentation
-query may return a composite row, but if that row participates in durable/live
-reconciliation it exposes each native-derived semantic component and its
-reference; one arbitrary “primary” reference cannot stand for several message,
-content-block, tool, or state revisions. The exact API representation is
-provisional; these laws are normative:
-
-1. `SemanticRevisionRef`, `SourceCoveragePoint`, and `SourceCoverageSet` have
-   the RFC 012A meaning.
-   An item representing the same native-derived revision as an RFC 012D event
-   exposes the same semantic reference. The aggregate negotiates compatible
-   common reference/coverage versions across both boundaries before merging;
-   incompatible selections fail rather than best-effort match.
-2. `subject_refs` contains the relevant persistable base session/project
-   references. For a session-scoped item, its session reference equals RFC
-   012D `root.session_ref`; a presentation alias or aggregate cannot replace
-   that base reference.
-3. For durable/scoped overlay comparison, the durable result includes
-   `FactFamily(version)` coverage compatible with the observer's fact-family
-   coverage. `projection_status` separately proves whether the durable query
-   pack has reduced/validated that fact coverage; projection-pack readiness
-   cannot substitute for native fact-family coverage.
-4. Rows, counts/facets, projection status, and coverage belong to the advertised
-   committed snapshot. Every continuation uses that same snapshot and query
-   fingerprint or returns `SnapshotExpired {latest_snapshot}`; a cursor cannot
-   silently move to a newer commit.
-5. `at_commit_seq` orders durable commits only. It cannot be compared with an
-   observer sequence or native cursor to decide which item is newer.
-6. A consumer deduplicates durable and ephemeral items by semantic revision
-   reference. It may retire unmatched old overlay state only when complete
-   compatible source/family coverage proves the durable reducer state subsumes
-   that evidence, including required retractions or generation replacement.
-7. `Partial`, `Unavailable`, incompatible-generation, or otherwise
-   incomparable coverage cannot prove absence. The consumer retains or marks
-   overlay state stale until direct semantic evidence or a complete replacement
-   resolves it.
-8. A durable invalidation identifies when a newer complete/declared result is
-   available; it does not mutate a page already bound to an older snapshot.
-
-This contract does not require one global native watermark. Coverage is a
-driver-aware vector because append offsets, document revisions, source
-database watermarks, and unrelated objects are not one ordinal.
-
-## 6. Actor and affiliation model
-
-### 6.1 Actor run
-
-Runtime facts reference:
-
-```text
-ActorRunRef {
-  root_session_key
-  run_key
-  role: Root | Child
-  parent_run_key?
-  native_session_id?
-  native_agent_id?
-  native_agent_type?
-}
-```
-
-`run_key` is mandatory even for the root. A child may be a standard subagent,
-workflow child, or team member without changing its `Child` role.
-
-The root `run_key` is deterministically derived from the RFC 012A root
-`SessionKey`, the `Root` role, and a support-release-declared native run
-discriminator only when that discriminator is part of the pre-attach identity
-input. Otherwise the contract uses a stable singleton-root discriminator and a
-later native run ID is an attribute, not new key material. The final key must be
-available before a scoped observer installs watches. A child key uses its stable
-native run/agent/session identity under the same source instance; a declared
-source-record fallback is allowed only when collision and replacement behavior
-are fixture-tested.
-Parentage and late affiliation are attributes, not key material. Ambiguous child
-identity remains uncorrelated evidence and cannot be assigned to the root.
-
-`ActorRunRef.run_key` identifies an evidence-backed native actor/execution
-lineage inside the native session. It does not identify an operating-system
-process, a Chopsticks host attachment, or a downstream `runtimeRunId`. Several
-process-lifetime runs may resume the same native session while retaining one
-Spaghetti root actor key; downstream systems correlate those runs through
-their own opaque references and proven native-session claim.
-
-### 6.2 Orthogonal affiliations
-
-```text
-ActorAffiliationRevision {
-  actor_run_key
-  affiliation_key
-  revision_key
-  dimension: Team | Workflow
-  target_key
-  member_key?
-  native_target_id?
-  native_member_id?
-  state: Present | Removed | Unknown
-  effective_at?
-  provenance
-}
-```
-
-Team and workflow affiliation can coexist. Neither is an actor kind. A late
-affiliation revises grouping metadata for the same actor; it does not copy the
-actor's messages, tasks, or usage into a new contribution identity.
-`affiliation_key` identifies one actor/relation-dimension/target relation; a
-team revision cannot overwrite a workflow relation or vice versa. The context
-below is their deterministic union.
-
-The dimension/target representation is the normalized fact shape. It avoids a
-union with several competing optional identifiers while leaving the derived
-consumer context typed by dimension. `Removed` and `Unknown` remain current
-explicit revisions but do not qualify as present grouping edges.
-
-Reducers also expose a delivery/query context derived from accepted revisions:
-
-```text
-ActorAffiliationContext {
-  actor_run_key
-  team_key?
-  native_team_id?
-  team_name?
-  member_key?
-  workflow_key?
-  native_workflow_id?
-  completeness: Complete | Partial | Unknown
-  derived_from_revision_keys[]
-}
-```
-
-This context is not a second fact and does not alter another event's identity.
-When no affiliation evidence exists, optional fields are absent and
-`completeness` is `Unknown`. A late affiliation emits its own revision; it does
-not cause unchanged message or usage revisions to be duplicated.
-
-### 6.3 Activity and terminal state
-
-Actor creation/discovery, native activity, explicit terminal evidence, and
-correlation changes are revisioned separately. Silence or elapsed host time is
-not terminal native truth. A transient assessment may label an actor idle, but
-that assessment is not persisted as native evidence.
-
-## 7. Usage-v2 contract
-
-### 7.1 Revision shape
-
-```text
-UsageRevision {
-  usage_key: {
-    source_instance_key
-    source_object
-    generation
-    response_key
-  }
-  revision_key: {
-    usage_key
-    normalized_snapshot_revision_v1
-  }
-  session_key
-  actor_run_key
-  native_message_id?
-  request_id?
-  buckets: {
-    input_tokens: QualifiedValue<u64>
-    output_tokens: QualifiedValue<u64>
-    cache_creation_input_tokens: QualifiedValue<u64>
-    cache_read_input_tokens: QualifiedValue<u64>
-  }
-  model?: QualifiedValue<ModelId>
-  effort?: QualifiedValue<Effort>
-  native_time?
-  provenance
-}
-```
-
-`input_tokens` means the normalized non-cache input bucket defined by the
-support release. If an agent exposes only an inclusive aggregate that cannot be
-split honestly, the adapter leaves incompatible common buckets `Unknown`,
-reports degraded usage capability, and may retain the native aggregate in a
-namespaced extension fact. It cannot relabel the aggregate as an exact common
-bucket.
-
-`usage_key` is the stable replaceable contribution identity. `revision_key` is
-the semantic value identity carried by correction events. An evolving counter
-therefore updates one contribution with a new revision; an exact repeat of the
-currently accepted snapshot may be suppressed and does not create a second
-contribution. A previously seen value returning after an intervening revision
-is a new ordered transition even though it reuses the earlier semantic
-revision reference. RFC 012D therefore includes deterministic source-occurrence
-identity in `event_id`; semantic revision alone is not a delivery-occurrence
-ID. For the common metadata law, `usage_key` is the semantic entity key and the
-enclosing `revision_key` is the semantic revision identity.
-
-`normalized_snapshot_revision_v1` is a domain-separated deterministic digest
-of the complete normalized revision: canonical session and actor-run keys;
-response identity/key and optional native message ID; optional `request_id`;
-all four qualified buckets including value, quality, authority, completeness,
-unknown reason, effective time, and normalization provenance; optional
-qualified model and effort; and qualified native time. The RFC 012A source
-record ID remains separate provenance and is not an input to this digest.
-Consequently two distinct native rows that normalize to the same complete
-snapshot share one semantic revision reference, while a counter-equal row with
-different qualified metadata is a correction with a new reference. Adapters
-cannot choose a weaker per-family key: the common reducer recomputes this
-digest and rejects a mismatch.
-
-Optional `model` or `effort` means this usage record makes no assertion for that
-dimension; it does not mean exact absence or reset an accepted effective-state
-revision. If a record explicitly asserts that a value is unknown, it carries a
-well-formed RFC 012A `QualifiedValue` with `quality = Unknown`.
-
-### 7.2 Missing and zero
-
-For every bucket:
-
-- `{value: 0, quality: Exact}` is valid only when native schema semantics or
-  fixture-backed decoder rules prove zero;
-- an omitted field whose native meaning is not proven is `Unknown`;
-- unsupported cache accounting is `Unknown`, not zero;
-- a derived split is labeled `Derived` or `Estimated` and retains its method
-  version in provenance; and
-- an aggregate total over incomplete buckets carries partial/unknown
-  completeness instead of silently summing known values as complete.
-
-Canonical query results expose per-bucket value, quality, and coverage. A
-consumer that requires exact four-bucket context accounting reports unknown
-when required buckets are not exact enough for its policy.
-
-### 7.3 Response identity
-
-Rules:
-
-1. For Claude, non-empty `message.id` is the primary `response_key`.
-2. The key is scoped by source instance, source object, and generation.
-3. `requestId` cannot be the sole key because it may be absent or shared by
-   multiple message IDs.
-4. Each adapter documents and fixture-tests a deterministic fallback when its
-   preferred response ID is absent.
-5. A fallback cannot merge unrelated responses because another metadata field
-   happens to match.
-6. Changing a fallback is a semantic-version change requiring replay.
-
-### 7.4 Revision reduction
-
-1. The first snapshot creates one response contribution.
-2. A later snapshot for the same response replaces all four prior bucket
-   values, qualities, and coverage in source-revision order.
-3. Upward and downward revisions are both valid.
-4. A complete normalized snapshot equal to the currently accepted revision
-   shares its semantic revision, does not change totals, and is suppressed from
-   semantic delivery, although the raw native record remains dispositioned.
-   Counter equality alone is not enough to prove an exact repeat. If revision
-   `A` returns after accepted revision `B`, the `A -> B -> A` reversion is
-   delivered and ordered even though both `A` occurrences share one semantic
-   ledger revision.
-5. A source-generation reset retracts every contribution owned solely by the
-   old generation before corrected replay.
-6. Conflicting out-of-order revisions produce a diagnostic and cannot replace a
-   later accepted source revision.
-
-### 7.5 Totals and affiliation
-
-- One response revision contributes at most once to its actor and session.
-- Root/session totals aggregate response keys, not row/event counts.
-- Team-member and workflow-member totals are groupings over actor-affiliation
-  revisions, not separately stored copies of usage.
-- Late affiliation recomputes grouping from the same response keys and cannot
-  change root/session totals.
-- Removing affiliation removes the response from that grouping without
-  retracting the actor's canonical contribution.
-- An RFC 012B catalog canonical representative never rewrites `session_key` or
-  response contribution identity. A query may explicitly aggregate the
-  representative's disclosed member base keys, but scoped observation remains
-  keyed by the selected native/base session.
-
-## 8. Burn-rate and correction semantics
-
-Spaghetti does not persist “burn rate” as native truth. It provides enough
-ordered response snapshots, qualified buckets, effective/native time, and
-delivery classification for a downstream consumer to calculate a rate.
-
-When carried by RFC 012D:
-
-- `Bootstrap` usage constructs the initial cumulative baseline;
-- resync or source-replay `Correction` replaces or adjusts that baseline;
-- neither phase is an instantaneous consumption sample;
-- only post-barrier `Live` changes are eligible for a consumer's burn-rate
-  window;
-- a downward revision corrects the baseline rather than representing negative
-  consumption; and
-- affiliation-only revisions regroup existing contributions and produce no
-  consumption sample.
-
-A consumer may update displayed cumulative totals after a correction, but it
-cannot attribute the corrected difference to the observer's delivery time.
-
-## 9. Effective runtime state
-
-State dimensions are independent:
-
-```text
-EffectiveStateRevision<T> {
-  session_key
-  actor_run_key
-  dimension: Model | Effort | SessionMode | PermissionMode
-  revision_key
-  value: QualifiedValue<T>
-  evidence_kind: ConfiguredIntent | ResponseObserved | NativeTransition
-  native_time?
-  provenance
-}
-```
-
-Rules:
-
-- a model/effort value on a response proves it was effective for that response;
-  it is not an instantaneous change notification;
-- a launch or settings value is configured intent until runtime evidence
-  confirms it;
-- a native settings `autoMode` policy object is sensitive configured intent,
-  not evidence that session mode or permission mode became effective;
-- a native transition may establish an effective boundary at its native time;
-- absence of evidence produces unknown, not inherited global default; and
-- session mode and permission mode remain separate dimensions.
-
-Spaghetti returns model ID and usage evidence. A downstream model-capacity
-catalog owns context-window percentage and displays unknown when capacity or
-required bucket evidence is unavailable.
-
-## 10. Messages, content, plans, tasks, tools, and progress
-
-### 10.1 Messages and content blocks
-
-RFC 012C retains and versions RFC 011's common message/content semantics:
-
-```text
-MessageRevision {
-  message_key
-  revision_key
-  session_key
-  actor_run_key
-  role_or_kind
-  ordered_content_block_keys[]
-  parent_or_turn_key?
-  completeness
-  native_time?
-  provenance
-}
-
-ContentBlockRevision {
-  content_block_key
-  revision_key
-  message_key
-  ordinal
-  kind
-  bounded_typed_content_or_extension
-  native_tool_call_or_result_id?
-  completeness
-  provenance
-}
-```
-
-Both are `CurrentGenerationLog` families. A native message ID is primary when
-stable; otherwise RFC 012A source-record identity plus a deterministic semantic
-subkey is used. A correction replaces the same message/block entity rather than
-appending a duplicate. A complete ordered block snapshot retracts blocks absent
-from its replacement; a partial block list cannot prove absence. Source reset or
-confirmed deletion removes old-generation-owned entries before replay.
-
-### 10.2 Plans
-
-`PlanRevision` carries stable plan key, owner actor, revision key, ordered
-steps/status, native/effective time, completeness, and provenance. A complete
-snapshot replaces prior plan state; tool lifecycle evidence may provide a
-lower-latency provisional revision that later transcript evidence corrects.
-Plans are `RevisionedEntity`; explicit removal or removal from a complete owned
-plan set retracts the entity. Omission from partial evidence does not.
-
-### 10.3 Tasks
-
-`TaskRevision` carries stable task key, owner actor, parent/dependency keys when
-native, revision key, normalized lifecycle state, native/effective time,
-completeness, operation, and provenance. Tasks are `RevisionedEntity` when
-individually sourced and `OwnedSetSnapshot` when supplied by a complete task-list
-document. Created, updated, completed, failed, cancelled, and removed require
-evidence; silence is not completion and a partial list cannot retract a task.
-
-### 10.4 Tools
-
-Tool call and result facts retain native call/result identifiers, tool name,
-bounded typed/common content where modeled, native payload evidence according
-to policy, actor/run attribution, and correlation state. An unmatched result is
-retained as unmatched evidence rather than discarded. Calls and results are
-separate `CorrelatedLifecycle` entities with their own revision keys. Correlation
-updates relationships without changing either entity key; object deletion or
-source reset follows declared ownership retraction.
-
-A file path or shell/Git command inside a tool payload proves only the typed
-tool evidence declared by the support release. It does not by itself prove a
-filesystem mutation, commit creation, final repository state, retained code,
-or contribution. A future `code.activity` family must distinguish intent,
-observed tool result, and repository/workspace authority; retain session,
-actor, tool, path-policy, quality, completeness, and provenance; and pass a
-separate corpus/conformance amendment before entering common queries.
-
-### 10.5 Compaction and progress
-
-Compaction, progress, queue, and comparable native markers are revisioned
-events with quality and provenance. Host-derived heuristics use a distinct
-assessment family and cannot masquerade as native transitions.
-Native markers are `CurrentGenerationLog`; a correction replaces the same
-marker identity, and source ownership controls reset/deletion. Transient
-host-derived assessments are not included in a native full-snapshot claim.
-
-## 11. Structured user-input requests
-
-```text
-UserInputRequestRevision {
-  interaction_key
-  revision_key
-  session_key
-  actor_run_key
-  native_tool_use_id
-  kind: Choice | MultiChoice | FreeText | Mixed
-  questions[] {
-    question_key?
-    header?
-    prompt
-    options[] {
-      label
-      description?
-      preview?
-    }
-    multi_select
-  }
-  state: Pending | Resolved | Failed | Cancelled
-  operation: Upsert | Retract
-  completeness
-  result_reference?
-  native_time?
-  provenance
-}
-```
-
-For Claude, `AskUserQuestion` opens `Pending`; its correlated `tool_result`
-resolves or fails the interaction. Cancellation requires native evidence or an
-unambiguous terminal boundary. Permission requests remain a separate family.
-Interactions are `CorrelatedLifecycle` entities. Repeated evidence for the same
-tool-use/state revision is idempotent; a later result revises the existing
-interaction. Removal from a complete owned interaction snapshot or an explicit
-source retraction removes it. Partial evidence and silence do not resolve,
-cancel, or retract it.
-
-Within one revision, `questions` and each question's `options` are complete only
-when `completeness` proves it. A partial revision can enrich known fields but
-cannot remove a previously known question or option.
-
-`header`, `label`, `description`, and `preview` are normalized typed strings
-when native evidence supplies them. A supported consumer does not parse raw
-native payloads to render question choices. Raw evidence remains available
-under RFC 012D policy for drift and forward compatibility.
-
-## 12. Reducer-family matrix and capability quality
-
-The observation/durable reducer output and RFC 012D replacement representation
-are fixed by family:
-
-| Family                            | Reducer class                                     | Complete replacement representation                                                               |
-| --------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Actor run/activity                | `RevisionedEntity`                                | every current in-scope actor plus its accepted current lifecycle/correlation state                |
-| Affiliation                       | `RevisionedEntity`                                | every current affiliation entity plus derived `ActorAffiliationContext`                           |
-| Message/content block             | `CurrentGenerationLog`                            | every unretracted current-generation message/block through the watermark in stable semantic order |
-| Usage                             | `UsageContribution`                               | latest accepted qualified revision for every unretracted response key                             |
-| Effective state                   | `RevisionedEntity`                                | current qualified value/evidence for every supported actor/dimension, including explicit unknown  |
-| Plan                              | `RevisionedEntity` or declared `OwnedSetSnapshot` | every current plan and ordered state                                                              |
-| Task                              | `RevisionedEntity` or declared `OwnedSetSnapshot` | every current task and lifecycle/dependency state                                                 |
-| Tool call/result                  | `CorrelatedLifecycle`                             | every current call/result entity and current correlation state                                    |
-| User-input request                | `CorrelatedLifecycle`                             | every current interaction and lifecycle state                                                     |
-| Native compaction/progress marker | `CurrentGenerationLog`                            | every unretracted current-generation marker through the watermark                                 |
-| Unknown native evidence           | bounded `CurrentGenerationLog` plus aggregation   | retained bounded samples and exact aggregate counts/digests required by policy                    |
-
-“Current” means reduced at the declared native/source watermark, not observed at
-consumer wall-clock time. A replacement may serialize canonical reduced
-snapshots instead of every losing candidate revision, provided it preserves the
-winning value, quality, completeness, provenance, semantic revision identity,
-and enough reducer state in the engine to emit a deterministic fallback if the
-winner is later retracted. An absent entity may be semantically retracted only
-when family/scope coverage is complete or by explicit retraction. RFC 012D may
-instead remove prior ephemeral state when replacement coverage marks its owning
-object unavailable, but it substitutes explicit unavailable/error state and
-does not claim native deletion.
-
-Every support release declares which reducer class and replacement
-representation it uses for any family that permits more than one class above.
-Changing that choice is a fact-family semantic-version change.
-
-Bounded unknown-evidence sampling is deterministic over semantic/source
-identity, not first-arrival or scheduling order. Aggregate counts and digests
-cover the complete observed set through the watermark even when only bounded
-samples are transported.
-
-For each fact family and support release, capabilities report:
-
-```text
-Supported | Degraded | Unsupported
-```
-
-with evidence source, quality, expected timing, completeness constraints, and
-known limitations. Examples:
-
-- response-observed model: supported but not instantaneous;
-- effort only from launch settings: degraded configured intent;
-- usage without cache separation: degraded qualified buckets;
-- absent native tasks: unsupported, not an empty exact task list.
-
-RFC 012A compatibility output constrains these states. Exact/range support may
-publish the declared result; recognized-unverified and incompatible artifacts
-cannot publish typed runtime support because RFC 012A disables runtime decoding.
-This capability mapping is distinct from RFC 012B catalog readiness.
-
-Unknown fields and record families remain bounded native evidence with mapping
-dispositions from RFC 012A. Adding a typed projection cannot erase that
-evidence.
-
-## 13. Durable usage-v2 migration
-
-`usage-v2` has independent fact, projection, query, and migration versions.
-Migration proceeds as follows:
-
-1. preserve the legacy usage projection and query path;
-2. build a shadow response-revision projection from source facts;
-3. keep the v2 usage pack non-ready during replay;
-4. compare response identities, latest qualified buckets, actor/session totals,
-   and coverage to an independent frozen-corpus oracle;
-5. test exact repeats, evolving counters, downward corrections, missing
-   `requestId`, reused `requestId`, affiliation delay, and generation reset;
-6. switch the versioned usage query in one transaction; and
-7. retain the legacy projection through the compatibility window so rollback
-   does not require reparsing or database deletion.
-
-The shadow query exposes pack readiness separately from migration selection:
-
-```text
-UsageV2ProjectionReadiness {
-  projection_id: "runtime.usage-v2"
-  desired_version
-  completed_version?
-  state: Ready | StaleSafe | Pending | Unavailable | Untracked
-  last_commit_seq?
-  updated_at?
-  detail?
-}
-```
-
-Migration selection is a separate durable contract:
-
-```text
-UsageQuerySelection {
-  query_pack_id: "runtime.usage"
-  source_instance_ref?
-  selected: {
-    query_id: "legacy.usage" | "runtime.usage-v2"
-    contract_version
-  }
-  rollback: {
-    query_id
-    contract_version
-  }
-  selection_epoch
-  last_commit_seq
-  updated_at
-}
-```
-
-Selection is source-instance scoped because one database may contain several
-adapters with different support and readiness. Absence of a materialized row
-means the explicit compatibility default `legacy.usage@1` at epoch zero; it
-does not mean “latest” and cannot change as code is upgraded.
-
-The public projection includes the opaque common `source_instance_ref` once a
-matching usage-v2 coverage set exists; it never exposes the database catalog
-identifier. Before coverage materializes the implicit legacy selection may
-omit that reference, and promotion necessarily fails its coverage guard.
-
-Promotion to `runtime.usage-v2@1` is one writer transaction that:
-
-1. compare-and-sets the expected selection tuple and epoch;
-2. proves the same source instance's `runtime.usage-v2` projection has desired
-   and completed version 1 in `Ready` state;
-3. proves the matching fact-family coverage set is `Complete`, belongs to the
-   same source/support declaration, and shares the readiness barrier's commit;
-4. appends the normal durable commit record; and
-5. advances the selection epoch while retaining `legacy.usage@1` as the
-   rollback target.
-
-A stale expectation or failed guard writes nothing. Retrying an already
-committed identical target after acknowledgement loss is a no-op success.
-Every pre-commit failure exposes neither the selection nor its commit; an
-after-commit acknowledgement failure is resolved by reading the durable
-selection, never by assuming rollback.
-
-Rollback compare-and-sets the selected tuple/epoch back to the retained target
-without requiring the v2 projection to be healthy. It never deletes legacy or
-v2 rows. If later source work makes a selected v2 projection `Pending` or
-`Unavailable`, queries report that selected-but-non-ready state and never
-silently fall back to legacy semantics; rollback remains an explicit control
-operation.
-
-A query spanning more than one source instance may select v2 only after every
-contributing source has a compatible selection and complete comparable
-coverage. Otherwise it fails selection negotiation or uses an explicitly
-requested legacy contract. It cannot combine row-additive legacy usage for one
-source with response-revision v2 usage for another under one unqualified
-aggregate.
-
-The aggregate negotiation boundary is `getRuntimeUsageTotals` contract v1. A
-request contains one to 128 canonical project/session scopes and a
-`requested_query_id` of `selected`, `legacy.usage`, or `runtime.usage-v2`.
-Scopes may not overlap: a project-wide scope cannot appear beside a
-session-specific scope for the same project, and an exact scope cannot be
-repeated. The engine resolves every distinct source instance that contributes
-a canonical session to those scopes and reads the full selection vector,
-readiness, coverage, and aggregates in one SQLite snapshot.
-
-Every vector member reports a query-local opaque selection-scope reference,
-adapter ID, contributing session count, durable `UsageQuerySelection`, current
-usage-v2 readiness, normalized coverage status, and whether the exact v2
-promotion guard is currently satisfied. The query-local scope reference exists
-even before fact-family coverage and is only an opaque vector-member identity;
-it must not be treated as RFC 012A's canonical `source_instance_ref`.
-
-`selected` resolves only when every non-empty vector member selects the same
-supported query and contract version. A mixed vector returns
-`mixed_selection`, no resolved query, and no aggregate. A uniform v2 vector
-whose current readiness/coverage guard is not satisfied returns `not_ready`
-and no aggregate; it never falls back to legacy. A uniform unsupported tuple
-returns `unsupported_selection`. An empty contributing vector resolves to the
-immutable legacy compatibility default. `legacy.usage` is an explicit
-compatibility request and resolves regardless of the current vector.
-`runtime.usage-v2` is an explicit shadow/comparison request, but resolves only
-when every contributing member satisfies the same v2 guard as promotion.
-
-A `resolved` response contains exactly one discriminated aggregate arm:
-`legacy` preserves the existing contribution-based values and coverage, while
-`usage_v2` preserves response counts, actor counts, independently qualified
-token buckets, and unknown counts. Consumers must branch on the resolved query
-and must not coerce the two shapes into one unlabeled total. The requested
-scopes, vector, resolution, and selected aggregate all share `at_commit_seq`.
-
-The pre-existing `getUsage` and `getUsageActivity` contracts remain explicitly
-legacy during their compatibility window. Composite/default consumers migrate
-to `getRuntimeUsageTotals`; they must not aggregate several independent legacy
-or v2 calls after selection negotiation.
-
-Compatibility observation uses the separate read-only
-`getRuntimeUsageCompatibility` contract v1. It accepts the same bounded,
-non-overlapping scope vector and reads the vector, retained legacy aggregate,
-eligible v2 aggregate, and comparison under one SQLite snapshot. It does not
-require v2 to be selected, so a release controller can sample shadow behavior
-before promotion. An empty contributing vector, or any contributing source
-that fails the current v2 guard, returns `not_ready`, the legacy aggregate, and
-no v2 or bucket comparison; it never compares a partial projection as if it
-were complete.
-
-For each of the four native token buckets, a ready comparison reports legacy
-exact, estimated, and combined tokens; v2 known tokens, unknown-response count,
-and completeness; and one relation:
-
-```text
-equal | legacy_higher | v2_higher | incomparable
-```
-
-The absolute delta is present only for comparable buckets. The report summary
-is `equal`, `different`, `incomparable`, or `not_ready`. `different` is
-descriptive, not a correctness failure: response-revision v2 is expected to be
-lower than row-additive legacy data when native responses were repeated.
-Independent oracle parity remains the correctness authority. Missing v2
-buckets remain `incomparable`; zero is comparable only when native evidence
-made zero explicit. A versioned opaque `comparison_ref` is deterministic for
-the unordered scope set and commit watermark so an external collector can
-deduplicate retries without learning native identities.
-
-Successful comparison reads feed fixed, owner-lifetime telemetry under the
-query performance snapshot: ready/not-ready and summary counts, bucket
-relations, sampled absolute-delta sum and maximum, and first/last commit
-watermarks. Repeated samples are intentionally counted; the sum is sampling
-telemetry, not a deduplicated corpus total. The engine retains no scope labels,
-paths, response identities, payloads, or per-sample rows, and the query writes
-nothing to SQLite. A release window collector must persist the bounded
-snapshots it uses as promotion evidence; engine restart begins a new
-owner-lifetime window.
-
-The release rollback drill is normative:
-
-1. capture the last compatibility snapshot and every source selection epoch;
-2. make at least one selected v2 source non-ready and prove selected aggregate
-   queries return no fallback arm;
-3. compare-and-set each contributing source to its retained legacy target;
-4. accept `mixed_selection` while only part of the vector has rolled back;
-5. prove the complete vector resolves legacy after the final rollback; and
-6. prove v2 rows remain queryable as shadow state, so repair and later
-   re-promotion require neither native reparsing nor database deletion.
-
-Rollback failure, stale authorization, or a source omitted from the vector is
-a failed drill, not permission to force a global selector.
-
-`Untracked` is a query-boundary representation for legacy/directly constructed
-state with no durable version row; it is never persisted and never aliases
-`Ready`. A transaction that changes rows supplied by a usage-v2 provider
-stream writes `Pending` atomically with those rows. `Ready` requires a later
-barrier after every declared provider stream has drained without retry,
-applicable quarantine, incomplete tail, bounded-backlog remainder, unavailable
-source, or dependency-access denial. For one fact family, applicable
-quarantine is an unscoped permanent diagnostic or a diagnostic whose non-empty
-capability scope includes that family, as defined by RFC 012A. A diagnostic
-scoped exclusively to another capability remains durable audit evidence but
-cannot contaminate this family's coverage. `Unavailable` retains an honest
-reason. A record-quarantine coverage gap cannot recover merely because the
-cursor later has no work or new records append; an explicit replay/revalidation
-must prove replacement coverage. Administrative readiness transitions advance
-the normal durable commit clock but do not update a source object or cursor.
-Equal transitions do not create a commit.
-
-Readiness and its replacement coverage set are one administrative SQLite
-transaction. Failure before the transaction, after commit-row allocation,
-after readiness writes, after coverage replacement, or immediately before
-commit exposes neither half and a retry applies exactly once. Failure after
-SQLite commit but before acknowledgement exposes both halves at the same
-commit sequence; after restart, retry observes the equal durable transition as
-a no-op. A migration therefore recovers from acknowledgement ambiguity by
-reading durable state, never by assuming that an error means rollback.
-
-An explicit fact-family replay is source-instance scoped and follows this
-replacement protocol:
-
-1. the coordinator validates the requested family/version and loads the
-   matching normalized coverage set;
-2. before reading provider data, it durably marks the projection `Pending`
-   with an explicit-replay marker while leaving that coverage set unchanged;
-3. provider streams are selected only by their common capability declaration,
-   never by adapter ID or native path convention;
-4. every present object in the frozen baseline must enter a later source
-   generation and replay through its common driver and decoder; a new object
-   is already a full fresh-generation read, while an unchanged explicit
-   absence needs no fabricated generation;
-5. the first transaction in a replacement generation retracts all
-   old-generation usage contributions atomically with its replayed slice;
-6. bounded continuation keeps the baseline coverage and replay marker. After
-   restart, an object still at its baseline generation resets from its
-   beginning, while an object already in the replacement generation continues
-   from its durable cursor; and
-7. only a fully drained attempt atomically publishes replacement coverage and
-   `Ready`. Retry, unavailable-source, or bounded-backlog work stays `Pending`;
-   a new quarantine ends the attempt as `Unavailable` and requires another
-   explicit replay after correction.
-
-The public replay authorization is an optimistic compare-and-set, not a bare
-reset switch. A caller must first read one materialized
-`getFactFamilyCoverage` set and echo its `source_instance_ref`,
-`content_digest_ref`, and coverage `last_commit_seq`, together with the exact
-project/session, owner, family/version, adapter, configured roots, and a bounded
-audit reason. The engine resolves the opaque scope to one private source stable
-key before discovery, rechecks the authorization after acquiring the instance
-reconcile lease, and the writer compares the same set identity/digest/commit in
-the transaction that publishes `Pending`. A stale token, cross-scope token,
-wrong adapter, wrong configured root, or failed writer comparison creates no
-commit and advances no generation.
-
-Low-level N-API exposes `replayFactFamily` with explicit roots. The sole-owner
-observation host exposes the same command without a roots field and injects
-only the roots configured for that adapter. The transport-neutral query/IPC
-client remains read-only and cannot initiate replay. Successful return means
-the bounded replay attempt ran; callers re-read coverage/readiness to determine
-whether it reached `Ready`, remains `Pending`, or ended `Unavailable`.
-
-An ordinary reconciliation automatically resumes a durable replay marker, but
-cannot create that marker or clear a sticky gap. Historical diagnostic rows
-remain auditable; current readiness is justified by the replacement coverage
-set, not by deleting evidence of the old failure. A directory-membership
-snapshot cannot declare itself a directly replayable fact provider; the member
-content streams it discovers own fact replay.
-
-`projection_status = shadow | selected | not_materialized` states whether the
-candidate query has v2 rows for the requested session and whether its source
-has an explicit v2 selection; it is distinct from pack readiness and from RFC
-012A source/fact-family coverage. Selection, readiness, rows, and aggregates
-returned by one page belong to its advertised `at_commit_seq`.
-
-The independent oracle groups native records without importing adapter code,
-selects the last complete response revision in the current generation, and
-computes bucket quality/coverage as well as values. History, capability, and
-FTS remain compared to their existing accepted oracles; usage is deliberately
-compared to the new v2 oracle.
-
-Current implementation status (2026-08-16): steps 1 through 6 have landed,
-including source-scoped selection and the non-mixing composite aggregate
-boundary. Frozen sanitized and private native-corpus evidence cover response,
-actor, session, and aggregate scope.
-Claude decoder contract 17 introduced a canonical `runtime.usage-v2` fact
-beside the unchanged legacy delta; contract 18 retains that identity and adds
-canonical actor and workflow-affiliation evidence. Contract 19 retains those
-semantic identities and adds capability-scoped permanent-diagnostic coverage;
-existing contract-18 state must replay before it can claim the narrower
-coverage result. Contract 20 adds native team affiliation while retaining the
-same usage identity. Contract 21 replaces source-row revision identity with
-the complete value-derived `normalized_snapshot_revision_v1`; existing
-contract-20 state therefore replays before it can expose the corrected
-semantic references. The usage fact uses
-non-empty `message.id` first, an object/generation/source-record fallback when
-it is absent, canonical session and actor-run keys, independently qualified
-buckets, optional model/effort assertions, and an RFC 012A semantic revision.
-Schema v46 interns qualification evidence and retains one source-ordered latest
-revision per response; later snapshots, including downward corrections,
-replace the prior row and a generation reset retracts the old namespace.
-Schema v47 retains current topology-neutral actor and affiliation revisions
-without copying usage contributions.
-
-Focused conformance proves topology-independent identities, exact-repeat
-non-duplication, evolving and downward counters, exact zero, missing buckets,
-absent and reused `requestId`, actor/session grouping, malformed-snapshot
-non-erasure, and generation replacement. The compatibility `getUsage` and
-`getUsageActivity` paths intentionally retain their old row-additive result;
-the selected aggregate boundary routes independently.
-The independent Python oracle imports no adapter, SDK, or database code; its
-digest-bound root/child fixture and report are consumed by a Rust integration
-test that exercises the real parent and subagent streams plus the durable
-reducer.
-
-The common fact layer and durable reducer now enforce contract-22 revision
-identity. Contract 22 retains contract 21's complete value-derived usage
-revision and corrects the candidate-only root actor derivation: the common key
-now includes the final base session key, the `Root` role, and the declared
-native-run or singleton-root discriminator. Root actor declarations, root
-usage, child parent references, durable affiliations, and scoped pre-attach
-identity therefore agree. The decoder-contract bump forces generation replay
-before old and corrected keys could mix. An exact repeat remains idempotent both within one decode batch and across
-commits: it creates neither a duplicate semantic fact-ledger row nor a
-`runtime.usage-v2.changed` entry. Query bootstrap reduces the complete usage
-baseline without enqueueing per-response usage-v2 changes; the final
-readiness/coverage barrier publishes that baseline, so a consumer cannot
-misread historical replay as instantaneous burn. After that barrier, a changed
-normalized snapshot upserts the same usage entity with a new semantic
-reference. Exact equal revisions are also suppressed when independently
-decoded record batches merge. A non-consecutive `A -> B -> A` reversion emits
-the second `A` transition while reusing `A`'s existing fact-ledger row and
-binding the current response to that valid row. A live/correction generation
-replacement emits explicit delete changes for old response entities before
-replay. The durable change payload carries the same RFC 012A semantic and
-source-record references as the v2 query. Focused tests include an
-equal-counter native-time correction, a bootstrap-to-live boundary plus
-semantic reversion, cross-batch idempotency with unequal-value rejection, and
-rejection of an adapter-supplied revision key that omits normalized state.
-
-The versioned `getRuntimeUsageV2` query contract v1 is now available through
-Rust, N-API, and the transport-neutral SDK as a shadow inspection surface. It
-returns response-level semantic revision references, canonical session and
-actor references, qualified buckets/model/effort, page-local actor contexts,
-all current affiliation revisions, and scope-wide qualified aggregates. Actor
-and present team/workflow filters regroup the same response identities. Every
-page and aggregate shares a commit snapshot; continuation is bound to its full
-scope and fails after the snapshot watermark changes. A session without a v2
-mapping reports `not_materialized`, never legacy fallback.
-
-The first step-3 projection-readiness slice is also durable. Only streams whose
-common capability list includes `runtime.usage-v2` can atomically set its pack
-to `Pending` in a source transaction. After those provider streams drain, the
-common coordinator uses a zero-fact administrative transaction on the same
-commit clock to establish `Ready` or `Unavailable`; it never fabricates a
-source-object cursor update. Equal transitions are no-ops, unrelated stream
-commits leave the pack watermark unchanged, and `getRuntimeUsageV2` returns the
-readiness row from the same snapshot as its rows and aggregates. A provider
-record quarantine is sticky `Unavailable`: neither a later append nor a no-op
-scan can claim the skipped evidence was recovered. The common coordinator's
-explicit fact-family replay now owns that recovery: it freezes the normalized
-coverage set as a generation baseline, writes a durable `Pending` marker before
-reading, and replaces coverage only after every present baseline object has
-advanced and all provider work has drained.
-
-Schema v48 now persists the step-3 RFC 012A fact-family coverage set in
-normalized, bounded set/point/absence/error tables. The common administrative
-writer replaces it atomically with the readiness barrier and binds it to the
-adapter, canonical source instance, support release, and verified source
-declaration. A deterministic content digest suppresses equal writes; restart,
-cursor advancement, and stable quarantine-gap behavior have focused tests.
-Coverage membership uses a two-pass canonical streaming digest, preserving
-the prior digest for small inputs while bounding memory and admitting native
-corpora beyond the former 64 KiB aggregate serialization limit. Targeted
-provider-object reconciliation invokes the same instance-wide post-drain
-barrier as a full scan, so it cannot leave exact recovered evidence stuck in
-`Pending`.
-
-The generic `getFactFamilyCoverage` query contract v1 now exposes those sets
-through Rust, N-API, and the transport-neutral SDK. A caller supplies an opaque
-project/session scope plus owner, family, and family version. The engine
-resolves the durable source instance internally and returns a bounded,
-deterministically ordered union of points, explicit absences/deletions, and
-errors. Set metadata and every page share one commit watermark; continuations
-are bound to the full query scope and expire after a newer commit. Native paths,
-object keys, and adapter payloads are never returned: source, stream, object,
-position, record, revision, membership, declaration, and content identities
-are versioned opaque common references. `not_materialized` is distinct from an
-empty complete set.
-
-The explicit replay/restart path and its public stale-safe authorization are
-implemented for usage-v2, including bounded append continuation and
-old-generation retraction without duplicate response contributions. The
-administrative readiness/coverage transaction is fault-tested at every
-precommit seam and after-commit acknowledgement loss, including restart and
-idempotent retry.
-
-Schema v49 persists query-selection contract v1 independently of readiness and
-coverage. Its primary key includes source instance, query pack, and scope. An
-absent row materializes as the immutable `legacy.usage@1` default at epoch
-zero. The common writer accepts selection only in an isolated administrative
-transaction, compare-and-sets the prior tuple/epoch, and rechecks Ready v1 plus
-complete error-free usage-v2 coverage from one shared barrier commit before
-promotion. Stale and failed guards create no commit. Every precommit failure
-rolls back the selection, while after-commit acknowledgement loss survives
-reopen and an identical retry returns the durable target without advancing the
-clock.
-
-The low-level N-API engine and sole-owner `ObservationHost` expose explicit
-promotion/rollback; the transport-neutral client remains read-only. The
-versioned v2 page returns selection/readiness/data under one snapshot and uses
-`projectionStatus = selected` only after explicit promotion. Rollback remains
-available while v2 is `Pending`, preserves both projections, advances the
-epoch, and supports idempotent retry.
-
-`getRuntimeUsageTotals` contract v1 is implemented through Rust, N-API, and the
-transport-neutral client. It validates one to 128 non-overlapping scopes,
-resolves a deterministic vector of every contributing source, and reads that
-vector plus readiness, coverage, and the chosen aggregate in one SQLite
-snapshot. Explicit v2 can inspect a fully eligible shadow vector before
-promotion. The selected path returns no aggregate for a mixed vector or a
-selected-but-unready v2 vector and never silently falls back. A resolved result
-contains exactly one labeled legacy or v2 arm. Native-boundary tests cover two
-simultaneous source instances, request-order independence, legacy defaults,
-one-sided promotion, explicit legacy during the mixed interval, full v2
-promotion, and loss of readiness from an incomplete tail.
-
-The read-only `getRuntimeUsageCompatibility` contract and fixed owner-lifetime
-telemetry are also implemented across the same boundaries. Focused native
-tests use a repeated native response to prove a directional legacy-higher
-delta without treating expected semantic divergence as failure, explicit-zero
-cache buckets to prove comparable equality, missing buckets to prove
-incomparability, request-order-independent comparison references, repeated
-sample accounting, and a non-ready vector that emits no v2 comparison. The
-same two-source fixture performs the release rollback sequence while one v2
-source is unhealthy: the intermediate vector is mixed, the completed vector
-resolves legacy, and the v2 rows remain available in shadow state.
-
-The private native corpus gate also passes on a stable ephemeral source clone.
-An adapter/SDK/database-independent census matched the durable projection
-exactly for 149,369 response groups, 5,044 actors, 854 sessions, the root/child
-partition, fallback and model counts, every qualified bucket total, and zero
-unknown responses. All 5,182 declared transcript objects produced complete
-coverage and `Ready` v1. Six retained typed-projection diagnostics were scoped
-outside usage-v2 and remained visible as audit evidence without manufacturing
-a usage gap. The committed aggregate-only report is
-[`usage-v2-private-parity-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-private-parity-v1.json)
-with digest
-`sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
-
-A second adapter/SDK-independent census on a stable ephemeral clone measured
-the exact suppression boundary before contract 21 landed. Across 344,160
-usage-bearing rows and 149,671 file-scoped response groups, 194,489 rows
-repeated a response key. Of 136,946 counter-and-bucket-equal repeats, only 965
-were equal complete semantic snapshots; 135,981 changed other normalized
-metadata, overwhelmingly native source time, and therefore remain replaceable
-corrections rather than additive burn. The census also found 262
-non-consecutive returns to an earlier complete semantic value. Those are
-ordered reversions, not suppressible retries. The aggregate-only report is
-[`usage-v2-semantic-revision-census-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-census-v1.json)
-with digest
-`sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d`.
-
-The contract-22 release artifact then passed the same stable-clone parity gate
-after final bootstrap integrity checking: 150,757 responses, 5,063 actors, 856
-sessions, the root/child partition, all four totals, zero unknown buckets, zero
-foreign-key violations, and complete `Ready` coverage for 5,201 transcript
-objects matched exactly. The
-gate binds the loaded native artifact digest so a stale addon cannot be
-mistaken for current-source evidence. Ingest completed in 358.25 seconds; the
-snapshot differs from earlier runs, so this timing is descriptive and not a
-controlled causal performance claim. The
-aggregate-only report is
-[`usage-v2-semantic-revision-parity-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-parity-v1.json)
-with digest
-`sha256:3f3e0606e1dd228771f0778c9299a9cdbd62fbb11b555352a36d693bdcf7ad76`.
-
-Native team-to-actor conformance first passed under decoder contract 20 and is
-retained by contract 21. Team
-config `leadSessionId` plus an exactly-one lead member establishes the root
-edge; zero or multiple matches fail closed as retained unknown evidence;
-subagent metadata `teamName` plus `name` establishes a child edge for the actor
-owned by that sidecar path. Both produce the same canonical team/member
-namespace without comparing opaque transcript filenames to config agent IDs.
-Snapshot replacement retracts an edited or deleted sidecar's prior edge while
-leaving actor usage untouched. The aggregate-only native census report is
-[`team-affiliation-census-v1.json`](../../agent-support/claude-code/2026-08-21/reports/team-affiliation-census-v1.json).
-
-The representative external compatibility-window report is now retained as
-[`usage-v2-compatibility-window-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-compatibility-window-v1.json)
-with digest
-`sha256:3f4eaa7c8144fe078c9df71ca6cb72a3b0c9a9e5390bcecb7433b455e1087a83`.
-On a stable ephemeral clone, the independent census and durable ingest matched
-153,525 response groups, 5,141 actors, 911 usage sessions, all four token
-totals, 5,289 complete Ready coverage points, and zero final foreign-key
-violations. The proven query selection remained the unselected
-`legacy.usage@1` default, and all four sampled comparisons were
-`legacy_higher`; the report records that expected semantic divergence rather
-than treating it as a parity failure. The compatibility-window gate is met,
-but the remaining runtime-family gates still keep the candidate capability
-unsupported, and `getUsage`/`getUsageActivity` retain legacy semantics.
-
-## 14. Failure and correction semantics
-
-- A malformed usage snapshot does not erase the latest valid contribution; it
-  emits bounded diagnostic evidence.
-- An unsupported/missing bucket degrades only the affected bucket and derived
-  aggregates.
-- Reset retracts old-generation contributions before replay.
-- Ambiguous actor attribution prevents contribution to actor/team/workflow
-  totals until corrected; it cannot be assigned to the root silently.
-- A late actor correction moves the same response contribution rather than
-  copying it.
-- Interaction/tool/task object deletion follows the section 5 law and section
-  12 family matrix; partial evidence cannot fabricate disappearance, while
-  explicit deletion or complete owned-set absence retracts with provenance.
-- Unknown record growth triggers drift telemetry, not unbounded public events.
-
-## 15. Rejected alternatives
-
-### 15.1 Add every Claude usage row
-
-Rejected by repeat and evolving-counter evidence.
-
-### 15.2 Use `requestId` as response identity
-
-Rejected because it is sometimes absent and sometimes shared across message
-IDs.
-
-### 15.3 Treat missing token buckets as zero
-
-Rejected because it violates qualified-value semantics and creates false exact
-totals for agents with incomplete native accounting.
-
-### 15.4 Encode team/workflow as actor kinds
-
-Rejected because one child actor can have both affiliations and affiliation can
-arrive after usage.
-
-### 15.5 Make Godview parse native tool payloads
-
-Rejected because typed runtime semantics would no longer be a common contract
-and native parsing would escape the adapter boundary.
-
-### 15.6 Infer Git or contribution truth from transcript commands
-
-Rejected because a recorded command or tool call does not prove the resulting
-workspace/ref state, accepted branch, retained code, exclusive authorship, or
-product contribution. Those require workspace/repository evidence and
-downstream policy outside this RFC.
-
-## 16. Conformance and acceptance
-
-Release-blocking fixtures cover:
-
-- compatible semantic-reference/coverage/query-pack selection and incompatible
-  aggregate-facing rejection;
-- exact repeat, evolving snapshot, upward and downward revision;
-- missing response ID fallback, absent `requestId`, and reused `requestId`;
-- exact zero, omitted/unknown bucket, derived bucket, and incomplete aggregate;
-- reset/retract and old-generation exclusion;
-- deterministic root run key before source creation and stable child keys under
-  late parent/affiliation correlation;
-- root, standard child, workflow child, and team-member attribution;
-- late affiliation, affiliation removal, and ambiguous actor correction without
-  duplicate contribution;
-- bootstrap/correction baseline versus live consumption classification;
-- response-observed model/effort and native state transitions;
-- configured intent kept distinct from effective state;
-- message/content correction, complete-block replacement, partial-block
-  non-retraction, and source reset;
-- plan/task lifecycle, unmatched tools, compaction/progress, and unknown facts;
-- question open/resolved/failed/cancelled with typed option fields;
-- explicit deletion versus partial omission for every section 12 family;
-- equal semantic revision references in durable query and observer forms;
-- equal external base-session references in catalog, durable runtime query, and
-  scoped observer forms;
-- durable runtime/history continuation pinned to one snapshot, explicit
-  expiration, and coherent projection status/source coverage;
-- live/durable overlay deduplication, direct absorption, coverage-based
-  retirement, omitted-object/partial/incomparable coverage, reset, and
-  retraction;
-- process-lifetime runs remaining distinct from Spaghetti actor-run identity;
-- equal durable/observation reduced-state and complete-replacement digests at
-  the same comparable RFC 012A source/family coverage vector; and
-- identical semantic serialization across Rust, N-API, and TypeScript facades.
-
-RFC 012C is complete when usage-v2 matches the independent qualified-bucket
-oracle at response, actor, session, affiliation-group, and aggregate scope;
-legacy rollback remains available; unknown is never reported as zero; typed
-runtime facts pass downstream scenarios; every supported family can produce an
-exact complete-replacement state; and neither durable nor ephemeral delivery
-introduces duplicate semantic contributions.
+- **Landing:** [landing plan](./012-landing-plan.md) §3.3 (consumer) and §8 (lane L3)
+- **Full 2026-08-15 draft:** [archive/012c-…-2026-08-15-draft.md](./archive/012c-runtime-semantics-and-usage-v2-2026-08-15-draft.md)
+- **Owns:** the common revision/reducer law for the eleven runtime fact
+  families, response-level usage, actor/run and affiliation identity, effective
+  state, and the qualified-value discipline that keeps unknown out of totals
+- **Does not own:** source access and decoding (012A), catalog readiness
+  (012B), observer delivery and epochs (012D)
+
+## 1. What this document is now
+
+The 2026-08-15 draft specified usage-v2 as a *migration*: a shadow projection
+beside the legacy one, a durable selection record, promotion and rollback
+transactions, a compatibility-comparison query, and telemetry to watch the two
+disagree. All of that was built. None of it is left.
+
+The landing deleted the legacy path instead of migrating off it. Response-level
+usage is now the only usage there is, so there is nothing to select between,
+nothing to promote, and nothing to roll back to. The semantic contract — what a
+response is, how a revision replaces one, what a bucket asserts, what unknown
+means — is unchanged and is what this file records.
+
+## 2. Decisions (as implemented)
+
+1. **Usage is one snapshot per native response, not one contribution per
+   source row.** A response contributes at most once to its session and to its
+   project no matter how many native rows revised it.
+2. **Claude's primary response key is a non-empty `message.id`**, scoped by
+   source instance, object, and generation. `requestId` is correlation
+   metadata, never identity: the census found it absent on 268 rows and shared
+   across message ids on eight.
+3. **Every token bucket is independently qualified.** `exact`,
+   `native_claimed`, `derived`, `estimated` assert a number; `unknown` asserts
+   nothing and is never folded into a total. An omitted bucket is unknown, not
+   zero.
+4. **A later snapshot replaces the earlier one**, downward corrections
+   included. An exact repeat changes nothing.
+5. **Actor/run identity is mandatory** on every runtime fact. Team and
+   workflow affiliations are orthogonal metadata; they regroup existing
+   contributions and never create a second one.
+6. **State is dimensioned and revisioned.** Configured intent and observed
+   effective state are different evidence qualities and never collapse.
+7. **One reducer law, two sinks.** Durable ingestion and the scoped observer
+   run the same reduction over the same facts, so the two topologies cannot
+   disagree about a revision.
+8. **Unknown native evidence stays bounded evidence**, not an error and not a
+   silent drop.
+9. **Spaghetti supplies qualified revisions, not derived rates.** Burn rate,
+   context-window percentage, and model-capacity catalogues are downstream.
+
+## 3. Semantic rules the engine enforces
+
+### 3.1 Common revision law
+
+`crates/spaghetti-napi/src/runtime_semantic_reducer.rs` is topology-neutral by
+construction: it imports no database and no observer type. It owns
+
+- reduction to `Unchanged | Upsert | Retract` per entity;
+- source order as the resolver within one object generation, with a
+  deterministic tie-break across objects — never callback or delivery order;
+- retraction of revisions owned solely by an old generation before corrected
+  replay;
+- complete owned-set snapshots retracting absent members, and partial evidence
+  proving nothing about absence;
+- a reduced-state digest (`RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION`) that
+  excludes epoch, sequence, phase, and observation time, so a clean bootstrap
+  and a completed resync at equal coverage produce equal digests.
+
+### 3.2 Usage
+
+`crates/spaghetti-napi/src/engine/usage_query.rs` holds the query side.
+
+- Four buckets: `input`, `output`, `cache_creation`, `cache_read`. Each carries
+  its own resolved qualification; a bucket that asserts nothing is reported
+  unknown rather than summed as zero.
+- `component_total_tokens` is the sum of the four; buckets that assert nothing
+  add nothing.
+- A response is counted in exactly one of three classes: fully exact,
+  partially known (`estimated_contribution_count`), or asserting nothing
+  (`unknown_contribution_count`). `contribution_count` counts distinct
+  responses, not native rows — that is the correction.
+- A windowed report splits days and keeps the all-time aggregate; a response
+  whose date is unusable is reported untimed rather than dropped.
+- A session outside the requested project is rejected, not answered empty.
+- `USAGE_QUERY_CONTRACT_VERSION` tracks the shared query-pack protocol number.
+  The response-level change itself is carried by `SCHEMA_VERSION`, which
+  rebuilds — there is no per-query usage version to negotiate.
+
+### 3.3 Actor and affiliation
+
+Actor-run and actor-affiliation are separate families with separate revisions.
+A late affiliation revises grouping for the same actor; it does not copy that
+actor's messages, tasks, or usage into a second contribution identity. Removing
+an affiliation removes the response from that grouping and leaves the actor's
+canonical contribution untouched. Ambiguous child identity stays uncorrelated
+evidence — it is never assigned to the root.
+
+### 3.4 The eleven families
+
+`message`, `content_block`, `tool`, `user_input_request`, `plan`, `task`,
+`native_marker`, `effective_state`, `actor_run`, `actor_affiliation`,
+`usage_v2` (`ObserverFamily` in `crates/spaghetti-napi/src/observer/event.rs`,
+`RuntimeSemanticFamily` in `runtime_semantic_reducer.rs`). Every one has a
+reducer, a fixture, a typed value, a place on the observer wire, and — as of
+lane L5 — a Claude emitter in
+`crates/spaghetti-napi/src/claude/runtime_facts.rs`. §7 records the two places
+where the evidence available is weaker than the family.
+
+## 4. Shipped interface
+
+**Facts.** `Fact::UsageRevisionV2`, `Fact::ActorRunRevision`,
+`Fact::ActorAffiliationRevision`, `Fact::MessageRevision`,
+`Fact::ContentBlockRevision`, `Fact::ToolRevision`, `Fact::TaskRevision`,
+`Fact::PlanRevision`, `Fact::EffectiveStateRevision`,
+`Fact::NativeRuntimeMarkerRevision`, `Fact::UserInputRequestRevision`, and
+`Fact::UnknownRecord` — all in `crates/spaghetti-napi/src/adapter/facts.rs`.
+`Fact::Usage`, the additive legacy variant, no longer exists.
+
+**Generated types.** `SemanticRevisionRef`, `FactRevisionId`, `ActorRef`,
+`ActorAttribution`, `SemanticOperation`, `ObserverFamily`, `SemanticEvent` in
+`packages/sdk/src/generated/`.
+
+`SemanticEvent.value` is a **`RuntimeSemanticValue`** — an externally tagged
+union with one variant per family (`{ MessageRevision: MessageRevisionFact }`,
+`{ ToolRevision: ToolRevisionFact }`, and so on), generated from the same
+`adapter/facts.rs` types the decoder emits;
+`crates/spaghetti-napi/src/adapter/runtime_value.rs` proves the wire shape and
+the typed shape agree for every family. Narrowing on `family` narrows the value
+with it, so nothing is cast. `value` is `null` for a retraction — the reducer
+removed the entity, so there is no current value to carry.
+
+**Native surface.** `SpaghettiEngine.getUsage(...)` and
+`SpaghettiEngine.getStats(...)` in `crates/spaghetti-napi/index.d.ts` return
+response-level values. The draft's `getRuntimeUsageV2`,
+`getRuntimeUsageTotals`, `getRuntimeUsageCompatibility`, and the promotion and
+rollback commands were deleted with the migration.
+
+**CLI and playground.** `spag stats`
+(`packages/cli/src/commands/stats.ts`) aggregates response-level totals and
+labels their quality `exact`, `estimated`, or `mixed`. The playground usage
+views read the same values.
+
+## 5. Acceptance tests
+
+`crates/spaghetti-napi/src/engine/usage_query/tests.rs`, behavioural against
+real SQLite:
+
+| Test | Rule proven |
+| --- | --- |
+| `evolving_counters_for_one_response_collapse_to_one_contribution` | §2.1, §2.4 |
+| `a_downward_revision_corrects_the_total_instead_of_being_rejected` | §2.4 |
+| `distinct_responses_each_contribute_once` | §2.1 |
+| `an_omitted_bucket_stays_unknown_and_is_never_summed_as_zero` | §2.3 |
+| `coverage_names_the_native_field_behind_every_qualified_bucket` | provenance |
+| `a_window_splits_days_and_keeps_the_all_time_aggregate` | §3.2 |
+| `a_response_without_a_usable_date_is_reported_untimed_rather_than_dropped` | §3.2 |
+| `a_session_outside_the_project_is_rejected_rather_than_answered_empty` | §3.2 |
+| `window_bounds_are_calendar_checked_and_bounded` | §3.2 |
+| `the_in_repo_claude_fixture_matches_the_independent_oracle` | §6 |
+
+**Independent oracle.** `scripts/usage_v2_oracle/` reproduces response grouping
+and bucket qualification from native records without importing the adapter,
+SDK, schema, or Rust output. `python3 scripts/usage_v2_oracle/test_oracle.py`
+runs it; `scripts/validate-all.sh` runs it as the suite *RFC 012C Usage-v2
+Oracle*. It was exact against the in-repo fixture (119 responses) and against a
+real corpus slice (5,238 responses).
+
+**Reducer parity across topologies.**
+`crates/spaghetti-napi/src/observer/tests/families.rs` —
+`all_eleven_families_reduce_and_appear_in_the_replacement_manifest`,
+`an_exact_repeat_of_a_revision_adds_nothing`,
+`retracting_an_objects_facts_empties_its_families`; and
+`observer/tests/lifecycle.rs` —
+`a_repeated_usage_row_adds_nothing_and_a_correction_replaces_it`.
+
+**End to end, native decode to typed TypeScript.**
+`packages/sdk/src/__tests__/observe-session-families.test.ts` drives a real
+`.claude`-shaped tree through the observer and asserts the families arrive with
+typed values, plus that the bootstrap barrier reports the families it actually
+reduced.
+
+## 6. The correction, in numbers
+
+On the full Claude corpus, response-level accounting reports **36.88B tokens
+where the 0.7.x additive path reported 78.52B — 2.129× lower**, from 362,043
+native rows resolving to 158,118 distinct responses. The old number was not a
+different opinion about the same events; it counted streamed-response repeats
+as separate consumption. `getStats` p95 improved 24%; `getUsage` p95 rose
+0.7 ms, which was accepted.
+
+Codex and Grok also emit response-level facts now. The Codex legacy path had
+double-counted cache-read inside input and reasoning inside output; the Grok
+delta was zero at the time of that measurement.
+
+Grok usage has since become **exact per response** rather than a session-scoped
+estimate: one `turn_completed` record in `updates.jsonl` is one response
+contribution (`crates/spaghetti-napi/src/grok/adapter.rs`). The estimate path
+is deleted. `cacheCreationTokens` is absent on some turns and stays `unknown`
+there rather than being inferred, and context occupancy is explicitly *not*
+treated as per-response usage.
+
+## 7. Where the evidence is weaker than the family
+
+All eleven families are emitted by the Claude decoder
+(`crates/spaghetti-napi/src/claude/runtime_facts.rs`). Two places deserve a
+consumer's attention, because the family exists but the native evidence behind
+it is narrower than the name suggests:
+
+- **Plans come from tool evidence, not from plan documents.** `PLAN_TOOLS`
+  is `["ExitPlanMode", "EnterPlanMode"]`: a `plan` revision is derived from
+  those tool calls in the transcript, which is where actor binding exists.
+  The `plans/<slug>.md` sidecars remain snapshot facts with no actor binding —
+  they are not a second source of `plan` revisions, and
+  `plan-document-from-evidence` is not among the relations the Claude scope
+  program declares.
+- **An orphaned `tool_result` claims no tool entity.** If a result's call fell
+  outside the bounded per-object correlation window, the result keeps its
+  content-block evidence — which already carries the native call id — and no
+  `tool` revision is emitted for it. RFC 012C forbids inventing the tool name a
+  `tool_result` never carries, so the honest outcome is content-block evidence
+  without a guessed name rather than a fabricated tool.
+
+Not implemented, deliberately:
+
+- **Usage migration machinery** — selection, promotion, rollback, the
+  compatibility query and its telemetry, and the legacy projection they
+  protected. Deleted; §1.
+- **`code.activity`.** Tool evidence is still not repository truth. A file path
+  or shell command inside a tool payload proves the tool evidence and nothing
+  about workspace state, commits, retained code, or contribution.
+- **Durable/live overlay reconciliation as a shipped helper.** The pieces exist
+  — a durable query and an observer event for the same revision carry equal
+  `SemanticRevisionRef` values — but no code in this repository performs the
+  deduplication; the consumer does. See
+  [docs/integration/vibefield-phase-a.md](../integration/vibefield-phase-a.md).
+
+## 8. Superseded sections of the 2026-08-15 draft
+
+- §5 `RuntimeRevisionMeta` and the reducer-class vocabulary — superseded by
+  `crates/spaghetti-napi/src/runtime_semantic_reducer.rs`.
+- §5.1 `DurableEvidencePage<T>` — superseded by the existing RFC 011 query
+  results, which carry `atCommitSeq` and the shared `SemanticRevisionRef`.
+- §6 `ActorRunRef` / `ActorAffiliationRevision` / `ActorAffiliationContext`
+  wire shapes — superseded by `ActorRef` and `ActorAttribution` in
+  `packages/sdk/src/generated/`.
+- §7 `UsageRevision` shape — superseded by `UsageRevisionV2Fact` in
+  `adapter/facts.rs` and the aggregates in `engine/usage_query.rs`.
+- §9 `EffectiveStateRevision<T>` and §10–§11 family shapes — superseded by the
+  corresponding `Fact::*Revision` variants in `adapter/facts.rs`.
+- §12 reducer-family matrix — superseded by `RuntimeSemanticFamily` plus the
+  replacement manifest the observer emits (`FamilyManifestEntry`).
+- §13 durable usage-v2 migration in full, including
+  `UsageV2ProjectionReadiness`, `UsageQuerySelection`, `getRuntimeUsageTotals`,
+  `getRuntimeUsageCompatibility`, the rollback drill, and every
+  contract-17-through-22 status paragraph — superseded by deletion; §1 and §7.
+  The historical corpus reports it cites remain under
+  `agent-support/claude-code/`.
+- §19 (draft §12) capability `Supported | Degraded | Unsupported` reporting —
+  superseded by the RFC 012B readiness vector plus the observer's family
+  manifest.
+
+## 9. Acceptance
+
+RFC 012C is met for this landing when usage matches the independent
+qualified-bucket oracle at response, session, and project scope; unknown is
+never reported as zero; an exact repeat adds nothing and a downward revision
+corrects; a generation reset retracts before replay; durable and observer
+reduction of the same fact produce the same revision reference; and every
+supported family is actually emitted with a typed value. All six hold as of
+2026-08-23 (landing plan §8, lanes L1, L3, and L5). The two evidence limits in
+§7 are documented behaviour, not outstanding work.

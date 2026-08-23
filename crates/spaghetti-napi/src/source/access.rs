@@ -24,8 +24,6 @@ pub const SCOPE_ACCESS_REPORT_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 
 const MAX_TRACE_CAPACITY: usize = 16_384;
-#[cfg(test)]
-const MAX_RENDERED_SCOPE_LOCATOR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1362,57 +1360,6 @@ mod tests {
             "/../../agent-support/grok/2026-08-15/scope-programs.json"
         )))
         .unwrap()
-    }
-
-    fn artifact_scope_plan(locator: &str) -> ScopeAccessPlan {
-        let mut manifest = grok_scope_manifest();
-        let relation = manifest.programs[0]
-            .relations
-            .iter_mut()
-            .find(|relation| relation.relation_id == "summary-sidecar")
-            .unwrap();
-        relation.primitive = ScopeRelationPrimitive::ArtifactLocatorFromEvidence;
-        relation.locator = locator.to_string();
-        relation.identity_inputs = vec![
-            "native-session-id".to_string(),
-            "backup-name".to_string(),
-            "artifact-version".to_string(),
-        ];
-        ScopeAccessPlan::for_program(&manifest, "observe-session-sidecars").unwrap()
-    }
-
-    fn render_artifact_locator(
-        locator: &str,
-        native_session_id: &[u8],
-        backup_name: &[u8],
-        artifact_version: &[u8],
-    ) -> Result<PathBuf, AccessBudgetError> {
-        let plan = artifact_scope_plan(locator);
-        let identity = [
-            ScopeIdentityInput {
-                name: "native-session-id",
-                value: native_session_id,
-            },
-            ScopeIdentityInput {
-                name: "backup-name",
-                value: backup_name,
-            },
-            ScopeIdentityInput {
-                name: "artifact-version",
-                value: artifact_version,
-            },
-        ];
-        plan.reserve(ScopeAccessRequest {
-            relation_id: "summary-sidecar",
-            operation: AccessOperation::ObjectRead,
-            phase: AccessPhase::Revalidation,
-            parent_token: None,
-            identity_inputs: &identity,
-            depth: 1,
-            max_bytes: 1,
-            max_rows: 0,
-        })?
-        .render_evidence_locator(&identity)
     }
 
     #[test]

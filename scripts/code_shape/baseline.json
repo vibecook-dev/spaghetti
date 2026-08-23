@@ -25,8 +25,7 @@
   "prod_files_over_cap": {
     "crates/spaghetti-napi/src/adapter/facts.rs": 3835,
     "crates/spaghetti-napi/src/core/schema.rs": 3076,
-    "crates/spaghetti-napi/src/engine/projection.rs": 3781,
-    "crates/spaghetti-napi/src/napi_engine.rs": 5697
+    "crates/spaghetti-napi/src/engine/projection.rs": 3781
   },
   "sdk_barrel_export_statements": 17,
   "test_cap": 500

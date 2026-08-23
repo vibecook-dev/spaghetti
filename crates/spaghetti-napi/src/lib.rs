@@ -36,20 +36,17 @@ pub mod observer;
 #[cfg(feature = "legacy-oracle")]
 pub mod orchestrate;
 mod runtime_semantic_reducer;
+// The committed RFC 012A/012C fixture graph, parsed for Rust tests only. Its
+// last production consumer was the `parseRfc012*` N-API surface, which this
+// lane deleted; every caller now lives under `#[cfg(test)]`.
+#[cfg(test)]
 mod semantic_contract;
-// `#[napi]` registration is compiled out under `cfg(test)`, so under the
-// unit-test target this module's only consumers (the JS callers in
-// `packages/sdk/src/contracts/__tests__/rfc012*-napi.test.ts`) do not exist.
-#[cfg(not(test))]
-mod semantic_contract_napi;
 pub mod source;
 mod unknown_evidence_reducer;
 
 pub use napi_engine::{
-    open_spaghetti_engine, EngineCommitWaitOptions, EngineCommitWaitResult, EngineHealth,
-    EngineObservationOptions, EngineObservationStatus, EngineOpenOptions, EngineOverviewResult,
-    EngineOwnerMetadata, EngineReconcileOptions, EngineReconcileResult, EngineStatus,
-    SpaghettiEngine,
+    open_spaghetti_engine, EngineCommitWaitOptions, EngineObservationOptions, EngineOpenOptions,
+    EngineReconcileOptions, SpaghettiEngine,
 };
 pub use observer::{
     observe_session, ObserveSessionRequest, ObserverEvent, SpaghettiSessionObserver,

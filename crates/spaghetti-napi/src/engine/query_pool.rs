@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use rusqlite::types::Value;
@@ -68,6 +68,7 @@ use super::timeline_query::{
 };
 use super::usage_query::{read_usage, UsageReport, UsageRequest};
 use super::EngineError;
+use ts_rs::TS;
 
 const QUEUE_DEPTH_PER_WORKER: usize = 16;
 pub const HISTORY_QUERY_CONTRACT_VERSION: u32 = 1;
@@ -102,15 +103,21 @@ pub struct HistoryProjectPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct HistoryProjectPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub items: Vec<HistoryProjectSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct HistoryProjectSummary {
     pub project_id: String,
     pub adapter_id: String,
@@ -124,19 +131,33 @@ pub struct HistoryProjectSummary {
     /// True when a canonical native memory-index document (for Claude,
     /// `MEMORY.md`) exists. Topic documents alone do not set this flag.
     pub has_memory_index: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub latest_activity_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub latest_activity_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub index: Option<HistoryProjectIndexSummary>,
     /// Catalog facts for this row; see `engine::catalog`. Absent until
     /// discovery has run for this row's source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub external_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub catalog_state: Option<String>,
     pub last_commit_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct HistoryProjectIndexSummary {
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub original_path: Option<String>,
     pub entry_count: u64,
     pub assertion_count: u64,
@@ -151,46 +172,84 @@ pub struct HistorySessionPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct HistorySessionPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub project_id: String,
     pub items: Vec<HistorySessionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct HistorySessionSummary {
     pub session_id: String,
     pub project_id: String,
     pub native_session_id: String,
     pub native_project_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub first_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub ai_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub custom_title: Option<String>,
     pub message_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub first_message_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub first_message_time_quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_message_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_message_time_quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub latest_activity_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub latest_activity_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub index: Option<HistorySessionIndexSummary>,
     /// Catalog facts for this row; see `engine::catalog`. Absent until
     /// discovery has run for this row's source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub external_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub catalog_state: Option<String>,
     pub last_commit_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct HistorySessionIndexSummary {
     pub full_path: String,
     pub file_mtime_ms: u64,
     pub first_prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub summary: Option<String>,
     pub message_count: u64,
     pub created_at: String,
@@ -290,7 +349,9 @@ pub(crate) struct SourceCoverageReplayMember {
     pub absent: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ChangeCursor {
     pub commit_seq: u64,
     pub ordinal: u32,
@@ -314,23 +375,81 @@ pub struct ChangeReplayRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One published change. The two binary fields are text on the wire: JSON has
+/// no byte string, and a JS consumer that re-encodes a number array cannot
+/// reproduce the original bytes. `entity_key` is URL-safe (it appears in
+/// cursors and identifiers); `payload` is standard base64.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DurableChange {
     pub cursor: ChangeCursor,
     pub topic: String,
     pub schema_version: u32,
+    #[serde(rename = "entityKeyBase64Url", with = "url_safe_base64")]
+    #[ts(rename = "entityKeyBase64Url", type = "string")]
     pub entity_key: Vec<u8>,
     pub operation: String,
+    #[serde(rename = "payloadBase64", with = "standard_base64")]
+    #[ts(rename = "payloadBase64", type = "string")]
     pub payload: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+mod url_safe_base64 {
+    use base64::Engine as _;
+
+    use super::{Deserialize, URL_SAFE_NO_PAD};
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        value: &[u8],
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&URL_SAFE_NO_PAD.encode(value))
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+mod standard_base64 {
+    use base64::Engine as _;
+
+    use super::{Deserialize, STANDARD};
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        value: &[u8],
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(value))
+    }
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD.decode(encoded).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ChangeReplay {
     pub contract_version: u32,
     /// Watermark read at the start of the same SQLite snapshot as `changes`.
     pub at_commit_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub oldest_available: Option<ChangeCursor>,
     pub changes: Vec<DurableChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<ChangeCursor>,
     pub has_more: bool,
     pub payload_bytes: u64,
