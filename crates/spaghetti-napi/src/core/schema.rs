@@ -561,6 +561,9 @@ CREATE TABLE IF NOT EXISTS catalog_sources (
   session_count INTEGER NOT NULL DEFAULT 0 CHECK (session_count >= 0),
   scanned_at_commit_seq INTEGER NOT NULL,
   scanned_at INTEGER NOT NULL,
+  -- Digest of everything the last pass asserted. A pass that matches it has
+  -- nothing to write, so an unchanged rescan costs no commit.
+  content_digest BLOB NOT NULL CHECK (length(content_digest) = 32),
   CHECK ((degraded = 0) = (degraded_reason IS NULL))
 );
 

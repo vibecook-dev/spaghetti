@@ -18,33 +18,6 @@ export declare class SpaghettiEngine {
   /** Execute the first typed, read-only Rust query. */
   overview(signal?: AbortSignal | undefined | null): Promise<EngineOverviewResult>
   /**
-   * Negotiate and return the restart-authenticated RFC 012B coverage plan
-   * plus current readiness as canonical JSON. The response carries no
-   * native path or LOCAL policy-view values.
-   */
-  getCatalogReadinessJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
-  /**
-   * Read one snapshot-bound RFC 012B project page through the policy-
-   * WITHHELD public view.
-   */
-  listLibraryProjectsJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
-  /**
-   * Read one snapshot-bound RFC 012B session page through the policy-
-   * WITHHELD public view.
-   */
-  listLibrarySessionsJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
-  /**
-   * Resolve one persisted RFC 012B external reference against the current
-   * exact plan and snapshot, returning only the policy-WITHHELD view.
-   */
-  resolveCatalogEntityJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
-  /**
-   * Request one idempotent RFC 012B selected-session hydration through the
-   * engine-owned bounded scheduler. Cancellation applies through command
-   * preparation; accepted native work is owned by the engine lifecycle.
-   */
-  requestCatalogHydrationJson(requestJson: string, signal?: AbortSignal | undefined | null): Promise<string>
-  /**
    * Replay one bounded, snapshot-consistent page of durable projection
    * changes. Binary keys and payloads remain lossless base64 strings.
    */
@@ -54,6 +27,32 @@ export declare class SpaghettiEngine {
    * durable commit. No SQLite read is performed while the request is idle.
    */
   waitForCommit(options: EngineCommitWaitOptions, signal?: AbortSignal | undefined | null): Promise<EngineCommitWaitResult>
+  /**
+   * List catalog projects — everything discoverable, complete or explicitly
+   * degraded. Available seconds after `startConfiguredObservation`, without
+   * waiting for history, usage, or full-text search.
+   */
+  listProjects(options?: EngineCatalogPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogProjectPage>
+  /**
+   * List catalog sessions, optionally within one project. Rows carry the
+   * evidence behind their project association and any competing identity.
+   */
+  listSessions(options?: EngineCatalogSessionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogSessionPage>
+  /** Resolve a persisted external reference against the current catalog. */
+  resolveCatalogEntity(externalRef: string, signal?: AbortSignal | undefined | null): Promise<EngineCatalogResolution>
+  /**
+   * Wait until every configured supervisor has finished starting.
+   *
+   * `startConfiguredObservation` resolves as soon as the catalog commits,
+   * so watchers are still coming up behind it. Callers that need decoded
+   * history await this; callers that only need the library do not.
+   */
+  awaitObservationStart(signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  /**
+   * The readiness vector: catalog, history, usage, capabilities, artifacts,
+   * and search, each derived from committed rows.
+   */
+  readiness(signal?: AbortSignal | undefined | null): Promise<EngineReadiness>
   /**
    * List canonical projects in Rust-defined activity order. The cursor is
    * opaque, versioned, and valid only for this query.
@@ -186,10 +185,11 @@ export declare class SpaghettiEngine {
   /** Register consolidated roots and supervise any registered adapter. */
   startObservation(options: EngineAdapterObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
   /**
-   * Start the complete configured source set behind one global catalog,
-   * watcher, and history-scan planning barrier.
+   * Start the complete configured source set, catalog first: every source
+   * commits its discovered projects and sessions before any watcher begins
+   * a history scan.
    */
-  startConfiguredObservation(options: EngineConfiguredObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  startConfiguredObservation(options: EngineConfiguredObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineCatalogStartup>
   /** Force one running adapter supervisor through common reconciliation. */
   refreshObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
   /** Stop one adapter supervisor without disposing the engine. */
@@ -359,6 +359,106 @@ export interface EngineCapabilityPageOptions {
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
+}
+
+/** A competing project association retained next to the selected one. */
+export interface EngineCatalogIdentityConflict {
+  competingNativeProjectKey: string
+  basis: string
+  provenance: string
+}
+
+export interface EngineCatalogPageOptions {
+  cursor?: string
+  limit?: number
+  /** Restrict to these adapters. Omitted or empty means all of them. */
+  adapterIds?: Array<string>
+}
+
+export interface EngineCatalogProject {
+  projectId: string
+  /** Persistable RFC 012A external reference. Stable across restarts. */
+  externalRef: string
+  adapterId: string
+  nativeProjectKey: string
+  displayName?: string
+  displayPath?: string
+  /** `discovered` | `transcript_backed` | `hydrated` | `searchable`. */
+  catalogState: string
+  degraded: boolean
+  degradedReason?: string
+  sessionCount: number
+  transcriptSessionCount: number
+  hydratedSessionCount: number
+  latestActivityAt?: string
+  lastCommitSeq: number
+}
+
+export interface EngineCatalogProjectPage {
+  projects: Array<EngineCatalogProject>
+  /** Opaque continuation token bound to `atCommitSeq`. */
+  cursor?: string
+  atCommitSeq: number
+}
+
+/**
+ * Resolution of one persisted external reference. A reference whose evidence
+ * was retracted resolves to `retracted`, never to a different live entity.
+ */
+export interface EngineCatalogResolution {
+  /** `project` | `session` | `retracted` | `unknown`. */
+  kind: string
+  project?: EngineCatalogProject
+  session?: EngineCatalogSession
+}
+
+export interface EngineCatalogSession {
+  sessionId: string
+  projectId: string
+  externalRef: string
+  adapterId: string
+  nativeSessionId?: string
+  title?: string
+  catalogState: string
+  degraded: boolean
+  degradedReason?: string
+  /** Which native evidence produced the project association. */
+  associationBasis: string
+  associationQuality: string
+  associationProvenance: string
+  nativeCreatedAt?: string
+  nativeUpdatedAt?: string
+  /** The count the agent claims. Absent rather than zero when unknown. */
+  nativeMessageCount?: number
+  /** Messages actually decoded so far. */
+  decodedMessageCount: number
+  transcriptPresent: boolean
+  identityConflicts: Array<EngineCatalogIdentityConflict>
+  lastCommitSeq: number
+}
+
+export interface EngineCatalogSessionPage {
+  sessions: Array<EngineCatalogSession>
+  cursor?: string
+  atCommitSeq: number
+}
+
+export interface EngineCatalogSessionPageOptions {
+  projectId?: string
+  cursor?: string
+  limit?: number
+  adapterIds?: Array<string>
+}
+
+/** What catalog-first startup committed before history began. */
+export interface EngineCatalogStartup {
+  catalogProjects: number
+  catalogSessions: number
+  /** Adapters whose discovery pass could not read their complete surface. */
+  degradedSources: Array<string>
+  supervisorsStarted: number
+  historyBackground: boolean
+  status: EngineStatus
 }
 
 export interface EngineChangeCursor {
@@ -922,6 +1022,31 @@ export interface EngineQueryPerformanceStats {
   oldestActiveMs: number
   runtimeUsageCompatibility: EngineRuntimeUsageCompatibilityTelemetryStats
   timings: Array<EngineNamedLatencyStats>
+}
+
+/**
+ * The single readiness surface. Each field is independent: `catalog` is
+ * routinely `ready` while `history` is still `indexing` and `search` is
+ * `pending`, which is exactly what catalog-first startup means.
+ */
+export interface EngineReadiness {
+  catalog: EngineReadinessField
+  history: EngineReadinessField
+  usage: EngineReadinessField
+  capabilities: EngineReadinessField
+  artifacts: EngineReadinessField
+  search: EngineReadinessField
+  atCommitSeq: number
+}
+
+/** One field of the readiness vector. */
+export interface EngineReadinessField {
+  /** `pending` | `indexing` | `ready` | `degraded` | `unavailable`. */
+  state: string
+  /** Commit sequence this field's evidence was read at. */
+  committedAtSeq: number
+  /** Human-readable progress or reason, when there is one to give. */
+  detail?: string
 }
 
 export interface EngineReconcileOptions {
@@ -1512,8 +1637,6 @@ export interface EngineStatus {
   state: string
   databasePath: string
   acceptingQueries: boolean
-  catalogQueryReady: boolean
-  searchAvailable: boolean
   writerAlive: boolean
   configuredQueryWorkers: number
   aliveQueryWorkers: number

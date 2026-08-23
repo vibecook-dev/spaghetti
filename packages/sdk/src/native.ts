@@ -182,14 +182,134 @@ export interface SpaghettiEngineStatus {
   state: 'bootstrapping' | 'running' | 'stopping' | 'stopped';
   databasePath: string;
   acceptingQueries: boolean;
-  catalogQueryReady: boolean;
-  searchAvailable: boolean;
   writerAlive: boolean;
   configuredQueryWorkers: number;
   aliveQueryWorkers: number;
   inFlightQueries: number;
   observation: SpaghettiEngineObservationStatus;
   owner?: SpaghettiEngineOwner;
+}
+
+/**
+ * How much of an entity is available. Each state implies the previous one:
+ * `discovered` means only that native evidence proves it exists.
+ */
+export type SpaghettiCatalogState = 'discovered' | 'transcript_backed' | 'hydrated' | 'searchable';
+
+/** State of one readiness field. */
+export type SpaghettiReadinessState = 'pending' | 'indexing' | 'ready' | 'degraded' | 'unavailable';
+
+export interface SpaghettiReadinessField {
+  state: SpaghettiReadinessState;
+  /** Commit sequence this field's evidence was read at. */
+  committedAtSeq: number;
+  /** Progress or reason, when there is one to give. */
+  detail?: string;
+}
+
+/**
+ * The single readiness surface. Fields are independent: `catalog` is routinely
+ * `ready` while `history` is `indexing` and `search` is `pending`.
+ */
+export interface SpaghettiReadiness {
+  catalog: SpaghettiReadinessField;
+  history: SpaghettiReadinessField;
+  usage: SpaghettiReadinessField;
+  capabilities: SpaghettiReadinessField;
+  artifacts: SpaghettiReadinessField;
+  search: SpaghettiReadinessField;
+  atCommitSeq: number;
+}
+
+/** A competing project association retained next to the selected one. */
+export interface SpaghettiCatalogIdentityConflict {
+  competingNativeProjectKey: string;
+  basis: string;
+  provenance: string;
+}
+
+export interface SpaghettiCatalogProject {
+  projectId: string;
+  /** Persistable external reference; stable across restarts. */
+  externalRef: string;
+  adapterId: string;
+  nativeProjectKey: string;
+  displayName?: string;
+  displayPath?: string;
+  catalogState: SpaghettiCatalogState;
+  degraded: boolean;
+  degradedReason?: string;
+  sessionCount: number;
+  transcriptSessionCount: number;
+  hydratedSessionCount: number;
+  latestActivityAt?: string;
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiCatalogSession {
+  sessionId: string;
+  projectId: string;
+  externalRef: string;
+  adapterId: string;
+  nativeSessionId?: string;
+  title?: string;
+  catalogState: SpaghettiCatalogState;
+  degraded: boolean;
+  degradedReason?: string;
+  /** Which native evidence produced the project association. */
+  associationBasis: string;
+  associationQuality: string;
+  associationProvenance: string;
+  nativeCreatedAt?: string;
+  nativeUpdatedAt?: string;
+  /** The count the agent claims. Absent rather than zero when unknown. */
+  nativeMessageCount?: number;
+  /** Messages actually decoded so far. */
+  decodedMessageCount: number;
+  transcriptPresent: boolean;
+  identityConflicts: SpaghettiCatalogIdentityConflict[];
+  lastCommitSeq: number;
+}
+
+export interface SpaghettiCatalogPageOptions {
+  cursor?: string;
+  limit?: number;
+  /** Restrict to these adapters. Omitted or empty means all of them. */
+  adapterIds?: string[];
+}
+
+export interface SpaghettiCatalogSessionPageOptions extends SpaghettiCatalogPageOptions {
+  projectId?: string;
+}
+
+export interface SpaghettiCatalogProjectPage {
+  projects: SpaghettiCatalogProject[];
+  /** Opaque continuation token bound to `atCommitSeq`. */
+  cursor?: string;
+  atCommitSeq: number;
+}
+
+export interface SpaghettiCatalogSessionPage {
+  sessions: SpaghettiCatalogSession[];
+  cursor?: string;
+  atCommitSeq: number;
+}
+
+export interface SpaghettiCatalogResolution {
+  kind: 'project' | 'session' | 'retracted' | 'unknown';
+  project?: SpaghettiCatalogProject;
+  session?: SpaghettiCatalogSession;
+}
+
+/** What catalog-first startup committed before history began. */
+export interface SpaghettiCatalogStartup {
+  catalogProjects: number;
+  catalogSessions: number;
+  /** Adapters whose discovery pass could not read their complete surface. */
+  degradedSources: string[];
+  supervisorsStarted: number;
+  historyBackground: boolean;
+  status: SpaghettiEngineStatus;
 }
 
 export interface SpaghettiEngineHealth {
@@ -2062,16 +2182,25 @@ export interface SpaghettiEngine {
   readonly status: SpaghettiEngineStatus;
   health(signal?: AbortSignal): Promise<SpaghettiEngineHealth>;
   overview(signal?: AbortSignal): Promise<SpaghettiEngineOverview>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  getCatalogReadinessJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  listLibraryProjectsJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  listLibrarySessionsJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  resolveCatalogEntityJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B engine-owned selected-session hydration command transport. */
-  requestCatalogHydrationJson(requestJson: string, signal?: AbortSignal): Promise<string>;
+  /**
+   * List discoverable projects. Answerable seconds after
+   * `startConfiguredObservation`, without waiting for history or search.
+   */
+  listProjects(options?: SpaghettiCatalogPageOptions, signal?: AbortSignal): Promise<SpaghettiCatalogProjectPage>;
+  /** List discoverable sessions, optionally within one project. */
+  listSessions(
+    options?: SpaghettiCatalogSessionPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiCatalogSessionPage>;
+  /** Resolve one persisted external reference against the current catalog. */
+  resolveCatalogEntity(externalRef: string, signal?: AbortSignal): Promise<SpaghettiCatalogResolution>;
+  /** The readiness vector, derived from committed rows. */
+  readiness(signal?: AbortSignal): Promise<SpaghettiReadiness>;
+  /**
+   * Wait until every configured supervisor has finished starting.
+   * `startConfiguredObservation` resolves as soon as the catalog commits.
+   */
+  awaitObservationStart(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   replayChanges(
     options?: SpaghettiEngineChangeReplayOptions,
     signal?: AbortSignal,
@@ -2179,11 +2308,14 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineAdapterObservationOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineStatus>;
-  /** Start all configured sources behind one global catalog and watcher barrier. */
+  /**
+   * Start all configured sources catalog first: each source commits its
+   * discovered projects and sessions before any watcher begins a history scan.
+   */
   startConfiguredObservation(
     options: SpaghettiEngineConfiguredObservationOptions,
     signal?: AbortSignal,
-  ): Promise<SpaghettiEngineStatus>;
+  ): Promise<SpaghettiCatalogStartup>;
   /** Force one running adapter supervisor through reconciliation. */
   refreshObservation(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   /** Stop one adapter supervisor without disposing the engine. */

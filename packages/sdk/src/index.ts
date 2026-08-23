@@ -18,14 +18,6 @@ export * from './data/timeline-query.js';
 // contracts. Rust derives references; portable consumers validate and compare.
 export * from './contracts/rfc012a.js';
 
-// RFC 012B portable catalog negotiation, pages, and snapshot lifecycle. The
-// low-level native owner exposes a strict JSON, policy-WITHHELD query boundary;
-// LOCAL disclosure remains separately authorization-gated.
-export * from './contracts/rfc012b.js';
-export * from './contracts/rfc012b-client.js';
-export * from './contracts/rfc012b-hydration.js';
-export * from './contracts/rfc012b-pages.js';
-
 // RFC 012C portable semantic values plus the bounded unknown-evidence
 // aggregate/sample snapshot. The latter is not itself query or observer
 // authority; enclosing RFC 012B/012D contracts bind scope and lifecycle.

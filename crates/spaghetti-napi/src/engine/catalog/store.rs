@@ -5,6 +5,11 @@
 //! surface says they are gone. A *degraded* pass owns nothing: it upserts what
 //! it managed to read and leaves everything else standing, so a transient
 //! unreadable root can never empty the library (RFC 012B §7.3).
+//!
+//! A pass whose content is byte-identical to the last committed one writes
+//! nothing at all. Rescanning is therefore free of commits, which is what lets
+//! a refresh run on every native change without advancing the watermark that
+//! open cursors are bound to.
 
 use rusqlite::{params, Connection, Transaction};
 
@@ -13,7 +18,7 @@ use super::discovery::{ScannedProject, ScannedSession, SourceScan};
 
 const SCAN_COMMIT_REASON: &str = "catalog.discovery.scanned";
 
-/// Outcome of one committed pass, used for readiness reporting and tests.
+/// Outcome of one pass, used for readiness reporting and tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CatalogScanReceipt {
     pub(crate) commit_seq: u64,
@@ -23,12 +28,116 @@ pub(crate) struct CatalogScanReceipt {
     pub(crate) degraded: bool,
 }
 
+/// Digest of everything a pass asserts. Two passes with the same digest
+/// describe the same native surface, so the second one has nothing to write.
+fn scan_digest(scan: &SourceScan) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(scan.adapter_id.as_bytes());
+    hasher.update(&scan.source_instance_id.to_be_bytes());
+    hasher.update(scan.degraded_reason.as_deref().unwrap_or("").as_bytes());
+    for project in &scan.projects {
+        hasher.update(b"p");
+        hasher.update(&project.project_key);
+        hasher.update(project.native_project_key.as_bytes());
+        hasher.update(project.display_name.as_deref().unwrap_or("").as_bytes());
+        hasher.update(project.display_path.as_deref().unwrap_or("").as_bytes());
+    }
+    for session in &scan.sessions {
+        hasher.update(b"s");
+        hasher.update(&session.session_key);
+        hasher.update(&session.project_key);
+        hasher.update(
+            session
+                .native_session_id
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        hasher.update(session.title.as_deref().unwrap_or("").as_bytes());
+        hasher.update(session.association_basis.as_bytes());
+        hasher.update(session.association_quality.as_bytes());
+        hasher.update(session.association_provenance.as_bytes());
+        hasher.update(
+            session
+                .native_created_at
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        hasher.update(
+            session
+                .native_updated_at
+                .as_deref()
+                .unwrap_or("")
+                .as_bytes(),
+        );
+        hasher.update(
+            &session
+                .native_message_count
+                .unwrap_or_default()
+                .to_be_bytes(),
+        );
+        hasher.update(&[u8::from(session.transcript_present)]);
+        hasher.update(&session.source_size_bytes.unwrap_or_default().to_be_bytes());
+        hasher.update(&session.source_modified_ms.unwrap_or_default().to_be_bytes());
+        hasher.update(session.sort_time.as_bytes());
+    }
+    for conflict in &scan.conflicts {
+        hasher.update(b"c");
+        hasher.update(&conflict.session_key);
+        hasher.update(conflict.competing_native_project_key.as_bytes());
+        hasher.update(conflict.basis.as_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// The receipt for a pass that matched what is already committed.
+fn unchanged_receipt(
+    connection: &Connection,
+    source_instance_id: u64,
+    degraded: bool,
+) -> Result<CatalogScanReceipt, EngineError> {
+    let (commit_seq, projects, sessions): (i64, i64, i64) = connection
+        .query_row(
+            r#"
+            SELECT scanned_at_commit_seq, project_count, session_count
+            FROM catalog_sources WHERE source_instance_id = ?1
+            "#,
+            params![to_i64(source_instance_id)?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| sqlite_error("read unchanged catalog source state", error))?;
+    Ok(CatalogScanReceipt {
+        commit_seq: commit_seq.max(0) as u64,
+        projects: projects.max(0) as u64,
+        sessions: sessions.max(0) as u64,
+        retracted_sessions: 0,
+        degraded,
+    })
+}
+
 /// Write one source's catalog rows atomically.
 pub(crate) fn commit_source_scan(
     connection: &mut Connection,
     scan: &SourceScan,
     now_ms: i64,
 ) -> Result<CatalogScanReceipt, EngineError> {
+    let digest = scan_digest(scan);
+    let stored: Option<Vec<u8>> = connection
+        .query_row(
+            "SELECT content_digest FROM catalog_sources WHERE source_instance_id = ?1",
+            params![to_i64(scan.source_instance_id)?],
+            |row| row.get(0),
+        )
+        .ok();
+    if stored.as_deref() == Some(digest.as_slice()) {
+        return unchanged_receipt(
+            connection,
+            scan.source_instance_id,
+            scan.degraded_reason.is_some(),
+        );
+    }
+
     let transaction = connection
         .transaction()
         .map_err(|error| sqlite_error("begin catalog scan transaction", error))?;
@@ -86,8 +195,8 @@ pub(crate) fn commit_source_scan(
             r#"
             INSERT INTO catalog_sources (
                 source_instance_id, adapter_id, degraded, degraded_reason,
-                project_count, session_count, scanned_at_commit_seq, scanned_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                project_count, session_count, scanned_at_commit_seq, scanned_at, content_digest
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(source_instance_id) DO UPDATE SET
                 adapter_id = excluded.adapter_id,
                 degraded = excluded.degraded,
@@ -95,7 +204,8 @@ pub(crate) fn commit_source_scan(
                 project_count = excluded.project_count,
                 session_count = excluded.session_count,
                 scanned_at_commit_seq = excluded.scanned_at_commit_seq,
-                scanned_at = excluded.scanned_at
+                scanned_at = excluded.scanned_at,
+                content_digest = excluded.content_digest
             "#,
             params![
                 to_i64(scan.source_instance_id)?,
@@ -106,6 +216,7 @@ pub(crate) fn commit_source_scan(
                 count_for(&transaction, scan.source_instance_id, "catalog_sessions")?,
                 to_i64(commit_seq)?,
                 now_ms,
+                digest.as_slice(),
             ],
         )
         .map_err(|error| sqlite_error("publish catalog source state", error))?;

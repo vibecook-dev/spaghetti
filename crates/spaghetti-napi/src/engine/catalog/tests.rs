@@ -304,6 +304,26 @@ fn a_rescan_picks_up_a_new_transcript_and_retracts_a_deleted_one() {
 }
 
 #[test]
+fn an_unchanged_rescan_costs_no_commit() {
+    let temp = TempDir::new().unwrap();
+    let root = claude_tree(temp.path());
+    let engine = open_engine(temp.path().join("idempotent.db"));
+    engine.discover_source_catalog(&configured(&root)).unwrap();
+
+    let after_first = engine.overview().unwrap().commit_seq;
+    engine.rescan_catalog(None).unwrap();
+    engine.rescan_catalog(None).unwrap();
+    assert_eq!(
+        engine.overview().unwrap().commit_seq,
+        after_first,
+        "rescanning an unchanged surface must not advance the watermark that open cursors bind to"
+    );
+    assert_eq!(sessions(&engine).sessions.len(), 3);
+
+    engine.shutdown().unwrap();
+}
+
+#[test]
 fn a_session_claimed_by_two_projects_reports_the_conflict() {
     let temp = TempDir::new().unwrap();
     let root = claude_tree(temp.path());

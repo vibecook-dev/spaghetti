@@ -703,7 +703,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistoryProjectPage> {
-    return this.client.listProjects(options, clientQueryOptions(signal));
+    return this.client.listHistoryProjects(options, clientQueryOptions(signal));
   }
 
   listHistorySessions(
@@ -711,7 +711,7 @@ class NativeClaudeObservationShadow implements ClaudeObservationShadow {
     options?: SpaghettiEngineHistoryPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineHistorySessionPage> {
-    return this.client.listSessions({ projectId, ...options }, clientQueryOptions(signal));
+    return this.client.listHistorySessions({ projectId, ...options }, clientQueryOptions(signal));
   }
 
   getSession(sessionId: string, signal?: AbortSignal): Promise<SpaghettiEngineSessionDetails> {

@@ -28,6 +28,7 @@ mod decode_runtime;
 pub mod engine;
 pub mod factory;
 pub mod grok;
+mod napi_catalog;
 mod napi_engine;
 mod observation_contract;
 #[cfg(feature = "legacy-oracle")]

@@ -548,8 +548,33 @@ fn writer_thread(
                 now_ms,
                 response,
             } => {
-                let result = commit_source_scan(&mut connection, &scan, now_ms);
+                // A catalog scan is a writer transaction like any other, so it
+                // is counted like one: its `ingest_commits` row must be
+                // reflected in the writer's committed total.
+                let reserve = ensure_disk_reserve(&database_path);
+                let rows_before = sqlite_total_changes(&connection);
+                let started = Instant::now();
+                let result =
+                    reserve.and_then(|()| commit_source_scan(&mut connection, &scan, now_ms));
+                let elapsed = started.elapsed();
+                telemetry.writer_total.record(elapsed);
+                atomic_saturating_add(&telemetry.commit_attempts, 1);
+                match &result {
+                    Ok(_) => {
+                        atomic_saturating_add(&telemetry.committed, 1);
+                        atomic_saturating_add(
+                            &telemetry.sqlite_rows_changed,
+                            sqlite_total_changes(&connection).saturating_sub(rows_before),
+                        );
+                        telemetry.physical_transaction.record(elapsed);
+                    }
+                    Err(_) => atomic_saturating_add(&telemetry.failed, 1),
+                }
+                let committed = result.is_ok();
                 let _ = response.send(result);
+                if committed {
+                    checkpoints.maybe_checkpoint(&connection, &telemetry, bootstrap_active);
+                }
             }
             WriterCommand::SourceCatalog {
                 adapter_id,

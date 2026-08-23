@@ -10,6 +10,7 @@ import type {
   StoreStats,
 } from '@vibecook/spaghetti-sdk';
 import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
+import type { SpaghettiReadiness } from '@vibecook/spaghetti-sdk/observation';
 import type { ObservationOwnerStatus } from '@shared/ipc';
 import { createIpcClient } from './ipc-api.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
@@ -104,6 +105,7 @@ function PlaygroundShell() {
   const [rebuilding, setRebuilding] = useState(false);
   const [debugSession, setDebugSession] = useState<DebugSessionModule | null>(null);
   const [projects, setProjects] = useState<ProjectListItem[]>([]);
+  const [readiness, setReadiness] = useState<SpaghettiReadiness | null>(null);
   const [selected, setSelected] = useState<ProjectKey | null>(null);
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
   const [sessionListProjectKey, setSessionListProjectKey] = useState<string | null>(null);
@@ -406,6 +408,33 @@ function PlaygroundShell() {
     };
   }, []);
 
+  // Readiness drives one small indicator: the library renders from the
+  // catalog, which is complete long before history, usage, and search are.
+  // Poll while anything is still converging, then stop.
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = (): void => {
+      void window.spaghetti
+        .getReadiness()
+        .then((next) => {
+          if (cancelled) return;
+          setReadiness(next);
+          const converging = [next.history, next.usage, next.search].some(
+            (field) => field.state === 'indexing' || field.state === 'pending',
+          );
+          if (converging) timer = setTimeout(poll, 2_000);
+        })
+        .catch(() => undefined);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [ready]);
+
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
@@ -589,6 +618,26 @@ function PlaygroundShell() {
 
   const sourceIds = useMemo(() => [...new Set(projects.flatMap((p) => p.sourceIds))].sort(), [projects]);
 
+  // "indexing…" while background convergence continues; "degraded" when a
+  // configured source could not be read completely. Nothing when all is well.
+  const [indexingLabel, indexingDetail] = useMemo<[string | null, string | null]>(() => {
+    if (!readiness) return [null, null];
+    if (readiness.catalog.state === 'degraded') {
+      return ['degraded', readiness.catalog.detail ?? 'a configured source could not be read completely'];
+    }
+    const converging = (
+      [
+        ['history', readiness.history],
+        ['usage', readiness.usage],
+        ['search', readiness.search],
+      ] as const
+    )
+      .filter(([, field]) => field.state === 'indexing' || field.state === 'pending')
+      .map(([name, field]) => (field.detail ? `${name}: ${field.detail}` : name));
+    if (converging.length === 0) return [null, null];
+    return ['indexing…', converging.join('\n')];
+  }, [readiness]);
+
   const liveProjectMembers = useMemo(
     () =>
       new Set(
@@ -756,6 +805,14 @@ function PlaygroundShell() {
               <div className="h-10 px-4 flex items-center">
                 <span className="font-serif text-[10px] uppercase tracking-[0.15em] opacity-80">Projects</span>
                 <span className="ml-auto font-mono text-[8px] tracking-widest opacity-45">{projects.length}</span>
+                {indexingLabel ? (
+                  <span
+                    className="ml-2 font-mono text-[8px] tracking-widest opacity-60"
+                    title={indexingDetail ?? undefined}
+                  >
+                    {indexingLabel}
+                  </span>
+                ) : null}
               </div>
             </div>
 

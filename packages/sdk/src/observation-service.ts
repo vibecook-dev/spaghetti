@@ -43,6 +43,10 @@ import type { TokenUsageSummary } from './data/summary-types.js';
 import type { SessionMessage } from './react/chat/types.js';
 import type { TeamDirectory } from './types/index.js';
 import type {
+  SpaghettiCatalogPageOptions,
+  SpaghettiCatalogProjectPage,
+  SpaghettiCatalogSessionPage,
+  SpaghettiCatalogSessionPageOptions,
   SpaghettiEngineDelegation,
   SpaghettiEngineHistoryProject,
   SpaghettiEngineHistorySession,
@@ -54,6 +58,7 @@ import type {
   SpaghettiEngineTimelinePageOptions,
   SpaghettiEngineUsageAggregate,
   SpaghettiEngineWorkflowMember,
+  SpaghettiReadiness,
 } from './native.js';
 import {
   openObservationHost,
@@ -83,6 +88,15 @@ export interface ObservationServiceOptions extends ObservationHostOptions {
 export interface ObservationService extends SpaghettiAPI {
   snapshot(signal?: AbortSignal): Promise<ObservationHostSnapshot>;
   serveIpc(channel: SpaghettiIpcChannel, transportKind?: string): SpaghettiIpcHost;
+  /**
+   * List the catalog: everything discoverable, complete or explicitly
+   * degraded. Unlike `getProjectList`, this answers during background
+   * ingestion because it reads only committed discovery rows.
+   */
+  listCatalogProjects(options?: SpaghettiCatalogPageOptions): Promise<SpaghettiCatalogProjectPage>;
+  listCatalogSessions(options?: SpaghettiCatalogSessionPageOptions): Promise<SpaghettiCatalogSessionPage>;
+  /** The readiness vector for the catalog and every background projection. */
+  getReadiness(): Promise<SpaghettiReadiness>;
 }
 
 interface ResolvedSession {
@@ -152,6 +166,12 @@ class RustObservationService extends EventEmitter implements ObservationService 
             },
           });
           if (this.disposePromise) throw new Error('Observation service stopped during initialization.');
+          // The host returns catalog-first, before watchers have finished
+          // starting. This compatibility surface promises decoded history to
+          // its callers, so it waits; catalog-only callers use the host
+          // directly and do not.
+          this.emitProgress('reconciling', 'Starting source observation…');
+          await host.whenObserving(signal);
           this.emitProgress('reconciling', 'Reading canonical source catalog…');
           await host.client.listSources({ limit: 1 });
           if (this.options.live !== false) await this.startSubscription(host);
@@ -216,6 +236,18 @@ class RustObservationService extends EventEmitter implements ObservationService 
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  listCatalogProjects(options?: SpaghettiCatalogPageOptions): Promise<SpaghettiCatalogProjectPage> {
+    return this.requireHost().client.listProjects(options);
+  }
+
+  listCatalogSessions(options?: SpaghettiCatalogSessionPageOptions): Promise<SpaghettiCatalogSessionPage> {
+    return this.requireHost().client.listSessions(options);
+  }
+
+  getReadiness(): Promise<SpaghettiReadiness> {
+    return this.requireHost().client.getReadiness();
   }
 
   async getSourceIds(): Promise<string[]> {
@@ -718,34 +750,28 @@ class RustObservationService extends EventEmitter implements ObservationService 
           elapsedMs: progress.elapsedMs,
         });
         return;
-      case 'adapter-scanning':
-        this.emitProgress(
-          'parsing',
-          `${sourceId} scan in progress${commitSeq == null ? '' : ` — commit ${commitSeq}`}…`,
-          {
-            sourceId,
-            sourceStage: 'active',
-            sourceIndex: progress.sourceIndex,
-            sourceCount: progress.sourceCount,
-            current: progress.sourceIndex,
-            total: progress.sourceCount,
-            elapsedMs: progress.elapsedMs,
-            ...(commitSeq == null ? {} : { commitSeq }),
-          },
-        );
-        return;
-      case 'adapter-ready':
-        this.emitProgress('indexing', `${sourceId} observation is live.`, {
+      case 'discovering-catalog':
+        this.emitProgress('parsing', 'Discovering projects and sessions…', {
           sourceId,
-          sourceStage: 'done',
-          sourceIndex: progress.sourceIndex,
+          sourceStage: 'active',
           sourceCount: progress.sourceCount,
-          current: progress.sourceIndex,
-          total: progress.sourceCount,
           elapsedMs: progress.elapsedMs,
           ...(commitSeq == null ? {} : { commitSeq }),
         });
         return;
+      case 'catalog-ready': {
+        const catalog = progress.catalog;
+        const summary = catalog
+          ? `${catalog.catalogProjects} projects · ${catalog.catalogSessions} sessions`
+          : 'library';
+        this.emitProgress('indexing', `${summary} visible; indexing continues in the background.`, {
+          sourceStage: 'done',
+          sourceCount: progress.sourceCount,
+          elapsedMs: progress.elapsedMs,
+          ...(commitSeq == null ? {} : { commitSeq }),
+        });
+        return;
+      }
       case 'ready':
         this.emitProgress('reconciling', 'All configured Rust observations are live.', {
           current: progress.sourceCount,
@@ -780,13 +806,13 @@ class RustObservationService extends EventEmitter implements ObservationService 
 
   private async allProjects(): Promise<SpaghettiEngineHistoryProject[]> {
     if (this.projectLoad) return await this.projectLoad;
-    const work = collectPages((cursor) => this.requireHost().client.listProjects({ cursor, limit: PAGE_LIMIT })).then(
-      (projects) => {
-        this.projectCatalogLoaded = true;
-        for (const project of projects) this.projectsById.set(project.projectId, project);
-        return projects;
-      },
-    );
+    const work = collectPages((cursor) =>
+      this.requireHost().client.listHistoryProjects({ cursor, limit: PAGE_LIMIT }),
+    ).then((projects) => {
+      this.projectCatalogLoaded = true;
+      for (const project of projects) this.projectsById.set(project.projectId, project);
+      return projects;
+    });
     const tracked = work.finally(() => {
       if (this.projectLoad === tracked) this.projectLoad = null;
     });
@@ -798,7 +824,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
     const pending = this.sessionLoads.get(projectId);
     if (pending) return await pending;
     const work = collectPages((cursor) =>
-      this.requireHost().client.listSessions({ projectId, cursor, limit: PAGE_LIMIT }),
+      this.requireHost().client.listHistorySessions({ projectId, cursor, limit: PAGE_LIMIT }),
     ).then((sessions) => {
       const project = this.projectsById.get(projectId);
       if (project) {

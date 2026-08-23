@@ -11,6 +11,7 @@ import { resolve } from 'node:path';
 
 import {
   openSpaghettiEngine,
+  type SpaghettiCatalogStartup,
   type SpaghettiEngine,
   type SpaghettiEngineFactFamilyReplayOptions,
   type SpaghettiEngineFactFamilyReplayResult,
@@ -18,6 +19,7 @@ import {
   type SpaghettiEngineRuntimeUsageQuerySelectionOptions,
   type SpaghettiEngineRuntimeUsageQuerySelectionResult,
   type SpaghettiEngineStatus,
+  type SpaghettiReadiness,
 } from './native.js';
 import {
   NapiTransport,
@@ -56,21 +58,16 @@ export interface ObservationHostOptions {
   onProgress?: (progress: ObservationHostProgress) => void;
 }
 
-export interface ObservationHostProgressiveView {
-  catalogQueryReady: boolean;
-  searchAvailable: boolean;
-  selectedHydrationAvailable: boolean;
-}
-
 export interface ObservationHostProgress {
-  stage: 'opening' | 'adapter-scanning' | 'adapter-ready' | 'finalizing' | 'ready';
+  stage: 'opening' | 'discovering-catalog' | 'catalog-ready' | 'finalizing' | 'ready';
   adapterId?: string;
   /** One-based configured source position. */
   sourceIndex?: number;
   sourceCount: number;
   elapsedMs: number;
   status?: SpaghettiEngineStatus;
-  progressive?: ObservationHostProgressiveView;
+  /** Present from `catalog-ready` onward: what discovery committed. */
+  catalog?: SpaghettiCatalogStartup;
 }
 
 export interface ObservationHostSnapshot {
@@ -90,8 +87,20 @@ export interface ObservationHost {
   readonly databasePath: string;
   readonly sources: ReadonlyArray<{ adapterId: string; roots: readonly string[] }>;
   readonly status: SpaghettiEngineStatus;
+  /** What catalog-first startup committed before history began. */
+  readonly catalog: SpaghettiCatalogStartup;
   readonly client: SpaghettiClient;
   readonly clientInfo: SpaghettiClientInfo;
+  /**
+   * The readiness vector. `catalog` is normally `ready` here while `history`,
+   * `usage`, and `search` are still converging in the background.
+   */
+  readiness(signal?: AbortSignal): Promise<SpaghettiReadiness>;
+  /**
+   * Resolve once every configured supervisor is running. Callers that promise
+   * decoded history await this; callers that only need the library do not.
+   */
+  whenObserving(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   snapshot(signal?: AbortSignal): Promise<ObservationHostSnapshot>;
   refresh(adapterId?: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   replayFactFamily(
@@ -127,35 +136,35 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
   const bootstrapActive = engine.status.state === 'bootstrapping';
   let client: SpaghettiClient | undefined;
   try {
-    for (const [index, source] of sources.entries()) {
-      emitAdapterProgress(options, engine, sources.length, startedAt, source, index, 'adapter-scanning');
-    }
-    let heartbeatIndex = 0;
-    const heartbeat = setInterval(() => {
-      if (options.signal?.aborted) return;
-      const index = heartbeatIndex % sources.length;
-      emitAdapterProgress(options, engine, sources.length, startedAt, sources[index]!, index, 'adapter-scanning');
-      heartbeatIndex += 1;
-    }, 1_000);
-    try {
-      await engine.startConfiguredObservation(
-        {
-          sources: sources.map((source) => ({
-            adapterId: source.adapterId,
-            roots: [...source.roots],
-            reason: 'production_observation',
-          })),
-        },
-        options.signal,
-      );
-    } finally {
-      clearInterval(heartbeat);
-    }
-    for (const [index, source] of sources.entries()) {
-      emitAdapterProgress(options, engine, sources.length, startedAt, source, index, 'adapter-ready');
-    }
-    // Catalog-first: admit the query client without waiting for FTS.
-    // Search stays unavailable until completeQueryBootstrap finishes.
+    // Catalog first. This resolves once every source has committed its
+    // discovered projects and sessions, which is well before history,
+    // usage, or full-text search converge.
+    emitHostProgress(options, {
+      stage: 'discovering-catalog',
+      sourceCount: sources.length,
+      elapsedMs: Date.now() - startedAt,
+      status: engine.status,
+    });
+    const catalog = await engine.startConfiguredObservation(
+      {
+        sources: sources.map((source) => ({
+          adapterId: source.adapterId,
+          roots: [...source.roots],
+          reason: 'production_observation',
+        })),
+      },
+      options.signal,
+    );
+    emitHostProgress(options, {
+      stage: 'catalog-ready',
+      sourceCount: sources.length,
+      elapsedMs: Date.now() - startedAt,
+      status: engine.status,
+      catalog,
+    });
+
+    // Search stays unavailable until query bootstrap finishes; it is not on
+    // the path to a visible library.
     const queryBootstrap = bootstrapActive ? engine.completeQueryBootstrap() : Promise.resolve(engine.status);
     if (bootstrapActive) {
       emitHostProgress(options, {
@@ -163,6 +172,7 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
         sourceCount: sources.length,
         elapsedMs: Date.now() - startedAt,
         status: engine.status,
+        catalog,
       });
     }
     client = await openSpaghettiClient({
@@ -174,8 +184,9 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
       sourceCount: sources.length,
       elapsedMs: Date.now() - startedAt,
       status: engine.status,
+      catalog,
     });
-    return new NativeObservationHost(engine, client, sources, queryBootstrap);
+    return new NativeObservationHost(engine, client, sources, catalog, queryBootstrap);
   } catch (error) {
     await client?.dispose().catch(() => undefined);
     await engine.dispose();
@@ -183,41 +194,9 @@ export async function openObservationHost(options: ObservationHostOptions): Prom
   }
 }
 
-function emitAdapterProgress(
-  options: ObservationHostOptions,
-  engine: SpaghettiEngine,
-  sourceCount: number,
-  startedAt: number,
-  source: { adapterId: string },
-  index: number,
-  stage: 'adapter-scanning' | 'adapter-ready',
-): void {
-  emitHostProgress(options, {
-    stage,
-    adapterId: source.adapterId,
-    sourceIndex: index + 1,
-    sourceCount,
-    elapsedMs: Date.now() - startedAt,
-    status: engine.status,
-  });
-}
-
-export function observationHostProgressiveView(
-  status: Pick<SpaghettiEngineStatus, 'state' | 'catalogQueryReady' | 'searchAvailable' | 'observation'>,
-): ObservationHostProgressiveView {
-  const catalogQueryReady = status.catalogQueryReady === true;
-  return {
-    catalogQueryReady,
-    searchAvailable: catalogQueryReady && status.state !== 'bootstrapping',
-    selectedHydrationAvailable: catalogQueryReady && status.observation.supervisorsRunning > 0,
-  };
-}
-
 function emitHostProgress(options: ObservationHostOptions, progress: ObservationHostProgress): void {
   try {
-    const progressive =
-      progress.progressive ?? (progress.status ? observationHostProgressiveView(progress.status) : undefined);
-    options.onProgress?.({ ...progress, progressive });
+    options.onProgress?.(progress);
   } catch {
     // Observability callbacks cannot take down the sole database owner.
   }
@@ -233,6 +212,7 @@ class NativeObservationHost implements ObservationHost {
     private readonly engine: SpaghettiEngine,
     readonly client: SpaghettiClient,
     sources: Array<{ adapterId: string; roots: string[] }>,
+    readonly catalog: SpaghettiCatalogStartup,
     private readonly queryBootstrap: Promise<SpaghettiEngineStatus> = Promise.resolve(engine.status),
   ) {
     this.databasePath = engine.status.databasePath;
@@ -247,6 +227,14 @@ class NativeObservationHost implements ObservationHost {
 
   get clientInfo(): SpaghettiClientInfo {
     return this.client.info;
+  }
+
+  readiness(signal?: AbortSignal): Promise<SpaghettiReadiness> {
+    return this.engine.readiness(signal);
+  }
+
+  whenObserving(signal?: AbortSignal): Promise<SpaghettiEngineStatus> {
+    return this.engine.awaitObservationStart(signal);
   }
 
   async snapshot(signal?: AbortSignal): Promise<ObservationHostSnapshot> {

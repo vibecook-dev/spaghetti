@@ -142,8 +142,8 @@ pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
     MAX_SEARCH_PAGE_PAYLOAD_BYTES, SEARCH_QUERY_CONTRACT_VERSION,
 };
+pub(crate) use startup::ConfiguredObservationSource;
 use startup::ConfiguredObservationStartupRuntime;
-pub(crate) use startup::{ConfiguredObservationSource, ConfiguredObservationStartupOutcome};
 pub use supervisor::ObservationSupervisorOptions;
 use supervisor::{ObservationSupervisor, PreparedObservationSupervisor};
 pub use team_query::{
@@ -807,6 +807,16 @@ impl SpaghettiEngineCore {
     ) -> Result<CatalogEntityResolution, EngineError> {
         let (_, queries) = self.clients()?;
         queries.resolve_catalog_entity(external_ref, self.search_ready())
+    }
+
+    /// Block until every configured supervisor has finished starting.
+    ///
+    /// Catalog-first startup returns as soon as discovery commits, so watchers
+    /// are still coming up. Callers that promise decoded history — the
+    /// compatibility product service — wait here; callers that only need the
+    /// library do not.
+    pub fn wait_for_observation_start(&self) -> Result<(), EngineError> {
+        self.wait_for_configured_observation_startup()
     }
 
     /// The readiness vector: one answer for catalog, history, usage,

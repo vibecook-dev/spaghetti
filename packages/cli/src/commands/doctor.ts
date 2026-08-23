@@ -5,7 +5,9 @@
  * so the same snapshot can be rendered by the TUI's DoctorView.
  */
 
+import type { ObservationService, SpaghettiReadiness } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
+import { readinessField, readinessFields } from '../lib/catalog.js';
 import {
   collectDoctorReport,
   formatBytes,
@@ -59,7 +61,24 @@ function leftoverIcon(kind: LeftoverKind): string {
   }
 }
 
-function renderReport(report: DoctorReport): string {
+function renderReadiness(readiness: SpaghettiReadiness | undefined): string[] {
+  const lines = [heading('Readiness')];
+  if (!readiness) {
+    lines.push(sub('engine unavailable — open spag once to build the index'));
+    lines.push('');
+    return lines;
+  }
+  lines.push(sub(`derived from committed rows at commit ${readiness.atCommitSeq}`));
+  for (const [name, field] of readinessFields(readiness)) {
+    const icon =
+      field.state === 'ready' ? OK : field.state === 'degraded' || field.state === 'unavailable' ? BAD : WARN;
+    lines.push(`${INDENT}${icon} ${readinessField(name.padEnd(LABEL_WIDTH), field)}`);
+  }
+  lines.push('');
+  return lines;
+}
+
+function renderReport(report: DoctorReport, readiness: SpaghettiReadiness | undefined): string {
   const lines: string[] = [];
   lines.push('');
   lines.push(`${INDENT}${theme.heading('Spaghetti Doctor')}  ${theme.muted(`v${report.version}`)}`);
@@ -111,6 +130,8 @@ function renderReport(report: DoctorReport): string {
   lines.push(sub(tildify(ix.activeSessionsDir)));
   lines.push('');
 
+  lines.push(...renderReadiness(readiness));
+
   // ─── Retired Claude Code plugins (RFC 007) ──────────────────────────
   lines.push(heading('Claude Code plugins'));
   lines.push(sub('read-only — these plugins were removed from spaghetti'));
@@ -127,7 +148,10 @@ function renderReport(report: DoctorReport): string {
   return lines.join('\n') + '\n';
 }
 
-export async function doctorCommand(version: string): Promise<void> {
+export async function doctorCommand(version: string, api?: ObservationService): Promise<void> {
   const report = collectDoctorReport(version);
-  process.stdout.write(renderReport(report));
+  // A missing or unopenable engine is itself diagnostic information, so the
+  // rest of the report still prints.
+  const readiness = await api?.getReadiness().catch(() => undefined);
+  process.stdout.write(renderReport(report, readiness));
 }

@@ -282,7 +282,7 @@ describe('production observation host status', () => {
       assert.equal(existsSync(productionDb), true);
       assert.equal(report.databasePath, productionDb);
       assert.equal(client.info.transportKind, 'playground-utility');
-      const [overview, projects] = await Promise.all([client.getOverview(), client.listProjects({ limit: 10 })]);
+      const [overview, projects] = await Promise.all([client.getOverview(), client.listHistoryProjects({ limit: 10 })]);
       assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
       assert.equal(projects.items[0]?.nativeProjectKey, '-tmp-production-project');
     } finally {

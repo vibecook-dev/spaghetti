@@ -8,13 +8,11 @@ import { fileURLToPath } from 'node:url';
 import {
   createObservationService,
   loadNativeAddon,
-  observationHostProgressiveView,
   openObservationHost,
   type ObservationHost,
   type ObservationHostProgress,
   type ObservationHostSource,
   type ObservationService,
-  type SpaghettiEngineStatus,
 } from '../index.js';
 
 const native = loadNativeAddon();
@@ -53,38 +51,6 @@ function multiAdapterFixture(): { dbPath: string; sources: ObservationHostSource
   };
 }
 
-describe('observation host progressive startup', () => {
-  test('catalog-first view withholds search until catalog is queryable', () => {
-    const bootstrapping = observationHostProgressiveView({
-      state: 'bootstrapping',
-      catalogQueryReady: true,
-      searchAvailable: false,
-      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
-    });
-    assert.equal(bootstrapping.catalogQueryReady, true);
-    assert.equal(bootstrapping.searchAvailable, false);
-    assert.equal(bootstrapping.selectedHydrationAvailable, true);
-
-    const runningWithoutCatalog = observationHostProgressiveView({
-      state: 'running',
-      catalogQueryReady: false,
-      searchAvailable: false,
-      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
-    });
-    assert.equal(runningWithoutCatalog.catalogQueryReady, false);
-    assert.equal(runningWithoutCatalog.searchAvailable, false);
-
-    const runningWithCatalog = observationHostProgressiveView({
-      state: 'running',
-      catalogQueryReady: true,
-      searchAvailable: true,
-      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
-    });
-    assert.equal(runningWithCatalog.searchAvailable, true);
-    assert.equal(runningWithCatalog.selectedHydrationAvailable, true);
-  });
-});
-
 describe('observation host options', () => {
   test('rejects empty and duplicate adapter composition before opening storage', async () => {
     await assert.rejects(
@@ -122,7 +88,17 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.ok(ready.length > 0);
     assert.equal(host.status.acceptingQueries, true);
     assert.equal(host.status.aliveQueryWorkers, 1);
-    assert.equal(host.status.searchAvailable, false);
+
+    // Catalog-first: the library is listable while search is still pending.
+    const readiness = await host.readiness();
+    assert.equal(readiness.catalog.state, 'ready');
+    assert.equal(readiness.search.state, 'pending');
+    assert.ok(host.catalog.catalogProjects > 0, 'discovery committed projects');
+    assert.ok(host.catalog.catalogSessions > 0, 'discovery committed sessions');
+    assert.deepEqual(host.catalog.degradedSources, []);
+    const catalogProjects = await host.client.listProjects();
+    assert.ok(catalogProjects.projects.length > 0, 'projects are listable before search');
+
     const sources = await host.client.listSources();
     assert.ok(sources.items.length >= 1);
     const started = Date.now();
@@ -146,14 +122,20 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     hosts.push(host);
 
     assert.equal(host.status.state, 'running');
+    // Catalog-first: the host returns before watchers finish starting, so a
+    // caller that needs history says so explicitly.
+    await host.whenObserving();
     assert.equal(host.status.observation.supervisorsRunning, 3);
     assert.equal(host.clientInfo.transportKind, 'napi');
     assert.equal((await host.snapshot()).health.healthy, true);
     assert.deepEqual(
-      startup.filter((progress) => progress.stage === 'adapter-ready').map((progress) => progress.adapterId),
-      ['claude-code', 'codex', 'grok'],
+      startup.map((progress) => progress.stage),
+      ['opening', 'discovering-catalog', 'catalog-ready', 'ready'],
     );
-    assert.equal(startup.at(-1)?.stage, 'ready');
+    const committed = startup.find((progress) => progress.stage === 'catalog-ready')?.catalog;
+    assert.ok(committed, 'catalog-ready reports what discovery committed');
+    assert.equal(committed.supervisorsStarted, 3);
+    assert.equal(committed.historyBackground, true);
 
     const sources = await host.client.listSources();
     assert.deepEqual(sources.items.map((source) => source.adapterId).sort(), ['claude-code', 'codex', 'grok']);
@@ -241,10 +223,10 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     );
 
     const projects = await host.client.listProjects({ limit: 10 });
-    const projectId = projects.items[0]?.projectId;
+    const projectId = projects.projects[0]?.projectId;
     assert.ok(projectId);
     const sessions = await host.client.listSessions({ projectId, limit: 10 });
-    const sessionId = sessions.items[0]?.sessionId;
+    const sessionId = sessions.sessions[0]?.sessionId;
     assert.ok(sessionId);
     const coverage = await host.client.getFactFamilyCoverage({
       projectId,
