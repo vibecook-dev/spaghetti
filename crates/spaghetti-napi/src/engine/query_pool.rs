@@ -648,7 +648,6 @@ struct QueryControl {
 struct QueryTelemetry {
     opened_at: Instant,
     requests_enqueued: AtomicU64,
-    requests_completed: AtomicU64,
     queue_rejections: AtomicU64,
     queue_high_watermark: AtomicU64,
     queue_wait: LatencyHistogram,
@@ -728,7 +727,6 @@ impl QueryControl {
             telemetry: QueryTelemetry {
                 opened_at: Instant::now(),
                 requests_enqueued: AtomicU64::new(0),
-                requests_completed: AtomicU64::new(0),
                 queue_rejections: AtomicU64::new(0),
                 queue_high_watermark: AtomicU64::new(0),
                 queue_wait: LatencyHistogram::default(),
@@ -743,6 +741,8 @@ impl QueryControl {
 impl QueryTelemetry {
     fn snapshot(&self, queue_depth: usize) -> QueryPerformanceSnapshot {
         let now_ns = duration_ns(self.opened_at.elapsed());
+        let queue_wait = self.queue_wait.snapshot();
+        let execution = self.execution.snapshot();
         let oldest_started_ns = self
             .active_started_ns
             .iter()
@@ -752,7 +752,11 @@ impl QueryTelemetry {
         QueryPerformanceSnapshot {
             uptime_ns: now_ns,
             requests_enqueued: self.requests_enqueued.load(Ordering::Acquire),
-            requests_completed: self.requests_completed.load(Ordering::Acquire),
+            // The execution histogram publishes its sample count last, after
+            // the duration and bucket updates. Use that single publication as
+            // the completion counter instead of racing a second atomic that
+            // can make one snapshot internally contradictory.
+            requests_completed: execution.samples,
             queue_rejections: self.queue_rejections.load(Ordering::Acquire),
             queue_depth: u64::try_from(queue_depth).unwrap_or(u64::MAX),
             queue_high_watermark: self.queue_high_watermark.load(Ordering::Acquire),
@@ -760,16 +764,16 @@ impl QueryTelemetry {
                 .map(|started| now_ns.saturating_sub(started))
                 .unwrap_or(0),
             runtime_usage_compatibility: self.runtime_usage_compatibility.snapshot(),
-            timings: [
-                ("queue_wait", &self.queue_wait),
-                ("execution", &self.execution),
-            ]
-            .into_iter()
-            .map(|(name, histogram)| NamedLatencySnapshot {
-                name: name.to_string(),
-                latency: histogram.snapshot(),
-            })
-            .collect(),
+            timings: vec![
+                NamedLatencySnapshot {
+                    name: "queue_wait".to_string(),
+                    latency: queue_wait,
+                },
+                NamedLatencySnapshot {
+                    name: "execution".to_string(),
+                    latency: execution,
+                },
+            ],
         }
     }
 }
@@ -901,7 +905,6 @@ impl Drop for QueryMeasurementGuard<'_> {
     fn drop(&mut self) {
         self.telemetry.execution.record(self.started_at.elapsed());
         self.telemetry.active_started_ns[self.worker_id].store(0, Ordering::Release);
-        atomic_saturating_add(&self.telemetry.requests_completed, 1);
     }
 }
 
