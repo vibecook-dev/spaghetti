@@ -282,6 +282,17 @@ describe('production observation host status', () => {
       assert.equal(existsSync(productionDb), true);
       assert.equal(report.databasePath, productionDb);
       assert.equal(client.info.transportKind, 'playground-utility');
+      // The catalog answers from the same runtime the renderer's two new
+      // channels are forwarded to, and it answers about the same project.
+      const catalog = await runtime.read((sdk) => sdk.listCatalogProjects({ limit: 10 }));
+      assert.equal(catalog.projects.length, 1);
+      assert.equal(catalog.projects[0]?.nativeProjectKey, '-tmp-production-project');
+      const catalogSessions = await runtime.read((sdk) =>
+        sdk.listCatalogSessions({ projectId: catalog.projects[0]!.projectId, limit: 10 }),
+      );
+      assert.equal(catalogSessions.sessions.length, 1);
+      assert.equal(catalogSessions.sessions[0]?.nativeSessionId, SESSION_ID);
+
       const overview = await waitForCanonicalRows(client, 1);
       const projects = await client.listProjects({ limit: 10 });
       assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
