@@ -55,6 +55,103 @@ impl SessionFixture {
             .join(format!("agent-{agent_id}.jsonl"))
     }
 
+    pub(crate) fn project(&self) -> &'static str {
+        PROJECT
+    }
+
+    /// The source instance the adapter discovers for this fixture root.
+    pub(crate) fn source_instance(
+        &self,
+        adapter: &ClaudeCodeAdapter,
+    ) -> crate::adapter::SourceInstance {
+        use crate::adapter::{AgentAdapter, DiscoveryContext, SourceInstance};
+        let spec = adapter
+            .discover(&DiscoveryContext {
+                configured_roots: vec![self.root.path().to_path_buf()],
+                observed_at: 0,
+            })
+            .expect("discovery")
+            .into_iter()
+            .next()
+            .expect("one instance");
+        SourceInstance { id: 1, spec }
+    }
+
+    fn session_dir(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("projects")
+            .join(PROJECT)
+            .join(SESSION)
+    }
+
+    pub(crate) fn workflow_child(&self, workflow: &str, agent_id: &str) -> PathBuf {
+        self.session_dir()
+            .join("subagents")
+            .join("workflows")
+            .join(workflow)
+            .join(format!("agent-{agent_id}.jsonl"))
+    }
+
+    pub(crate) fn workflow_journal(&self, workflow: &str) -> PathBuf {
+        self.session_dir()
+            .join("subagents")
+            .join("workflows")
+            .join(workflow)
+            .join("journal.jsonl")
+    }
+
+    pub(crate) fn write_workflow_run(&self, workflow: &str) {
+        let path = self
+            .session_dir()
+            .join("workflows")
+            .join(format!("wf_{workflow}.json"));
+        self.append_once(
+            &path,
+            &[format!(r#"{{"id":"{workflow}","status":"running"}}"#)],
+        );
+    }
+
+    /// The sibling metadata object the declared sibling relation names: the
+    /// transcript path with the declared suffix appended.
+    pub(crate) fn write_subagent_metadata(&self, agent_id: &str) {
+        let transcript = self.subagent(agent_id);
+        let path = transcript.with_file_name(format!(
+            "{}.meta.json",
+            transcript
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+        ));
+        self.append_once(&path, &[format!(r#"{{"agentId":"{agent_id}"}}"#)]);
+    }
+
+    pub(crate) fn write_todo(&self, actor_id: &str) {
+        self.append_once(
+            &self.todo_sidecar(actor_id),
+            &[r#"[{"content":"f","status":"pending","activeForm":"f"}]"#.to_string()],
+        );
+    }
+
+    pub(crate) fn write_team(&self, team: &str, member: &str) {
+        let teams = self.root.path().join("teams").join(team);
+        self.append_once(
+            &teams.join("config.json"),
+            &[format!(r#"{{"name":"{team}","leadAgentId":"{member}"}}"#)],
+        );
+        self.append_once(
+            &teams.join("inboxes").join(format!("{member}.json")),
+            &[r#"{"messages":[]}"#.to_string()],
+        );
+    }
+
+    pub(crate) fn write_plan(&self, slug: &str) {
+        self.append_once(
+            &self.root.path().join("plans").join(format!("{slug}.md")),
+            &["# plan".to_string()],
+        );
+    }
+
     pub(crate) fn todo_sidecar(&self, actor_id: &str) -> PathBuf {
         self.root
             .path()
@@ -179,6 +276,11 @@ pub(crate) fn compact_assistant_record(index: usize) -> String {
     format!(
         r#"{{"type":"assistant","uuid":"m{index}","timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/f","version":"1","isSidechain":false,"userType":"external","requestId":"r{index}","message":{{"model":"m","id":"p{index}","type":"message","role":"assistant","content":[],"usage":{{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
     )
+}
+
+/// A workflow journal record.
+pub(crate) fn workflow_journal_record(workflow: &str) -> String {
+    format!(r#"{{"type":"started","agentId":"a1","key":"step-1","workflowId":"{workflow}"}}"#)
 }
 
 /// A subagent transcript record. The child declares its own actor id.
