@@ -2011,7 +2011,8 @@ export interface SpaghettiEngineAdapterObservationOptions extends SpaghettiEngin
   adapterId: string;
 }
 
-export interface SpaghettiEngineConfiguredObservationSourceOptions extends SpaghettiEngineAdapterObservationOptions {}
+/** One source in a configured startup unit. Alias, not a narrowing. */
+export type SpaghettiEngineConfiguredObservationSourceOptions = SpaghettiEngineAdapterObservationOptions;
 
 export interface SpaghettiEngineConfiguredObservationOptions {
   /** Complete source set planned as one startup unit before history scans begin. */
