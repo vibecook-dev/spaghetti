@@ -2007,15 +2007,6 @@ impl SpaghettiEngineCore {
     }
 }
 
-fn engine_now_unix_ms() -> Result<i64, EngineError> {
-    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_| {
-        EngineError::InvalidConfig("system clock precedes the Unix epoch".to_string())
-    })?;
-    i64::try_from(elapsed.as_millis()).map_err(|_| {
-        EngineError::InvalidConfig("system clock exceeds the supported range".to_string())
-    })
-}
-
 impl Drop for SpaghettiEngineCore {
     fn drop(&mut self) {
         let _ = self.shutdown();
@@ -2112,13 +2103,7 @@ fn duration_ms(value: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::{
-        CanonicalSourceInstanceKey, ContractVersionSelection, CoverageDeclarationDigest,
-        CoverageDomain, CoverageMembershipRevision, CoverageSetCompleteness,
-        CONTRACT_VERSION_SELECTION_VERSION,
-    };
     use crate::source::SharedSourcePassPool;
-    use std::collections::BTreeMap;
     use std::sync::mpsc;
     use std::thread;
     use tempfile::tempdir;

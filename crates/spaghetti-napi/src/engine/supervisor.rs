@@ -87,7 +87,6 @@ type WatcherFactory = fn(
 struct WatchedInstance {
     stable_key: Vec<u8>,
     spec: SourceInstanceSpec,
-    roots: Vec<PathBuf>,
     event_roots: Vec<PathBuf>,
     routes: Vec<WatchRoute>,
 }
@@ -95,7 +94,6 @@ struct WatchedInstance {
 #[derive(Debug)]
 struct WatchRoute {
     roots: Vec<PathBuf>,
-    root_name: String,
     stream_key: String,
     directory_snapshot: bool,
     patterns: SelectorPatterns,
@@ -158,30 +156,7 @@ pub(crate) struct PausedObservationSupervisor {
 }
 
 impl ObservationSupervisor {
-    pub(crate) fn start<A: AgentAdapter>(
-        engine: Arc<SpaghettiEngineCore>,
-        adapter: A,
-        options: ObservationSupervisorOptions,
-    ) -> Result<Self, EngineError> {
-        Self::start_cancellable(engine, adapter, options, QueryCancellationToken::default())
-    }
-
-    pub(crate) fn start_cancellable<A: AgentAdapter>(
-        engine: Arc<SpaghettiEngineCore>,
-        adapter: A,
-        options: ObservationSupervisorOptions,
-        startup_cancellation: QueryCancellationToken,
-    ) -> Result<Self, EngineError> {
-        Self::prepare_with_watcher_factory(
-            engine,
-            adapter,
-            options,
-            create_registered_watcher,
-            startup_cancellation,
-        )?
-        .start()
-    }
-
+    #[cfg(test)]
     fn start_with_watcher_factory<A: AgentAdapter>(
         engine: Arc<SpaghettiEngineCore>,
         adapter: A,
@@ -344,14 +319,17 @@ impl ObservationSupervisor {
 }
 
 impl PreparedObservationSupervisor {
+    #[cfg(test)]
     pub(crate) fn adapter_id(&self) -> &str {
         &self.inner().adapter_id
     }
 
+    #[cfg(test)]
     pub(crate) fn watched_instances(&self) -> u32 {
         self.inner().watched_instances
     }
 
+    #[cfg(test)]
     pub(crate) fn watch_roots(&self) -> u32 {
         if self.watcher_available() {
             self.inner().watch_roots
@@ -360,6 +338,7 @@ impl PreparedObservationSupervisor {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn watcher_available(&self) -> bool {
         self.inner().watcher_available.load(Ordering::Acquire)
     }
@@ -465,10 +444,6 @@ impl Drop for StartingObservationSupervisor {
 }
 
 impl ObservationSupervisorClient {
-    pub(crate) fn refresh(&self) -> Result<(), EngineError> {
-        self.refresh_cancellable(QueryCancellationToken::default())
-    }
-
     pub(crate) fn refresh_cancellable(
         &self,
         cancellation: QueryCancellationToken,
@@ -760,7 +735,6 @@ fn supervisor_thread<A: AgentAdapter>(adapter: A, context: SupervisorThreadConte
                                     MAX_RECONCILE_PASSES_PER_WAKE,
                                     &[cancellation.clone(), refresh_cancellation],
                                 );
-                                let summary = summary;
                                 update_polling_after_drain(&mut polling, &summary);
                                 handle_backend_failure(
                                     &summary,
@@ -984,7 +958,6 @@ fn discover_topology<A: AgentAdapter>(
                 .to_path_buf();
             routes.push(WatchRoute {
                 roots: event_path_aliases(&root, configured_roots),
-                root_name: stream.selector.root_name.clone(),
                 stream_key: stream.id.as_str().to_string(),
                 directory_snapshot: matches!(stream.driver, DriverSpec::DirectorySnapshot(_)),
                 patterns: SelectorPatterns::new(&stream)?,
@@ -1010,7 +983,6 @@ fn discover_topology<A: AgentAdapter>(
         instances.push(WatchedInstance {
             stable_key: spec.stable_key.as_bytes().to_vec(),
             spec,
-            roots,
             event_roots,
             routes,
         });
@@ -1020,19 +992,6 @@ fn discover_topology<A: AgentAdapter>(
         instances,
         physical_roots,
     })
-}
-
-fn check_supervisor_cancellations(
-    cancellations: &[QueryCancellationToken],
-) -> Result<(), EngineError> {
-    if cancellations
-        .iter()
-        .any(QueryCancellationToken::is_cancelled)
-    {
-        Err(EngineError::QueryCancelled)
-    } else {
-        Ok(())
-    }
 }
 
 fn create_watcher(
@@ -1580,12 +1539,10 @@ mod tests {
 
     use crate::adapter::{
         AdapterError, AdapterErrorClass, AdapterId, AdapterManifest, AdapterObjectContext,
-        CanonicalEntityKey, CanonicalFactId, ConsistencyPolicy, ContractCompleteness,
-        DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
-        EntityScope, FactBatch, FactRevisionId, ObjectSelector, QualifiedValue,
-        QualifiedValueQuality, RawRetentionPolicy, SemanticRevisionRef, SourceInstance,
-        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
-        StreamId, StreamSpec,
+        ConsistencyPolicy, DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy,
+        DiscoveryContext, DriverSpec, EntityScope, FactBatch, ObjectSelector, RawRetentionPolicy,
+        SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
+        StreamAuthority, StreamId, StreamSpec,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::engine::EngineOptions;
@@ -1927,7 +1884,6 @@ mod tests {
 
         assert_eq!(topology.instances.len(), 1);
         assert_eq!(topology.physical_roots, vec![root.canonicalize().unwrap()]);
-        assert_eq!(topology.instances[0].roots, topology.physical_roots);
     }
 
     #[test]

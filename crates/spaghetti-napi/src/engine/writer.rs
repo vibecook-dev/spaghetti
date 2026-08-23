@@ -93,6 +93,7 @@ enum WriterCommand {
         now_ms: i64,
         response: Sender<Result<ChangeLogRetentionSnapshot, EngineError>>,
     },
+    #[cfg(test)]
     Checkpoint {
         response: Sender<Result<CheckpointOutcome, EngineError>>,
     },
@@ -252,21 +253,12 @@ impl WriterClient {
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
     }
 
+    #[cfg(test)]
     pub fn commit_observation(
         &self,
         request: ObservationCommit,
     ) -> Result<CommitReceipt, EngineError> {
         self.submit_observation(request)?
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
-    }
-
-    pub fn commit_facts(
-        &self,
-        request: ObservationCommit,
-        batch: FactBatch,
-    ) -> Result<CommitReceipt, EngineError> {
-        self.submit_facts(request, batch)?
             .recv()
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?
     }
@@ -319,6 +311,7 @@ impl WriterClient {
         atomic_saturating_add(&self.telemetry.changes_published, u64::from(count));
     }
 
+    #[cfg(test)]
     pub(crate) fn checkpoint(&self) -> Result<CheckpointOutcome, EngineError> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(EngineError::WorkerUnavailable { worker: "writer" });
@@ -650,6 +643,7 @@ fn writer_thread(
             } => {
                 let _ = response.send(commit::maintain_change_log(&mut connection, policy, now_ms));
             }
+            #[cfg(test)]
             WriterCommand::Checkpoint { response } => {
                 let _ = response.send(checkpoints.checkpoint(&connection, &telemetry, false));
             }

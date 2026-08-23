@@ -534,12 +534,6 @@ enum QueryCommand {
         cancellation: QueryCancellationToken,
         response: Sender<Result<Readiness, EngineError>>,
     },
-    SourceCatalog {
-        cancellation_epoch: u64,
-        adapter_id: String,
-        stable_key: Vec<u8>,
-        response: Sender<Result<SourceCatalogSnapshot, EngineError>>,
-    },
     SourceCoverageReplayBaseline {
         cancellation_epoch: u64,
         source_instance_id: u64,
@@ -761,7 +755,6 @@ impl Drop for QueryMeasurementGuard<'_> {
 pub struct QueryClient {
     commands: Sender<QueuedQuery>,
     control: Arc<QueryControl>,
-    configured_workers: usize,
     source_pass_pool: Option<SharedSourcePassPool>,
 }
 
@@ -1203,10 +1196,6 @@ impl QueryClient {
         )
     }
 
-    pub fn canonical_stats(&self) -> Result<CanonicalStats, EngineError> {
-        self.canonical_stats_cancellable(QueryCancellationToken::default())
-    }
-
     pub fn canonical_stats_cancellable(
         &self,
         cancellation: QueryCancellationToken,
@@ -1429,34 +1418,6 @@ impl QueryClient {
         )
     }
 
-    pub fn source_catalog(
-        &self,
-        adapter_id: &str,
-        stable_key: &[u8],
-    ) -> Result<SourceCatalogSnapshot, EngineError> {
-        if adapter_id.trim().is_empty() || stable_key.is_empty() {
-            return Err(EngineError::InvalidQuery(
-                "source catalog requires a non-empty adapter id and stable key".to_string(),
-            ));
-        }
-        if self.control.stopping.load(Ordering::Acquire) {
-            return Err(EngineError::ShuttingDown);
-        }
-
-        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
-        let (response_tx, response_rx) = bounded(1);
-        self.enqueue(QueryCommand::SourceCatalog {
-            cancellation_epoch,
-            adapter_id: adapter_id.to_string(),
-            stable_key: stable_key.to_vec(),
-            response: response_tx,
-        })?;
-
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
-    }
-
     pub(crate) fn source_coverage_replay_baseline(
         &self,
         source_instance_id: u64,
@@ -1513,20 +1474,12 @@ impl QueryClient {
             .saturating_add(1)
     }
 
-    pub fn configured_workers(&self) -> usize {
-        self.configured_workers
-    }
-
     pub fn alive_workers(&self) -> usize {
         self.control.alive_workers.load(Ordering::Acquire)
     }
 
     pub fn in_flight(&self) -> usize {
         self.control.in_flight.load(Ordering::Acquire)
-    }
-
-    pub fn is_stopping(&self) -> bool {
-        self.control.stopping.load(Ordering::Acquire)
     }
 
     pub fn performance_snapshot(&self) -> QueryPerformanceSnapshot {
@@ -1691,7 +1644,6 @@ impl QueryPool {
             client: QueryClient {
                 commands: command_tx,
                 control,
-                configured_workers: workers,
                 source_pass_pool,
             },
             joins,
@@ -2307,28 +2259,6 @@ fn query_thread(
                     cancellation_epoch,
                     &cancellation,
                     || read_readiness(&connection),
-                );
-                let _ = response.send(result);
-            }
-            QueryCommand::SourceCatalog {
-                cancellation_epoch,
-                adapter_id,
-                stable_key,
-                response,
-            } => {
-                if is_cancelled(&control, cancellation_epoch) {
-                    let _ = response.send(Err(EngineError::QueryCancelled));
-                    continue;
-                }
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = read_source_catalog(&connection, &adapter_id, &stable_key).and_then(
-                    |catalog| {
-                        if is_cancelled(&control, cancellation_epoch) {
-                            Err(EngineError::QueryCancelled)
-                        } else {
-                            Ok(catalog)
-                        }
-                    },
                 );
                 let _ = response.send(result);
             }
@@ -3552,7 +3482,9 @@ mod tests {
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
             })
             .unwrap();
-        let canonical_stats = client.canonical_stats().unwrap();
+        let canonical_stats = client
+            .canonical_stats_cancellable(QueryCancellationToken::default())
+            .unwrap();
         let run_state = client
             .run_state(RunStateRequest {
                 run_id: encode_entity_id(
@@ -4545,15 +4477,15 @@ mod tests {
         let receipt = writer.client().commit_observation(request).unwrap();
         writer.shutdown().unwrap();
 
-        let mut restarted_queries = QueryPool::start(database, 1, None).unwrap();
-        let missing = restarted_queries
+        let mut restarted = WriterRuntime::start(database).unwrap();
+        let missing = restarted
             .client()
             .source_catalog("query-fixture", b"missing")
             .unwrap();
         assert_eq!(missing.source_instance_id, None);
         assert!(missing.streams.is_empty() && missing.objects.is_empty());
 
-        let catalog = restarted_queries
+        let catalog = restarted
             .client()
             .source_catalog("query-fixture", b"root")
             .unwrap();
@@ -4582,9 +4514,9 @@ mod tests {
         assert_eq!(object.state, "active");
 
         assert!(matches!(
-            restarted_queries.client().source_catalog("", b"root"),
+            restarted.client().source_catalog("", b"root"),
             Err(EngineError::InvalidQuery(_))
         ));
-        restarted_queries.shutdown().unwrap();
+        restarted.shutdown().unwrap();
     }
 }

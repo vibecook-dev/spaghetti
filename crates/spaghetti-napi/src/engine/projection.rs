@@ -18,8 +18,9 @@ use crate::adapter::{
 };
 
 use super::artifact_projection::{apply_artifact_facts, retract_replayed_artifact_fact};
+#[cfg(test)]
+use super::commit::apply_observation_commit_with_projection;
 use super::commit::{
-    apply_observation_commit_with_projection, apply_observation_commit_with_projection_and_hook,
     apply_observation_commit_with_projection_in_transaction, ChangeEntry, CommitDetail, CommitHook,
     CommitReceipt, ObservationCommit, ProjectionCommitContext, TransactionalProjectionWork,
 };
@@ -49,39 +50,14 @@ const RUN_EVIDENCE_INSERT_BATCH_ROWS: usize = 512;
 /// Submit one already-decoded fact batch through the catalog/projection/cursor
 /// transaction. Public changes and the durable fact count are derived here;
 /// callers cannot supply adapter-owned event topics for typed commits.
+#[cfg(test)]
 pub(super) fn apply_fact_observation_commit(
     connection: &mut Connection,
     request: &ObservationCommit,
     batch: &FactBatch,
 ) -> Result<CommitReceipt, EngineError> {
-    apply_fact_observation_commit_inner(connection, request, batch, None)
-}
-
-pub(super) fn apply_fact_observation_commit_with_hook(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    batch: &FactBatch,
-    hook: &dyn CommitHook,
-) -> Result<CommitReceipt, EngineError> {
-    apply_fact_observation_commit_inner(connection, request, batch, Some(hook))
-}
-
-fn apply_fact_observation_commit_inner(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    batch: &FactBatch,
-    hook: Option<&dyn CommitHook>,
-) -> Result<CommitReceipt, EngineError> {
-    let (request, projection) = prepare_fact_observation_commit(request, batch, hook)?;
-    match hook {
-        Some(hook) => apply_observation_commit_with_projection_and_hook(
-            connection,
-            &request,
-            &projection,
-            hook,
-        ),
-        None => apply_observation_commit_with_projection(connection, &request, &projection),
-    }
+    let (request, projection) = prepare_fact_observation_commit(request, batch, None)?;
+    apply_observation_commit_with_projection(connection, &request, &projection)
 }
 
 pub(super) fn apply_fact_observation_commit_in_transaction(
@@ -2081,18 +2057,6 @@ fn evidence_strength_rank(strength: EvidenceStrength) -> i64 {
     }
 }
 
-fn run_state_label(kind: &str) -> &'static str {
-    match kind {
-        "terminal_succeeded" => "succeeded",
-        "terminal_failed" => "failed",
-        "terminal_cancelled" => "cancelled",
-        "input_requested" | "waiting_observed" => "waiting",
-        "run_started" | "activity_observed" => "active",
-        "run_declared" => "declared",
-        _ => "unknown",
-    }
-}
-
 fn reduce_run_state(
     transaction: &Transaction<'_>,
     run_key: &[u8],
@@ -3875,10 +3839,6 @@ mod tests {
         ProjectionVersionCommit, ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate,
         SourceStreamSpec,
     };
-    use crate::engine::coverage_query::{
-        read_fact_family_coverage_page, FactFamilyCoveragePageRequest,
-        DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT,
-    };
     use crate::engine::query_identity::{encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
     use crate::engine::unknown_evidence_projection::{
         read_unknown_evidence_snapshot, unknown_evidence_owner,
@@ -4995,20 +4955,7 @@ mod tests {
         connection.query_row(&sql, [], |row| row.get(0)).unwrap()
     }
 
-    fn persisted_project_session_ids(connection: &Connection) -> (String, String) {
-        let (project_key, session_key) = connection
-            .query_row(
-                "SELECT project_key, session_key FROM canonical_sessions ORDER BY session_key LIMIT 1",
-                [],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .unwrap();
-        (
-            encode_entity_id(PROJECT_ID_PREFIX, &project_key),
-            encode_entity_id(SESSION_ID_PREFIX, &session_key),
-        )
-    }
-
+    #[cfg(feature = "legacy-oracle")]
     struct ShadowCommit<'a> {
         stream: &'a str,
         decoder: &'a str,
@@ -5020,6 +4967,7 @@ mod tests {
         object_context: Option<&'a AdapterObjectContext>,
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_request(input: ShadowCommit<'_>) -> ObservationCommit {
         ObservationCommit {
             source: SourceInstanceSpec {
@@ -5071,6 +5019,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_ingest_fixture(root: &Path) -> Connection {
         let projects = root.join("projects");
         let adapter = ClaudeCodeAdapter::new();
@@ -5200,22 +5149,12 @@ mod tests {
         connection
     }
 
-    /// History parity only. Per-message token columns are gone: RFC 012C
-    /// attributes usage to a response, not to a transcript record, and the
-    /// corpus totals are proven against the independent oracle instead.
-    type HistoryParityRow = (
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-    );
-
+    #[cfg(feature = "legacy-oracle")]
     fn normalized_json(raw: String) -> String {
         serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&raw).unwrap()).unwrap()
     }
 
+    #[cfg(feature = "legacy-oracle")]
     type SessionParityRow = (String, String, String, String, String);
     type ExplicitDelegationRow = (
         Vec<u8>,
@@ -5235,6 +5174,7 @@ mod tests {
         Option<Vec<u8>>,
     );
 
+    #[cfg(feature = "legacy-oracle")]
     fn legacy_session_rows(connection: &Connection) -> Vec<SessionParityRow> {
         let mut rows = connection
             .prepare(
@@ -5261,6 +5201,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_session_rows(connection: &Connection) -> Vec<SessionParityRow> {
         let mut rows = connection
             .prepare(
@@ -5288,6 +5229,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn legacy_parent_rows(connection: &Connection) -> Vec<HistoryParityRow> {
         let mut rows = connection
             .prepare(
@@ -5314,6 +5256,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_parent_rows(connection: &Connection) -> Vec<HistoryParityRow> {
         let rows = connection
             .prepare(
@@ -5368,8 +5311,10 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     type SubagentParityRow = (String, Option<String>, String);
 
+    #[cfg(feature = "legacy-oracle")]
     fn legacy_subagent_rows(connection: &Connection) -> Vec<SubagentParityRow> {
         let mut rows = connection
             .prepare(
@@ -5389,6 +5334,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_subagent_rows(connection: &Connection) -> Vec<SubagentParityRow> {
         let rows = connection
             .prepare(
@@ -6247,7 +6193,6 @@ mod tests {
         assert!(run_evidence_outranks(&started, &declared));
         assert!(run_evidence_outranks(&succeeded, &started));
         assert!(!run_evidence_outranks(&declared, &succeeded));
-        assert_eq!(run_state_label(succeeded.kind), "succeeded");
         assert_eq!(
             max_optional_time(
                 started.last_activity_at.clone(),

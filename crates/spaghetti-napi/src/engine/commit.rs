@@ -137,7 +137,6 @@ pub struct SourceObjectUpdate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectionReadiness {
     Ready,
-    StaleSafe,
     Pending,
     Unavailable,
 }
@@ -146,7 +145,6 @@ impl ProjectionReadiness {
     fn as_str(self) -> &'static str {
         match self {
             Self::Ready => "ready",
-            Self::StaleSafe => "stale_safe",
             Self::Pending => "pending",
             Self::Unavailable => "unavailable",
         }
@@ -297,8 +295,10 @@ pub(super) trait CommitHook: Send + Sync {
     fn record_detail(&self, _detail: CommitDetail, _elapsed: Duration) {}
 }
 
+#[cfg(test)]
 struct NoopCommitHook;
 
+#[cfg(test)]
 impl CommitHook for NoopCommitHook {
     fn reach(&self, _stage: CommitStage) -> Result<(), EngineError> {
         Ok(())
@@ -401,19 +401,20 @@ impl TransactionalProjectionWork for NoProjectionWork {
     }
 }
 
+/// Test-only convenience over [`apply_observation_commit_with_components`]:
+/// the production writer commits inside its own transaction through
+/// [`apply_observation_commit_in_transaction`].
+#[cfg(test)]
 pub(crate) fn apply_observation_commit(
     connection: &mut Connection,
     request: &ObservationCommit,
 ) -> Result<CommitReceipt, EngineError> {
-    apply_observation_commit_with_hook(connection, request, &NoopCommitHook)
-}
-
-pub(super) fn apply_observation_commit_with_hook(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    hook: &dyn CommitHook,
-) -> Result<CommitReceipt, EngineError> {
-    apply_observation_commit_with_components(connection, request, &NoProjectionWork, hook)
+    apply_observation_commit_with_components(
+        connection,
+        request,
+        &NoProjectionWork,
+        &NoopCommitHook,
+    )
 }
 
 /// Reserve or hydrate the durable identifier adapters need before emitting
@@ -530,28 +531,18 @@ pub(super) fn apply_projection_version_commit_with_hook(
     }))
 }
 
+/// Test-only counterpart of [`apply_observation_commit`] for commits that
+/// carry projection work.
+#[cfg(test)]
 pub(super) fn apply_observation_commit_with_projection(
     connection: &mut Connection,
     request: &ObservationCommit,
     projection_work: &dyn TransactionalProjectionWork,
 ) -> Result<CommitReceipt, EngineError> {
-    apply_observation_commit_with_projection_and_hook(
-        connection,
-        request,
-        projection_work,
-        &NoopCommitHook,
-    )
+    apply_observation_commit_with_components(connection, request, projection_work, &NoopCommitHook)
 }
 
-pub(super) fn apply_observation_commit_with_projection_and_hook(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    projection_work: &dyn TransactionalProjectionWork,
-    hook: &dyn CommitHook,
-) -> Result<CommitReceipt, EngineError> {
-    apply_observation_commit_with_components(connection, request, projection_work, hook)
-}
-
+#[cfg(test)]
 pub(super) fn apply_observation_commit_with_components(
     connection: &mut Connection,
     request: &ObservationCommit,
@@ -906,12 +897,6 @@ fn validate_projection_versions(
             {
                 return Err(EngineError::InvalidCommit(format!(
                     "ready projection {} must complete its desired version",
-                    projection.projection_id
-                )));
-            }
-            ProjectionReadiness::StaleSafe if projection.completed_version.is_none() => {
-                return Err(EngineError::InvalidCommit(format!(
-                    "stale-safe projection {} requires a completed version",
                     projection.projection_id
                 )));
             }
@@ -1579,17 +1564,6 @@ fn write_change_log(
             .map_err(|error| sqlite_error("account durable changes", error))?;
     }
     Ok(())
-}
-
-/// Persist writer-owned administrative changes through the same validation,
-/// accounting, and ordinal rules as observation commits.
-pub(super) fn write_internal_changes(
-    transaction: &Transaction<'_>,
-    commit_seq: u64,
-    changes: &[ChangeEntry],
-) -> Result<(), EngineError> {
-    validate_changes(changes)?;
-    write_change_log(transaction, commit_seq, changes)
 }
 
 fn change_log_payload_bytes(change: &ChangeEntry) -> Result<u64, EngineError> {
