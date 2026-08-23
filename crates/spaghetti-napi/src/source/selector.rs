@@ -1,8 +1,9 @@
 //! Common confined component-glob matching for declared source selectors.
 //!
-//! Patterns are compiled before native access. Matching is byte-oriented and
-//! component-aware so `*` never crosses a path separator and `**` is the only
-//! recursive form.
+//! Patterns are compiled before native access. Matching is component-aware so
+//! `*` never crosses a path separator and `**` is the only recursive form.
+//! Declared patterns are UTF-8; Unix paths retain their native bytes, while
+//! Windows paths are converted losslessly to UTF-8 before comparison.
 
 use std::ffi::OsStr;
 use std::path::{Component, Path};
@@ -82,29 +83,52 @@ fn matches_segment(pattern: &[u8], value: &[u8]) -> bool {
 }
 
 fn normal_components(path: &Path) -> Option<Vec<Vec<u8>>> {
-    path.components()
-        .map(|component| match component {
-            Component::Normal(value) => Some(os_bytes(value)),
-            Component::CurDir => Some(Vec::new()),
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
-        })
-        .filter(|component| component.as_ref().is_none_or(|value| !value.is_empty()))
-        .collect()
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => components.push(selector_bytes(value)?),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(components)
 }
 
 #[cfg(unix)]
-fn os_bytes(value: &OsStr) -> Vec<u8> {
+fn selector_bytes(value: &OsStr) -> Option<Vec<u8>> {
     use std::os::unix::ffi::OsStrExt;
-    value.as_bytes().to_vec()
+    Some(value.as_bytes().to_vec())
 }
 
 #[cfg(windows)]
-fn os_bytes(value: &OsStr) -> Vec<u8> {
-    use std::os::windows::ffi::OsStrExt;
-    value.encode_wide().flat_map(u16::to_be_bytes).collect()
+fn selector_bytes(value: &OsStr) -> Option<Vec<u8>> {
+    value.to_str().map(|value| value.as_bytes().to_vec())
 }
 
 #[cfg(not(any(unix, windows)))]
-fn os_bytes(value: &OsStr) -> Vec<u8> {
-    value.to_string_lossy().as_bytes().to_vec()
+fn selector_bytes(value: &OsStr) -> Option<Vec<u8>> {
+    value.to_str().map(|value| value.as_bytes().to_vec())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn portable_pattern_matches_native_path_components() {
+        let path = PathBuf::from("nested").join("also.json");
+        assert!(GlobPattern::new("nested/*.json")
+            .unwrap()
+            .matches_path(&path));
+    }
+
+    #[test]
+    fn portable_pattern_matches_unicode_native_path_components() {
+        let path = PathBuf::from("nested").join("évidence.json");
+        assert!(GlobPattern::new("nested/é*.json")
+            .unwrap()
+            .matches_path(&path));
+    }
 }

@@ -574,11 +574,12 @@ impl ObserverRuntime {
     /// semantic lane because an unreadable log could otherwise flood the small
     /// control lane and take the whole attachment down with it.
     fn emit_unknown(&mut self, owner: &ScopeMemberKey, unknown: &UnknownRecord) {
+        let object_path = owner.object_path();
         let mut builder = EventIdBuilder::new("runtime.unknown-evidence");
         builder
             .scope(&self.scope)
             .component(owner.stream_id.as_bytes())
-            .component(owner.relative_path.to_string_lossy().as_bytes())
+            .component(object_path.as_bytes())
             .u64(unknown.generation)
             .component(unknown.source_record_id.as_bytes());
         let event = ObserverEvent::UnknownEvidence(UnknownEvidenceEvent {
@@ -588,7 +589,7 @@ impl ObserverRuntime {
             phase: self.phase,
             source: SourcePosition {
                 stream_id: owner.stream_id.clone(),
-                object_path: owner.relative_path.to_string_lossy().into_owned(),
+                object_path,
                 root_name: owner.root_name.clone(),
                 generation: unknown.generation,
                 byte_start: unknown.byte_start,
@@ -615,7 +616,7 @@ impl ObserverRuntime {
         for (family, semantic, generation) in retracted {
             let source = SourcePosition {
                 stream_id: owner.stream_id.clone(),
-                object_path: owner.relative_path.to_string_lossy().into_owned(),
+                object_path: owner.object_path(),
                 root_name: owner.root_name.clone(),
                 generation,
                 byte_start: None,
@@ -750,7 +751,7 @@ impl ObserverRuntime {
             let source = owner.map_or_else(
                 || SourcePosition {
                     stream_id: self.root_key.stream_id.clone(),
-                    object_path: self.root_key.relative_path.to_string_lossy().into_owned(),
+                    object_path: self.root_key.object_path(),
                     root_name: self.root_key.root_name.clone(),
                     generation: 0,
                     byte_start: None,
@@ -759,7 +760,7 @@ impl ObserverRuntime {
                 },
                 |(key, generation)| SourcePosition {
                     stream_id: key.stream_id.clone(),
-                    object_path: key.relative_path.to_string_lossy().into_owned(),
+                    object_path: key.object_path(),
                     root_name: key.root_name.clone(),
                     generation,
                     byte_start: None,
@@ -824,7 +825,7 @@ impl ObserverRuntime {
             .map(|(key, object)| ObjectCoverage {
                 relation_id: object.relation_id().to_string(),
                 stream_id: key.stream_id.clone(),
-                object_path: key.relative_path.to_string_lossy().into_owned(),
+                object_path: key.object_path(),
                 root_name: key.root_name.clone(),
                 generation: object.generation(),
                 present: object.present(),
@@ -834,11 +835,12 @@ impl ObserverRuntime {
     }
 
     fn emit_reset(&mut self, owner: &ScopeMemberKey, reset: ObjectReset, generation: u64) {
+        let object_path = owner.object_path();
         let mut builder = EventIdBuilder::new("source.reset");
         builder
             .scope(&self.scope)
             .component(owner.stream_id.as_bytes())
-            .component(owner.relative_path.to_string_lossy().as_bytes())
+            .component(object_path.as_bytes())
             .u64(reset.old_generation)
             .u64(reset.new_generation)
             .component(reset.reason.as_bytes());
@@ -849,7 +851,7 @@ impl ObserverRuntime {
                 scope_epoch: self.delivery.epoch(),
                 source: SourcePosition {
                     stream_id: owner.stream_id.clone(),
-                    object_path: owner.relative_path.to_string_lossy().into_owned(),
+                    object_path,
                     root_name: owner.root_name.clone(),
                     generation,
                     byte_start: None,
@@ -870,11 +872,12 @@ impl ObserverRuntime {
             return;
         }
         self.object_errors.insert(owner.clone(), message.clone());
+        let object_path = owner.object_path();
         let mut builder = EventIdBuilder::new("source.error");
         builder
             .scope(&self.scope)
             .component(owner.stream_id.as_bytes())
-            .component(owner.relative_path.to_string_lossy().as_bytes())
+            .component(object_path.as_bytes())
             .component(message.as_bytes());
         self.delivery
             .admit_control(ObserverEvent::SourceError(SourceErrorEvent {
@@ -883,7 +886,7 @@ impl ObserverRuntime {
                 scope_epoch: self.delivery.epoch(),
                 source: SourcePosition {
                     stream_id: owner.stream_id.clone(),
-                    object_path: owner.relative_path.to_string_lossy().into_owned(),
+                    object_path,
                     root_name: owner.root_name.clone(),
                     generation: 0,
                     byte_start: None,
@@ -920,7 +923,7 @@ impl ObserverRuntime {
     ) -> SourcePosition {
         SourcePosition {
             stream_id: owner.stream_id.clone(),
-            object_path: owner.relative_path.to_string_lossy().into_owned(),
+            object_path: owner.object_path(),
             root_name: owner.root_name.clone(),
             generation,
             byte_start: fact.byte_start,

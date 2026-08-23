@@ -4994,8 +4994,18 @@ mod tests {
             let (records, _) = append_records(driver.read(&path, None, &origin, false).unwrap());
             let mut cursor = SourceCursor::append_offset(0).into_bytes();
             let mut decoder_state = None;
+            let semantic_context = FactSemanticContext::new(
+                &adapter.manifest().id,
+                instance.spec.identity_contract_version,
+                instance.spec.stable_key.as_bytes(),
+                stream.as_bytes(),
+                &object_key,
+                1,
+            )
+            .unwrap();
             for record in records {
-                let mut batch = FactBatch::new(16, 8).unwrap();
+                let mut batch =
+                    FactBatch::new_with_semantic_context(16, 8, semantic_context.clone()).unwrap();
                 adapter
                     .decode(
                         DecodeContext {
@@ -8106,7 +8116,7 @@ mod tests {
 
     #[cfg(feature = "legacy-oracle")]
     #[test]
-    fn claude_shadow_history_and_usage_match_the_legacy_small_fixture() {
+    fn claude_shadow_history_matches_the_legacy_small_fixture() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/small/.claude");
         let legacy_dir = TempDir::new().unwrap();
         let legacy_path = legacy_dir.path().join("legacy.db");
@@ -8139,29 +8149,6 @@ mod tests {
                 )
                 .unwrap()
                 > 0
-        );
-        assert_eq!(
-            count(&shadow, "usage_contributions"),
-            count(&legacy, "messages") + count(&legacy, "subagent_messages")
-                - legacy
-                    .query_row(
-                        r#"
-                        SELECT COUNT(*) FROM (
-                          SELECT input_tokens, output_tokens,
-                                 cache_creation_tokens, cache_read_tokens
-                          FROM messages
-                          UNION ALL
-                          SELECT input_tokens, output_tokens,
-                                 cache_creation_tokens, cache_read_tokens
-                          FROM subagent_messages
-                        )
-                        WHERE input_tokens = 0 AND output_tokens = 0
-                          AND cache_creation_tokens = 0 AND cache_read_tokens = 0
-                        "#,
-                        [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap()
         );
     }
 

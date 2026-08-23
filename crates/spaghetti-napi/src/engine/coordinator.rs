@@ -36,16 +36,16 @@ use crate::decode_runtime::{
     DecodeRuntimeRequest,
 };
 use crate::source::{
-    confined_relative_path_key, AccessBudget, AccessBudgetError, AccessBudgetSnapshot,
-    AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase, AccessReservation,
-    AccessReservationRequest, AppendCheckpoint, AppendDelimitedFile, AppendItem, AppendRead,
-    BoundedScheduler, DirectoryCheckpoint, DirectoryEntryKind, DirectoryScan, DirectorySelection,
-    DirectorySnapshot, DirtyReason, GlobPattern, KeyValueCheckpoint, KeyValueRead,
-    KeyValueSnapshot, MalformedRevisionGuard, MalformedRevisionPolicy, ParseFailureDecision,
-    PresenceCheckpoint, PresenceObject, PresenceRead, RecordOrigin, ReplaceCheckpoint,
-    ReplaceDocument, ReplaceRead, Revision, ScheduleOutcome, ScheduledWork, ScopeAccessBounds,
-    SourceCursor, SourceDriverError, SourceMediaType, SourceRecord, SqliteCheckpoint, SqliteRead,
-    SqliteSnapshot, WorkKey,
+    confined_relative_path_key, portable_relative_path, AccessBudget, AccessBudgetError,
+    AccessBudgetSnapshot, AccessObjectToken, AccessOperation, AccessOutcome, AccessPhase,
+    AccessReservation, AccessReservationRequest, AppendCheckpoint, AppendDelimitedFile, AppendItem,
+    AppendRead, BoundedScheduler, DirectoryCheckpoint, DirectoryEntryKind, DirectoryScan,
+    DirectorySelection, DirectorySnapshot, DirtyReason, GlobPattern, KeyValueCheckpoint,
+    KeyValueRead, KeyValueSnapshot, MalformedRevisionGuard, MalformedRevisionPolicy,
+    ParseFailureDecision, PresenceCheckpoint, PresenceObject, PresenceRead, RecordOrigin,
+    ReplaceCheckpoint, ReplaceDocument, ReplaceRead, Revision, ScheduleOutcome, ScheduledWork,
+    ScopeAccessBounds, SourceCursor, SourceDriverError, SourceMediaType, SourceRecord,
+    SqliteCheckpoint, SqliteRead, SqliteSnapshot, WorkKey,
 };
 
 use super::commit::{
@@ -4695,11 +4695,7 @@ fn commit_request<A: AgentAdapter + ?Sized>(
             object_key: object.descriptor.object_key.clone(),
             expected,
             display_path: Some(
-                object
-                    .descriptor
-                    .relative_path
-                    .to_string_lossy()
-                    .into_owned(),
+                portable_relative_path(&object.descriptor.relative_path).map_err(source_error)?,
             ),
             native_identity: None,
             generation,

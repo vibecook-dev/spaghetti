@@ -436,6 +436,30 @@ pub(crate) fn confined_relative_path_key(path: &Path) -> Result<Vec<u8>, SourceD
     Ok(output)
 }
 
+/// Render an already-confined relative path with the contract separator `/`.
+/// Native identity remains binary in [`confined_relative_path_key`]; this is
+/// only the stable UTF-8 display form carried by catalogs and observer events.
+pub(crate) fn portable_relative_path(path: &Path) -> Result<String, SourceDriverError> {
+    let mut output = String::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                if !output.is_empty() {
+                    output.push('/');
+                }
+                output.push_str(&value.to_string_lossy());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(SourceDriverError::PathEscape(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+    }
+    Ok(output)
+}
+
 /// Binary-safe component-framed key for an already host-approved platform
 /// path. Unlike [`confined_relative_path_key`], absolute roots are allowed.
 pub fn platform_path_key(path: &Path) -> Vec<u8> {
@@ -490,6 +514,16 @@ mod tests {
     fn confined_keys_reject_parent_components() {
         assert!(matches!(
             confined_relative_path_key(Path::new("../escape")),
+            Err(SourceDriverError::PathEscape(_))
+        ));
+    }
+
+    #[test]
+    fn portable_relative_paths_use_contract_separators() {
+        let native = PathBuf::from("nested").join("also.json");
+        assert_eq!(portable_relative_path(&native).unwrap(), "nested/also.json");
+        assert!(matches!(
+            portable_relative_path(Path::new("../escape")),
             Err(SourceDriverError::PathEscape(_))
         ));
     }

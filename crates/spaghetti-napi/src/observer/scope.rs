@@ -18,8 +18,8 @@ use crate::adapter::{
     ScopeRelationDeclaration, ScopeRelationPrimitive, StreamSpec,
 };
 use crate::source::{
-    confined_relative_path_key, render_confined_locator, validate_bound_locator_template,
-    GlobPattern, ScopeIdentityInput,
+    confined_relative_path_key, portable_relative_path, render_confined_locator,
+    validate_bound_locator_template, GlobPattern, ScopeIdentityInput,
 };
 
 use super::request::ResolvedRequest;
@@ -42,6 +42,13 @@ pub(crate) struct ScopeMemberKey {
     pub stream_id: String,
     pub root_name: String,
     pub relative_path: PathBuf,
+}
+
+impl ScopeMemberKey {
+    pub(crate) fn object_path(&self) -> String {
+        portable_relative_path(&self.relative_path)
+            .unwrap_or_else(|_| self.relative_path.to_string_lossy().into_owned())
+    }
 }
 
 #[derive(Debug, Clone)]

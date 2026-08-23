@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use super::file::{confined_relative_path_key, file_stamp, stamp_revision, FileStamp};
+use super::file::{
+    confined_relative_path_key, file_stamp, portable_relative_path, stamp_revision, FileStamp,
+};
 use super::model::{io_error, CursorReader};
 use super::{FileIdentity, Revision, SourceCursor, SourceDriverError};
 
@@ -397,7 +399,7 @@ impl DirectorySnapshot {
                 let revision = entry_revision(kind, &stamp);
                 let state = DirectoryEntryState {
                     path_key: path_key.clone(),
-                    display_path: relative.to_string_lossy().into_owned(),
+                    display_path: portable_relative_path(relative)?,
                     kind,
                     identity: stamp.identity,
                     revision,
