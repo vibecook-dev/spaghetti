@@ -2,12 +2,25 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Library, Moon, PanelLeft, Search, Settings, Sun } from 'lucide-react';
 import { TrafficLights } from './components/TrafficLights.js';
 import { SpaghettiProvider } from '@vibecook/spaghetti-sdk/react';
-import type { InitProgress, SegmentChangeBatch, SessionListItem, StoreStats } from '@vibecook/spaghetti-sdk';
+import type { InitProgress, SegmentChangeBatch, StoreStats } from '@vibecook/spaghetti-sdk';
 import type { SpaghettiClientResponseMap } from '@vibecook/spaghetti-sdk/client';
 import type { SpaghettiReadiness } from '@vibecook/spaghetti-sdk/observation';
 import type { ObservationOwnerStatus } from '@shared/ipc';
 import { createIpcClient } from './ipc-api.js';
-import { catalogLibrary, type LibraryProject } from './lib/catalog-library.js';
+import {
+  allCatalogProjects,
+  catalogLibrary,
+  mergeCatalogProjects,
+  mergeDecodedProjects,
+  type LibraryProject,
+} from './lib/catalog-library.js';
+import {
+  allCatalogSessionSeeds,
+  mergeCatalogSessions,
+  mergeDecodedSessions,
+  type LibrarySession,
+} from './lib/catalog-sessions.js';
+import { readinessIndicator, readinessIsConverging } from './lib/readiness-status.js';
 import { LoadingScreen } from './components/LoadingScreen.js';
 import { SourceBadge, SourceBadges } from './components/SourceBadge.js';
 import { SessionMessagesView } from './components/SessionMessagesView.js';
@@ -57,6 +70,8 @@ interface LiveSessionState {
   unreadCount: number;
 }
 
+type SessionListPhase = 'idle' | 'loading' | 'catalog' | 'decoded' | 'error';
+
 /** A session stays live until a full minute passes without another update. */
 const SESSION_LIVE_TTL_MS = 60_000;
 
@@ -70,6 +85,16 @@ function liveProjectMemberKey(sourceId: string, projectSlug: string): string {
 
 function projectKey(p: ProjectKey): string {
   return p.projectId;
+}
+
+/** Only fields that can change which catalog/history sessions belong here. */
+function sessionReaderKey(project: LibraryProject): string {
+  return JSON.stringify({
+    projectId: project.projectId,
+    decoded: project.decoded,
+    members: project.members.map((member) => [member.sourceId, member.slug]),
+    catalogProjects: project.catalogProjects.map((member) => [member.projectId, member.nativeProjectKey]),
+  });
 }
 
 export function App() {
@@ -102,10 +127,13 @@ function PlaygroundShell() {
   const [projects, setProjects] = useState<LibraryProject[]>([]);
   const [readiness, setReadiness] = useState<SpaghettiReadiness | null>(null);
   const [selected, setSelected] = useState<ProjectKey | null>(null);
-  const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const [sessions, setSessions] = useState<LibrarySession[]>([]);
   const [sessionListProjectKey, setSessionListProjectKey] = useState<string | null>(null);
+  const sessionListProjectKeyRef = useRef<string | null>(null);
+  const [sessionListPhase, setSessionListPhase] = useState<SessionListPhase>('idle');
+  const [sessionListError, setSessionListError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<{
-    session: SessionListItem;
+    session: LibrarySession;
     index: number;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -130,10 +158,10 @@ function PlaygroundShell() {
   const [liveClock, setLiveClock] = useState(Date.now());
   const selectedSessionRef = useRef<typeof selectedSession>(null);
   const selectedProjectMembersRef = useRef<Set<string>>(new Set());
+  const projectsRef = useRef<LibraryProject[]>([]);
   const projectItemRefs = useRef(new Map<string, HTMLButtonElement>());
   const projectItemPositionsRef = useRef(new Map<string, number>());
   const projectItemAnimationsRef = useRef(new Map<string, Animation>());
-  const projectListLoadedRef = useRef(false);
 
   const [sources, setSources] = useState<SourceProgressState[]>(() => initialSourceStates());
   const [progress, setProgress] = useState<ProgressSnapshot | null>(null);
@@ -150,7 +178,7 @@ function PlaygroundShell() {
       if (cancelled) return;
       setDebugSession(gallery);
       setProjects((current) => [
-        { ...gallery.DEBUG_PROJECT, decoded: true },
+        { ...gallery.DEBUG_PROJECT, decoded: true, catalogProjects: [] },
         ...current.filter((project) => projectKey(project) !== projectKey(gallery.DEBUG_PROJECT)),
       ]);
       setSelected({ ...gallery.DEBUG_PROJECT_KEY });
@@ -177,6 +205,10 @@ function PlaygroundShell() {
       return state?.unreadCount ? { ...current, [key]: { ...state, unreadCount: 0 } } : current;
     });
   }, [selectedSession]);
+
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
 
   useLayoutEffect(() => {
     if (!leftOpen) {
@@ -416,12 +448,13 @@ function PlaygroundShell() {
         .then((next) => {
           if (cancelled) return;
           setReadiness(next);
-          const converging = [next.history, next.usage, next.search].some(
-            (field) => field.state === 'indexing' || field.state === 'pending',
-          );
-          if (converging) timer = setTimeout(poll, 2_000);
+          if (readinessIsConverging(next)) timer = setTimeout(poll, 2_000);
         })
-        .catch(() => undefined);
+        .catch(() => {
+          // A transient IPC/read-pool race must not freeze a stale readiness
+          // indicator for the rest of the process lifetime.
+          if (!cancelled) timer = setTimeout(poll, 2_000);
+        });
     };
     poll();
     return () => {
@@ -430,54 +463,38 @@ function PlaygroundShell() {
     };
   }, [ready]);
 
-  // The catalog answers while ingestion is still running, so the library is
-  // on screen in milliseconds. Decoded rows replace these in place — the
-  // grouping key is the same one `getProjectList` computes.
+  // Catalog and decoded rows are independent requests. Merge either completion
+  // order: catalog identity must survive the decoded swap so session paging can
+  // continue, while decoded statistics must never be overwritten by a late
+  // catalog page.
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
-    void window.spaghetti
-      .listCatalogProjects({ limit: 500 })
-      .then((page) => {
-        if (cancelled || projectListLoadedRef.current) return;
-        const rows = catalogLibrary(page.projects);
-        setProjects((current) => {
-          const debugRow = current.find((project) => project.projectId === debugSession?.DEBUG_PROJECT.projectId);
-          const seeded = rows.filter((project) => project.projectId !== debugRow?.projectId);
-          return debugRow ? [debugRow, ...seeded] : seeded;
-        });
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [ready, debugSession]);
+    const catalogRequest = allCatalogProjects((options) => window.spaghetti.listCatalogProjects(options));
+    const decodedRequest = window.spaghetti.getProjectList();
+    const preserved = new Set(debugSession ? [debugSession.DEBUG_PROJECT.projectId] : []);
 
-  useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void window.spaghetti
-      .getProjectList()
-      .then((list) => {
-        if (cancelled) return;
-        projectListLoadedRef.current = true;
-        const decoded = list.map((project) => ({ ...project, decoded: true }));
-        setProjects(
-          debugSession
-            ? [
-                { ...debugSession.DEBUG_PROJECT, decoded: true },
-                ...decoded.filter((project) => projectKey(project) !== projectKey(debugSession.DEBUG_PROJECT)),
-              ]
-            : decoded,
-        );
-      })
-      .catch((e: unknown) => {
-        // Live writes can expire a multi-page snapshot. The service retries
-        // those reads; if a refresh still loses the race, retain the last
-        // complete library instead of replacing a working app with a fatal
-        // loading screen.
-        if (!cancelled && !projectListLoadedRef.current) setError(String(e));
-      });
+    void catalogRequest.then(
+      (catalog) => {
+        if (!cancelled) setProjects((current) => mergeCatalogProjects(current, catalogLibrary(catalog)));
+      },
+      () => undefined,
+    );
+    void decodedRequest.then(
+      (decoded) => {
+        if (!cancelled) setProjects((current) => mergeDecodedProjects(current, decoded, preserved));
+      },
+      () => undefined,
+    );
+    void Promise.allSettled([catalogRequest, decodedRequest]).then(([catalog, decoded]) => {
+      if (cancelled || catalog.status === 'fulfilled' || decoded.status === 'fulfilled') return;
+      // Preserve a previously working library across a transient snapshot/IPC
+      // race. Only initial startup with neither reader available is fatal.
+      if (projectsRef.current.length === 0) {
+        setError(`Catalog and decoded project reads failed: ${String(catalog.reason)}; ${String(decoded.reason)}`);
+      }
+    });
+
     void window.spaghetti
       .getStats()
       .then((next) => {
@@ -516,16 +533,27 @@ function PlaygroundShell() {
     };
   }, [ready, settingsOpen, projectChangeNonce]);
 
+  const sessionProject = selected
+    ? projects.find((candidate) => projectKey(candidate) === projectKey(selected))
+    : undefined;
+  const sessionProjectReaderKey = sessionProject ? sessionReaderKey(sessionProject) : null;
+
   useEffect(() => {
     if (!selected) {
       setSessions([]);
       setSessionListProjectKey(null);
+      sessionListProjectKeyRef.current = null;
+      setSessionListPhase('idle');
+      setSessionListError(null);
       return;
     }
-    const project = projects.find((candidate) => projectKey(candidate) === projectKey(selected));
+    const project = sessionProject;
     if (!project) {
       setSessions([]);
       setSessionListProjectKey(null);
+      sessionListProjectKeyRef.current = null;
+      setSessionListPhase('idle');
+      setSessionListError(null);
       setSelectedSession(null);
       return;
     }
@@ -533,15 +561,46 @@ function PlaygroundShell() {
     if (debugSession && projectKey(project) === projectKey(debugSession.DEBUG_PROJECT)) {
       setSessions([debugSession.DEBUG_SESSION]);
       setSessionListProjectKey(requestedProjectKey);
+      sessionListProjectKeyRef.current = requestedProjectKey;
+      setSessionListPhase('decoded');
+      setSessionListError(null);
       return;
     }
+
     let cancelled = false;
-    void window.spaghetti
-      .getSessionList(project)
-      .then((list) => {
+    if (sessionListProjectKeyRef.current !== requestedProjectKey) {
+      setSessions([]);
+      setSessionListPhase('loading');
+      setSessionListError(null);
+    }
+
+    const catalogRequest =
+      project.catalogProjects.length > 0
+        ? allCatalogSessionSeeds(project.catalogProjects, (options) => window.spaghetti.listCatalogSessions(options))
+        : Promise.reject(new Error('Catalog project identity has not arrived yet.'));
+    const decodedRequest =
+      project.decoded || readiness?.history.state === 'ready'
+        ? window.spaghetti.getSessionList(project)
+        : Promise.reject(new Error(`Decoded history is ${readiness?.history.state ?? 'pending'}.`));
+
+    void catalogRequest.then(
+      (catalog) => {
         if (cancelled) return;
-        setSessions(list);
+        setSessions((current) => mergeCatalogSessions(current, catalog));
         setSessionListProjectKey(requestedProjectKey);
+        sessionListProjectKeyRef.current = requestedProjectKey;
+        setSessionListPhase((current) => (current === 'decoded' ? current : 'catalog'));
+      },
+      () => undefined,
+    );
+    void decodedRequest.then(
+      (list) => {
+        if (cancelled) return;
+        setSessions((current) => mergeDecodedSessions(current, list));
+        setSessionListProjectKey(requestedProjectKey);
+        sessionListProjectKeyRef.current = requestedProjectKey;
+        setSessionListPhase('decoded');
+        setSessionListError(null);
         const want = pendingSessionId.current;
         if (want) {
           pendingSessionId.current = null;
@@ -549,7 +608,7 @@ function PlaygroundShell() {
             (s) => s.sessionId === want.sessionId && (!want.sourceId || s.sourceId === want.sourceId),
           );
           if (idx >= 0) {
-            setSelectedSession({ session: list[idx], index: idx });
+            setSelectedSession({ session: list[idx]!, index: idx });
           }
           return;
         }
@@ -559,16 +618,23 @@ function PlaygroundShell() {
             (session) =>
               session.sessionId === current.session.sessionId && session.sourceId === current.session.sourceId,
           );
-          return idx >= 0 ? { session: list[idx], index: idx } : current;
+          return idx >= 0 ? { session: list[idx]!, index: idx } : null;
         });
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(String(e));
-      });
+      },
+      () => undefined,
+    );
+    void Promise.allSettled([catalogRequest, decodedRequest]).then(([catalog, decoded]) => {
+      if (cancelled || catalog.status === 'fulfilled' || decoded.status === 'fulfilled') return;
+      setSessions([]);
+      setSessionListProjectKey(requestedProjectKey);
+      sessionListProjectKeyRef.current = requestedProjectKey;
+      setSessionListPhase('error');
+      setSessionListError(`${String(catalog.reason)}; ${String(decoded.reason)}`);
+    });
     return () => {
       cancelled = true;
     };
-  }, [selected, projects, sessionChangeNonce, debugSession]);
+  }, [selected, sessionProjectReaderKey, sessionChangeNonce, debugSession, readiness?.history.state]);
 
   const onRebuild = async () => {
     if (rebuilding || retrying) return;
@@ -637,25 +703,12 @@ function PlaygroundShell() {
 
   const sourceIds = useMemo(() => [...new Set(projects.flatMap((p) => p.sourceIds))].sort(), [projects]);
 
-  // "indexing…" while background convergence continues; "degraded" when a
-  // configured source could not be read completely. Nothing when all is well.
-  const [indexingLabel, indexingDetail] = useMemo<[string | null, string | null]>(() => {
-    if (!readiness) return [null, null];
-    if (readiness.catalog.state === 'degraded') {
-      return ['degraded', readiness.catalog.detail ?? 'a configured source could not be read completely'];
-    }
-    const converging = (
-      [
-        ['history', readiness.history],
-        ['usage', readiness.usage],
-        ['search', readiness.search],
-      ] as const
-    )
-      .filter(([, field]) => field.state === 'indexing' || field.state === 'pending')
-      .map(([name, field]) => (field.detail ? `${name}: ${field.detail}` : name));
-    if (converging.length === 0) return [null, null];
-    return ['indexing…', converging.join('\n')];
-  }, [readiness]);
+  // One honest summary of all six RFC 012 readiness fields. Nothing when the
+  // complete vector is ready.
+  const [indexingLabel, indexingDetail] = useMemo(
+    () => (readiness ? readinessIndicator(readiness) : [null, null]),
+    [readiness],
+  );
 
   const liveProjectMembers = useMemo(
     () =>
@@ -674,7 +727,7 @@ function PlaygroundShell() {
 
   const selectedKey = selected ? projectKey(selected) : null;
   const sessionPanelLoading = selectedKey !== null && sessionListProjectKey !== selectedKey;
-  const selectedProject = selected ? projects.find((p) => projectKey(p) === selectedKey) : null;
+  const selectedProject = sessionProject ?? null;
   const selectedActivity = selectedSession
     ? liveSessions[
         liveSessionKey(
@@ -684,6 +737,14 @@ function PlaygroundShell() {
         )
       ]
     : undefined;
+  const selectedSessionIndex = selectedSession
+    ? sessions.findIndex(
+        (session) =>
+          (selectedSession.session.externalRef && session.externalRef === selectedSession.session.externalRef) ||
+          (session.sourceId === selectedSession.session.sourceId &&
+            session.sessionId === selectedSession.session.sessionId),
+      )
+    : -1;
   const selectedSessionIsLive = !!selectedActivity && liveClock - selectedActivity.lastActivityAt < SESSION_LIVE_TTL_MS;
 
   const scopeProject = useMemo(
@@ -756,6 +817,25 @@ function PlaygroundShell() {
         ))}
       </div>
     ) : null;
+
+  const sourceFilterIsEmpty = sessionSourceFilter !== null && sessionListPhase !== 'loading';
+  const sessionListIsIndexing = sessionListPhase === 'loading' || sessionListPhase === 'catalog';
+  const emptySessionTitle = sourceFilterIsEmpty
+    ? 'No sessions'
+    : sessionListPhase === 'error'
+      ? 'Sessions unavailable'
+      : sessionListIsIndexing || (selectedProject && !selectedProject.decoded)
+        ? 'Indexing'
+        : 'No sessions';
+  const emptySessionDetail = sourceFilterIsEmpty
+    ? `No ${sourceLabel(sessionSourceFilter!)} sessions in this project.`
+    : sessionListPhase === 'error'
+      ? (sessionListError ?? 'Both the catalog and decoded session readers failed.')
+      : sessionListPhase === 'loading'
+        ? 'Loading the discovered session catalog.'
+        : sessionListIsIndexing || (selectedProject && !selectedProject.decoded)
+          ? `${formatNumber(selectedProject?.sessionCount ?? 0)} sessions found. Their transcripts are still being read.`
+          : 'This project has no indexed sessions yet.';
 
   return (
     <div
@@ -900,7 +980,7 @@ function PlaygroundShell() {
               projectSlug={selectedSession.session.projectSlug}
               sourceId={selectedSession.session.sourceId}
               session={selectedSession.session}
-              sessionIndex={selectedSession.index}
+              sessionIndex={selectedSessionIndex >= 0 ? selectedSessionIndex : selectedSession.index}
               isLive={selectedSessionIsLive}
               hasMemory={selectedProject?.hasMemory}
               isDark={isDark}
@@ -959,33 +1039,25 @@ function PlaygroundShell() {
                   />
                 )}
                 {selected && filteredSessions.length === 0 && (
-                  <EmptyState
-                    title={selectedProject && !selectedProject.decoded ? 'Indexing' : 'No sessions'}
-                    detail={
-                      sessionSourceFilter
-                        ? `No ${sourceLabel(sessionSourceFilter)} sessions in this project.`
-                        : selectedProject && !selectedProject.decoded
-                          ? // The catalog already counted them; they are not readable
-                            // until their transcripts decode.
-                            `${formatNumber(selectedProject.sessionCount)} sessions found. Their transcripts are still being read.`
-                          : 'This project has no indexed sessions yet.'
-                    }
-                  />
+                  <EmptyState title={emptySessionTitle} detail={emptySessionDetail} />
                 )}
                 {filteredSessions.map((s) => {
                   const index = sessions.findIndex(
                     (session) => session.sourceId === s.sourceId && session.sessionId === s.sessionId,
                   );
                   const prompt = flattenPrompt(s.title || s.firstPrompt || s.summary, 96);
-                  const tok = formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated);
+                  const tok = s.decoded ? formatTokenUsage(s.tokenUsage, s.sourceId, s.tokensEstimated) : '—';
                   const activityKey = liveSessionKey(s.sourceId, s.projectSlug, s.sessionId);
                   const activity = liveSessions[activityKey];
-                  const isLive = !!activity && liveClock - activity.lastActivityAt < SESSION_LIVE_TTL_MS;
+                  const isLive = s.decoded && !!activity && liveClock - activity.lastActivityAt < SESSION_LIVE_TTL_MS;
                   return (
                     <button
-                      key={`${s.sourceId}:${s.sessionId}`}
+                      key={s.externalRef ?? `${s.sourceId}:${s.sessionId}`}
                       type="button"
+                      aria-disabled={!s.decoded}
+                      title={!s.decoded ? (s.degradedReason ?? 'Transcript is still being decoded.') : undefined}
                       onClick={() => {
+                        if (!s.decoded) return;
                         setBranchNavigateTarget(null);
                         if (activity?.unreadCount) {
                           setLiveSessions((current) => ({
@@ -995,13 +1067,19 @@ function PlaygroundShell() {
                         }
                         setSelectedSession({ session: s, index });
                       }}
-                      className="block w-full text-left px-6 py-3.5 border-0 bg-transparent text-inherit cursor-pointer hover:bg-ink/[0.05] transition-colors"
+                      className={`block w-full px-6 py-3.5 text-left border-0 bg-transparent text-inherit transition-colors ${
+                        s.decoded ? 'cursor-pointer hover:bg-ink/[0.05]' : 'cursor-default opacity-65'
+                      }`}
                     >
                       <div className="flex items-center gap-2.5 mb-1.5">
                         <span className="font-mono text-[10px] tracking-[0.1em] opacity-70">#{index + 1}</span>
                         {isLive ? <LiveDot active /> : null}
                         {s.gitBranch ? (
                           <span className="font-mono text-[10px] text-sanguine/90">{s.gitBranch}</span>
+                        ) : !s.decoded ? (
+                          <span className="font-mono text-[9px] uppercase tracking-wider opacity-50">
+                            {s.degraded ? 'degraded' : 'indexing'}
+                          </span>
                         ) : (
                           <span className="font-mono text-[10px] opacity-30">no branch</span>
                         )}
@@ -1016,23 +1094,23 @@ function PlaygroundShell() {
                       </div>
                       {/* Session prompt quote — design thought scale: 13px serif */}
                       <div className="mb-1.5 truncate font-serif text-[13px] leading-relaxed opacity-70">
-                        {prompt ? `"${prompt}"` : '(no prompt)'}
+                        {prompt ? `"${prompt}"` : s.decoded ? '(no prompt)' : '(transcript indexing)'}
                       </div>
                       <div className="font-mono text-[8px] uppercase tracking-[0.08em] opacity-55">
-                        {formatNumber(s.messageCount)} msgs
+                        {s.decoded ? formatNumber(s.messageCount) : '—'} msgs
                         <Dot />
                         {tok} tokens
                         <Dot />
-                        {formatDuration(s.lifespanMs)}
+                        {s.decoded ? formatDuration(s.lifespanMs) : s.degraded ? 'unavailable' : 'indexing'}
                         <Dot />
                         {formatRelativeTime(s.lastUpdate)}
-                        {s.todoCount > 0 ? (
+                        {s.decoded && s.todoCount > 0 ? (
                           <>
                             <Dot />
                             {s.todoCount} todos
                           </>
                         ) : null}
-                        {s.planSlug ? (
+                        {s.decoded && s.planSlug ? (
                           <>
                             <Dot />
                             plan

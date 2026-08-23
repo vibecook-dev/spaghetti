@@ -231,8 +231,10 @@ it is the largest and depends on L2's codegen).
   the observer's serial bootstrap and CPU, not durable ingest (writer-bound).
 - `fixtures/contracts/rfc012a-access-request-v1.json` is Rust-unverified after L5c (only
   `scripts/agent_support/test_contracts.py` reads it) — retire or re-verify.
-- Playground session list still seeds from history (library list is catalog-first); a
-  `decoded` flag through `SessionListItem` + an explicit empty reader state would finish it.
+- **Resolved 2026-08-23:** playground project and session lists both seed from the complete
+  paged catalog. `SessionListItem.decoded` keeps catalog-only rows non-readable until stable
+  external/native identity replaces them with transcript-backed rows; the UI now consumes all
+  six readiness fields.
 - `requestHydration` (priority hydration command) removed with the 012B stack; reintroduce
   only when a consumer needs it.
 - Two `#[ignore]`d real-corpus smoke tests exist (`catalog_startup_on_a_real_corpus`,

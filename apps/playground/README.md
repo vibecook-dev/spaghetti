@@ -86,6 +86,8 @@ renderer -> preload -> Electron main broker -> SDK UtilityProcess
 
 | Surface | How |
 |---|---|
+| Library startup | Catalog projects and sessions render before transcript decoding; catalog-only sessions stay visibly non-readable until decoded rows replace them |
+| Readiness | One indicator follows catalog, history, usage, capabilities, artifacts, and search; degraded/unavailable fields remain explicit |
 | Search | `⌘K` / header **Search** → `api.search` overlay; Enter opens project/session |
 | Live chat | `onChange` → append new messages at the tail; “N new” pill when scrolled up |
 | Message filters | Session bar: type/tool solo (pin) + mute (eye) + text filter (ProjectPage parity) |
