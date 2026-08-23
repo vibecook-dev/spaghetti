@@ -21,6 +21,9 @@ pub struct ObserverStatus {
     /// Highest sequence admitted so far. Not comparable across attachments and
     /// never comparable to a durable commit sequence.
     pub offered_through_sequence: i64,
+    /// Source objects opened since attach. A watcher-directed pass reads only
+    /// what changed, so this grows with real activity rather than scope size.
+    pub object_reads: i64,
     pub queued_semantic: u32,
     pub queued_control: u32,
     pub retained_bytes: u32,

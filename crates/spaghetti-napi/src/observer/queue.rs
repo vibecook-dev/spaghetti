@@ -40,6 +40,10 @@ struct Lanes {
     closing: bool,
     closed: bool,
     discarded: u32,
+    /// How many times the owner has opened a source object. With a
+    /// watcher-directed dirty set this should track the number of objects that
+    /// actually changed, not the size of the scope.
+    object_reads: u64,
     terminal_error: Option<String>,
 }
 
@@ -52,6 +56,7 @@ pub(crate) struct Delivery {
 /// A snapshot of delivery state for `status()`.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DeliveryStatus {
+    pub object_reads: u64,
     pub epoch: u64,
     pub offered_through_sequence: u64,
     pub queued_semantic: u32,
@@ -76,6 +81,7 @@ impl Delivery {
                 closing: false,
                 closed: false,
                 discarded: 0,
+                object_reads: 0,
                 terminal_error: None,
             }),
             signal: Condvar::new(),
@@ -94,6 +100,10 @@ impl Delivery {
 
     pub(crate) fn is_closing(&self) -> bool {
         self.lock().closing
+    }
+
+    pub(crate) fn count_object_read(&self) {
+        self.lock().object_reads += 1;
     }
 
     /// Offer one semantic event. The caller decides what a `Full` result means
@@ -262,6 +272,7 @@ impl Delivery {
     pub(crate) fn status(&self) -> DeliveryStatus {
         let lanes = self.lock();
         DeliveryStatus {
+            object_reads: lanes.object_reads,
             epoch: lanes.epoch,
             offered_through_sequence: lanes.next_sequence.saturating_sub(1),
             queued_semantic: lanes.semantic.len() as u32,

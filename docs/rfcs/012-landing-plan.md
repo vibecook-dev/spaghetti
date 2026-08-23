@@ -179,14 +179,20 @@ it is the largest and depends on L2's codegen).
   (RFC 012A: adapters emit facts only), with `ts_rs::TS` on `adapter/facts.rs`
   so `SemanticEvent.value` is typed; then collapse per-adapter triplicates;
   one `version` field replacing candidate/promoted; promote real
-  Claude/Codex/Grok support releases; delete `candidate-2026-08-15`; restore
+  Claude/Codex/Grok support releases; read Grok's per-response usage from
+  `updates.jsonl` (`params.update.usage.*`) so Grok usage becomes exact
+  instead of session-estimated; delete `candidate-2026-08-15`; restore
   the 08-15 scope relation set so `observer/scope.rs` evaluates the declared
   `ScopeProgram` instead of resolving locators in Rust; keep fixture-agent as
   a test fixture only.
-- **L6 napi surface**: collapse `Engine*` mirror DTOs to what napi-rs
-  needs; delete the 2,455-line hand-written mirror of `index.d.ts` in
+- **L6 napi/SDK surface**: collapse `Engine*` mirror DTOs to what napi-rs
+  needs; delete the hand-written mirror of `index.d.ts` in
   `packages/sdk/src/native.ts` (import the generated `@vibecook/spaghetti-sdk-native`
-  types instead); readiness vector as the only status surface.
+  types instead); replace the remaining Rust-parser-vs-TS-parser parity tests
+  with Rust-output-vs-generated-type tests and then delete
+  `contracts/rfc012a.ts`, `rfc012c.ts`, `rfc012-semantic-json.ts` (~5.4k lines;
+  parity is a test, a second parser is not); readiness vector as the only
+  status surface.
 - **L7 perf**: observer bootstrap is 15 ms/MB (662 ms for a 43.7 MB root;
   budget 500 ms @ 50 MB) and per-append latency scales with member count
   (38 ms p50 at 674 objects) because every reconciliation pass re-opens every
@@ -208,9 +214,9 @@ it is the largest and depends on L2's codegen).
 | Item | State | Evidence |
 | --- | --- | --- |
 | Wave 0 | done 2026-08-23 (local `main` `3db39a7`) | plan + lane briefs landed; `allow(dead_code)` removed (`a08c013`); code-shape ratchet in `validate-all.sh` (`8753f28`); lane worktrees `land-l1..l4` on the SSD; push of `main` + archive branch awaiting owner go-ahead |
-| L1 observer | **merged** `90e6bec` + `4a19e28` (2026-08-23) | `crates/spaghetti-napi/src/observer/` 3,310 prod / 1,201 test LOC (budget 6k/4k); 97,486 lines deleted (scoped_observation tree, rfc012d fixtures/contracts, observation_contract, `adapter/registry.rs` 17,800→992); all 11 families on the wire, 23 behavioral file tests + Node smoke test; `SpaghettiSessionObserver` napi class, ts-rs types generated; adapter-neutral (resolves `dyn AgentAdapter` from the registry); perf: append→consumer p50 0.2 ms (1 object) / 38 ms (674 objects), bootstrap 662 ms for 43.7 MB (budget missed ~1.5×, see Wave 2 L7); JSON-string transport measured 2.3–2.6× faster than napi object marshalling; Rust 921/921, SDK 424/0, CLI 110/0, validate-all 9/9 |
+| L1 observer | **merged** `90e6bec`/`4a19e28` + L1b `0fd6ba3` (2026-08-23) | `observer/` 3,625 prod / 1,418 test LOC (budget 6k/4k); 97,486 lines deleted (scoped_observation tree, rfc012d fixtures/contracts, observation_contract; `adapter/registry.rs` 17,800→992); all 11 families on the wire; 25 behavioral file tests + Node smoke test; adapter-neutral; L1b: watcher-directed dirty set + stat pre-check sweep — append→consumer p95 40.2 → 8.3 ms at 674 objects (0.2 ms at 1 object), object opens during bootstrap 21,254 → 1,428; fixed `bootstrap_complete` firing after 64×1,024 records with a 66k-record both-directions regression test; root bootstrap 635 ms @ 43.7 MB is decoder-bound (adapter 64%, io 22%, reduce 10%) → Wave 2 L5; JSON-string transport 2.3–2.6× faster than napi object marshalling; Rust 916/916, SDK 433/0, CLI 110/0, validate-all 9/9 |
 | L2 sdk-api | Phase A merged `a0bc677`; **Phase B merged `ff1e2da`** (2026-08-23); final AbortSignal option pending | Phase A: ts-rs pipeline + `pnpm generate:types` + CI diff; 13,694 lines of hand-written contracts/shims deleted; barrel 38 → 17 explicit exports (allowlist); VibeField Phase A refs generated + tested on real engine output; `watchSessionTranscript` restored to the barrel (missing at base). Phase B: `observeSession(request, options)` async-iterator SDK API over the native observer (single consumer, one-batch buffering, close-on-exit), 7 behavioral tests on real `.claude`-shaped trees, Chopsticks README section; found the observer `bootstrap_complete`/65,536-record bug (routed to L1). SDK 431/0, CLI 110/0, validate-all 9/9 |
-| L3 usage | in progress (Opus lane, branch `land/l3-usage`) | — |
+| L3 usage | **merged** `71c7268` + `d6fed37` (2026-08-23) | response-level usage is the only usage path: Codex/Grok adapters now emit response-level facts (Codex legacy double-counted cache-read inside input and reasoning inside output; Grok delta 0); legacy `usage_contributions`/`usage_totals`, `query_pack_selections`, shadow/selected packs, `Fact::Usage`, 5 napi methods, usage experiments deleted (+2,157/−12,688); `spag stats` + playground show corrected totals with value quality; oracle exact on in-repo fixture (119 responses) and real slice (5,238 responses); Claude full corpus 78.52B → 36.88B tokens (2.129×, 362,043 rows → 158,118 responses); getStats p95 −24%, getUsage p95 +0.7 ms (accepted); SCHEMA_VERSION 63 (rebuild ≈29 min on 2.9 GB corpus); Rust 912/912, SDK 429/0, CLI 110/0, validate-all 9/9 |
 | L4 catalog | in progress (Opus lane, branch `land/l4-catalog`) | — |
-| Wave 2 | not started | — |
+| Wave 2 | **L5 adapters in progress** (Opus lane, branch `land/l5-adapters`, brief `012-landing-lanes/L5-adapters.md`, started 2026-08-23 before L4 landed — owns adapter/claude/codex/grok/agent-support, not catalog files); L6/L7/L8 not started | — |
 | Wave 3 | not started | — |

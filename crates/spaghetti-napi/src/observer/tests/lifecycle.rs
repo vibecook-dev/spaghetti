@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use super::support::{
-    assistant_record, collect_until, drain_bootstrap, semantic_ids, user_record, SessionFixture,
+    assistant_record, collect_until, compact_assistant_record, drain_bootstrap,
+    drain_bootstrap_within, semantic_ids, user_record, SessionFixture,
 };
-use crate::observer::{ObserverEvent, ObserverFamily};
+use crate::observer::{ObserverEvent, ObserverFamily, ObserverPhase};
 
 fn families(events: &[ObserverEvent]) -> Vec<ObserverFamily> {
     events
@@ -346,6 +347,60 @@ fn a_record_the_decoder_cannot_interpret_does_not_terminate_the_stream() {
             .iter()
             .any(|event| matches!(event, ObserverEvent::BootstrapComplete(_))),
         "one uninterpretable line must not stop bootstrap from completing"
+    );
+    observer.close();
+}
+
+#[test]
+fn a_session_larger_than_the_pass_bound_still_completes_bootstrap_first() {
+    // The append driver frames at most 1,024 records per read, so a scope with
+    // more than 1,024 x 64 records used to exhaust the per-wake pass bound and
+    // publish `bootstrap_complete` over a truncated manifest, delivering the
+    // rest as `Live` — cold state arriving labelled as new activity.
+    let fixture = SessionFixture::new();
+    // Each record reduces to its own usage revision, so a truncated bootstrap
+    // leaves real revisions behind rather than empty lines.
+    let records: Vec<String> = (0..66_000).map(compact_assistant_record).collect();
+    fixture.append_once(&fixture.transcript(), &records);
+
+    let observer = fixture.open();
+    // Decoding this many records takes about ten seconds in a debug build, so
+    // the bound is generous on purpose: it exists to give the work room, not to
+    // assert anything about timing.
+    let mut events = drain_bootstrap_within(&observer, Duration::from_secs(120));
+    let barrier_at = events
+        .iter()
+        .position(|event| matches!(event, ObserverEvent::BootstrapComplete(_)))
+        .expect("bootstrap barrier");
+
+    // Keep draining past the barrier. Nothing was appended, so anything that
+    // arrives now was already on disk at attach and should have been delivered
+    // before the barrier claimed complete coverage.
+    events.extend(collect_until(&observer, Duration::from_secs(3), |_| false));
+
+    let stragglers: Vec<ObserverPhase> = events[barrier_at + 1..]
+        .iter()
+        .filter_map(|event| match event {
+            ObserverEvent::Message(event)
+            | ObserverEvent::ContentBlock(event)
+            | ObserverEvent::Tool(event)
+            | ObserverEvent::UserInputRequest(event)
+            | ObserverEvent::Plan(event)
+            | ObserverEvent::Task(event)
+            | ObserverEvent::NativeMarker(event)
+            | ObserverEvent::EffectiveState(event)
+            | ObserverEvent::ActorRun(event)
+            | ObserverEvent::ActorAffiliation(event)
+            | ObserverEvent::UsageV2(event) => Some(event.phase),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        stragglers.is_empty(),
+        "{} revisions that were on disk at attach arrived after the barrier \
+         (phases {:?}) — the barrier claimed coverage it did not have",
+        stragglers.len(),
+        stragglers.iter().take(3).collect::<Vec<_>>()
     );
     observer.close();
 }

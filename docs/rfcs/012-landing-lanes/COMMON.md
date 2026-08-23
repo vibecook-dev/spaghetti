@@ -38,7 +38,9 @@ decision, §3 landing surface, §4 budgets, and §5 rules are binding.
 4. Tests are behavioral: real temp files / real SQLite / real decode; frozen
    fixtures only as goldens. No digest-stability or struct-round-trip tests.
 5. No production `.rs` file > 3,000 lines; inline `mod tests` > 500 lines go
-   in a sibling `tests.rs`. `python3 scripts/code_shape/check_code_shape.py`
+   in a sibling `tests.rs`. Trap: a file-level `#[cfg(test)] use …` line moves
+   where the checker thinks the inline test block starts — qualify paths at
+   the call site instead. `python3 scripts/code_shape/check_code_shape.py`
    must pass (it is a ratchet; it only forbids getting worse). Never edit
    `scripts/code_shape/baseline.json` except to *lower* numbers.
 6. Shared files (`lib.rs`, `engine/mod.rs`, `napi_engine.rs`, `core/schema.rs`,
