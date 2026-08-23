@@ -26,6 +26,7 @@ napi-derive.workspace = true
 
 # JSON
 sonic-rs.workspace = true
+ts-rs = { version = "12", features = ["serde-compat"] }
 serde.workspace = true
 serde_json.workspace = true
 base64.workspace = true

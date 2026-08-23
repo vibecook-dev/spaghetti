@@ -303,15 +303,15 @@
         },
         {
           "kind": "code_reference",
-          "path": "crates/spaghetti-napi/src/scoped_observation.rs",
+          "path": "crates/spaghetti-napi/src/observer/state.rs",
           "sha256": null,
-          "locator": "selected actor-run, actor-affiliation, and usage-v2 envelope mapping"
+          "locator": "shared reducer application and per-family replacement manifest for every runtime family"
         },
         {
           "kind": "conformance_test",
-          "path": "crates/spaghetti-napi/src/scoped_observation.rs",
+          "path": "crates/spaghetti-napi/src/observer/tests/families.rs",
           "sha256": null,
-          "locator": "rfc012c_fixture_identities_survive_selected_scoped_envelopes"
+          "locator": "all_eleven_families_reduce_and_appear_in_the_replacement_manifest"
         }
       ]
     },

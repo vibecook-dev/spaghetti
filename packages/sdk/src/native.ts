@@ -2011,8 +2011,7 @@ export interface SpaghettiEngineAdapterObservationOptions extends SpaghettiEngin
   adapterId: string;
 }
 
-/** One source in a configured startup unit. Alias, not a narrowing. */
-export type SpaghettiEngineConfiguredObservationSourceOptions = SpaghettiEngineAdapterObservationOptions;
+export interface SpaghettiEngineConfiguredObservationSourceOptions extends SpaghettiEngineAdapterObservationOptions {}
 
 export interface SpaghettiEngineConfiguredObservationOptions {
   /** Complete source set planned as one startup unit before history scans begin. */
@@ -2042,6 +2041,36 @@ export interface SpaghettiEngineReconcileResult {
   dependencyTraceEntriesDropped: number;
   commits: number;
   lastCommitSeq?: number;
+}
+
+/**
+ * Native owner for one store-free RFC 012D session attachment.
+ *
+ * Batches cross as one JSON string holding an array of `ObserverEvent`. The
+ * typed element shape is generated from Rust by `ts-rs`; parse the string and
+ * narrow on `type`.
+ */
+export interface NativeSessionObserver {
+  /** Take up to `max` pending events now, and hint a reconciliation pass. */
+  poll(max?: number): string;
+  /** Wait up to `timeoutMs` for at least one event, then take up to `max`. */
+  waitForEvents(timeoutMs: number, max?: number): Promise<string>;
+  /** Current epoch, queue depth, and whether continuity still holds. */
+  status(): NativeSessionObserverStatus;
+  /** Idempotent; waits for every owned watch, read, and decode to stop. */
+  close(): Promise<void>;
+}
+
+/** Health surface for one attachment. */
+export interface NativeSessionObserverStatus {
+  scopeEpoch: number;
+  offeredThroughSequence: number;
+  queuedSemantic: number;
+  queuedControl: number;
+  retainedBytes: number;
+  /** False between continuity loss and the completion of its replacement. */
+  epochValid: boolean;
+  closed: boolean;
 }
 
 /** Async handle backed by one persistent Rust engine lifecycle. */
@@ -2199,6 +2228,8 @@ export interface NativeAddon {
   nativeVersion(): string;
   /** Open the persistent RFC 011 engine shell off the JavaScript thread. */
   openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promise<SpaghettiEngine>;
+  /** Attach a store-free observer to one native session tree. */
+  observeSession(request: string | Record<string, unknown>): NativeSessionObserver;
 }
 
 /**
@@ -2326,6 +2357,26 @@ export function openSpaghettiEngine(options: SpaghettiEngineOpenOptions): Promis
     throw new Error('Persistent SpaghettiEngine requires the native addon, but it could not be loaded.');
   }
   return addon.openSpaghettiEngine(options).then(withAbortSignalPreflight);
+}
+
+/**
+ * Attach the native store-free observer for one session tree.
+ *
+ * Validation is synchronous: an unusable agent root, a locator outside the
+ * adapter's declared source roots, or a session id that disagrees with the
+ * locator throws here rather than surfacing as an error event later.
+ */
+export function openNativeSessionObserver(request: string | Record<string, unknown>): NativeSessionObserver {
+  const addon = loadNativeAddon();
+  if (!addon) {
+    const failure = nativeLoadFailure();
+    if (failure) throw failure;
+    throw new Error('Session observation requires the native addon, but it could not be loaded.');
+  }
+  if (typeof addon.observeSession !== 'function') {
+    throw new Error('The loaded native addon does not implement the RFC 012D session observer.');
+  }
+  return addon.observeSession(request);
 }
 
 /**

@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::*;
@@ -26,30 +25,6 @@ const RFC012C_NATIVE_MARKER: &str =
 const RFC012C_TASK: &str = include_str!("../../../fixtures/contracts/rfc012c-task-v1.json");
 const RFC012C_PLAN: &str = include_str!("../../../fixtures/contracts/rfc012c-plan-v1.json");
 const RFC012C_TOOL: &str = include_str!("../../../fixtures/contracts/rfc012c-tool-v1.json");
-const RFC012D_USAGE: &str =
-    include_str!("../../../fixtures/contracts/rfc012d-scoped-usage-envelope-v1.json");
-
-#[derive(Deserialize)]
-struct EnvelopeEventExtract {
-    fact_id: CanonicalFactId,
-    operation: String,
-    retraction: Option<Value>,
-    revision: UsageRevisionV2Fact,
-}
-
-#[derive(Deserialize)]
-struct EnvelopeExtract {
-    event_id: String,
-    semantic_revision_ref: SemanticRevisionRef,
-    event: EnvelopeEventExtract,
-}
-
-#[derive(Deserialize)]
-struct UsageEnvelopeFixtureFile {
-    upsert: EnvelopeExtract,
-    reset_retraction: EnvelopeExtract,
-}
-
 fn runtime_fixture() -> RuntimeContractFixtureWire {
     let parsed = parse_rfc012c_runtime_v1_json(RFC012C).expect("rfc012c fixture");
     serde_json::from_str(&parsed).expect("rfc012c typed fixture")
@@ -89,38 +64,21 @@ fn upsert_event(event_id: &str, example: &UsageExampleWire) -> ScopedUsageObserv
     }
 }
 
-fn observer_event_from_envelope(envelope: &EnvelopeExtract) -> ScopedUsageObserverEvent {
-    let operation = match envelope.event.operation.as_str() {
-        "upsert" => ScopedUsageOperation::Upsert,
-        "retract" => ScopedUsageOperation::Retract,
-        other => panic!("unsupported envelope operation {other}"),
-    };
-    let retraction = envelope
-        .event
-        .retraction
-        .as_ref()
-        .map(|value| match value["kind"].as_str() {
-            Some("reset") => ScopedUsageRetraction::Reset {
-                old_generation: value["old_generation"].as_u64().expect("old_generation"),
-                new_generation: value["new_generation"].as_u64().expect("new_generation"),
-            },
-            Some("source_deleted") => ScopedUsageRetraction::SourceDeleted {
-                generation: value["generation"].as_u64().expect("generation"),
-            },
-            other => panic!("unsupported retraction {other:?}"),
-        });
+/// A retraction event for the same fact, as the observer emits one when the
+/// object that owned it resets or disappears.
+fn retract_event(
+    event_id: &str,
+    example: &UsageExampleWire,
+    retraction: ScopedUsageRetraction,
+) -> ScopedUsageObserverEvent {
     ScopedUsageObserverEvent {
-        event_id: envelope.event_id.clone(),
-        fact_id: envelope.event.fact_id,
-        semantic_revision_ref: envelope.semantic_revision_ref,
-        operation,
-        retraction,
-        revision: envelope.event.revision.clone(),
+        event_id: event_id.to_owned(),
+        fact_id: example.fact_id,
+        semantic_revision_ref: example.semantic_revision_ref,
+        operation: ScopedUsageOperation::Retract,
+        retraction: Some(retraction),
+        revision: example.revision.clone(),
     }
-}
-
-fn usage_envelopes() -> UsageEnvelopeFixtureFile {
-    serde_json::from_str(RFC012D_USAGE).expect("rfc012d usage envelope fixture")
 }
 
 fn semantic_revision(
@@ -169,7 +127,8 @@ fn coverage_for_family(family: RuntimeSemanticFamily, completeness: &str) -> Sou
     serde_json::from_value(value).expect("family coverage")
 }
 
-fn all_runtime_family_contributions() -> Vec<(RuntimeSemanticFamily, DurableRuntimeContribution)> {
+pub(crate) fn all_runtime_family_contributions(
+) -> Vec<(RuntimeSemanticFamily, DurableRuntimeContribution)> {
     let runtime = runtime_fixture();
     let actor = &runtime.actors.root;
     let affiliation = &runtime.affiliations.child_team_present;
@@ -906,19 +865,19 @@ fn partial_unavailable_or_incomparable_coverage_retains_stale_overlay() {
 
 #[test]
 fn reset_retraction_applies_before_replay() {
-    let envelopes = usage_envelopes();
-    let upsert = observer_event_from_envelope(&envelopes.upsert);
-    let reset = observer_event_from_envelope(&envelopes.reset_retraction);
-    assert_eq!(upsert.fact_id, reset.fact_id);
-    assert!(matches!(
-        reset.retraction,
-        Some(ScopedUsageRetraction::Reset { .. })
-    ));
-    assert_eq!(upsert.event_id, envelopes.upsert.event_id);
-    assert_eq!(
-        upsert.semantic_revision_ref,
-        envelopes.upsert.semantic_revision_ref
+    let fixture = runtime_fixture();
+    let example = &fixture.usage.native_message;
+    let upsert = upsert_event("evt-upsert", example);
+    let reset = retract_event(
+        "evt-reset",
+        example,
+        ScopedUsageRetraction::Reset {
+            old_generation: 1,
+            new_generation: 2,
+        },
     );
+    assert_eq!(upsert.fact_id, reset.fact_id);
+    assert_eq!(upsert.semantic_revision_ref, reset.semantic_revision_ref);
 
     let durable = vec![DurableUsageContribution {
         fact_id: upsert.fact_id,
@@ -950,21 +909,25 @@ fn reset_retraction_applies_before_replay() {
         merged.contributions[0].origin,
         MergedContributionOrigin::Overlay
     );
+
+    // A deleted source object retracts the same way a reset does.
+    let deleted = retract_event(
+        "evt-deleted",
+        example,
+        ScopedUsageRetraction::SourceDeleted { generation: 2 },
+    );
+    let after_delete =
+        merge_durable_and_scoped_usage(&durable, &baseline, &[upsert, deleted], &partial)
+            .expect("source-deleted merge");
+    assert_eq!(after_delete.delivered_observer_occurrences.len(), 2);
+    assert_eq!(
+        after_delete.delivered_observer_occurrences[0].event_id,
+        "evt-deleted"
+    );
 }
 
 #[test]
 fn merge_consumes_typed_usage_and_interaction_values_without_native_payloads() {
-    let envelopes: Value = serde_json::from_str(RFC012D_USAGE).expect("envelope json");
-    assert_eq!(
-        envelopes["upsert"]["native_evidence"]["kind"],
-        json!("withheld")
-    );
-    assert_eq!(
-        envelopes["expected"]["native_payload_disclosure"],
-        json!("withheld_at_projection_boundary")
-    );
-    assert!(envelopes["upsert"].get("native_payload").is_none());
-
     let interaction = parse_rfc012c_interaction_v1_json(RFC012C_INTERACTION).expect("interaction");
     assert_eq!(interaction.family, "runtime.user-input-request");
     assert_eq!(interaction.pending.state, UserInputLifecycleState::Pending);

@@ -223,41 +223,31 @@ export declare class SpaghettiEngine {
 }
 
 /**
- * Native owner for one store-free RFC 012D session attachment. Construct it
- * through `openScopedObservationJson`; direct construction is forbidden.
+ * Store-free observer over one native session tree.
+ *
+ * Create it with `observeSession(request)`. Every method is safe to call after
+ * `close()`; the observer simply reports itself closed and stops delivering.
  */
 export declare class SpaghettiSessionObserver {
   constructor(_notConstructible: never)
   /**
-   * Return the attachment's immutable capability snapshot plus the exact
-   * portable parsing context. Neither value carries source-access authority.
+   * Take up to `max` pending events as a JSON array of `ObserverEvent`.
+   *
+   * Returns immediately, including with an empty array. Calling it also
+   * hints the owner thread to reconcile now, which is the low-latency path
+   * a lifecycle hook should use.
    */
-  capabilitiesJson(): string
+  poll(max?: number | undefined | null): string
   /**
-   * Yield one strict outer-union envelope. The matching process-local
-   * receipt remains pending until `acknowledgeApplied()` succeeds.
+   * Wait up to `timeoutMs` for at least one event, then take up to `max`.
+   * Resolves with an empty array on timeout.
    */
-  nextEventJson(): Promise<string | null>
+  waitForEvents(timeoutMs: number, max?: number | undefined | null): Promise<string>
+  /** Current epoch, queue depth, and whether continuity still holds. */
+  status(): ObserverStatus
   /**
-   * Advance the consumer-owned applied boundary for the last yielded
-   * envelope. No receipt bytes cross N-API or enter portable JSON.
-   */
-  acknowledgeApplied(): Promise<void>
-  /** Run one exact-scope pass and return its contextual strict watermark. */
-  pollJson(): Promise<string>
-  /**
-   * Await engine-level bootstrap admission. The completion envelope still
-   * belongs to `nextEventJson()` and must be applied independently.
-   */
-  readyOffered(): Promise<void>
-  /**
-   * Request a full-snapshot replacement and await its engine-offered
-   * barrier. Ordered delivery and application remain on the event drain.
-   */
-  resyncOffered(): Promise<void>
-  /**
-   * Idempotently cancel the attachment, await all owned work, and join the
-   * retained producer supervisor before resolving.
+   * Release the scope. Idempotent, and waits for every owned watch, read,
+   * decode, and delivery to stop before it resolves.
    */
   close(): Promise<void>
 }
@@ -2133,11 +2123,37 @@ export interface EngineWriterPerformanceStats {
 export declare function nativeVersion(): string
 
 /**
- * Open one configured, exact-known-object RFC 012D observer. Current built-in
- * Candidate releases fail closed here; this function does not create a test
- * authorization or bypass promotion state.
+ * What the observer is currently doing, for a consumer's health surface.
+ *
+ * This one crosses N-API as an object rather than through `ts-rs`, because
+ * napi-rs already generates its TypeScript from the same declaration.
  */
-export declare function openScopedObservationJson(requestJson: string): Promise<SpaghettiSessionObserver>
+export interface ObserverStatus {
+  scopeEpoch: number
+  /**
+   * Highest sequence admitted so far. Not comparable across attachments and
+   * never comparable to a durable commit sequence.
+   */
+  offeredThroughSequence: number
+  queuedSemantic: number
+  queuedControl: number
+  retainedBytes: number
+  /**
+   * False between continuity loss and the completion of the replacement
+   * epoch. Ordinary semantic delivery is suspended while it is false.
+   */
+  epochValid: boolean
+  closed: boolean
+}
+
+/**
+ * Open a store-free observer over one native session tree.
+ *
+ * Accepts the request as an object or as a JSON string. Attachment is
+ * synchronous in its validation: an unusable root, an identity mismatch, or an
+ * unsupported adapter fails here rather than as an error event later.
+ */
+export declare function observeSession(request: string | Record<string, unknown>): SpaghettiSessionObserver
 
 /** Open the persistent engine on a libuv worker thread. */
 export declare function openSpaghettiEngine(options: EngineOpenOptions): Promise<SpaghettiEngine>
