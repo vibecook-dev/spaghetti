@@ -41,6 +41,7 @@ mod timeline_query;
 mod tool_result_projection;
 mod unknown_evidence_projection;
 mod usage_query;
+mod usage_v2_qualification;
 mod workflow_projection;
 mod writer;
 
