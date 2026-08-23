@@ -21,6 +21,20 @@ use crate::source::{RecordOrigin, SourceCursor, SourceMediaType};
 const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
 const PROJECT: &str = "-Users-test-project";
 
+fn transcript_object_context() -> crate::adapter::AdapterObjectContext {
+    crate::adapter::AdapterObjectContext::new(
+        1,
+        serde_json::to_vec(&serde_json::json!({
+            "project_slug": PROJECT,
+            "session_id": SESSION,
+            "agent_id": null,
+            "workflow_id": null,
+        }))
+        .expect("object context"),
+    )
+    .expect("object context")
+}
+
 /// Decode a whole transcript the way the engine does: one record at a time,
 /// carrying decoder state forward, through the adapter's public seam.
 fn decode_transcript(lines: &[&str]) -> FactBatch {
@@ -41,17 +55,7 @@ fn decode_transcript(lines: &[&str]) -> FactBatch {
     )
     .expect("fact batch");
 
-    let object_context = crate::adapter::AdapterObjectContext::new(
-        1,
-        serde_json::to_vec(&serde_json::json!({
-            "project_slug": PROJECT,
-            "session_id": SESSION,
-            "agent_id": null,
-            "workflow_id": null,
-        }))
-        .expect("object context"),
-    )
-    .expect("object context");
+    let object_context = transcript_object_context();
     let decoder = crate::adapter::DecoderId::new("claude-session-record").expect("decoder");
 
     let mut offset = 0_u64;
@@ -122,6 +126,66 @@ fn reduce_family(batch: &FactBatch, family: &str) -> BTreeMap<String, Fact> {
         .into_iter()
         .map(|(entity, (_, value))| (entity, value))
         .collect()
+}
+
+/// Decode each record into its own batch, the way the engine's spine does, and
+/// hand every batch to `visit`. Used where accumulating a whole transcript in
+/// one batch would say more about the test harness than about the decoder.
+fn decode_each_record(lines: &[&str], mut visit: impl FnMut(&FactBatch)) {
+    let adapter = ClaudeCodeAdapter::new();
+    let object_key = format!("{PROJECT}/{SESSION}.jsonl");
+    let object_context = transcript_object_context();
+    let decoder = crate::adapter::DecoderId::new("claude-session-record").expect("decoder");
+
+    let mut offset = 0_u64;
+    let mut decoder_state: Option<Vec<u8>> = None;
+    for line in lines {
+        let mut batch = FactBatch::new_with_semantic_context(
+            512,
+            16,
+            FactSemanticContext::new(
+                &AdapterId::new("claude-code").expect("adapter id"),
+                1,
+                b"fixture-root",
+                b"session-transcripts",
+                object_key.as_bytes(),
+                1,
+            )
+            .expect("semantic context"),
+        )
+        .expect("fact batch");
+        let payload = line.as_bytes().to_vec();
+        let length = payload.len() as u64;
+        let record = crate::source::SourceRecord::new(
+            &RecordOrigin {
+                source_instance_id: 7,
+                stream_id: 8,
+                object_id: 9,
+                observed_at: 10,
+                source_timestamp_hint: Some(1_776_211_200_000),
+                media_type: SourceMediaType::new("application/x-ndjson").expect("media type"),
+            },
+            1,
+            SourceCursor::append_offset(offset),
+            SourceCursor::append_offset(offset + length + 1),
+            0,
+            payload,
+        );
+        offset += length + 1;
+        adapter
+            .decode(
+                DecodeContext {
+                    decoder: &decoder,
+                    object_context: &object_context,
+                    decoder_state: decoder_state.as_deref(),
+                },
+                &record,
+                &mut batch,
+            )
+            .expect("the adapter decodes a well-formed Claude record");
+        decoder_state = batch.next_decoder_state().map(<[u8]>::to_vec);
+        visit(&batch);
+    }
 }
 
 fn assistant_line(uuid: &str, model: &str, blocks: serde_json::Value) -> String {
@@ -878,4 +942,84 @@ fn a_todo_status_never_becomes_a_guessed_terminal_state() {
         TaskLifecycleState::Updated,
         "an unrecognized status proves the task was touched, nothing more"
     );
+}
+
+/// Decoder throughput and fact-identity digest on one large transcript.
+///
+/// Ignored because it is a measurement, not an assertion. Run it with
+/// `cargo test -p spaghetti-napi decode_throughput -- --ignored --nocapture`,
+/// optionally pointing `SPAG_BENCH_TRANSCRIPT` at a real transcript; without
+/// it the committed medium fixture is repeated to a comparable size.
+///
+/// The digest is the point of the second line: an optimization that changes
+/// any fact or revision identity changes it, so a before/after pair proves a
+/// speedup preserved semantics.
+#[test]
+#[ignore]
+fn decode_throughput_and_fact_identity_digest() {
+    let lines: Vec<String> = match std::env::var("SPAG_BENCH_TRANSCRIPT") {
+        Ok(path) => std::fs::read_to_string(&path)
+            .expect("bench transcript")
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Err(_) => {
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/medium/.claude/projects");
+            let mut source: Vec<String> = Vec::new();
+            for project in std::fs::read_dir(&root).expect("fixtures").flatten() {
+                for entry in std::fs::read_dir(project.path())
+                    .expect("fixture project")
+                    .flatten()
+                {
+                    if entry.path().extension().is_none_or(|ext| ext != "jsonl") {
+                        continue;
+                    }
+                    source.extend(
+                        std::fs::read_to_string(entry.path())
+                            .expect("fixture")
+                            .lines()
+                            .filter(|line| !line.is_empty())
+                            .map(str::to_owned),
+                    );
+                }
+            }
+            let mut lines = Vec::new();
+            while lines.len() < 40_000 {
+                lines.extend(source.iter().cloned());
+            }
+            lines
+        }
+    };
+
+    let bytes: usize = lines.iter().map(|line| line.len() + 1).sum();
+    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+
+    // One batch per record, exactly as the engine's decode spine does it.
+    let mut hasher = blake3::Hasher::new();
+    let mut facts = 0_usize;
+    let started = std::time::Instant::now();
+    decode_each_record(&borrowed, |batch| {
+        for envelope in batch.facts() {
+            if let Some(semantic) = envelope.semantic_revision {
+                facts += 1;
+                hasher.update(envelope.value.kind().as_bytes());
+                hasher.update(semantic.fact_id.as_bytes());
+                hasher.update(semantic.fact_revision_id.as_bytes());
+            }
+        }
+    });
+    let elapsed = started.elapsed();
+
+    let megabytes = bytes as f64 / (1024.0 * 1024.0);
+    println!(
+        "decode: {:.1} MB / {} records / {} canonical facts in {:.1} ms = {:.2} ms/MB",
+        megabytes,
+        lines.len(),
+        facts,
+        elapsed.as_secs_f64() * 1000.0,
+        elapsed.as_secs_f64() * 1000.0 / megabytes,
+    );
+    println!("fact identity digest: {}", hasher.finalize().to_hex());
 }
