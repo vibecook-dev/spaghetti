@@ -291,7 +291,7 @@ export interface SpaghettiQueryOptions {
 
 export interface SpaghettiSubscribeRequest {
   /** Start strictly after this durable cursor. Omit to replay retained history. */
-  from?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>['after'];
+  from?: NonNullable<SpaghettiClientRequestMap['replayChanges']>['after'];
   /** Empty or omitted means all stable projection topics. */
   topics?: readonly string[];
   /** Changes per replay page. Defaults to 100; Rust caps it at 1,000. */

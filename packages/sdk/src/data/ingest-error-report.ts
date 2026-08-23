@@ -10,7 +10,7 @@
  */
 
 import type { ErrorSink } from '../io/error-sink.js';
-import type { NativeIngestError, NativeIngestErrorReport } from '../native.js';
+import type { NativeIngestError, NativeIngestErrorReport } from '../legacy-native.js';
 
 /** How many paths to name before collapsing the rest into a count. */
 const NAMED_PATHS = 5;

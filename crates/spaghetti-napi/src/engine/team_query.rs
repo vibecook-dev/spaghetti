@@ -11,6 +11,7 @@ use super::query_identity::{
 };
 use super::query_pool::read_committed_watermark;
 use super::EngineError;
+use ts_rs::TS;
 
 pub const TEAM_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_TEAM_PAGE_LIMIT: u32 = 50;
@@ -23,20 +24,28 @@ pub struct TeamPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub items: Vec<TeamSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamSummary {
     pub team_id: String,
     pub adapter_id: String,
     pub source_instance_id: u64,
     pub native_team_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub config: Option<TeamConfigSummary>,
     pub inbox_count: u64,
     pub message_count: u64,
@@ -46,12 +55,18 @@ pub struct TeamSummary {
     pub last_commit_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamConfigSummary {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub description: Option<String>,
     pub created_at: String,
     pub created_at_quality: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub lead_member_id: Option<String>,
     pub lead_member_present: bool,
     pub native_lead_agent_id: String,
@@ -71,7 +86,9 @@ pub struct TeamDetailsRequest {
     pub team_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamDetails {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -79,23 +96,37 @@ pub struct TeamDetails {
     pub members: Vec<TeamMember>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamMember {
     pub member_id: String,
     pub team_id: String,
     pub member_ordinal: u32,
     pub native_agent_id: String,
     pub native_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub plan_mode_required: Option<bool>,
     pub joined_at: String,
     pub joined_at_quality: String,
     pub tmux_pane_id: String,
     pub cwd: String,
     pub subscriptions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub backend_type: Option<String>,
     pub membership_status: String,
     pub decisive_fact_id: String,
@@ -111,16 +142,22 @@ pub struct TeamInboxPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamInboxPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub team_id: String,
     pub items: Vec<TeamInboxSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamInboxSummary {
     pub inbox_id: String,
     pub team_id: String,
@@ -145,7 +182,9 @@ pub struct TeamInboxMessagePageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamInboxMessagePage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -154,22 +193,36 @@ pub struct TeamInboxMessagePage {
     pub native_team_id: String,
     pub native_recipient_name: String,
     pub items: Vec<TeamInboxMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TeamInboxMessage {
     pub message_id: String,
     pub inbox_id: String,
     pub sender_id: String,
     pub sender_present: bool,
     pub message_ordinal: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_version: Option<u32>,
     pub native_sender_name: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub color: Option<String>,
     pub source_time: String,
     pub source_time_quality: String,

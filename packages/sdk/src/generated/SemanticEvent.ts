@@ -5,6 +5,7 @@ import type { ObserverFamily } from "./ObserverFamily.js";
 import type { ObserverPhase } from "./ObserverPhase.js";
 import type { RuntimeSemanticValue } from "./RuntimeSemanticValue.js";
 import type { SemanticOperation } from "./SemanticOperation.js";
+import type { SemanticRevisionRef } from "./SemanticRevisionRef.js";
 import type { SourcePosition } from "./SourcePosition.js";
 
 /**
@@ -26,7 +27,7 @@ sequence: number, scope_epoch: number, family: ObserverFamily, phase: ObserverPh
  * the same revision, which is what makes cross-topology reconciliation
  * possible without comparing observer event ids.
  */
-semantic_revision_ref: { semantic_reference_contract_version: number, fact_revision_id: string },
+semantic_revision_ref: SemanticRevisionRef,
 /**
  * Canonical fact identity the revision belongs to.
  */

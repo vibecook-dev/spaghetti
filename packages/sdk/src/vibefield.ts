@@ -15,9 +15,12 @@
  * consumer would otherwise write the same field-by-field check.
  */
 
-import type { EngineTimelinePage } from '@vibecook/spaghetti-sdk-native';
-
-import type { ExternalEntityRef, NativeIdentity, SemanticRevisionRef } from './generated/index.js';
+import type {
+  ExternalEntityRef,
+  NativeIdentity,
+  SemanticRevisionRef,
+  TimelinePage as EngineTimelinePage,
+} from './generated/index.js';
 
 export type { ExternalEntityRef, NativeIdentity, SemanticRevisionRef };
 

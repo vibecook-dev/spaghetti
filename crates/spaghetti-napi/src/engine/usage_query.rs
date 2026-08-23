@@ -10,6 +10,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction};
 use super::query_identity::{decode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
 use super::query_pool::read_committed_watermark;
 use super::EngineError;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Every query pack shares one negotiated contract version with the client, so
 /// this tracks that protocol number rather than versioning usage on its own.
@@ -44,7 +46,9 @@ pub struct UsageWindow {
     pub to: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UsageTokenValues {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -54,7 +58,9 @@ pub struct UsageTokenValues {
     pub component_total_tokens: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UsageAggregate {
     pub exact: UsageTokenValues,
     pub estimated: UsageTokenValues,
@@ -73,21 +79,31 @@ pub struct UsageAggregate {
 
 /// One qualified bucket population: how a group of responses described the same
 /// bucket with the same quality, authority, and native provenance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UsageCoverageSummary {
     pub bucket: String,
     pub value_quality: String,
     pub completeness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub unknown_reason: Option<String>,
     pub authority: String,
     pub native_field: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time_quality: Option<String>,
     pub contribution_count: u64,
     pub tokens: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UsageDay {
     pub date: String,
     pub aggregate: UsageAggregate,
@@ -98,15 +114,25 @@ pub struct UsageDay {
     pub last_commit_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UntimedUsageSummary {
     pub aggregate: UsageAggregate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub first_observed_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_observed_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_commit_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UsageWindowReport {
     pub from: String,
     pub to: String,
@@ -116,19 +142,35 @@ pub struct UsageWindowReport {
     pub untimed: UntimedUsageSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct UsageReport {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub session_id: Option<String>,
     pub aggregate: UsageAggregate,
     pub coverage: Vec<UsageCoverageSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub first_source_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_source_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub first_observed_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_observed_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_commit_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub window: Option<UsageWindowReport>,
 }
 

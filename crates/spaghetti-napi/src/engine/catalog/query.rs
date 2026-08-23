@@ -51,17 +51,21 @@ pub struct CatalogProjectRow {
     pub adapter_id: String,
     pub native_project_key: String,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_path: Option<String>,
     pub catalog_state: CatalogState,
     pub degraded: bool,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
     pub session_count: u64,
     pub transcript_session_count: u64,
     pub hydrated_session_count: u64,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_activity_at: Option<String>,
     pub last_commit_seq: u64,
 }
@@ -75,21 +79,27 @@ pub struct CatalogSessionRow {
     pub external_ref: String,
     pub adapter_id: String,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_session_id: Option<String>,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub catalog_state: CatalogState,
     pub degraded: bool,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub degraded_reason: Option<String>,
     pub association_basis: String,
     pub association_quality: String,
     pub association_provenance: String,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_created_at: Option<String>,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_updated_at: Option<String>,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_message_count: Option<u64>,
     pub decoded_message_count: u64,
     pub transcript_present: bool,
@@ -114,6 +124,7 @@ pub struct IdentityConflict {
 pub struct CatalogProjectPage {
     pub projects: Vec<CatalogProjectRow>,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     pub at_commit_seq: u64,
 }
@@ -124,6 +135,7 @@ pub struct CatalogProjectPage {
 pub struct CatalogSessionPage {
     pub sessions: Vec<CatalogSessionRow>,
     #[ts(optional)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     pub at_commit_seq: u64,
 }

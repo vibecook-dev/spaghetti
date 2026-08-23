@@ -734,7 +734,7 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
     assert.equal(presence?.sessionPresent, true);
     assert.equal(presence?.runPresent, true);
     assert.equal(presence?.presenceStatus, 'resolved');
-    const activeRun = runtimeEntries.find((entry) => entry.kind === 'run' && entry.run.state === 'active');
+    const activeRun = runtimeEntries.find((entry) => entry.kind === 'run' && entry.run?.state === 'active');
     assert.ok(activeRun?.run);
     const exactRun = await shadow.getRunState(activeRun.run.runId);
     assert.equal(exactRun.atCommitSeq, runtime.atCommitSeq);

@@ -17,6 +17,7 @@ use super::query_identity::{
 use super::query_pool::read_committed_watermark;
 use super::storage_codec;
 use super::EngineError;
+use ts_rs::TS;
 
 pub const TIMELINE_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_TIMELINE_PAGE_LIMIT: u32 = 30;
@@ -44,7 +45,9 @@ pub struct TimelinePageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TimelinePage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -60,10 +63,14 @@ pub struct TimelinePage {
     pub items: Vec<TimelineMessage>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TimelineFacets {
     pub total_messages: u64,
     pub roles: Vec<NamedCount>,
@@ -75,30 +82,56 @@ pub struct TimelineFacets {
     pub branch_kinds: Vec<NamedCount>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TimelineMessage {
     pub message_id: String,
     pub project_id: String,
     pub session_id: String,
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub parent_run_id: Option<String>,
     pub branch_kind: String,
     /// Present only when the decisive delegation relation has a currently
     /// materialized native spawn message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub branch_anchor_message_id: Option<String>,
     pub adapter_id: String,
     pub source_instance_id: u64,
     pub native_project_key: String,
     pub native_session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_child_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub delegation_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub delegation_strength: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub delegation_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub branch_tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub branch_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub requested_agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_message_id: Option<String>,
     pub native_kind: String,
     pub role: String,
@@ -107,9 +140,17 @@ pub struct TimelineMessage {
     pub content: JsonValue,
     pub content_kinds: Vec<String>,
     pub tool_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time_quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub parent_native_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub model: Option<String>,
     pub decisive_fact_id: String,
     pub observed_at_unix_ms: i64,

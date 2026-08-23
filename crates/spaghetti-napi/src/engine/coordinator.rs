@@ -62,6 +62,8 @@ use super::query_pool::{
 use super::runtime_semantic_projection::{USAGE_V2_PROJECTION_ID, USAGE_V2_PROJECTION_VERSION};
 use super::source_coverage::{DurableCoverageSetPrecondition, DurableCoverageSetUpdate};
 use super::{EngineError, SpaghettiEngineCore};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 // One default append-driver batch can contain 1,024 records. Built-in
 // transcript decoders emit several normalized facts per record, so keep the
@@ -213,7 +215,9 @@ impl FactFamilyReplayRequest {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ReconcileOutcome {
     pub instances_discovered: u32,
     pub streams_reconciled: u32,
@@ -243,10 +247,14 @@ pub struct ReconcileOutcome {
     pub backlog_remaining: u32,
     pub retry_targets: Vec<ReconcileRetryTarget>,
     pub commits: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_commit_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ReconcileRetryTarget {
     pub stable_key: Vec<u8>,
     pub stream_key: String,

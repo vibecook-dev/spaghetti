@@ -6,7 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use super::performance::EnginePerformanceSnapshot;
+use super::commit::SourceCapabilitySpec;
+use super::performance::PerformanceStats;
 use super::query_identity::{
     decode_entity_id, encode_entity_id, FACT_ID_PREFIX, MESSAGE_ID_PREFIX, PROJECT_ID_PREFIX,
     SESSION_ID_PREFIX, SOURCE_ID_PREFIX,
@@ -14,6 +15,7 @@ use super::query_identity::{
 use super::query_pool::read_committed_watermark;
 use super::storage_codec;
 use super::EngineError;
+use ts_rs::TS;
 
 pub const DETAIL_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_DETAIL_PAGE_LIMIT: u32 = 50;
@@ -28,14 +30,20 @@ pub struct SessionDetailsRequest {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SessionDetails {
     pub contract_version: u32,
     pub at_commit_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub session: Option<SessionDetail>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SessionDetail {
     pub session_id: String,
     pub project_id: String,
@@ -43,12 +51,26 @@ pub struct SessionDetail {
     pub source_instance_id: u64,
     pub native_session_id: String,
     pub native_project_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub git_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub first_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub ai_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub custom_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time_quality: Option<String>,
     pub message_count: u64,
     pub run_count: u64,
@@ -58,6 +80,8 @@ pub struct SessionDetail {
     pub workflow_count: u64,
     pub persisted_tool_result_count: u64,
     pub project_memory_document_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub index: Option<SessionIndexDetail>,
     pub decisive_fact_id: String,
     pub observed_at_unix_ms: i64,
@@ -66,11 +90,15 @@ pub struct SessionDetail {
     pub last_commit_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SessionIndexDetail {
     pub full_path: String,
     pub file_mtime_ms: u64,
     pub first_prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub summary: Option<String>,
     pub message_count: u64,
     pub created_at: String,
@@ -97,7 +125,9 @@ pub struct MessagePageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct MessagePage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -106,10 +136,14 @@ pub struct MessagePage {
     pub items: Vec<MessageDetail>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct MessageDetail {
     pub message_id: String,
     pub session_id: String,
@@ -118,15 +152,27 @@ pub struct MessageDetail {
     pub source_instance_id: u64,
     pub native_session_id: String,
     pub native_project_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_message_id: Option<String>,
     pub native_kind: String,
     pub role: String,
     pub content: JsonValue,
     pub native_payload: JsonValue,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time_quality: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub parent_native_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub search_text: Option<String>,
     pub decisive_fact_id: String,
     pub observed_at_unix_ms: i64,
@@ -141,15 +187,21 @@ pub struct SourcePageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SourcePage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub items: Vec<SourceSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SourceSummary {
     pub source_id: String,
     pub source_instance_id: u64,
@@ -168,19 +220,46 @@ pub struct SourceSummary {
     pub record_error_count: u64,
     pub fact_count: u64,
     pub commit_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_commit_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One declared capability, as a caller reads it.
+///
+/// The same five fields are stored in the source manifest as
+/// [`SourceCapabilitySpec`], which is a *durable* encoding and stays
+/// snake_case. This one is the API encoding. They are converted at the read
+/// site rather than sharing a serde attribute, so a change to what JavaScript
+/// sees can never silently rewrite what is already on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SourceCapabilitySummary {
     pub id: String,
     pub support_level: String,
     pub granularity: String,
     pub availability: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl From<SourceCapabilitySpec> for SourceCapabilitySummary {
+    fn from(value: SourceCapabilitySpec) -> Self {
+        Self {
+            id: value.id,
+            support_level: value.support_level,
+            granularity: value.granularity,
+            availability: value.availability,
+            notes: value.notes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct CanonicalStats {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -202,10 +281,14 @@ pub struct CanonicalStats {
     /// Owner-lifetime telemetry sampled immediately before the
     /// snapshot-consistent database counts. Direct query-pool tests do not
     /// have writer ownership and therefore leave it absent.
-    pub performance: Option<EnginePerformanceSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub performance: Option<PerformanceStats>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct NamedCount {
     pub name: String,
     pub count: u64,
@@ -838,10 +921,13 @@ fn decode_source_row(row: &Row<'_>) -> Result<SourceRow, EngineError> {
                 query_get(row, 5, "decode source schema versions")?,
                 "source schema versions",
             )?,
-            capabilities: decode_source_manifest_json(
+            capabilities: decode_source_manifest_json::<Vec<SourceCapabilitySpec>>(
                 query_get(row, 6, "decode source capabilities")?,
                 "source capabilities",
-            )?,
+            )?
+            .into_iter()
+            .map(SourceCapabilitySummary::from)
+            .collect(),
             discovered_at_unix_ms: query_get(row, 7, "decode source discovery time")?,
             last_seen_at_unix_ms: query_get(row, 8, "decode source last-seen time")?,
             stream_count: decode_nonnegative_u64(
