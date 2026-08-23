@@ -41,6 +41,13 @@ import type { SpaghettiEnginePerformanceStats } from '../packages/sdk/src/native
 
 type Scenario = 'cold' | 'live-append' | 'warm-unchanged' | 'warm-append';
 
+/** How often the benchmark asks the host whether history has converged. */
+const CONVERGENCE_POLL_MS = 25;
+/** How long to observe background convergence before driving repair passes. */
+const CONVERGENCE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+/** How long to wait for the deferred full-text structures after history. */
+const SEARCH_READY_TIMEOUT_MS = 30 * 60 * 1000;
+
 interface DatabaseMetrics {
   canonicalMessages: number;
   facts: number;
@@ -52,12 +59,28 @@ interface DatabaseMetrics {
 }
 
 interface Sample extends DatabaseMetrics {
+  /** Time to catalog-visible: `openObservationHost` resolving after catalog-first startup. */
   readyMs: number;
+  /** Time to history-complete: catalog plus every bounded repair pass to convergence. */
   durationMs: number;
+  /** Time until the deferred full-text structures are queryable, when reached. */
+  searchReadyMs: number | null;
+  /** `refresh` passes the host needed after open to converge. */
+  convergencePasses: number;
   inputBytes: number;
   inputRecords: number;
   mibPerSecond: number;
   recordsPerSecond: number;
+}
+
+interface Distribution {
+  min: number;
+  p50: number;
+  median: number;
+  p95: number;
+  p99: number;
+  mean: number;
+  max: number;
 }
 
 interface Summary {
@@ -66,15 +89,9 @@ interface Summary {
   appendRecords: number;
   samples: Sample[];
   finalMetrics: DatabaseMetrics;
-  durationMs: {
-    min: number;
-    p50: number;
-    median: number;
-    p95: number;
-    p99: number;
-    mean: number;
-    max: number;
-  };
+  durationMs: Distribution;
+  readyMs: Distribution;
+  medianConvergencePasses: number;
   medianMibPerSecond: number;
   medianRecordsPerSecond: number;
   memory: {
@@ -201,7 +218,7 @@ async function runLiveAppendSeries(options: {
       const startedAt = performance.now();
       await host.value.refresh('claude-code');
       const readyMs = performance.now() - startedAt;
-      await converge(host.value);
+      const convergencePasses = await converge(host.value);
       const durationMs = performance.now() - startedAt;
       // Query through the native read pool while the owner is alive. Opening
       // node:sqlite here would load a second SQLite implementation into this
@@ -217,6 +234,8 @@ async function runLiveAppendSeries(options: {
         ...metrics,
         readyMs,
         durationMs,
+        searchReadyMs: null,
+        convergencePasses,
         inputBytes,
         inputRecords: options.appendRecords,
         mibPerSecond: durationMs === 0 ? 0 : inputBytes / 1024 / 1024 / (durationMs / 1000),
@@ -251,9 +270,10 @@ async function readHostMetrics(host: Awaited<ReturnType<typeof openObservationHo
 }
 
 function logSample(sample: Sample, label: string): void {
+  const search = sample.searchReadyMs === null ? '' : `, ${formatDuration(sample.searchReadyMs)} search`;
   console.log(
-    `  ${label}: ${formatDuration(sample.durationMs)} converged ` +
-      `(${formatDuration(sample.readyMs)} ready), ` +
+    `  ${label}: ${formatDuration(sample.durationMs)} history ` +
+      `(${formatDuration(sample.readyMs)} catalog${search}, ${sample.convergencePasses} repair passes), ` +
       `${sample.recordsPerSecond.toFixed(0)} records/s, ${sample.mibPerSecond.toFixed(2)} MiB/s, ` +
       `${sample.commits.toLocaleString()} commits, ${formatBytes(sample.databaseBytes)} DB`,
   );
@@ -299,8 +319,9 @@ async function runSample(options: {
     }
   }
 
-  await converge(host.value);
+  const convergencePasses = await converge(host.value);
   const durationMs = performance.now() - sampleStartedAt;
+  const searchReadyMs = (await awaitSearchReady(host.value)) ? performance.now() - sampleStartedAt : null;
   const metrics = await finishSample(host.value, options.databasePath);
   if (options.transcript && !ingestProfileSkip) {
     const appends = options.scenario === 'warm-append' || options.scenario === 'live-append';
@@ -311,6 +332,8 @@ async function runSample(options: {
     ...metrics,
     readyMs,
     durationMs,
+    searchReadyMs,
+    convergencePasses,
     inputBytes: benchmarkBytes,
     inputRecords: benchmarkRecords,
     mibPerSecond: durationMs === 0 ? 0 : benchmarkBytes / 1024 / 1024 / (durationMs / 1000),
@@ -344,7 +367,7 @@ async function timedOpen(sourceRoot: string, databasePath: string) {
     sources: [{ adapterId: 'claude-code', roots: [sourceRoot] }],
   });
   try {
-    assertObservationReady(value);
+    assertCatalogVisible(value);
   } catch (error) {
     await value.dispose();
     throw error;
@@ -352,22 +375,70 @@ async function timedOpen(sourceRoot: string, databasePath: string) {
   return { value, durationMs: performance.now() - startedAt };
 }
 
-async function converge(host: Awaited<ReturnType<typeof openObservationHost>>): Promise<void> {
-  for (let pass = 0; pass < 10_000; pass += 1) {
-    if (observationIsConverged(host)) return;
+/**
+ * Wait for history to converge the way an application does.
+ *
+ * The supervisor drains its own backlog in the background after catalog-first
+ * startup, so the benchmark observes that convergence instead of driving it:
+ * `refresh` marks the whole adapter dirty and forces a full corpus rescan, so
+ * a poll loop built on `refresh` measures repeated rescans rather than
+ * ingestion. Bounded repair passes remain as a backstop for corpora the
+ * supervisor cannot settle on its own, and their count is reported.
+ */
+async function converge(host: Awaited<ReturnType<typeof openObservationHost>>): Promise<number> {
+  // Catalog-first startup returns before the supervisors are running; a
+  // `refresh` issued before that fails with "supervisor is not running".
+  await host.whenObserving();
+  const deadline = performance.now() + CONVERGENCE_TIMEOUT_MS;
+  while (performance.now() < deadline) {
+    if (observationIsConverged(host) && (await historyIsReady(host))) return 0;
+    await delay(CONVERGENCE_POLL_MS);
+  }
+  // The supervisor did not settle on its own; fall back to bounded repair.
+  for (let pass = 1; pass <= 10_000; pass += 1) {
     await host.refresh('claude-code');
+    if (observationIsConverged(host) && (await historyIsReady(host))) return pass;
   }
   throw new Error('observation did not converge after 10,000 bounded repair passes');
 }
 
-function assertObservationReady(host: Awaited<ReturnType<typeof openObservationHost>>): void {
-  if (observationIsConverged(host)) return;
+async function historyIsReady(host: Awaited<ReturnType<typeof openObservationHost>>): Promise<boolean> {
+  const readiness = await host.readiness();
+  return readiness.history.state === 'ready';
+}
+
+/**
+ * Full-text structures are deferred during a cold ingest and rebuilt once, so
+ * they become queryable after history does. Returns false if they never do.
+ */
+async function awaitSearchReady(host: Awaited<ReturnType<typeof openObservationHost>>): Promise<boolean> {
+  const deadline = performance.now() + SEARCH_READY_TIMEOUT_MS;
+  while (performance.now() < deadline) {
+    const readiness = await host.readiness();
+    if (readiness.search.state === 'ready') return true;
+    await delay(CONVERGENCE_POLL_MS);
+  }
+  return false;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+/**
+ * Catalog-first startup (RFC 012B) resolves `openObservationHost` once the
+ * catalog is committed; history, usage and search converge afterwards. A host
+ * that still needs recovery, however, never opened cleanly.
+ */
+function assertCatalogVisible(host: Awaited<ReturnType<typeof openObservationHost>>): void {
   const observation = host.status.observation;
+  if (!observation.recoveryRequired) return;
   throw new Error(
-    'observation host violated readiness: ' +
+    'observation host opened in recovery: ' +
       `state=${observation.state}, inFlight=${observation.reconcileInFlight}, ` +
-      `recovery=${observation.recoveryRequired}, full=${observation.fullReconcileRequired}, ` +
-      `dirtyInstances=${observation.dirtyInstances}`,
+      `full=${observation.fullReconcileRequired}, dirtyInstances=${observation.dirtyInstances}`,
   );
 }
 
@@ -520,6 +591,8 @@ function summarize(
     samples,
     finalMetrics,
     durationMs: distribution(durationSamples),
+    readyMs: distribution(samples.map((sample) => sample.readyMs)),
+    medianConvergencePasses: median(samples.map((sample) => sample.convergencePasses)),
     medianMibPerSecond: median(samples.map((sample) => sample.mibPerSecond)),
     medianRecordsPerSecond: median(samples.map((sample) => sample.recordsPerSecond)),
     memory: {
@@ -535,7 +608,9 @@ function printSummary(summary: Summary, selectedReportPath?: string): void {
   console.log(
     `  p50/p99: ${formatDuration(summary.durationMs.p50)} / ${formatDuration(summary.durationMs.p99)}, ` +
       `${summary.medianRecordsPerSecond.toFixed(0)} records/s, ` +
-      `${summary.medianMibPerSecond.toFixed(2)} MiB/s`,
+      `${summary.medianMibPerSecond.toFixed(2)} MiB/s, ` +
+      `catalog p50 ${formatDuration(summary.readyMs.p50)}, ` +
+      `${summary.medianConvergencePasses} convergence passes`,
   );
   printPerformanceSummary(summary.finalMetrics.performance);
   console.log(
@@ -624,7 +699,7 @@ function printPerformanceSummary(performance: SpaghettiEnginePerformanceStats | 
   );
 }
 
-function distribution(values: number[]) {
+function distribution(values: number[]): Distribution {
   return {
     min: Math.min(...values),
     p50: percentile(values, 0.5),
