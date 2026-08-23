@@ -224,6 +224,43 @@ impl ReplaceDocument {
         )
     }
 
+    /// Frame an already-completed confined read without reopening the native
+    /// object. Callers use this after their own access reservation has
+    /// accounted the exact outcome and byte count.
+    pub(crate) fn frame_retained_read(
+        &self,
+        read: StableRead,
+        previous: Option<&ReplaceCheckpoint>,
+        origin: &RecordOrigin,
+        incompatible_replacement: bool,
+    ) -> Result<ReplaceRead, SourceDriverError> {
+        match &read {
+            StableRead::Stable {
+                stamp,
+                bytes,
+                revision,
+            } if bytes.len() > self.config.max_document_bytes
+                || u64::try_from(bytes.len()).ok() != Some(stamp.len)
+                || Revision::digest(bytes) != *revision =>
+            {
+                return Err(SourceDriverError::InvalidCursor(
+                    "retained stable document does not match its bounded read evidence".to_string(),
+                ));
+            }
+            StableRead::Oversized(stamp) if stamp.len <= self.config.max_document_bytes as u64 => {
+                return Err(SourceDriverError::InvalidCursor(
+                    "retained oversized document does not exceed its bounded read limit"
+                        .to_string(),
+                ));
+            }
+            StableRead::Missing
+            | StableRead::Unstable
+            | StableRead::Oversized(_)
+            | StableRead::Stable { .. } => {}
+        }
+        self.interpret_read(read, previous, origin, incompatible_replacement)
+    }
+
     fn interpret_read(
         &self,
         read: StableRead,
@@ -578,6 +615,29 @@ mod tests {
         ));
         assert!(matches!(
             driver(7).frame_retained_stable(&stamp, bytes, revision, None, &origin(), false,),
+            Err(SourceDriverError::InvalidCursor(_))
+        ));
+
+        assert!(matches!(
+            retained_driver.frame_retained_read(
+                StableRead::Stable {
+                    stamp: stamp.clone(),
+                    bytes: bytes.to_vec(),
+                    revision: wrong_revision,
+                },
+                None,
+                &origin(),
+                false,
+            ),
+            Err(SourceDriverError::InvalidCursor(_))
+        ));
+        assert!(matches!(
+            retained_driver.frame_retained_read(
+                StableRead::Oversized(stamp),
+                None,
+                &origin(),
+                false,
+            ),
             Err(SourceDriverError::InvalidCursor(_))
         ));
     }

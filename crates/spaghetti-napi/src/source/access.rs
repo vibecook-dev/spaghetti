@@ -1124,6 +1124,10 @@ impl AuthorizedObservationSourceReservation {
         self.reservation.bounds()
     }
 
+    pub(crate) fn reserved_max_bytes(&self) -> u64 {
+        self.reservation.reserved_max_bytes()
+    }
+
     pub(crate) fn access_root(&self) -> &str {
         self.reservation.access_root()
     }
@@ -1393,6 +1397,10 @@ impl AuthorizedObservationRuntimeStreamReservation {
         self.reservation.bounds()
     }
 
+    pub(crate) fn reserved_max_bytes(&self) -> u64 {
+        self.reservation.reserved_max_bytes()
+    }
+
     pub(crate) fn access_root(&self) -> &str {
         self.reservation.access_root()
     }
@@ -1623,6 +1631,14 @@ impl ScopeAccessReservation {
 
     pub(crate) fn bounds(&self) -> ScopeRelationBounds {
         self.declaration.bounds
+    }
+
+    pub(crate) fn reserved_max_bytes(&self) -> u64 {
+        self.reservation
+            .as_ref()
+            .expect("scope reservation is consumed only once")
+            .request
+            .max_bytes
     }
 
     pub fn access_root(&self) -> &str {

@@ -31,9 +31,9 @@ use crate::source::{
     AuthorizedObservationDirectoryReadAuthority, AuthorizedObservationDirectoryRootAuthority,
     AuthorizedObservationRuntimeStreamReservation, DirectoryChange, DirectoryCheckpoint,
     DirectoryEntryAuditReservation, DirectoryEntryAuditor, DirectoryEntryKind, DirectoryEntryState,
-    DirectoryScan, DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig, FileStamp,
-    GlobPattern, RecordOrigin, ReplaceCheckpoint, ReplaceDocument, ReplaceRead, Revision,
-    ScopeAccessRequest, SourceRecord, StableRead,
+    DirectoryScan, DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig,
+    DriverQuarantine, FileStamp, GlobPattern, RecordOrigin, ReplaceCheckpoint, ReplaceDocument,
+    ReplaceDocumentConfig, ReplaceRead, Revision, ScopeAccessRequest, SourceRecord, StableRead,
 };
 
 use super::{
@@ -56,6 +56,10 @@ pub(crate) enum ScopedObservationRuntimeSourceError {
     Access(#[from] AccessBudgetError),
     #[error("scoped observation directory scan failed")]
     DirectoryScan,
+    #[error("scoped observation related-object source failed")]
+    RelatedSource(ScopedSourceFailureClass),
+    #[error("scoped observation related-object decode failed")]
+    RelatedDecode(ScopedDecodeFailureClass),
 }
 
 /// Exact source-instance/root join underneath one runtime stream reservation.
@@ -442,6 +446,65 @@ pub(crate) enum ScopedObservationDirectoryMemberLifecycle {
     },
 }
 
+/// Path-free semantic identity of one exact sibling or evidence-referenced
+/// object. Native locator material stays in the private binding below.
+#[derive(Clone)]
+pub(crate) struct ScopedObservationRelatedObjectIdentity {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    relation_id: Arc<str>,
+    primitive: ScopeRelationPrimitive,
+    object_token: AccessObjectToken,
+    source: ScopedSourceObjectIdentity,
+    semantic_context: FactSemanticContext,
+}
+
+/// Non-serializable decoder binding prepared from one pass-bound related
+/// source reservation. Callers cannot replace its adapter, stream, source
+/// instance, descriptor, or semantic context after the native read.
+#[derive(Clone)]
+pub(crate) struct ScopedObservationRelatedObjectBinding {
+    identity: ScopedObservationRelatedObjectIdentity,
+    adapter: Arc<dyn AgentAdapter>,
+    source_instance: Arc<SourceInstance>,
+    runtime_stream: Arc<StreamSpec>,
+    descriptor: SourceObjectDescriptor,
+}
+
+/// Initial declaration-owned ReplaceDocument result for one exact related
+/// source. It deliberately accepts no caller-provided checkpoint or decoder
+/// state; replacement lifecycle is layered on only after retained state can
+/// bind those values to this exact source identity.
+pub(crate) enum ScopedObservationRelatedObjectInitialObservation {
+    Unavailable {
+        binding: Box<ScopedObservationRelatedObjectBinding>,
+    },
+    RetryTransient {
+        binding: Box<ScopedObservationRelatedObjectBinding>,
+    },
+    Oversized {
+        binding: Box<ScopedObservationRelatedObjectBinding>,
+        checkpoint: ReplaceCheckpoint,
+        quarantine: Box<DriverQuarantine>,
+    },
+    Present(Box<ScopedObservationRelatedObjectDecodedSnapshot>),
+}
+
+/// One access-accounted, dependency-free initial decode. Facts and retained
+/// bytes remain internal until related-source admission proves membership and
+/// evidence-owner lifecycle in a later layer.
+pub(crate) struct ScopedObservationRelatedObjectDecodedSnapshot {
+    binding: ScopedObservationRelatedObjectBinding,
+    object_context: AdapterObjectContext,
+    checkpoint: ReplaceCheckpoint,
+    record: SourceRecord,
+    disposition: DecodeDisposition,
+    mapping_disposition: RecordMappingDisposition,
+    batch: FactBatch,
+    scope_join_updates: Vec<ScopeJoinUpdate>,
+    next_decoder_state: Option<Vec<u8>>,
+    quarantined: bool,
+}
+
 struct DirectoryMemberSourceAccessDenied;
 
 /// Completed, path-free evidence that one exact native directory entry was
@@ -654,6 +717,83 @@ impl fmt::Debug for ScopedObservationDirectoryMemberLifecycle {
                 .debug_struct("Oversized")
                 .field("has_binding", &true)
                 .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl fmt::Debug for ScopedObservationRelatedObjectIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationRelatedObjectIdentity")
+            .field(
+                "has_attachment_authority",
+                &(Arc::strong_count(&self.attachment_authority) > 0),
+            )
+            .field("primitive", &self.primitive)
+            .field("has_relation", &true)
+            .field("has_object_token", &true)
+            .field("has_source_identity", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationRelatedObjectBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationRelatedObjectBinding")
+            .field("identity", &self.identity)
+            .field("has_adapter", &true)
+            .field("has_source_instance", &true)
+            .field("has_runtime_stream", &true)
+            .field("has_source_descriptor", &true)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationRelatedObjectDecodedSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationRelatedObjectDecodedSnapshot")
+            .field("binding", &self.binding)
+            .field("object_context_version", &self.object_context.version())
+            .field("object_context_bytes", &self.object_context.payload().len())
+            .field("generation", &self.checkpoint.generation)
+            .field("has_checkpoint_revision", &true)
+            .field("record_state", &self.record.state)
+            .field("record_bytes", &self.record.payload.len())
+            .field("disposition", &self.disposition)
+            .field("fact_count", &self.batch.facts().len())
+            .field("diagnostic_count", &self.batch.diagnostics().len())
+            .field("scope_join_update_count", &self.scope_join_updates.len())
+            .field("has_next_decoder_state", &self.next_decoder_state.is_some())
+            .field("quarantined", &self.quarantined)
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for ScopedObservationRelatedObjectInitialObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable { .. } => formatter
+                .debug_struct("Unavailable")
+                .field("has_binding", &true)
+                .finish_non_exhaustive(),
+            Self::RetryTransient { .. } => formatter
+                .debug_struct("RetryTransient")
+                .field("has_binding", &true)
+                .finish_non_exhaustive(),
+            Self::Oversized {
+                checkpoint,
+                quarantine,
+                ..
+            } => formatter
+                .debug_struct("Oversized")
+                .field("generation", &checkpoint.generation)
+                .field("has_checkpoint_revision", &true)
+                .field("observed_bytes", &quarantine.payload_len)
+                .field("has_binding", &true)
+                .finish_non_exhaustive(),
+            Self::Present(snapshot) => formatter.debug_tuple("Present").field(snapshot).finish(),
         }
     }
 }
@@ -1371,40 +1511,13 @@ impl ScopedObservationDirectoryMemberBinding {
 
     fn valid_for_dependency_free_bootstrap(&self) -> bool {
         let identity = self.identity();
-        let stream = self.runtime_stream();
-        let instance = self.source_instance();
-        let descriptor = self.descriptor();
-        let canonical_source_instance = CanonicalSourceInstanceKey::derive(
-            instance.spec.identity_contract_version,
-            instance.spec.stable_key.as_bytes(),
-        );
-        let include_matches = stream.selector.include.iter().any(|pattern| {
-            GlobPattern::new(pattern)
-                .ok()
-                .is_some_and(|pattern| pattern.matches_path(&descriptor.relative_path))
-        });
-        let excluded = stream.selector.exclude.iter().any(|pattern| {
-            GlobPattern::new(pattern)
-                .ok()
-                .is_some_and(|pattern| pattern.matches_path(&descriptor.relative_path))
-        });
-        // Binding creation already checked the exact retained adapter manifest.
-        // Keep every later adapter invocation inside the common panic boundary.
-        instance.id != 0
-            && stream.validate(instance).is_ok()
-            && canonical_source_instance.as_ref().ok() == Some(&identity.source.source_instance_key)
-            && matches!(stream.driver, DriverSpec::ReplaceDocument(_))
-            && stream.id == descriptor.stream_id
-            && stream.id.as_str().as_bytes() == identity.semantic_context.stream_key()
-            && stream.driver.framing_contract_version()
-                == identity.semantic_context.framing_contract_version()
-            && descriptor.object_key == identity.semantic_context.object_key()
-            && confined_relative_path_key(&descriptor.relative_path)
-                .is_ok_and(|key| key == descriptor.object_key)
-            && ScopedSourceObjectIdentity::from_semantic_context(&identity.semantic_context)
-                .is_ok_and(|source| source == identity.source)
-            && include_matches
-            && !excluded
+        valid_dependency_free_replace_binding(
+            &identity.source,
+            &identity.semantic_context,
+            self.runtime_stream(),
+            self.source_instance(),
+            self.descriptor(),
+        )
     }
 
     #[cfg(test)]
@@ -1426,6 +1539,45 @@ impl ScopedObservationDirectoryMemberBinding {
     pub(crate) fn source_instance_for_test(&self) -> &Arc<SourceInstance> {
         self.source_instance()
     }
+}
+
+fn valid_dependency_free_replace_binding(
+    source: &ScopedSourceObjectIdentity,
+    semantic_context: &FactSemanticContext,
+    stream: &StreamSpec,
+    instance: &SourceInstance,
+    descriptor: &SourceObjectDescriptor,
+) -> bool {
+    let canonical_source_instance = CanonicalSourceInstanceKey::derive(
+        instance.spec.identity_contract_version,
+        instance.spec.stable_key.as_bytes(),
+    );
+    let include_matches = stream.selector.include.iter().any(|pattern| {
+        GlobPattern::new(pattern)
+            .ok()
+            .is_some_and(|pattern| pattern.matches_path(&descriptor.relative_path))
+    });
+    let excluded = stream.selector.exclude.iter().any(|pattern| {
+        GlobPattern::new(pattern)
+            .ok()
+            .is_some_and(|pattern| pattern.matches_path(&descriptor.relative_path))
+    });
+    // Binding creation already checked the exact retained adapter manifest.
+    // Keep every later adapter invocation inside the common panic boundary.
+    instance.id != 0
+        && stream.validate(instance).is_ok()
+        && canonical_source_instance.as_ref().ok() == Some(&source.source_instance_key)
+        && matches!(stream.driver, DriverSpec::ReplaceDocument(_))
+        && stream.id == descriptor.stream_id
+        && stream.id.as_str().as_bytes() == semantic_context.stream_key()
+        && stream.driver.framing_contract_version() == semantic_context.framing_contract_version()
+        && descriptor.object_key == semantic_context.object_key()
+        && confined_relative_path_key(&descriptor.relative_path)
+            .is_ok_and(|key| key == descriptor.object_key)
+        && ScopedSourceObjectIdentity::from_semantic_context(semantic_context)
+            .is_ok_and(|expected| expected == *source)
+        && include_matches
+        && !excluded
 }
 
 impl ScopedObservationDirectoryMemberDecodeInput {
@@ -1816,6 +1968,239 @@ impl ScopedObservationDirectoryMemberLifecycle {
     }
 }
 
+impl ScopedObservationRelatedObjectIdentity {
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub(crate) fn primitive(&self) -> ScopeRelationPrimitive {
+        self.primitive
+    }
+
+    pub(crate) fn object_token(&self) -> AccessObjectToken {
+        self.object_token
+    }
+
+    pub(crate) fn source(&self) -> &ScopedSourceObjectIdentity {
+        &self.source
+    }
+
+    pub(crate) fn semantic_context(&self) -> &FactSemanticContext {
+        &self.semantic_context
+    }
+}
+
+impl ScopedObservationRelatedObjectBinding {
+    pub(crate) fn identity(&self) -> &ScopedObservationRelatedObjectIdentity {
+        &self.identity
+    }
+
+    fn valid_for_dependency_free_bootstrap(&self) -> bool {
+        matches!(
+            self.identity.primitive,
+            ScopeRelationPrimitive::SiblingObject
+                | ScopeRelationPrimitive::ReferencedObjectFromField
+        ) && valid_dependency_free_replace_binding(
+            &self.identity.source,
+            &self.identity.semantic_context,
+            &self.runtime_stream,
+            &self.source_instance,
+            &self.descriptor,
+        )
+    }
+
+    fn decode_initial_record(
+        self,
+        checkpoint: ReplaceCheckpoint,
+        record: SourceRecord,
+    ) -> Result<ScopedObservationRelatedObjectInitialObservation, ScopedObservationRuntimeSourceError>
+    {
+        if !self.valid_for_dependency_free_bootstrap()
+            || record.source_instance_id != self.source_instance.id
+            || checkpoint.generation == 0
+            || !checkpoint.present
+            || record.generation != checkpoint.generation
+        {
+            return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+        }
+        let object_context = bootstrap_object_without_source_access(
+            self.adapter.as_ref(),
+            self.source_instance.as_ref(),
+            &self.descriptor,
+        )
+        .map_err(|error| {
+            ScopedObservationRuntimeSourceError::RelatedDecode(super::decode_failure_class(&error))
+        })?;
+        let attempt = decode_record(DecodeRuntimeRequest {
+            adapter: self.adapter.as_ref(),
+            decoder: &self.runtime_stream.decoder,
+            object_context: &object_context,
+            source_access: &DirectoryMemberSourceAccessDenied,
+            record: &record,
+            semantic_context: &self.identity.semantic_context,
+            decoder_state: None,
+            retention: self.runtime_stream.retention,
+            limits: DecodeRuntimeLimits {
+                max_facts: DIRECTORY_MEMBER_MAX_FACTS,
+                max_diagnostics: DIRECTORY_MEMBER_MAX_DIAGNOSTICS,
+            },
+        });
+        let decoded = match attempt.result {
+            Ok(decoded) if decoded.disposition != DecodeDisposition::RetryTransient => decoded,
+            Ok(_) => {
+                return Err(ScopedObservationRuntimeSourceError::RelatedDecode(
+                    ScopedDecodeFailureClass::Transient,
+                ));
+            }
+            Err(error) => {
+                return Err(ScopedObservationRuntimeSourceError::RelatedDecode(
+                    super::decode_failure_class(&error),
+                ));
+            }
+        };
+        Ok(ScopedObservationRelatedObjectInitialObservation::Present(
+            Box::new(ScopedObservationRelatedObjectDecodedSnapshot {
+                binding: self,
+                object_context,
+                checkpoint,
+                record,
+                disposition: decoded.disposition,
+                mapping_disposition: decoded.mapping_disposition,
+                batch: decoded.batch,
+                scope_join_updates: decoded.scope_join_updates,
+                next_decoder_state: decoded.next_decoder_state,
+                quarantined: decoded.quarantined,
+            }),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn runtime_stream_for_test(&self) -> &StreamSpec {
+        &self.runtime_stream
+    }
+
+    #[cfg(test)]
+    pub(crate) fn source_instance_for_test(&self) -> &SourceInstance {
+        &self.source_instance
+    }
+
+    #[cfg(test)]
+    pub(crate) fn descriptor_for_test(&self) -> &SourceObjectDescriptor {
+        &self.descriptor
+    }
+}
+
+impl ScopedObservationRelatedObjectDecodedSnapshot {
+    pub(crate) fn identity(&self) -> &ScopedObservationRelatedObjectIdentity {
+        self.binding.identity()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.checkpoint.generation
+    }
+
+    pub(crate) fn revision(&self) -> Revision {
+        self.checkpoint.revision
+    }
+
+    pub(crate) fn admission_measurement(&self) -> Option<(u64, u64)> {
+        let semantic_items = self
+            .batch
+            .facts()
+            .len()
+            .checked_add(self.batch.diagnostics().len())?
+            .max(1);
+        let data_events = u64::try_from(semantic_items).ok()?;
+        let mut retained_native_bytes = match self.binding.runtime_stream.retention {
+            RawRetentionPolicy::None | RawRetentionPolicy::HashOnly => 0,
+            RawRetentionPolicy::DiagnosticExcerpt => {
+                u64::try_from(diagnostic_excerpt(&self.record.payload).len()).ok()?
+            }
+            RawRetentionPolicy::Full => u64::try_from(self.record.payload.len()).ok()?,
+        };
+        for fact in self.batch.facts() {
+            if let Fact::UnknownRecord { raw_payload, .. } = &fact.value {
+                retained_native_bytes =
+                    retained_native_bytes.checked_add(u64::try_from(raw_payload.len()).ok()?)?;
+            }
+        }
+        for update in &self.scope_join_updates {
+            retained_native_bytes =
+                retained_native_bytes.checked_add(u64::try_from(update.retained_bytes()).ok()?)?;
+        }
+        Some((data_events, retained_native_bytes))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn binding_for_test(&self) -> &ScopedObservationRelatedObjectBinding {
+        &self.binding
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disposition_for_test(&self) -> DecodeDisposition {
+        self.disposition
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mapping_disposition_for_test(&self) -> &RecordMappingDisposition {
+        &self.mapping_disposition
+    }
+
+    #[cfg(test)]
+    pub(crate) fn facts_for_test(&self) -> &[crate::adapter::FactEnvelope] {
+        self.batch.facts()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_decoder_state_for_test(&self) -> Option<&[u8]> {
+        self.next_decoder_state.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_for_test(&self) -> &SourceRecord {
+        &self.record
+    }
+}
+
+impl ScopedObservationRelatedObjectInitialObservation {
+    pub(crate) fn identity(&self) -> &ScopedObservationRelatedObjectIdentity {
+        match self {
+            Self::Unavailable { binding }
+            | Self::RetryTransient { binding }
+            | Self::Oversized { binding, .. } => binding.identity(),
+            Self::Present(snapshot) => snapshot.identity(),
+        }
+    }
+
+    pub(crate) fn present_snapshot(
+        &self,
+    ) -> Option<&ScopedObservationRelatedObjectDecodedSnapshot> {
+        match self {
+            Self::Present(snapshot) => Some(snapshot),
+            Self::Unavailable { .. } | Self::RetryTransient { .. } | Self::Oversized { .. } => None,
+        }
+    }
+
+    pub(crate) fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable { .. })
+    }
+
+    pub(crate) fn is_retry_transient(&self) -> bool {
+        matches!(self, Self::RetryTransient { .. })
+    }
+
+    pub(crate) fn oversized(&self) -> Option<(u64, Revision)> {
+        match self {
+            Self::Oversized {
+                checkpoint,
+                quarantine,
+                ..
+            } => Some((quarantine.payload_len, checkpoint.revision)),
+            Self::Unavailable { .. } | Self::RetryTransient { .. } | Self::Present(_) => None,
+        }
+    }
+}
+
 impl SourceAccess for DirectoryMemberSourceAccessDenied {
     fn read_object(
         &self,
@@ -2023,6 +2408,126 @@ impl<'pass> ScopedObservationRuntimeSourceReservation<'pass> {
         self.binding.fail_conservative();
     }
 
+    /// Perform the first exact read of one sibling or evidence-referenced
+    /// ReplaceDocument source. The pass supplies the approved root and runtime
+    /// stream; the caller supplies only origin coordinates for the already-
+    /// bound source instance. No prior checkpoint or decoder state can be
+    /// injected through this initial-only boundary.
+    pub(crate) fn observe_initial_related_replace(
+        self,
+        origin: &RecordOrigin,
+    ) -> Result<ScopedObservationRelatedObjectInitialObservation, ScopedObservationRuntimeSourceError>
+    {
+        if self._pass.state.closed.load(Ordering::Acquire) {
+            self.fail_conservative();
+            return Err(ScopedObservationRuntimeSourceError::Closed);
+        }
+        let related = match prepare_related_object_binding(
+            self.binding(),
+            Arc::clone(&self._pass.attachment_authority),
+        ) {
+            Ok(related) => related,
+            Err(error) => {
+                self.fail_conservative();
+                return Err(error);
+            }
+        };
+        if origin.source_instance_id != self.binding.source_instance_id() {
+            self.fail_conservative();
+            return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+        }
+        let max_bytes = match usize::try_from(self.binding.runtime.reserved_max_bytes()) {
+            Ok(max_bytes) if max_bytes > 0 => max_bytes,
+            _ => {
+                self.fail_conservative();
+                return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+            }
+        };
+        let driver = match ReplaceDocument::new(ReplaceDocumentConfig {
+            max_document_bytes: max_bytes,
+        }) {
+            Ok(driver) => driver,
+            Err(_) => {
+                self.fail_conservative();
+                return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+            }
+        };
+        let read =
+            match read_stable_file_confined(self.binding.root(), self.binding.locator(), max_bytes)
+            {
+                Ok(read) => read,
+                Err(error) => {
+                    self.fail_conservative();
+                    return Err(ScopedObservationRuntimeSourceError::RelatedSource(
+                        super::source_failure_class(&error),
+                    ));
+                }
+            };
+        if self._pass.state.closed.load(Ordering::Acquire) {
+            self.fail_conservative();
+            return Err(ScopedObservationRuntimeSourceError::Closed);
+        }
+        let (bytes_read, outcome) = match &read {
+            StableRead::Missing => (0, AccessOutcome::Unavailable),
+            StableRead::Unstable => {
+                self.fail_conservative();
+                return Ok(
+                    ScopedObservationRelatedObjectInitialObservation::RetryTransient {
+                        binding: Box::new(related),
+                    },
+                );
+            }
+            StableRead::Oversized(_) => (0, AccessOutcome::Oversized),
+            StableRead::Stable { bytes, .. } => (bytes.len() as u64, AccessOutcome::Available),
+        };
+        self.complete(bytes_read, outcome)?;
+        let framed = driver
+            .frame_retained_read(read, None, origin, false)
+            .map_err(|error| {
+                ScopedObservationRuntimeSourceError::RelatedSource(super::source_failure_class(
+                    &error,
+                ))
+            })?;
+        match framed {
+            ReplaceRead::Missing => Ok(
+                ScopedObservationRelatedObjectInitialObservation::Unavailable {
+                    binding: Box::new(related),
+                },
+            ),
+            ReplaceRead::RetryTransient => Ok(
+                ScopedObservationRelatedObjectInitialObservation::RetryTransient {
+                    binding: Box::new(related),
+                },
+            ),
+            ReplaceRead::Record {
+                record,
+                checkpoint,
+                generation_changed: true,
+            } => related.decode_initial_record(checkpoint, record),
+            ReplaceRead::Quarantined {
+                quarantine,
+                checkpoint,
+                generation_changed: true,
+            } => Ok(
+                ScopedObservationRelatedObjectInitialObservation::Oversized {
+                    binding: Box::new(related),
+                    checkpoint,
+                    quarantine: Box::new(quarantine),
+                },
+            ),
+            ReplaceRead::Unchanged { .. }
+            | ReplaceRead::Removed { .. }
+            | ReplaceRead::Record {
+                generation_changed: false,
+                ..
+            }
+            | ReplaceRead::Quarantined {
+                generation_changed: false,
+                ..
+            } => Err(ScopedObservationRuntimeSourceError::InvalidBinding),
+        }
+    }
+
     pub(crate) fn into_directory_membership_contract(
         self,
     ) -> Result<
@@ -2044,6 +2549,81 @@ impl<'pass> ScopedObservationRuntimeSourceReservation<'pass> {
             }
         }
     }
+}
+
+fn prepare_related_object_binding(
+    binding: &ScopedObservationRuntimeSourceBinding,
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+) -> Result<ScopedObservationRelatedObjectBinding, ScopedObservationRuntimeSourceError> {
+    if !matches!(
+        binding.runtime.primitive(),
+        ScopeRelationPrimitive::SiblingObject | ScopeRelationPrimitive::ReferencedObjectFromField
+    ) || binding.runtime.operation() != AccessOperation::ObjectRead
+        || binding.relative_selector().is_some()
+    {
+        return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+    }
+    let DriverSpec::ReplaceDocument(config) = &binding.stream().driver else {
+        return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+    };
+    let reserved_max_bytes = binding.runtime.reserved_max_bytes();
+    if reserved_max_bytes == 0
+        || reserved_max_bytes > binding.runtime.bounds().max_bytes
+        || usize::try_from(reserved_max_bytes)
+            .ok()
+            .is_none_or(|limit| limit > config.max_document_bytes)
+    {
+        return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+    }
+    let canonical_object_key = confined_relative_path_key(binding.locator())
+        .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+    let adapter_id = AdapterId::new(binding.runtime.adapter_id())
+        .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+    let stream_namespace = binding.stream().id.as_str();
+    let stream_key = CoverageStreamKey::derive(adapter_id.as_str(), stream_namespace.as_bytes())
+        .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+    let object_key = CoverageObjectKey::derive(stream_namespace, &canonical_object_key)
+        .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+    let semantic_context = FactSemanticContext::new(
+        &adapter_id,
+        binding.runtime.source_instance_identity_contract_version(),
+        binding.runtime.source_instance_key().as_bytes(),
+        stream_namespace.as_bytes(),
+        &canonical_object_key,
+        binding.stream().driver.framing_contract_version(),
+    )
+    .map_err(|_| ScopedObservationRuntimeSourceError::InvalidBinding)?;
+    let source = ScopedSourceObjectIdentity {
+        adapter_id,
+        source_instance_key: semantic_context.source_instance_key(),
+        stream_key,
+        object_key,
+    };
+    if source.source_instance_key != binding.canonical_source_instance_key() {
+        return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+    }
+    let related = ScopedObservationRelatedObjectBinding {
+        identity: ScopedObservationRelatedObjectIdentity {
+            attachment_authority,
+            relation_id: Arc::from(binding.relation_id()),
+            primitive: binding.runtime.primitive(),
+            object_token: binding.object_token(),
+            source,
+            semantic_context,
+        },
+        adapter: Arc::clone(binding.adapter()),
+        source_instance: Arc::clone(binding.source_instance()),
+        runtime_stream: Arc::new(binding.stream().clone()),
+        descriptor: SourceObjectDescriptor {
+            stream_id: binding.stream().id.clone(),
+            object_key: canonical_object_key,
+            relative_path: binding.locator().to_path_buf(),
+        },
+    };
+    if !related.valid_for_dependency_free_bootstrap() {
+        return Err(ScopedObservationRuntimeSourceError::InvalidBinding);
+    }
+    Ok(related)
 }
 
 fn prepare_directory_membership_contract(

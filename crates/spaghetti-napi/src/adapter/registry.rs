@@ -553,6 +553,7 @@ pub(crate) mod tests {
         request_dependency_access: bool,
         dependency_mutation: Option<(PathBuf, Vec<u8>)>,
         dependency_free_bootstrap_failure_suffix: Option<PathBuf>,
+        dependency_free_bootstrap_panic_suffix: Option<PathBuf>,
     }
 
     impl EmptyAdapter {
@@ -576,6 +577,7 @@ pub(crate) mod tests {
                 request_dependency_access: false,
                 dependency_mutation: None,
                 dependency_free_bootstrap_failure_suffix: None,
+                dependency_free_bootstrap_panic_suffix: None,
             }
         }
 
@@ -612,6 +614,11 @@ pub(crate) mod tests {
 
         fn with_dependency_free_bootstrap_failure(mut self, suffix: PathBuf) -> Self {
             self.dependency_free_bootstrap_failure_suffix = Some(suffix);
+            self
+        }
+
+        fn with_dependency_free_bootstrap_panic(mut self, suffix: PathBuf) -> Self {
+            self.dependency_free_bootstrap_panic_suffix = Some(suffix);
             self
         }
 
@@ -1004,6 +1011,7 @@ pub(crate) mod tests {
                         fixture_root_runtime_stream(),
                         fixture_related_runtime_stream(),
                     ])
+                    .with_stateful_decode()
                     .with_configured_root_discovery(discover_calls),
             )
             .register_native_support_probe("fixture", move |_| {
@@ -2005,6 +2013,13 @@ pub(crate) mod tests {
             object: &SourceObjectDescriptor,
         ) -> Result<AdapterObjectContext, AdapterError> {
             if self
+                .dependency_free_bootstrap_panic_suffix
+                .as_deref()
+                .is_some_and(|suffix| object.relative_path.ends_with(suffix))
+            {
+                panic!("private fixture panic /Users/alice/private/session.jsonl");
+            }
+            if self
                 .dependency_free_bootstrap_failure_suffix
                 .as_deref()
                 .is_some_and(|suffix| object.relative_path.ends_with(suffix))
@@ -2825,6 +2840,326 @@ pub(crate) mod tests {
         assert!(!error.to_string().contains("caller-injected-private-team"));
         assert_eq!(probe_calls.load(Ordering::Acquire), 2);
         assert_eq!(discover_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authorized_related_object_initial_read_is_confined_accounted_and_decoded() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_related_object_registry(probe_calls, discover_calls);
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("related-private-root");
+        std::fs::create_dir_all(root.join("sessions")).unwrap();
+        std::fs::create_dir_all(root.join("teams/private-team-coordinate")).unwrap();
+        std::fs::create_dir_all(root.join("teams/oversized-team")).unwrap();
+        std::fs::write(root.join("sessions/session.jsonl"), b"root\n").unwrap();
+        let related_payload = b"related-private-document";
+        std::fs::write(
+            root.join("teams/private-team-coordinate/config.json"),
+            related_payload,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("teams/oversized-team/config.json"),
+            vec![b'x'; 4_097],
+        )
+        .unwrap();
+
+        let request = scoped_access_request(root.clone());
+        let instance = request.source_instance.clone();
+        let expected_source_instance = CanonicalSourceInstanceKey::derive(
+            instance.spec.identity_contract_version,
+            instance.spec.stable_key.as_bytes(),
+        )
+        .unwrap();
+        let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
+        let origin = RecordOrigin {
+            source_instance_id: instance.id,
+            stream_id: 71,
+            object_id: 72,
+            observed_at: 73,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/json").unwrap(),
+        };
+        let observe = |team_name: &[u8], phase: AccessPhase| {
+            let pass = host.begin_pass().unwrap();
+            let identity = [ScopeIdentityInput {
+                name: "team-name",
+                value: team_name,
+            }];
+            let observation = pass
+                .reserve_observation_runtime_source(ScopeAccessRequest {
+                    relation_id: "team-config-from-evidence",
+                    operation: AccessOperation::ObjectRead,
+                    phase,
+                    parent_token: None,
+                    identity_inputs: &identity,
+                    depth: 1,
+                    max_bytes: 4_096,
+                    max_rows: 0,
+                })
+                .unwrap()
+                .observe_initial_related_replace(&origin)
+                .unwrap();
+            let report = pass.finish();
+            (observation, report)
+        };
+
+        let (present, present_report) = observe(b"private-team-coordinate", AccessPhase::Initial);
+        let snapshot = present.present_snapshot().unwrap();
+        let expected_relative = PathBuf::from("teams/private-team-coordinate/config.json");
+        let expected_object_key = confined_relative_path_key(&expected_relative).unwrap();
+        let expected_stream_key =
+            CoverageStreamKey::derive("fixture", b"team-config-stream").unwrap();
+        let expected_coverage_object =
+            CoverageObjectKey::derive("team-config-stream", &expected_object_key).unwrap();
+        assert_eq!(
+            snapshot.identity().relation_id(),
+            "team-config-from-evidence"
+        );
+        assert_eq!(
+            snapshot.identity().primitive(),
+            ScopeRelationPrimitive::ReferencedObjectFromField
+        );
+        assert_eq!(
+            snapshot.identity().object_token(),
+            AccessObjectToken::derive(
+                "team-config-from-evidence",
+                &[
+                    b"team-name".as_slice(),
+                    b"private-team-coordinate".as_slice()
+                ],
+            )
+            .unwrap()
+        );
+        assert_eq!(snapshot.identity().source().adapter_id.as_str(), "fixture");
+        assert_eq!(
+            snapshot.identity().source().source_instance_key,
+            expected_source_instance
+        );
+        assert_eq!(snapshot.identity().source().stream_key, expected_stream_key);
+        assert_eq!(
+            snapshot.identity().source().object_key,
+            expected_coverage_object
+        );
+        assert_eq!(
+            snapshot.identity().semantic_context(),
+            &FactSemanticContext::new(
+                &AdapterId::new("fixture").unwrap(),
+                instance.spec.identity_contract_version,
+                instance.spec.stable_key.as_bytes(),
+                b"team-config-stream",
+                &expected_object_key,
+                1,
+            )
+            .unwrap()
+        );
+        assert_eq!(snapshot.generation(), 1);
+        assert_eq!(snapshot.revision(), Revision::digest(related_payload));
+        assert_eq!(
+            snapshot.disposition_for_test(),
+            DecodeDisposition::PreservedUnknown
+        );
+        assert!(matches!(
+            snapshot.mapping_disposition_for_test(),
+            crate::adapter::RecordMappingDisposition::RetainedUnknown { .. }
+        ));
+        assert_eq!(snapshot.facts_for_test().len(), 1);
+        assert!(matches!(
+            &snapshot.facts_for_test()[0].value,
+            Fact::UnknownRecord { raw_payload, .. } if raw_payload.is_empty()
+        ));
+        assert_eq!(
+            snapshot.next_decoder_state_for_test(),
+            Some(related_payload.as_slice())
+        );
+        assert_eq!(snapshot.record_for_test().payload, related_payload);
+        assert_eq!(snapshot.admission_measurement(), Some((1, 0)));
+        assert_eq!(
+            snapshot.binding_for_test().runtime_stream_for_test(),
+            &fixture_related_runtime_stream()
+        );
+        assert_eq!(
+            snapshot.binding_for_test().source_instance_for_test().id,
+            instance.id
+        );
+        assert_eq!(
+            snapshot
+                .binding_for_test()
+                .descriptor_for_test()
+                .relative_path,
+            expected_relative
+        );
+        let rendered = format!("{present:?} {:?}", snapshot.identity());
+        for private in [
+            "private-team-coordinate",
+            "related-private-document",
+            "config.json",
+            "related-private-root",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        let present_relation = present_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(present_relation.attempts, 1);
+        assert_eq!(present_relation.completed, 1);
+        assert_eq!(present_relation.bytes_read, related_payload.len() as u64);
+        assert_eq!(present_relation.trace[0].outcome, AccessOutcome::Available);
+
+        let (missing, missing_report) = observe(b"missing-team", AccessPhase::Revalidation);
+        assert!(missing.is_unavailable());
+        assert_eq!(
+            missing.identity().source().object_key,
+            CoverageObjectKey::derive(
+                "team-config-stream",
+                &confined_relative_path_key(
+                    PathBuf::from("teams/missing-team/config.json").as_path()
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        );
+        assert!(!format!("{missing:?}").contains("missing-team"));
+        let missing_relation = missing_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(missing_relation.bytes_read, 0);
+        assert_eq!(
+            missing_relation.trace[0].outcome,
+            AccessOutcome::Unavailable
+        );
+
+        let (oversized, oversized_report) = observe(b"oversized-team", AccessPhase::Revalidation);
+        assert_eq!(oversized.oversized().map(|value| value.0), Some(4_097));
+        assert!(!format!("{oversized:?}").contains("oversized-team"));
+        let oversized_relation = oversized_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(oversized_relation.bytes_read, 0);
+        assert_eq!(
+            oversized_relation.trace[0].outcome,
+            AccessOutcome::Oversized
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn related_object_origin_and_adapter_panic_fail_closed_without_private_output() {
+        let (catalog, binding, scope_programs) =
+            promoted_fixture_catalog_with_scope(COMPOSED_RELATED_SCOPE_DOCUMENT);
+        let registry = AdapterRegistryBuilder::new()
+            .register(
+                EmptyAdapter::new("fixture")
+                    .with_support(binding, scope_programs)
+                    .with_streams(vec![
+                        fixture_root_runtime_stream(),
+                        fixture_related_runtime_stream(),
+                    ])
+                    .with_stateful_decode()
+                    .with_dependency_free_bootstrap_panic(PathBuf::from(
+                        "teams/private-panic-team/config.json",
+                    )),
+            )
+            .register_native_support_probe("fixture", |_| {
+                Ok(NativeArtifactProbe {
+                    family: "fixture".to_string(),
+                    platform: "test".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    markers: vec!["fixture.marker".to_string()],
+                    contradictory_markers: false,
+                })
+            })
+            .build_supported(catalog)
+            .unwrap();
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("panic-private-root");
+        std::fs::create_dir_all(root.join("teams/private-panic-team")).unwrap();
+        std::fs::write(
+            root.join("teams/private-panic-team/config.json"),
+            b"private-panic-payload",
+        )
+        .unwrap();
+        let request = scoped_access_request(root);
+        let source_instance_id = request.source_instance.id;
+        let host = ScopedObservationAccessHost::authorize(&registry, request).unwrap();
+        let identity = [ScopeIdentityInput {
+            name: "team-name",
+            value: b"private-panic-team",
+        }];
+        let observe = |pass: &ScopedObservationAccessPass, origin: &RecordOrigin| {
+            pass.reserve_observation_runtime_source(ScopeAccessRequest {
+                relation_id: "team-config-from-evidence",
+                operation: AccessOperation::ObjectRead,
+                phase: AccessPhase::Initial,
+                parent_token: None,
+                identity_inputs: &identity,
+                depth: 1,
+                max_bytes: 4_096,
+                max_rows: 0,
+            })
+            .unwrap()
+            .observe_initial_related_replace(origin)
+        };
+        let origin = RecordOrigin {
+            source_instance_id,
+            stream_id: 81,
+            object_id: 82,
+            observed_at: 83,
+            source_timestamp_hint: None,
+            media_type: SourceMediaType::new("application/json").unwrap(),
+        };
+
+        let wrong_origin = RecordOrigin {
+            source_instance_id: source_instance_id + 1,
+            ..origin.clone()
+        };
+        let wrong_pass = host.begin_pass().unwrap();
+        let wrong_error = observe(&wrong_pass, &wrong_origin).unwrap_err();
+        assert_eq!(
+            wrong_error.to_string(),
+            "scoped observation source binding does not match the active attachment"
+        );
+        let wrong_report = wrong_pass.finish();
+        let wrong_relation = wrong_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(wrong_relation.trace[0].outcome, AccessOutcome::Failed);
+
+        let panic_pass = host.begin_pass().unwrap();
+        let panic_error = observe(&panic_pass, &origin).unwrap_err();
+        assert_eq!(
+            panic_error.to_string(),
+            "scoped observation related-object decode failed"
+        );
+        let rendered = format!("{panic_error:?}");
+        assert!(rendered.contains("AdapterFatal"));
+        for private in [
+            "/Users/",
+            "alice",
+            "private-panic-team",
+            "private-panic-payload",
+            "config.json",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+        let panic_report = panic_pass.finish();
+        let panic_relation = panic_report
+            .relations()
+            .iter()
+            .find(|relation| relation.relation_id == "team-config-from-evidence")
+            .unwrap();
+        assert_eq!(panic_relation.bytes_read, 21);
+        assert_eq!(panic_relation.trace[0].outcome, AccessOutcome::Available);
     }
 
     #[test]
