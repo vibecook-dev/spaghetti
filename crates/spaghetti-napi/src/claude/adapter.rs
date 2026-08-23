@@ -4066,14 +4066,10 @@ fn decode_transcript_record(
             return Ok(DecodeDisposition::PreservedUnknown);
         }
     };
-    let projection = message_extractor::project_jsonl_line(raw).map_err(|error| {
-        AdapterError::new(
-            AdapterErrorClass::RecordPermanent,
-            "claude_projection",
-            error.to_string(),
-        )
-    })?;
+    // One loose parse and one typed parse per record, shared by the projection
+    // and every fact family below. Each of these used to be done twice.
     let typed = serde_json::from_str::<SessionMessage>(raw);
+    let projection = message_extractor::project_parsed_line(&value, &typed);
 
     let session = EntityKey::native(
         adapter_id,
@@ -5949,7 +5945,7 @@ mod tests {
         );
         let candidate_scope = manifest.scope_programs.as_ref().unwrap();
         assert_eq!(candidate_scope.status, ScopeProgramStatus::Candidate);
-        assert!(candidate_scope.program("observe-root-transcript").is_some());
+        assert!(candidate_scope.program("observe-root-session-and-descendants").is_some());
         let scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"

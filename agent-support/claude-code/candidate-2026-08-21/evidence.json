@@ -354,7 +354,7 @@
         {
           "kind": "code_reference",
           "path": "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
-          "sha256": "sha256:b28608dcf0f0a5d6d55475b121cd4162b592c4f6a5e47e7284d3ba2b2a4434a8",
+          "sha256": "sha256:d7f48d920b393ca8fbc6767e3262619955ffa82e5d6ea43909087836d89101ad",
           "locator": "eleven concrete observation bindings with exact stream, source-pattern, and directory-selector coordinates"
         },
         {
