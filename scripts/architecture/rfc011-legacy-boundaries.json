@@ -16,7 +16,11 @@
     },
     "source_specific_runtime_services": {
       "description": "The shipped SDK runtime graph cannot contain source-local lifecycle, watcher, parser, or checkpoint services.",
-      "allowed": []
+      "allowed": [
+        "packages/sdk/src/sources/claude-code/live/incremental-parser.ts",
+        "packages/sdk/src/sources/claude-code/live/session-tail.ts"
+      ],
+      "compatibility_window": "RFC 012 landing plan \u00a73.1 and \u00a77 Wave 3: `watchSessionTranscript` and `SessionTranscriptTail` stay on the SDK barrel until Chopsticks has migrated to `observeSession`, which the plan gives one release of overlap. `session-tail.ts` is the tail itself and `incremental-parser.ts` is the only module it pulls in. Both entries are removed \u2014 not re-justified \u2014 by the PR that deletes the legacy tail."
     },
     "rust_common_source_dispatch": {
       "description": "Default Rust common modules cannot branch on a built-in adapter or depend on one concretely.",
