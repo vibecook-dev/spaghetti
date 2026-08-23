@@ -223,13 +223,41 @@ it is the largest and depends on L2's codegen).
   and the playground showed "INDEX IS EMPTY". Fixed with bootstrap-conditional SQL
   (degraded hydration/message counts until finalization; 124 ms on the same corpus).
   Remaining from that investigation:
-  - `getStats` still takes ~25 s during deferred bootstrap (it answers; find its scan).
+  - `getStats` is slow regardless of bootstrap: `detail_query.rs` counts
+    `canonical_messages WHERE trim(search_text) <> ''` — `trim()` is unindexable, so
+    every call reads every search_text blob (~25 s at 1.2 M rows). Needs a maintained
+    counter or an expression index, not a query tweak.
   - Optional fidelity restore: un-defer `idx_canonical_messages_session_activity` (or a
     narrower `session_key` index) so decoded sessions can report hydrated during
     background ingest — L7 must measure the cold-ingest cost first.
-  - The SDK utility process exits once (~10 s in, Electron reports code 0, JS
-    `exit`/`beforeExit` hooks never fire → native-level death) when opening a resumed
-    corpus; the restart now recovers cleanly, but the death is unexplained.
+  - The main timeline page query (`timeline_query.rs`, WHERE session_key ORDER BY
+    source_time) still full-scans during deferred bootstrap — left ungated because it is
+    the transcript itself and the playground gates opens on `decoded`; a CLI read of a
+    session mid-build is slow but correct.
+  - The SDK utility's reported "exit code 0" masks the real failure: on 'fatal' or a
+    shutdown that exceeds the 15 s timer, `sdk-host-client.ts` calls `proc.kill()`, which
+    skips the child's JS exit hooks and surfaces code 0; the uncaughtException path also
+    races its own `process.exit(1)` against the parent's kill. The one-time startup death
+    on a resumed corpus self-heals via restart now, but the original error is still
+    unobserved — log when the shutdown timer fires and forward the 'fatal' payload before
+    killing, to separate an engine error from an OS kill.
+  - `resolve_catalog_entity` pages `MAX_CATALOG_PAGE_LIMIT` rows and scans linearly for
+    one external ref — inefficient, not catastrophic.
+  - Confirmed safe: rows written while FTS triggers are absent are captured — finalization
+    issues the FTS5 `'rebuild'` command before reinstalling triggers.
+  - `timeline_query.rs` `require_session_membership` computes the session revision with the
+    same deferred `MAX(cm.last_commit_seq)` probe (one scan per timeline page mid-build).
+    Left ungated deliberately: the value feeds cursor snapshot validation, so degrading it
+    would reject pre-finalization cursors after finalization — needs a semantics decision,
+    not a mechanical gate.
+  - `orchestration_query.rs` counts `canonical_workflow_members` by `child_run_key` per
+    delegation row, but that table only has `workflow_key`-leading indexes — a full scan
+    of that (small) table always, independent of bootstrap.
+  - **`canonical_message_content_blocks` is never populated on the Claude ingest path**
+    (verified: real reconcile, 3 canonical messages incl. a tool_use → 0 block rows, while
+    `projection.rs` has the insert and `block_metadata` maps every kind — something
+    upstream delivers `Fact::Message` with empty content). Timeline content-kind/tool-name
+    facets and block include/exclude filters are silently empty for real sessions.
   - `supervisor.rs` initial scan holds one shared source-pass permit across the entire
     adapter reconcile — the pool's contract is *bounded* passes; scope the permit per
     pass so pressure-limited capacity (limit=1 under checkpoint debt) cannot be pinned

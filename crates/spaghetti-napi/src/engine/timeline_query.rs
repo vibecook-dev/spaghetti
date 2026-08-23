@@ -9,6 +9,7 @@ use serde_json::Value as JsonValue;
 
 use crate::adapter::ContentBlock;
 
+use super::catalog::query_structures_deferred;
 use super::detail_query::NamedCount;
 use super::query_identity::{
     decode_entity_id, encode_entity_id, FACT_ID_PREFIX, MESSAGE_ID_PREFIX, PROJECT_ID_PREFIX,
@@ -747,6 +748,24 @@ fn read_timeline_facets(
     transaction: &Transaction<'_>,
     session_key: &[u8],
 ) -> Result<TimelineFacets, EngineError> {
+    // Every facet aggregates a whole session out of `canonical_messages` or
+    // `canonical_message_content_blocks`, and the indexes that make those
+    // aggregates a range scan are deferred structures. The blocks table has no
+    // fallback: its primary key is `(message_key, block_ordinal)`, so each
+    // block facet scans the largest table in the database. Report empty facets
+    // until finalization; the transcript page beside them still answers.
+    if query_structures_deferred(transaction)
+        .map_err(|error| query_sqlite_error("read deferred-structures marker", error))?
+    {
+        return Ok(TimelineFacets {
+            total_messages: 0,
+            roles: Vec::new(),
+            native_kinds: Vec::new(),
+            content_kinds: Vec::new(),
+            tool_names: Vec::new(),
+            branch_kinds: Vec::new(),
+        });
+    }
     let total_messages: i64 = transaction
         .query_row(
             "SELECT COUNT(*) FROM canonical_messages WHERE session_key = ?1",

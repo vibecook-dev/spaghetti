@@ -13,8 +13,9 @@ use crate::adapter::AdapterRegistry;
 use crate::claude::ClaudeCodeAdapter;
 
 use super::super::{
-    ConfiguredObservationSource, EngineOptions, HistoryProjectPageRequest, ReconcileRequest,
-    SpaghettiEngineCore,
+    ConfiguredObservationSource, DelegationPageRequest, EngineOptions, HistoryProjectPageRequest,
+    QueryCancellationToken, ReconcileRequest, SessionDetailsRequest, SpaghettiEngineCore,
+    TimelinePage, TimelinePageRequest,
 };
 use super::readiness::ReadinessState;
 use super::{
@@ -89,6 +90,25 @@ fn open_engine(database_path: PathBuf) -> std::sync::Arc<SpaghettiEngineCore> {
             query_workers: Some(1),
             owner_label: Some("catalog-test".to_string()),
             defer_query_structures: false,
+            source_pass_pool: None,
+        },
+        AdapterRegistry::builder()
+            .register(ClaudeCodeAdapter::new())
+            .build()
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+/// An engine whose query structures stay deferred until the test finalizes
+/// them, which is the state a resumed mid-rebuild database is in.
+fn open_deferred_engine(database_path: PathBuf) -> std::sync::Arc<SpaghettiEngineCore> {
+    SpaghettiEngineCore::open_with_registry(
+        EngineOptions {
+            database_path,
+            query_workers: Some(1),
+            owner_label: Some("catalog-test".to_string()),
+            defer_query_structures: true,
             source_pass_pool: None,
         },
         AdapterRegistry::builder()
@@ -569,21 +589,7 @@ fn history_convergence_promotes_the_catalog_state_of_a_transcript() {
 fn deferred_structures_keep_catalog_and_history_queries_degraded_not_probing() {
     let temp = TempDir::new().unwrap();
     let root = claude_tree(temp.path());
-    let database = temp.path().join("deferred-degraded.db");
-    let engine = SpaghettiEngineCore::open_with_registry(
-        EngineOptions {
-            database_path: database.clone(),
-            query_workers: Some(1),
-            owner_label: Some("catalog-test".to_string()),
-            defer_query_structures: true,
-            source_pass_pool: None,
-        },
-        AdapterRegistry::builder()
-            .register(ClaudeCodeAdapter::new())
-            .build()
-            .unwrap(),
-    )
-    .unwrap();
+    let engine = open_deferred_engine(temp.path().join("deferred-degraded.db"));
     engine.discover_source_catalog(&configured(&root)).unwrap();
     engine
         .reconcile_adapter(
@@ -658,6 +664,136 @@ fn deferred_structures_keep_catalog_and_history_queries_degraded_not_probing() {
         .items
         .iter()
         .any(|project| project.message_count > 0));
+    engine.shutdown().unwrap();
+}
+
+/// The same rule for the per-session and per-run message aggregates the detail,
+/// timeline, and orchestration packs carry: session details count messages by
+/// session_key, timeline facets group messages and content blocks by
+/// session_key — the block table's primary key is `(message_key,
+/// block_ordinal)`, so it has no fallback index at all — and the delegation
+/// page counts messages by run_key once per returned row. Each answers with
+/// zero counts and empty facets while the structures are deferred, and the real
+/// numbers return at finalization. The transcript page itself is not degraded:
+/// it is the content the caller asked for.
+#[test]
+fn deferred_structures_keep_detail_timeline_and_delegation_queries_degraded() {
+    let temp = TempDir::new().unwrap();
+    let root = claude_tree(temp.path());
+    let engine = open_deferred_engine(temp.path().join("deferred-detail.db"));
+    engine.discover_source_catalog(&configured(&root)).unwrap();
+    engine
+        .reconcile_adapter(
+            "claude-code",
+            ReconcileRequest {
+                configured_roots: vec![root.clone()],
+                reason: "catalog-test".to_string(),
+            },
+        )
+        .unwrap();
+
+    let session = sessions(&engine)
+        .sessions
+        .into_iter()
+        .find(|session| session.native_session_id.as_deref() == Some(SESSION_A))
+        .expect("session A is catalog-visible");
+
+    let details = |engine: &SpaghettiEngineCore| {
+        engine
+            .session_details(SessionDetailsRequest {
+                session_id: session.session_id.clone(),
+            })
+            .unwrap()
+            .session
+            .expect("session A is transcript-backed")
+    };
+    let timeline = |engine: &SpaghettiEngineCore| -> TimelinePage {
+        engine
+            .timeline_cancellable(
+                TimelinePageRequest {
+                    project_id: session.project_id.clone(),
+                    session_id: session.session_id.clone(),
+                    roles: Vec::new(),
+                    native_kinds: Vec::new(),
+                    include_content_kinds: Vec::new(),
+                    include_tool_names: Vec::new(),
+                    exclude_content_kinds: Vec::new(),
+                    exclude_tool_names: Vec::new(),
+                    search: None,
+                    branch_kind: None,
+                    cursor: None,
+                    limit: 10,
+                },
+                QueryCancellationToken::default(),
+            )
+            .unwrap()
+    };
+
+    let building = details(&engine);
+    assert_eq!(
+        building.message_count, 0,
+        "the session message count has no index to seek yet"
+    );
+    assert!(
+        building.run_count > 0,
+        "counts that keep their own index stay exact"
+    );
+
+    let timeline_building = timeline(&engine);
+    assert_eq!(timeline_building.facets.total_messages, 0);
+    assert!(
+        timeline_building.facets.roles.is_empty()
+            && timeline_building.facets.native_kinds.is_empty()
+            && timeline_building.facets.content_kinds.is_empty()
+            && timeline_building.facets.tool_names.is_empty()
+            && timeline_building.facets.branch_kinds.is_empty(),
+        "every facet aggregates a whole session and stays empty until finalization"
+    );
+    assert!(
+        !timeline_building.items.is_empty(),
+        "the transcript itself still answers while its facets are degraded"
+    );
+
+    // The fixture has no subagent spawns, so this page is empty — what it
+    // proves is that the degraded delegation SQL answers, and that any row it
+    // does return carries a zero message count.
+    let delegations = engine
+        .delegations_cancellable(
+            DelegationPageRequest {
+                project_id: session.project_id.clone(),
+                session_id: session.session_id.clone(),
+                workflow_id: None,
+                standalone_only: false,
+                cursor: None,
+                limit: 10,
+            },
+            QueryCancellationToken::default(),
+        )
+        .unwrap();
+    assert!(delegations
+        .items
+        .iter()
+        .all(|delegation| delegation.message_count == 0));
+
+    engine.complete_query_bootstrap().unwrap();
+
+    let after = details(&engine);
+    assert!(
+        after.message_count > 0,
+        "the real message count returns once the index exists"
+    );
+    let timeline_after = timeline(&engine);
+    assert_eq!(timeline_after.facets.total_messages, after.message_count);
+    // The message facets carry real counts again. The block facets stay empty
+    // because this ingest path writes no `canonical_message_content_blocks`
+    // rows at all — a separate gap, not a property of deferral.
+    assert!(
+        !timeline_after.facets.roles.is_empty()
+            && !timeline_after.facets.native_kinds.is_empty()
+            && !timeline_after.facets.branch_kinds.is_empty(),
+        "facets are exact again after finalization: {:?}",
+        timeline_after.facets
+    );
     engine.shutdown().unwrap();
 }
 

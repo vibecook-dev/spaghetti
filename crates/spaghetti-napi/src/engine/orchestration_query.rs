@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use super::catalog::query_structures_deferred;
 use super::query_identity::{
     decode_entity_id, encode_entity_id, FACT_ID_PREFIX, MESSAGE_ID_PREFIX, PROJECT_ID_PREFIX,
     RUN_ID_PREFIX, SESSION_ID_PREFIX, WORKFLOW_ID_PREFIX, WORKFLOW_MEMBER_ID_PREFIX,
@@ -547,8 +548,18 @@ pub(super) fn read_delegation_page(
     if let Some(workflow_key) = &workflow_key {
         require_workflow_scope(&transaction, workflow_key, &project_key, &session_key)?;
     }
+    let structures_deferred = query_structures_deferred(&transaction)
+        .map_err(|error| query_sqlite_error("read deferred-structures marker", error))?;
+    // One count per delegation row, so the deferred-index hazard compounds with
+    // page size: without `idx_canonical_messages_run_activity` each count scans
+    // the whole message store. Report zero until finalization.
+    let child_message_count = if structures_deferred {
+        "0"
+    } else {
+        "(SELECT COUNT(*) FROM canonical_messages cm WHERE cm.run_key = cd.child_run_key)"
+    };
     let mut statement = transaction
-        .prepare(
+        .prepare(&format!(
             r#"
             WITH delegation_rows AS (
                 SELECT cd.child_run_key, cd.parent_run_key, cs.project_key,
@@ -566,8 +577,7 @@ pub(super) fn read_delegation_page(
                        cds.requested_agent_type, anchor.message_key,
                        cd.child_present, cd.parent_present,
                        cdm.run_present, ors.state,
-                       (SELECT COUNT(*) FROM canonical_messages cm
-                         WHERE cm.run_key = cd.child_run_key),
+                       {child_message_count},
                        (SELECT COUNT(*) FROM canonical_workflow_members cwm
                          WHERE cwm.child_run_key = cd.child_run_key),
                        cd.source_time, cd.source_time_quality,
@@ -619,7 +629,7 @@ pub(super) fn read_delegation_page(
             ORDER BY untimed_rank, order_text DESC, child_run_key DESC
             LIMIT ?9
             "#,
-        )
+        ))
         .map_err(|error| query_sqlite_error("prepare delegation page", error))?;
     let mut rows = statement
         .query(rusqlite::params![
@@ -842,8 +852,17 @@ pub(super) fn read_workflow_member_page(
     let watermark = read_committed_watermark(&transaction)?;
     validate_cursor_watermark(cursor.as_ref(), watermark)?;
     let identity = require_workflow(&transaction, &workflow_key)?;
+    let structures_deferred = query_structures_deferred(&transaction)
+        .map_err(|error| query_sqlite_error("read deferred-structures marker", error))?;
+    // Same per-row run-key count as the delegation page, and the same deferred
+    // index behind it. Report zero until finalization.
+    let child_message_count = if structures_deferred {
+        "0"
+    } else {
+        "(SELECT COUNT(*) FROM canonical_messages cm WHERE cm.run_key = cwm.child_run_key)"
+    };
     let mut statement = transaction
-        .prepare(
+        .prepare(&format!(
             r#"
             SELECT cwm.member_key, cwm.workflow_key, cwm.project_key,
                    cwm.session_key, cwm.child_run_key,
@@ -854,8 +873,7 @@ pub(super) fn read_workflow_member_page(
                    cdm.agent_type, cdm.description, cdm.native_name,
                    cdm.worktree_path, cwm.member_status, cwm.result_json,
                    cwm.resolution_status, ors.state, cd.relation_status,
-                   (SELECT COUNT(*) FROM canonical_messages cm
-                     WHERE cm.run_key = cwm.child_run_key),
+                   {child_message_count},
                    cwm.decisive_started_fact_id,
                    cwm.decisive_result_fact_id,
                    started.observed_at, result.observed_at,
@@ -889,7 +907,7 @@ pub(super) fn read_workflow_member_page(
             ORDER BY cwm.native_agent_id, cwm.member_key
             LIMIT ?5
             "#,
-        )
+        ))
         .map_err(|error| query_sqlite_error("prepare workflow member page", error))?;
     let mut rows = statement
         .query(rusqlite::params![

@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use super::catalog::query_structures_deferred;
 use super::commit::SourceCapabilitySpec;
 use super::performance::PerformanceStats;
 use super::query_identity::{
@@ -371,17 +372,32 @@ pub(super) fn read_session_details(
         .unchecked_transaction()
         .map_err(|error| query_sqlite_error("begin session detail snapshot", error))?;
     let watermark = read_committed_watermark(&transaction)?;
+    let structures_deferred = query_structures_deferred(&transaction)
+        .map_err(|error| query_sqlite_error("read deferred-structures marker", error))?;
+    // The message count and its commit-seq contribution both seek
+    // `idx_canonical_messages_session_activity`, a deferred structure: without
+    // it each one scans the whole message store. Report zero messages and no
+    // message-derived commit contribution until finalization — the other
+    // canonical counts keep their own indexes and stay exact.
+    let (message_count, message_commit_seq) = if structures_deferred {
+        ("0", "0")
+    } else {
+        (
+            "(SELECT COUNT(*) FROM canonical_messages cm WHERE cm.session_key = cs.session_key)",
+            "COALESCE((SELECT MAX(cm.last_commit_seq) FROM canonical_messages cm WHERE cm.session_key = cs.session_key), 0)",
+        )
+    };
     let session = transaction
         .query_row(
-            r#"
+            &format!(
+                r#"
             SELECT cs.session_key, cs.project_key, cs.native_session_id,
                    cs.native_project_key, cs.cwd, cs.git_branch,
                    cs.first_prompt, cs.ai_title, cs.custom_title,
                    cs.source_time, cs.source_time_quality, si.adapter_id,
                    fr.source_instance_id, cs.fact_id, fr.observed_at,
                    cs.source_object_id, cs.source_generation,
-                   (SELECT COUNT(*) FROM canonical_messages cm
-                    WHERE cm.session_key = cs.session_key) AS message_count,
+                   {message_count} AS message_count,
                    (SELECT COUNT(*) FROM canonical_runs cr
                     WHERE cr.session_key = cs.session_key) AS run_count,
                    (SELECT COUNT(*) FROM canonical_presences cp
@@ -409,9 +425,7 @@ pub(super) fn read_session_details(
                    MAX(
                        cs.last_commit_seq,
                        COALESCE(csi.last_commit_seq, 0),
-                       COALESCE((SELECT MAX(cm.last_commit_seq)
-                                 FROM canonical_messages cm
-                                 WHERE cm.session_key = cs.session_key), 0),
+                       {message_commit_seq},
                        COALESCE((SELECT MAX(cr.last_commit_seq)
                                  FROM canonical_runs cr
                                  WHERE cr.session_key = cs.session_key), 0),
@@ -441,7 +455,8 @@ pub(super) fn read_session_details(
             LEFT JOIN canonical_session_index_entries csi
               ON csi.session_key = cs.session_key
             WHERE cs.session_key = ?1
-            "#,
+            "#
+            ),
             [&session_key],
             decode_session_detail,
         )
