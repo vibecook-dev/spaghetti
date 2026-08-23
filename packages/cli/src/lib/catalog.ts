@@ -153,6 +153,13 @@ export function resolveCatalogProject(
   const index = Number(input);
   if (Number.isInteger(index) && index >= 1 && index <= projects.length) return projects[index - 1]!;
 
+  // Opaque identifiers are compared verbatim: both alphabets are base64url,
+  // where case is significant. `spag sessions <projectId>` worked before the
+  // catalog and still does, and an `externalRef` a caller persisted resolves
+  // the same way.
+  const byIdentifier = projects.find((project) => project.projectId === input || project.externalRef === input);
+  if (byIdentifier) return byIdentifier;
+
   const lower = input.toLowerCase();
   const names = projects.map((project) => [project, catalogProjectName(project).toLowerCase()] as const);
   for (const match of [
