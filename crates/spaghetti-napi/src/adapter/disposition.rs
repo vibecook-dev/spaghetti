@@ -33,11 +33,4 @@ pub(crate) enum RecordMappingDisposition {
         bounded_evidence: BoundedNativeEvidence,
     },
     BufferedIncomplete,
-    Malformed {
-        reason_code: String,
-        bounded_diagnostic: Vec<u8>,
-    },
-    UnsupportedVersion {
-        observed_version: String,
-    },
 }

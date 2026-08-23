@@ -746,10 +746,17 @@ Every complete record receives exactly one top-level disposition:
 
 - `Mapped {fact_count}`;
 - `IgnoredKnown {reason_code}`;
-- `RetainedUnknown {family_hint, bounded_evidence}`;
-- `BufferedIncomplete`;
-- `Malformed {reason_code, bounded_diagnostic}`; or
-- `UnsupportedVersion {observed_version}`.
+- `RetainedUnknown {family_hint, bounded_evidence}`; or
+- `BufferedIncomplete`.
+
+The disposition set is exactly what the decoders produce, and it grows only
+when an emitter for the new disposition lands with it: a variant that no
+decode path can construct is unreachable classification, not a reserved slot.
+`DecodeDisposition` — the only signal a decoder returns — carries no
+malformed or unsupported-version case, so a decoder classifies such a record
+as `PreservedUnknown` with bounded evidence or fails the record outright;
+`Malformed` and `UnsupportedVersion` dispositions were therefore removed
+rather than kept as never-constructed cases.
 
 Known ignored records are not reported as drift. Unknown families and fields
 remain measurable without producing one unbounded diagnostic row per record.

@@ -6018,7 +6018,9 @@ mod tests {
             .find(|stream| stream.id.as_str() == "session-membership")
             .unwrap();
         let release = crate::grok::verified_support_release().unwrap();
-        let contract = release.source_contract("session-membership").unwrap();
+        let contract = release
+            .source_contract_for_test("session-membership")
+            .unwrap();
         validate_durable_stream_contract(contract, &stream).unwrap();
 
         let DriverSpec::DirectorySnapshot(config) = &mut stream.driver else {

@@ -241,42 +241,6 @@ impl AdapterRegistry {
         )
     }
 
-    /// Select a promoted scoped-observation contract for one already-probed
-    /// native artifact. Candidate, recognized-unverified, and incompatible
-    /// artifacts deliberately return `None`; they never reach the stricter
-    /// typed-access constructor and cannot acquire source authority.
-    ///
-    /// The containing trusted host must negotiate the complete RFC 012D
-    /// observation contract before it performs the native probe and calls
-    /// this method. Keeping this selector in the registry prevents a future
-    /// portable transport from treating a caller-supplied classification as
-    /// authority.
-    pub(crate) fn authorize_scoped_if_supported(
-        &self,
-        adapter_id: &AdapterId,
-        probe: &NativeArtifactProbe,
-        request: &ContractVersionRequest,
-        offer: &ContractVersionOffer,
-    ) -> Result<Option<(CompatibilityDecision, TypedAccessAuthorization)>, AdapterError> {
-        let Some(catalog) = self.support_catalog.as_ref() else {
-            return Ok(None);
-        };
-        let decision = catalog
-            .classify(probe)
-            .map_err(|error| AdapterError::invalid_contract(error.to_string()))?;
-        if !decision.permissions().scoped_observation {
-            return Ok(None);
-        }
-        self.authorize_typed_access(
-            adapter_id,
-            probe,
-            SupportOperation::ScopedTypedObservation,
-            request,
-            offer,
-        )
-        .map(Some)
-    }
-
     fn authorize_supported_operation(
         &self,
         adapter_id: &AdapterId,
