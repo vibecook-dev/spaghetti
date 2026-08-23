@@ -176,7 +176,9 @@ it is the largest and depends on L2's codegen).
   candidate/promoted; promote real Claude/Codex/Grok support releases; delete
   `candidate-2026-08-15`; keep fixture-agent as a test fixture only.
 - **L6 napi surface**: collapse `Engine*` mirror DTOs to what napi-rs
-  needs; readiness vector as the only status surface.
+  needs; delete the 2,455-line hand-written mirror of `index.d.ts` in
+  `packages/sdk/src/native.ts` (import the generated `@vibecook/spaghetti-sdk-native`
+  types instead); readiness vector as the only status surface.
 - **L7 perf**: measure §6 on the production-shaped corpus; fix regressions;
   publish one report.
 - **L8 docs**: trim 012B/C/D to ≤ 300-line semantic contracts matching what
@@ -196,7 +198,7 @@ it is the largest and depends on L2's codegen).
 | --- | --- | --- |
 | Wave 0 | done 2026-08-23 (local `main` `3db39a7`) | plan + lane briefs landed; `allow(dead_code)` removed (`a08c013`); code-shape ratchet in `validate-all.sh` (`8753f28`); lane worktrees `land-l1..l4` on the SSD; push of `main` + archive branch awaiting owner go-ahead |
 | L1 observer | in progress (Opus lane, branch `land/l1-observer`) | — |
-| L2 sdk-api | in progress (Opus lane, branch `land/l2-sdk-api`, Phase A) | — |
+| L2 sdk-api | Phase A **merged** `a0bc677` (2026-08-23); Phase B (`observeSession` wrapper) waits on L1 | ts-rs pipeline + `pnpm generate:types` + CI diff; 13,694 lines of hand-written contracts/shims deleted; barrel 38 → 15 export statements (allowlist); VibeField Phase A refs generated (`packages/sdk/src/vibefield.ts` + test on real engine output); `watchSessionTranscript` restored to the barrel (it was missing at base); Rust 1204/1204, SDK 421/0, CLI 110/0, validate-all 9/9 |
 | L3 usage | in progress (Opus lane, branch `land/l3-usage`) | — |
 | L4 catalog | in progress (Opus lane, branch `land/l4-catalog`) | — |
 | Wave 2 | not started | — |
