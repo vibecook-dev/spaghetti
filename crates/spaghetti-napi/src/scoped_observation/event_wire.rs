@@ -180,6 +180,8 @@ impl ScopedObservationKnownEnvelope {
             }
             ScopedObservationEvent::UserInputRequest { .. }
             | ScopedObservationEvent::Message { .. }
+            | ScopedObservationEvent::ContentBlock { .. }
+            | ScopedObservationEvent::NativeMarker { .. }
             | ScopedObservationEvent::Plan { .. }
             | ScopedObservationEvent::Task { .. }
             | ScopedObservationEvent::Tool { .. }

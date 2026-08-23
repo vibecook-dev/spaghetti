@@ -13,13 +13,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use crate::adapter::ScopeDirectoryIdentityAuthority;
 use crate::adapter::{
     AgentAdapter, AuthorizedObservationSourceAuthority, AuthorizedObservationSourceContract,
     AuthorizedObservationSourceDriver, AuthorizedScopeProgram, ConsistencyPolicy, DeletionPolicy,
-    DriverSpec, ScopeDirectoryIdentityAuthority, ScopeObservationSourceBinding,
-    ScopeProgramManifest, ScopeProgramStatus, ScopeRelationBounds, ScopeRelationDeclaration,
-    ScopeRelationPrimitive, ScopeUnavailableBehavior, SourceInstance, SourceInstanceKey,
-    StreamAuthority, StreamSpec,
+    DriverSpec, ScopeObservationSourceBinding, ScopeProgramManifest, ScopeProgramStatus,
+    ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
+    ScopeUnavailableBehavior, SourceInstance, SourceInstanceKey, StreamAuthority, StreamSpec,
 };
 
 use super::selector::GlobPattern;
