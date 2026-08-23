@@ -267,7 +267,7 @@ describe('production observation host status', () => {
       });
       [, client] = await Promise.all([attached, opened]);
 
-      const report = await waitForHost(runtime);
+      const report = await waitForHost(runtime, 1);
       assert.deepEqual(errors, []);
       assert.equal(runtime.isReady(), true);
       assert.equal(report.state, 'running', report.error);
@@ -282,7 +282,19 @@ describe('production observation host status', () => {
       assert.equal(existsSync(productionDb), true);
       assert.equal(report.databasePath, productionDb);
       assert.equal(client.info.transportKind, 'playground-utility');
-      const [overview, projects] = await Promise.all([client.getOverview(), client.listProjects({ limit: 10 })]);
+      // The catalog answers from the same runtime the renderer's two new
+      // channels are forwarded to, and it answers about the same project.
+      const catalog = await runtime.read((sdk) => sdk.listCatalogProjects({ limit: 10 }));
+      assert.equal(catalog.projects.length, 1);
+      assert.equal(catalog.projects[0]?.nativeProjectKey, '-tmp-production-project');
+      const catalogSessions = await runtime.read((sdk) =>
+        sdk.listCatalogSessions({ projectId: catalog.projects[0]!.projectId, limit: 10 }),
+      );
+      assert.equal(catalogSessions.sessions.length, 1);
+      assert.equal(catalogSessions.sessions[0]?.nativeSessionId, SESSION_ID);
+
+      const overview = await waitForCanonicalRows(client, 1);
+      const projects = await client.listProjects({ limit: 10 });
       assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);
       assert.equal(projects.items[0]?.nativeProjectKey, '-tmp-production-project');
     } finally {
@@ -293,12 +305,31 @@ describe('production observation host status', () => {
   });
 });
 
-async function waitForHost(runtime: SdkRuntime) {
+/**
+ * Wait for the host to finish starting, and optionally for its watchers.
+ *
+ * Opening is catalog-first: the host reports `running` once discovery commits,
+ * which is before any supervisor thread is up. A caller that asserts on
+ * watchers or on decoded rows has to say so.
+ */
+async function waitForHost(runtime: SdkRuntime, minimumSupervisors = 0) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const report = await runtime.getObservationHostStatus();
-    if (report.state !== 'starting') return report;
+    const supervisors = report.snapshot?.status.observation.supervisorsRunning ?? 0;
+    if (report.state !== 'starting' && supervisors >= minimumSupervisors) return report;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error('Timed out waiting for utility observation host startup');
+}
+
+/** Wait for the one fixture message to be decoded, not merely discovered. */
+async function waitForCanonicalRows(client: SpaghettiClient, sessions: number) {
+  const deadline = Date.now() + 10_000;
+  let overview = await client.getOverview();
+  while (Date.now() < deadline && overview.canonicalSessions < sessions) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    overview = await client.getOverview();
+  }
+  return overview;
 }

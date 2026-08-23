@@ -19,6 +19,7 @@ export function registerIpcHandlers(client: SdkHostClient): void {
   ipcMain.handle(IPC_CHANNELS.getReadiness, () => client.request('getReadiness'));
 
   // Projects ----------------------------------------------------------------
+  ipcMain.handle(IPC_CHANNELS.listCatalogProjects, (_event, options) => client.request('listCatalogProjects', options));
   ipcMain.handle(IPC_CHANNELS.getProjectList, () => client.request('getProjectList'));
   ipcMain.handle(IPC_CHANNELS.getProjectTokenActivity, (_event, project: ProjectReference, query) =>
     client.request('getProjectTokenActivity', project, query),
@@ -32,6 +33,7 @@ export function registerIpcHandlers(client: SdkHostClient): void {
   ipcMain.handle(IPC_CHANNELS.getProjectWorktrees, (_event, projectPath: string) => listWorktrees(projectPath));
 
   // Sessions ----------------------------------------------------------------
+  ipcMain.handle(IPC_CHANNELS.listCatalogSessions, (_event, options) => client.request('listCatalogSessions', options));
   ipcMain.handle(IPC_CHANNELS.getSessionList, (_event, project: ProjectReference, options?: { sourceId?: string }) =>
     client.request('getSessionList', project, options),
   );
