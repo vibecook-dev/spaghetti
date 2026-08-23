@@ -152,7 +152,6 @@ pub struct SemanticEvent {
     /// here is equal to the one an aggregate-facing durable query returns for
     /// the same revision, which is what makes cross-topology reconciliation
     /// possible without comparing observer event ids.
-    #[ts(type = "{ semantic_reference_contract_version: number, fact_revision_id: string }")]
     pub semantic_revision_ref: SemanticRevisionRef,
     /// Canonical fact identity the revision belongs to.
     #[ts(type = "string")]
