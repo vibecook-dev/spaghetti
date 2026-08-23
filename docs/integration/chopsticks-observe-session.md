@@ -155,17 +155,27 @@ no current value. Every other event has one.
 
 ### Naming the value types
 
-The barrel exports `SemanticEvent` but not `RuntimeSemanticValue` or the
-per-family `*Fact` types, and there is no `./generated` subpath in the package
-`exports` map. Structural narrowing (above) needs no import and is the normal
-path. When you want to name a shape for a handler signature, derive it:
+Structural narrowing (above) needs no import and is still the shortest path.
+When you want to *name* a shape — a handler signature, a stored field, a
+function you export — import it: `RuntimeSemanticValue` and every per-family
+`*Fact` type are on the barrel.
 
 ```ts
-import type { SemanticEvent } from '@vibecook/spaghetti-sdk';
+import type { RuntimeSemanticValue, ToolRevisionFact } from '@vibecook/spaghetti-sdk';
 
-type RuntimeSemanticValue = NonNullable<SemanticEvent['value']>;
-type ToolRevisionFact = Extract<RuntimeSemanticValue, { ToolRevision: unknown }>['ToolRevision'];
+function onTool(fact: ToolRevisionFact): void {
+  console.log(fact.tool_name, fact.kind, fact.correlated_native_id);
+}
+
+function dispatch(value: RuntimeSemanticValue): void {
+  if ('ToolRevision' in value) onTool(value.ToolRevision);
+}
 ```
+
+The value types come with the qualifications the reducers actually apply — a
+`QualifiedValue`'s `value` is nullable because a value may be unknown, and the
+generated type says so. That is the reason to import the name rather than
+hand-write an optimistic version of it.
 
 ### Two evidence limits worth knowing
 
@@ -231,5 +241,6 @@ this stream delivers.
   `consumer_requested`, but only `queue_full` is produced today.
 - No `capabilities()`. The `family_manifest` on a barrier is the honest
   substitute: it reports what was actually reduced.
-- The per-family value types are not nameable from the package entry point —
-  derive them from `SemanticEvent['value']` as shown above.
+- The per-family value types are importable by name from the package entry
+  point (`RuntimeSemanticValue`, `ToolRevisionFact`, …); structural narrowing
+  stays available and needs no import.

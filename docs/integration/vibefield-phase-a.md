@@ -16,6 +16,11 @@ asks Spaghetti for in Phase A, and where each item is in `@vibecook/spaghetti-sd
 Everything below is generated from Rust. There is no hand-written TypeScript
 mirror to drift.
 
+Every generated type on this surface is importable by name from
+`@vibecook/spaghetti-sdk` — the identity contracts, `RuntimeSemanticValue`, and
+each per-family `*Fact` member of it — so a handler signature or a stored field
+can name the shape instead of deriving it.
+
 ## 1. Stable session and project references
 
 ```ts
@@ -217,11 +222,6 @@ Full detail and the porting table:
   and an orphaned `tool_result` keeps content-block evidence without a guessed
   tool name. Both are recorded in
   [RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §7.
-- **The per-family value types are not nameable from the package entry point.**
-  `SemanticEvent.value` is a typed `RuntimeSemanticValue` and narrowing on
-  `family` narrows it, but the union and its `*Fact` members are not exported
-  and there is no `./generated` subpath. Derive what you need:
-  `type V = NonNullable<SemanticEvent['value']>`.
 - **No identity relations.** Alias, `SameEntity`, `Supersedes`, and `ReplacedBy`
   facts do not exist. A project moved without provable native identity becomes a
   new project. Conflicts are reported, never resolved.
