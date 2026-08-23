@@ -1853,7 +1853,9 @@ impl ScopedObservationAdmissionLane {
     /// Admit one reserved directory child's complete source-driver
     /// observation. Present files enqueue every decoded frame atomically;
     /// missing files contribute explicit absence coverage; oversized children
-    /// stay outside this seam.
+    /// stay outside this seam. A correction for an already-retained child
+    /// preserves its attachment-local object token and may enter only once per
+    /// access pass.
     pub(crate) fn admit_directory_member(
         &mut self,
         access_pass_id: u64,
@@ -1879,22 +1881,29 @@ impl ScopedObservationAdmissionLane {
             .dynamic_relation_members
             .get(&relation_id)
             .is_some_and(|members| members.contains(&source));
-        if !reserved
-            || self.relation_membership_objects.contains_key(&source)
-            || self.known_coverage_objects.contains_key(&source)
-            || self.dynamic_member_object_tokens.contains_key(&source)
-        {
-            return Err(fail(ScopedAdmissionError::InvalidCoverage, lifecycle));
-        }
         let membership_identity = ScopedCoverageMembershipIdentity {
             relation_id: Arc::clone(&relation_id),
             stream_key: Arc::from(source.stream_key.as_bytes().as_slice()),
             object_key: Arc::from(source.object_key.as_bytes().as_slice()),
             coverage_domains: Vec::new(),
         };
-        let object_token = match next_scoped_object_token() {
-            Ok(token) => token,
-            Err(_) => return Err(fail(ScopedAdmissionError::CapacityExhausted, lifecycle)),
+        let retained_membership = self.known_coverage_objects.get(&source);
+        let retained_object_token = self.dynamic_member_object_tokens.get(&source).copied();
+        let source_is_new = retained_membership.is_none();
+        if !reserved
+            || self.relation_membership_objects.contains_key(&source)
+            || retained_membership.is_some_and(|known| known != &membership_identity)
+            || source_is_new != retained_object_token.is_none()
+            || self.offered_access_pass_ids.get(&source) == Some(&access_pass_id)
+        {
+            return Err(fail(ScopedAdmissionError::InvalidCoverage, lifecycle));
+        }
+        let object_token = match retained_object_token {
+            Some(token) => token,
+            None => match next_scoped_object_token() {
+                Ok(token) => token,
+                Err(_) => return Err(fail(ScopedAdmissionError::CapacityExhausted, lifecycle)),
+            },
         };
         let admission_token = 1;
 
@@ -2792,6 +2801,22 @@ impl ScopedObservationAdmissionLane {
         self.dynamic_member_decoder_states
             .get(source)
             .map(Vec::as_slice)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dynamic_relation_members_for_test(
+        &self,
+        relation_id: &str,
+    ) -> Option<&BTreeSet<ScopedSourceObjectIdentity>> {
+        self.dynamic_relation_members.get(relation_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn directory_member_object_token_for_test(
+        &self,
+        source: &ScopedSourceObjectIdentity,
+    ) -> Option<u64> {
+        self.dynamic_member_object_tokens.get(source).copied()
     }
 
     /// Latest decode coverage whose corresponding control/data frames have all
@@ -20010,6 +20035,11 @@ impl std::fmt::Debug for ScopedObservationDirectoryPassBinding {
     }
 }
 
+struct ScopedObservationDirectoryListingSnapshotBatch {
+    listing: ScopedObservationDirectoryListing,
+    members: Vec<ScopedObservationDirectoryMemberLifecycle>,
+}
+
 struct ScopedObservationDirectorySnapshotBatch {
     membership: ScopedRelationMembershipObservation,
     members: Vec<ScopedObservationDirectoryMemberLifecycle>,
@@ -20033,6 +20063,27 @@ fn scoped_read_directory_relation_snapshot(
     binding: &ScopedObservationDirectoryPassBinding,
     request: ScopedObservationDirectorySnapshotRequest<'_>,
 ) -> Result<ScopedObservationDirectorySnapshotBatch, ()> {
+    let ScopedObservationDirectoryListingSnapshotBatch { listing, members } =
+        scoped_read_directory_relation_listing_snapshot(host, pass, binding, request)?;
+    let membership =
+        ScopedRelationMembershipObservation::from_directory_listing(listing).map_err(|_| ())?;
+    Ok(ScopedObservationDirectorySnapshotBatch {
+        membership,
+        members,
+    })
+}
+
+/// Read, decode, and revalidate one directory while retaining its finalized
+/// listing authority for a caller that must compose several evidence-derived
+/// roots into one relation membership. The returned listing still contains
+/// private native coordinates and must be finalized or dropped before any
+/// portable boundary.
+fn scoped_read_directory_relation_listing_snapshot(
+    host: &ScopedObservationAccessHost,
+    pass: &ScopedObservationAccessPass,
+    binding: &ScopedObservationDirectoryPassBinding,
+    request: ScopedObservationDirectorySnapshotRequest<'_>,
+) -> Result<ScopedObservationDirectoryListingSnapshotBatch, ()> {
     if request.relation_ordinal == 0 {
         return Err(());
     }
@@ -20106,12 +20157,7 @@ fn scoped_read_directory_relation_snapshot(
     listing
         .confirm_membership_unchanged(verification)
         .map_err(|_| ())?;
-    let membership =
-        ScopedRelationMembershipObservation::from_directory_listing(listing).map_err(|_| ())?;
-    Ok(ScopedObservationDirectorySnapshotBatch {
-        membership,
-        members,
-    })
+    Ok(ScopedObservationDirectoryListingSnapshotBatch { listing, members })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

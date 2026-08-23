@@ -6179,6 +6179,96 @@ pub(crate) mod tests {
             "root, membership source, and selected child must all remain covered"
         );
         assert_eq!(watermark.scope_coverage.relations().len(), 2);
+
+        let member_source = admission
+            .dynamic_relation_members_for_test("descendant-objects")
+            .and_then(|members| members.iter().next())
+            .cloned()
+            .expect("the selected directory child remains admitted");
+        let retained_object_token = admission
+            .directory_member_object_token_for_test(&member_source)
+            .expect("the selected directory child retains one object token");
+        let revalidation_pass = host.begin_pass().unwrap();
+        let mut listing = match host
+            .scan_directory_relation_membership(
+                &revalidation_pass,
+                "descendant-objects",
+                &identity,
+                AccessPhase::Revalidation,
+                admission.directory_relation_listing("descendant-objects"),
+            )
+            .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
+            other => panic!("expected a correction directory snapshot, got {other:?}"),
+        };
+        let mut correction_contents = Vec::new();
+        while let Some(read) = listing.read_next_member().unwrap() {
+            match read {
+                ScopedObservationDirectoryMemberRead::Stable(content) => {
+                    correction_contents.push(content)
+                }
+                other => panic!("expected a stable correction member, got {other:?}"),
+            }
+        }
+        let mut correction_lifecycles = Vec::with_capacity(correction_contents.len());
+        for content in correction_contents {
+            let mut member_origin = origin.clone();
+            member_origin.source_instance_id = content.source_instance_for_test().id;
+            member_origin.observed_at = 41;
+            let input = content.bootstrap_for_test().unwrap();
+            correction_lifecycles.push(
+                listing
+                    .observe_bootstrapped_member(
+                        input,
+                        &member_origin,
+                        admission.directory_member_decoder_state(&member_source),
+                    )
+                    .unwrap(),
+            );
+        }
+        let verification = match host
+            .scan_directory_relation_membership(
+                &revalidation_pass,
+                "descendant-objects",
+                &identity,
+                AccessPhase::Revalidation,
+                Some(&listing),
+            )
+            .unwrap()
+        {
+            ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
+            other => panic!("expected a correction verification snapshot, got {other:?}"),
+        };
+        listing.confirm_membership_unchanged(verification).unwrap();
+        admission
+            .record_relation_membership(
+                revalidation_pass.pass_id(),
+                ScopedAppendDeliveryPhase::Correction,
+                ScopedRelationMembershipObservation::from_directory_listing(listing).unwrap(),
+            )
+            .unwrap();
+        for lifecycle in correction_lifecycles {
+            admission
+                .admit_directory_member(
+                    revalidation_pass.pass_id(),
+                    ScopedAppendDeliveryPhase::Correction,
+                    lifecycle,
+                )
+                .unwrap();
+        }
+        while !admission.is_empty() {
+            assert!(host
+                .offer_consumer_next(&mut admission, &mut projection, &mut drain)
+                .unwrap()
+                .is_some());
+        }
+        assert_eq!(
+            admission.directory_member_object_token_for_test(&member_source),
+            Some(retained_object_token),
+            "a directory correction must preserve the attachment-local child token"
+        );
+        drop(revalidation_pass);
         let rendered = format!("{watermark:?}");
         assert!(!rendered.contains("fixture-session"));
         assert!(!rendered.contains("child.jsonl"));
