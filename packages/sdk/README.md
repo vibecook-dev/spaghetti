@@ -146,6 +146,20 @@ resolved before continuing. Iteration is single-consumer: the observer returns
 the same iterator every time, because a second one would take events from the
 first rather than receive its own copy.
 
+A live session has no natural end, so `for await` parks on the next event
+rather than returning. Call `close()` from elsewhere — a signal handler, a
+session switch — to end the iteration; the loop then drains what is already
+queued and stops.
+
+> **Known deviation (as of 0.8.0-dev).** On a session tree whose per-family
+> revision count exceeds 65,536, `bootstrap_complete` is emitted early: the
+> barrier reports the truncated count as complete coverage, and the remaining
+> revisions arrive afterwards labelled `phase: "live"` even though they were
+> already on disk at attach. Nothing is lost, but a consumer that commits its
+> staged epoch at the barrier will briefly treat existing entities as absent,
+> and one that distinguishes cold state from live activity will see the
+> remainder as new. Sessions below that bound are unaffected.
+
 ### Replacing `watchSessionTranscript`
 
 `watchSessionTranscript` still works and still ships, but it is superseded and
