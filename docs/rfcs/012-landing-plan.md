@@ -216,6 +216,25 @@ it is the largest and depends on L2's codegen).
 
 ## 8a. Follow-ups filed during the landing (not blockers)
 
+- **Filed 2026-08-23 (playground regression fix):** during deferred query bootstrap the
+  catalog/readiness/history SQL probed `canonical_messages` per row while its supporting
+  index (`idx_canonical_messages_session_activity`) is itself a deferred structure — one
+  probe measured 16.6 s on a 1.2 M-row mid-rebuild corpus, so one catalog page cost hours
+  and the playground showed "INDEX IS EMPTY". Fixed with bootstrap-conditional SQL
+  (degraded hydration/message counts until finalization; 124 ms on the same corpus).
+  Remaining from that investigation:
+  - `getStats` still takes ~25 s during deferred bootstrap (it answers; find its scan).
+  - Optional fidelity restore: un-defer `idx_canonical_messages_session_activity` (or a
+    narrower `session_key` index) so decoded sessions can report hydrated during
+    background ingest — L7 must measure the cold-ingest cost first.
+  - The SDK utility process exits once (~10 s in, Electron reports code 0, JS
+    `exit`/`beforeExit` hooks never fire → native-level death) when opening a resumed
+    corpus; the restart now recovers cleanly, but the death is unexplained.
+  - `supervisor.rs` initial scan holds one shared source-pass permit across the entire
+    adapter reconcile — the pool's contract is *bounded* passes; scope the permit per
+    pass so pressure-limited capacity (limit=1 under checkpoint debt) cannot be pinned
+    for the whole build.
+
 - Reconcile `NativeRuntimeMarkerRevisionFact::stable_native_fact_key` (test-only, in the
   contract fixture) with the emitter's inline key in `claude/runtime_facts.rs` — the two
   derivations differ (session/actor_run/kind vs marker id only); changes native-marker

@@ -52,6 +52,39 @@ macro_rules! search_ready_sql {
     };
 }
 
+/// The hydration predicate for one catalog session row, chosen by whether the
+/// deferred query structures exist yet.
+///
+/// The `EXISTS` probe is one index seek — but the index it seeks
+/// (`idx_canonical_messages_session_activity`) is a deferred structure that
+/// does not exist while `query_bootstrap_state` is set, and without it the
+/// probe scans the whole message store per catalog row: measured 16.6 s per
+/// probe on a 1.2 M-row mid-rebuild corpus, which turns one catalog page into
+/// hours. While structures are deferred, hydration reports false — the session
+/// stays `transcript_backed` ("processing") until finalization restores the
+/// seek, which is the degraded state RFC 012B prescribes for an index that is
+/// still converging.
+pub(crate) fn session_hydrated_predicate(structures_deferred: bool) -> &'static str {
+    if structures_deferred {
+        "0"
+    } else {
+        session_hydrated_sql!()
+    }
+}
+
+/// Whether the deferred query structures (FTS + the bootstrap query indexes)
+/// are still absent. Reads the durable marker inside the caller's transaction
+/// so the answer is consistent with every other row the query sees.
+pub(crate) fn query_structures_deferred(
+    connection: &rusqlite::Connection,
+) -> Result<bool, rusqlite::Error> {
+    connection.query_row(
+        "SELECT COUNT(*) > 0 FROM schema_meta WHERE key = 'query_bootstrap_state'",
+        [],
+        |row| row.get(0),
+    )
+}
+
 mod discovery;
 mod query;
 mod readiness;
@@ -66,10 +99,10 @@ use ts_rs::TS;
 
 pub(crate) use discovery::{scan_source, SourceScan};
 pub use query::{
-    encode_external_ref, read_project_page, read_session_page, resolve_catalog_entity,
-    CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest, CatalogProjectRow,
-    CatalogSessionPage, CatalogSessionPageRequest, CatalogSessionRow, IdentityConflict,
-    HISTORY_PROJECT_CATALOG_COLUMNS, HISTORY_PROJECT_CATALOG_CTE, HISTORY_PROJECT_CATALOG_JOINS,
+    encode_external_ref, history_project_catalog_cte, read_project_page, read_session_page,
+    resolve_catalog_entity, CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest,
+    CatalogProjectRow, CatalogSessionPage, CatalogSessionPageRequest, CatalogSessionRow,
+    IdentityConflict, HISTORY_PROJECT_CATALOG_COLUMNS, HISTORY_PROJECT_CATALOG_JOINS,
     HISTORY_SESSION_CATALOG_COLUMNS, HISTORY_SESSION_CATALOG_JOIN,
 };
 pub use readiness::{read_readiness, Readiness, ReadinessField, ReadinessState};

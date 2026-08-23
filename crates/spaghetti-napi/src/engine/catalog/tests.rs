@@ -557,6 +557,110 @@ fn history_convergence_promotes_the_catalog_state_of_a_transcript() {
     engine.shutdown().unwrap();
 }
 
+/// While the deferred query structures are absent (`query_bootstrap_state`
+/// set), catalog, readiness, and history queries must not probe
+/// `canonical_messages` per row — the index that makes those probes one seek
+/// does not exist yet, and on a production mid-rebuild corpus a single probe
+/// measured 16.6 s, turning one catalog page into hours (the 2026-08-23
+/// playground "INDEX IS EMPTY" regression). The surfaces answer with explicit
+/// degradation instead — `transcript_backed`, zero message counts — and full
+/// fidelity returns at finalization.
+#[test]
+fn deferred_structures_keep_catalog_and_history_queries_degraded_not_probing() {
+    let temp = TempDir::new().unwrap();
+    let root = claude_tree(temp.path());
+    let database = temp.path().join("deferred-degraded.db");
+    let engine = SpaghettiEngineCore::open_with_registry(
+        EngineOptions {
+            database_path: database.clone(),
+            query_workers: Some(1),
+            owner_label: Some("catalog-test".to_string()),
+            defer_query_structures: true,
+            source_pass_pool: None,
+        },
+        AdapterRegistry::builder()
+            .register(ClaudeCodeAdapter::new())
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    engine.discover_source_catalog(&configured(&root)).unwrap();
+    engine
+        .reconcile_adapter(
+            "claude-code",
+            ReconcileRequest {
+                configured_roots: vec![root.clone()],
+                reason: "catalog-test".to_string(),
+            },
+        )
+        .unwrap();
+
+    // History is committed, but hydration cannot be proven without the
+    // deferred index: every transcript-backed session reports the degraded
+    // state and zero decoded messages.
+    let building = sessions(&engine);
+    let backed = building
+        .sessions
+        .iter()
+        .filter(|session| session.catalog_state == CatalogState::TranscriptBacked)
+        .count();
+    assert!(
+        backed >= 2,
+        "decoded sessions report transcript_backed while structures are deferred; got {backed}"
+    );
+    assert!(
+        building
+            .sessions
+            .iter()
+            .all(|session| session.catalog_state <= CatalogState::TranscriptBacked),
+        "no session may claim hydration before finalization"
+    );
+    assert!(
+        building
+            .sessions
+            .iter()
+            .all(|session| session.decoded_message_count == 0),
+        "decoded counts stay zero while the counting probe has no index"
+    );
+
+    let projects_building = projects(&engine);
+    assert!(!projects_building.projects.is_empty());
+    engine.readiness().unwrap();
+    let history_building = engine
+        .history_projects(HistoryProjectPageRequest {
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    assert!(history_building
+        .items
+        .iter()
+        .all(|project| project.message_count == 0));
+
+    // Finalization restores the deferred structures and full fidelity.
+    engine.complete_query_bootstrap().unwrap();
+    let after = sessions(&engine);
+    assert!(
+        after
+            .sessions
+            .iter()
+            .any(|session| session.catalog_state >= CatalogState::Hydrated
+                && session.decoded_message_count > 0),
+        "hydration and decoded counts return once structures exist"
+    );
+    let history_after = engine
+        .history_projects(HistoryProjectPageRequest {
+            cursor: None,
+            limit: 10,
+        })
+        .unwrap();
+    assert!(history_after
+        .items
+        .iter()
+        .any(|project| project.message_count > 0));
+    engine.shutdown().unwrap();
+}
+
 /// The 012B publication tables must be gone, not merely unused.
 fn assert_no_legacy_catalog_tables(database: &Path) {
     let connection =

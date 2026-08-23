@@ -16,8 +16,9 @@ use base64::Engine as _;
 use rusqlite::Connection;
 
 use super::catalog::{
-    encode_external_ref, HISTORY_PROJECT_CATALOG_COLUMNS, HISTORY_PROJECT_CATALOG_CTE,
-    HISTORY_PROJECT_CATALOG_JOINS, HISTORY_SESSION_CATALOG_COLUMNS, HISTORY_SESSION_CATALOG_JOIN,
+    encode_external_ref, history_project_catalog_cte, query_structures_deferred,
+    HISTORY_PROJECT_CATALOG_COLUMNS, HISTORY_PROJECT_CATALOG_JOINS,
+    HISTORY_SESSION_CATALOG_COLUMNS, HISTORY_SESSION_CATALOG_JOIN,
 };
 use super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
@@ -66,6 +67,28 @@ pub(super) fn read_history_projects(
         .map_err(|error| query_sqlite_error("begin history project snapshot", error))?;
     let watermark = read_committed_watermark(&transaction)?;
     validate_history_cursor_watermark(cursor.as_ref(), watermark)?;
+    let structures_deferred = query_structures_deferred(&transaction)
+        .map_err(|error| query_sqlite_error("read deferred-structures marker", error))?;
+    let catalog_cte = history_project_catalog_cte(structures_deferred);
+    // While the deferred indexes are absent the message aggregate scans the
+    // whole message store per query; report empty message stats until
+    // finalization so the list stays bounded during background ingest.
+    let message_stats = if structures_deferred {
+        r#"message_stats AS (
+                SELECT NULL AS project_key, 0 AS message_count,
+                       NULL AS latest_message_at, 0 AS last_commit_seq
+                WHERE 0
+            ),"#
+    } else {
+        r#"message_stats AS (
+                SELECT cs.project_key, COUNT(cm.message_key) AS message_count,
+                       MAX(cm.source_time) AS latest_message_at,
+                       MAX(cm.last_commit_seq) AS last_commit_seq
+                FROM canonical_sessions cs
+                JOIN canonical_messages cm ON cm.session_key = cs.session_key
+                GROUP BY cs.project_key
+            ),"#
+    };
     let mut statement = transaction
         .prepare(&format!(
             r#"
@@ -99,14 +122,7 @@ pub(super) fn read_history_projects(
                 FROM canonical_sessions
                 GROUP BY project_key
             ),
-            message_stats AS (
-                SELECT cs.project_key, COUNT(cm.message_key) AS message_count,
-                       MAX(cm.source_time) AS latest_message_at,
-                       MAX(cm.last_commit_seq) AS last_commit_seq
-                FROM canonical_sessions cs
-                JOIN canonical_messages cm ON cm.session_key = cs.session_key
-                GROUP BY cs.project_key
-            ),
+            {message_stats}
             index_entry_stats AS (
                 SELECT project_key,
                        MAX(CASE WHEN resolution_status = 'resolved' THEN modified_at END)
@@ -122,7 +138,7 @@ pub(super) fn read_history_projects(
                 FROM canonical_project_memory_documents
                 GROUP BY project_key
             ),
-            {HISTORY_PROJECT_CATALOG_CTE}
+            {catalog_cte}
             project_rows AS (
                 SELECT p.project_key, si.adapter_id, p.source_instance_id,
                        p.native_project_key,
@@ -360,6 +376,53 @@ pub(super) fn read_history_sessions(
         .map_err(|error| query_sqlite_error("begin history session snapshot", error))?;
     let watermark = read_committed_watermark(&transaction)?;
     validate_history_cursor_watermark(cursor.as_ref(), watermark)?;
+    let structures_deferred = query_structures_deferred(&transaction)
+        .map_err(|error| query_sqlite_error("read deferred-structures marker", error))?;
+    // Same deferred-index hazard as the project list: without the session
+    // activity index every message aggregate and correlated quality probe
+    // scans the message store. Report empty stats until finalization.
+    let message_stats = if structures_deferred {
+        r#"message_stats AS (
+                SELECT NULL AS session_key, 0 AS message_count,
+                       NULL AS first_message_at, NULL AS last_message_at,
+                       0 AS last_commit_seq
+                WHERE 0
+            ),"#
+    } else {
+        r#"message_stats AS (
+                SELECT cm.session_key, COUNT(*) AS message_count,
+                       MIN(cm.source_time) AS first_message_at,
+                       MAX(cm.source_time) AS last_message_at,
+                       MAX(cm.last_commit_seq) AS last_commit_seq
+                FROM canonical_messages cm
+                JOIN target_sessions target ON target.session_key = cm.session_key
+                GROUP BY cm.session_key
+            ),"#
+    };
+    let first_message_quality = if structures_deferred {
+        "NULL"
+    } else {
+        r#"(
+                           SELECT cm.source_time_quality
+                           FROM canonical_messages cm
+                           WHERE cm.session_key = cs.session_key
+                             AND cm.source_time = ms.first_message_at
+                           ORDER BY cm.message_key ASC
+                           LIMIT 1
+                       )"#
+    };
+    let last_message_quality = if structures_deferred {
+        "NULL"
+    } else {
+        r#"(
+                           SELECT cm.source_time_quality
+                           FROM canonical_messages cm
+                           WHERE cm.session_key = cs.session_key
+                             AND cm.source_time = ms.last_message_at
+                           ORDER BY cm.message_key DESC
+                           LIMIT 1
+                       )"#
+    };
     let mut statement = transaction
         .prepare(&format!(
             r#"
@@ -368,38 +431,16 @@ pub(super) fn read_history_sessions(
                 FROM canonical_sessions
                 WHERE project_key = ?1
             ),
-            message_stats AS (
-                SELECT cm.session_key, COUNT(*) AS message_count,
-                       MIN(cm.source_time) AS first_message_at,
-                       MAX(cm.source_time) AS last_message_at,
-                       MAX(cm.last_commit_seq) AS last_commit_seq
-                FROM canonical_messages cm
-                JOIN target_sessions target ON target.session_key = cm.session_key
-                GROUP BY cm.session_key
-            ),
+            {message_stats}
             session_rows AS (
                 SELECT cs.session_key, cs.project_key, cs.native_session_id,
                        cs.native_project_key, cs.cwd, cs.git_branch,
                        cs.first_prompt, cs.ai_title, cs.custom_title,
                        COALESCE(ms.message_count, 0) AS message_count,
                        ms.first_message_at,
-                       (
-                           SELECT cm.source_time_quality
-                           FROM canonical_messages cm
-                           WHERE cm.session_key = cs.session_key
-                             AND cm.source_time = ms.first_message_at
-                           ORDER BY cm.message_key ASC
-                           LIMIT 1
-                       ) AS first_message_quality,
+                       {first_message_quality} AS first_message_quality,
                        ms.last_message_at,
-                       (
-                           SELECT cm.source_time_quality
-                           FROM canonical_messages cm
-                           WHERE cm.session_key = cs.session_key
-                             AND cm.source_time = ms.last_message_at
-                           ORDER BY cm.message_key DESC
-                           LIMIT 1
-                       ) AS last_message_quality,
+                       {last_message_quality} AS last_message_quality,
                        MAX(
                            COALESCE(ms.last_message_at, ''),
                            COALESCE(cs.source_time, ''),

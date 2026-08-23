@@ -372,6 +372,10 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     });
     services.push(service);
     await service.initialize();
+    // Message-derived fields (messageCount, timeline ordering) are
+    // deliberately degraded while query structures are deferred; this test
+    // asserts the converged product surface, so wait for finalization.
+    await awaitSearchReady(service);
 
     const lateProgress: Array<{ message: string }> = [];
     const stopLateProgress = service.onProgress((progress) => lateProgress.push(progress));
@@ -513,6 +517,10 @@ describe('history query contract survives the catalog', { skip: !native }, () =>
     });
     hosts.push(host);
     await host.whenObserving();
+    // The pre-catalog baseline was captured from a converged database.
+    // Message-derived fields are deliberately degraded while query structures
+    // are deferred, so parity is asserted after finalization.
+    await awaitSearchReady({ getReadiness: () => host.readiness() });
 
     const baseline = JSON.parse(
       readFileSync(new URL('./fixtures/history-contract-baseline.json', import.meta.url), 'utf8'),

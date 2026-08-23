@@ -154,28 +154,32 @@ pub enum CatalogEntityResolution {
 ///
 /// Every term is a join or a durable marker, so one snapshot answers the whole
 /// expression and no engine flag has to be threaded through the read path.
-const SESSION_STATE_SQL: &str = concat!(
-    r#"
+/// The hydration term is chosen by `structures_deferred` — see
+/// [`super::session_hydrated_predicate`] for why the probe must not run while
+/// the deferred indexes are absent.
+fn session_state_sql(structures_deferred: bool) -> String {
+    format!(
+        r#"
     CASE
         WHEN cs.transcript_present = 0 THEN 'discovered'
         WHEN can.session_key IS NULL THEN 'discovered'
-        WHEN NOT "#,
-    session_hydrated_sql!(),
-    r#" THEN 'transcript_backed'
-        WHEN "#,
-    search_ready_sql!(),
-    r#"
+        WHEN NOT {hydrated} THEN 'transcript_backed'
+        WHEN {search_ready}
             THEN 'searchable'
         ELSE 'hydrated'
     END
-"#
-);
+"#,
+        hydrated = super::session_hydrated_predicate(structures_deferred),
+        search_ready = search_ready_sql!(),
+    )
+}
 
 /// SQL the history page borrows so both surfaces derive `catalog_state` from
 /// one definition. Keeping it here — rather than inline in `query_pool.rs` —
 /// is what stops the two derivations drifting apart.
-pub const HISTORY_PROJECT_CATALOG_CTE: &str = concat!(
-    r#"
+pub fn history_project_catalog_cte(structures_deferred: bool) -> String {
+    format!(
+        r#"
     catalog_rollup AS (
         SELECT cs.project_key,
                COUNT(*) AS catalog_sessions,
@@ -183,16 +187,16 @@ pub const HISTORY_PROJECT_CATALOG_CTE: &str = concat!(
                    CASE WHEN cs.transcript_present = 1 AND can.session_key IS NOT NULL
                         THEN 1 ELSE 0 END
                ) AS backed_sessions,
-               SUM(CASE WHEN "#,
-    session_hydrated_sql!(),
-    r#" THEN 1 ELSE 0 END)
+               SUM(CASE WHEN {hydrated} THEN 1 ELSE 0 END)
                    AS hydrated_sessions
         FROM catalog_sessions cs
         LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key
         GROUP BY cs.project_key
     ),
-"#
-);
+"#,
+        hydrated = super::session_hydrated_predicate(structures_deferred),
+    )
+}
 
 /// Projected columns for a history project row.
 pub const HISTORY_PROJECT_CATALOG_COLUMNS: &str = concat!(
@@ -247,6 +251,9 @@ pub fn read_project_page(
         .unchecked_transaction()
         .map_err(|error| sqlite_error("begin catalog project snapshot", error))?;
     let watermark = read_committed_watermark(&transaction)?;
+    let structures_deferred = super::query_structures_deferred(&transaction)
+        .map_err(|error| sqlite_error("read deferred-structures marker", error))?;
+    let session_state = session_state_sql(structures_deferred);
     let cursor = decode_cursor(request.bounds.cursor.as_deref(), watermark)?;
     let (cursor_sort, cursor_key) = cursor
         .map(|cursor| (cursor.sort_key, cursor.entity_key))
@@ -259,7 +266,7 @@ pub fn read_project_page(
             SELECT cs.project_key,
                    cs.session_key,
                    cs.sort_time,
-                   {SESSION_STATE_SQL} AS state
+                   {session_state} AS state
             FROM catalog_sessions cs
             LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key
         ),
@@ -358,6 +365,18 @@ pub fn read_session_page(
         .unchecked_transaction()
         .map_err(|error| sqlite_error("begin catalog session snapshot", error))?;
     let watermark = read_committed_watermark(&transaction)?;
+    let structures_deferred = super::query_structures_deferred(&transaction)
+        .map_err(|error| sqlite_error("read deferred-structures marker", error))?;
+    let session_state = session_state_sql(structures_deferred);
+    // The per-row COUNT has the same deferred-index hazard as the hydration
+    // probe: without `idx_canonical_messages_session_activity` it scans the
+    // message store once per catalog session. Report zero decoded messages
+    // until finalization — the row is `transcript_backed` then anyway.
+    let decoded_messages = if structures_deferred {
+        "0"
+    } else {
+        "(SELECT COUNT(*) FROM canonical_messages cm WHERE cm.session_key = cs.session_key)"
+    };
     let cursor = decode_cursor(request.bounds.cursor.as_deref(), watermark)?;
     let (cursor_sort, cursor_key) = cursor
         .map(|cursor| (cursor.sort_key, cursor.entity_key))
@@ -371,11 +390,8 @@ pub fn read_session_page(
                cs.association_quality, cs.association_provenance,
                cs.native_created_at, cs.native_updated_at, cs.native_message_count,
                cs.transcript_present, cs.last_commit_seq, cs.sort_time,
-               {SESSION_STATE_SQL} AS state,
-               (
-                   SELECT COUNT(*) FROM canonical_messages cm
-                   WHERE cm.session_key = cs.session_key
-               ) AS decoded_messages,
+               {session_state} AS state,
+               {decoded_messages} AS decoded_messages,
                COALESCE(src.degraded, 0), src.degraded_reason
         FROM catalog_sessions cs
         LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key

@@ -339,9 +339,11 @@ fn read_evidence(connection: &Connection) -> Result<Evidence, EngineError> {
         )
         .map_err(|error| sqlite_error("read catalog row counts", error))?;
 
+    let structures_deferred = super::query_structures_deferred(connection)
+        .map_err(|error| sqlite_error("read deferred-structures marker", error))?;
     let (canonical_sessions, hydrated_sessions) = connection
         .query_row(
-            concat!(
+            &format!(
                 r#"
             SELECT (
                 SELECT COUNT(*) FROM catalog_sessions cs
@@ -349,11 +351,10 @@ fn read_evidence(connection: &Connection) -> Result<Evidence, EngineError> {
                 WHERE cs.transcript_present = 1
             ), (
                 SELECT COUNT(*) FROM catalog_sessions cs
-                WHERE cs.transcript_present = 1 AND "#,
-                session_hydrated_sql!(),
-                r#"
+                WHERE cs.transcript_present = 1 AND {hydrated}
             )
-            "#
+            "#,
+                hydrated = super::session_hydrated_predicate(structures_deferred),
             ),
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
