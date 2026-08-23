@@ -47,7 +47,7 @@ from scripts.agent_support.validate import (
 def promoted_release() -> dict[str, object]:
     return {
         "support_release_id": "fixture-support-v1",
-        "status": "promoted",
+        "runtime_selectable": True,
         "capabilities": [
             {
                 "capability_id": "fixture-catalog",
@@ -217,7 +217,7 @@ class CompatibilityTests(unittest.TestCase):
 
     def test_candidate_release_never_confers_support(self) -> None:
         candidate = copy.deepcopy(promoted_release())
-        candidate["status"] = "candidate"
+        candidate["runtime_selectable"] = False
         result = classify_runtime(
             RuntimeProbe("fixture-agent", "darwin", "1.2.3", frozenset({"native.marker"})),
             [candidate],
@@ -238,7 +238,7 @@ class CompatibilityTests(unittest.TestCase):
         self.assertEqual(result.support_release_id, "fixture-support-v1")
 
         candidate = copy.deepcopy(promoted)
-        candidate["status"] = "candidate"
+        candidate["runtime_selectable"] = False
         candidate_result = classify_runtime(
             RuntimeProbe("fixture-agent", "darwin", "9.0.0", frozenset({"native.marker"})),
             [candidate],
@@ -671,7 +671,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                 _load_object(link, "sanitizer approval")
 
     def test_promotion_preflight_rejects_self_approval_and_stub_reports(self) -> None:
-        support_release_id = "claude-code-support-2026-08-21-candidate"
+        support_release_id = "claude-code-support-2026-08-21"
         with self.assertRaises(PromotionPreflightError):
             validate_sanitizer_approval(
                 {
@@ -687,7 +687,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                 candidate_digest="sha256:" + "0" * 64,
             )
 
-        report_root = REPO_ROOT / "agent-support/claude-code/candidate-2026-08-21/reports"
+        report_root = REPO_ROOT / "agent-support/claude-code/2026-08-21/reports"
         performance = json.loads(
             (report_root / "performance-v1.json").read_text(encoding="utf-8")
         )
@@ -994,10 +994,10 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         claude_candidate = [
             release
             for release in releases
-            if release["support_release_id"] == "claude-code-support-2026-08-21-candidate"
+            if release["support_release_id"] == "claude-code-support-2026-08-21"
         ]
         self.assertEqual(len(claude_candidate), 1)
-        self.assertEqual(claude_candidate[0]["status"], "candidate")
+        self.assertEqual(claude_candidate[0]["version"], "2026-08-21")
         self.assertEqual(claude_candidate[0]["sanitizer_review"]["status"], "pending")
         self.assertIsNone(claude_candidate[0]["reports"]["performance_sha256"])
         self.assertEqual(claude_candidate[0]["artifact_compatibility"]["exact_versions"], ["2.1.223"])
@@ -1023,7 +1023,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         telemetry = json.loads(
             (
                 REPO_ROOT
-                / "agent-support/claude-code/candidate-2026-08-21/reports/promotion-telemetry-v1.json"
+                / "agent-support/claude-code/2026-08-21/reports/promotion-telemetry-v1.json"
             ).read_text(encoding="utf-8")
         )
         self.assertEqual(telemetry["rollback"]["query_id"], "legacy.usage")
@@ -1041,11 +1041,19 @@ class SchemaAndRepositoryTests(unittest.TestCase):
         )
         releases = [bundle.document("support-release.json") for bundle in bundles]
         self.assertEqual(
-            {release["status"] for release in releases if release["adapter_id"] == "fixture-agent"},
+            {
+                bundle.document("scope-programs.json")["status"]
+                for bundle in bundles
+                if bundle.document("ads.json")["adapter_id"] == "fixture-agent"
+            },
             {"promoted"},
         )
         self.assertEqual(
-            {release["status"] for release in releases if release["adapter_id"] == "claude-code"},
+            {
+                bundle.document("scope-programs.json")["status"]
+                for bundle in bundles
+                if bundle.document("ads.json")["adapter_id"] == "claude-code"
+            },
             {"candidate"},
         )
         for release in releases:
@@ -1056,7 +1064,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                 frozenset(release["artifact_compatibility"]["required_markers"]),
             )
             result = classify_runtime(probe, releases)
-            if release["status"] == "candidate":
+            if not release.get("runtime_selectable", False):
                 self.assertEqual(result.compatibility_class, CompatibilityClass.RECOGNIZED_UNVERIFIED)
                 self.assertIsNone(result.support_release_id)
             else:
@@ -1068,7 +1076,7 @@ class SchemaAndRepositoryTests(unittest.TestCase):
                 )
                 promoted = classify_runtime(fixture_probe, releases)
                 self.assertEqual(promoted.compatibility_class, CompatibilityClass.EXACT_SUPPORTED)
-                self.assertEqual(promoted.support_release_id, "fixture-agent-support-2026-08-21-promoted")
+                self.assertEqual(promoted.support_release_id, "fixture-agent-support-2026-08-21")
 
 
 if __name__ == "__main__":

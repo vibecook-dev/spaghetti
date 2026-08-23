@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::adapter::{AdapterError, NativeArtifactProbe};
+use crate::adapter::{
+    bounded_file_bytes, platform_id, probe_error, sorted_directory_entries, AdapterError,
+    NativeArtifactProbe,
+};
 
 const MAX_PROBE_ROOTS: usize = 16;
 const MAX_SESSION_ENTRIES: usize = 256;
@@ -14,75 +17,6 @@ const MAX_TRANSCRIPT_ENTRIES: usize = 1_024;
 const MAX_SETTINGS_BYTES: usize = 1024 * 1024;
 const MAX_ACTIVE_SESSION_BYTES: usize = 64 * 1024;
 const MAX_TRANSCRIPT_PREFIX_BYTES: usize = 64 * 1024;
-
-fn probe_error(message: &'static str) -> AdapterError {
-    AdapterError::invalid_contract(message)
-}
-
-fn platform_id() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "darwin",
-        "windows" => "windows",
-        other => other,
-    }
-}
-
-fn bounded_file_bytes(path: &Path, max_bytes: usize) -> Result<Vec<u8>, AdapterError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|_| probe_error("native support probe could not inspect a selected object"))?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.len() > max_bytes as u64
-    {
-        return Err(probe_error(
-            "native support probe selected an invalid or oversized object",
-        ));
-    }
-    let file = File::open(path)
-        .map_err(|_| probe_error("native support probe could not open a selected object"))?;
-    let mut bytes = Vec::with_capacity((metadata.len() as usize).min(max_bytes));
-    file.take(max_bytes as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| probe_error("native support probe could not read a selected object"))?;
-    if bytes.len() > max_bytes {
-        return Err(probe_error(
-            "native support probe object exceeded its byte bound",
-        ));
-    }
-    Ok(bytes)
-}
-
-fn sorted_directory_entries(path: &Path, limit: usize) -> Result<Vec<PathBuf>, AdapterError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => {
-            return Err(probe_error(
-                "native support probe could not inspect a directory",
-            ))
-        }
-    };
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(probe_error(
-            "native support probe selected an invalid directory",
-        ));
-    }
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(path)
-        .map_err(|_| probe_error("native support probe could not read a directory"))?
-    {
-        let entry = entry
-            .map_err(|_| probe_error("native support probe could not read a directory entry"))?;
-        if entries.len() == limit {
-            return Err(probe_error(
-                "native support probe directory exceeded its entry bound",
-            ));
-        }
-        entries.push(entry.path());
-    }
-    entries.sort();
-    Ok(entries)
-}
 
 fn inspect_settings(root: &Path) -> Result<bool, AdapterError> {
     let path = root.join("settings.json");

@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "support_release_id": "grok-support-2026-08-15",
+  "adapter_id": "grok",
+  "version": "2026-08-15",
+  "artifact_compatibility": {
+    "family": "grok",
+    "platforms": [
+      "darwin"
+    ],
+    "exact_versions": [],
+    "ranges": [],
+    "required_markers": [
+      "event.type",
+      "signal.shape",
+      "summary.shape"
+    ],
+    "forward_catalog_only": false
+  },
+  "references": {
+    "ads": {
+      "path": "agent-support/grok/2026-08-15/ads.json",
+      "sha256": "sha256:75df1bad38a2975da5d4614b1485d57d4da4f5e11fe6939fd2d3850620b3240b"
+    },
+    "source_declaration": {
+      "path": "agent-support/grok/2026-08-15/source-declarations.json",
+      "sha256": "sha256:52a6f4949c76ccdde9c71a8601a1fe654010ba332a0d04fabe5d91777a85c520"
+    },
+    "scope_program": {
+      "path": "agent-support/grok/2026-08-15/scope-programs.json",
+      "sha256": "sha256:2da094e844d59bb1d8cabcc6797fe4a0a2ccf61eaba95c31249fa6beedead173"
+    },
+    "evidence": {
+      "path": "agent-support/grok/2026-08-15/evidence.json",
+      "sha256": "sha256:c228b9c7e0ae6332faaf6db73f99a59466aeb9b55db756de78d1bec452bce601"
+    },
+    "conformance": {
+      "path": "agent-support/grok/2026-08-15/conformance.json",
+      "sha256": "sha256:9b9b18a5a5ebf44be01383c1843fc77b88559b8649967fa1e76a0cf1a2664e62"
+    }
+  },
+  "versions": {
+    "adapter_package": "0.7.0",
+    "decoder_contract": 2,
+    "decoder_state": [
+      1
+    ],
+    "source_record_identity": 1,
+    "fact_identity": 1,
+    "external_entity_reference": 1,
+    "semantic_revision_reference": 1,
+    "coverage": [
+      1
+    ],
+    "durable_contracts": {},
+    "observation_contracts": {}
+  },
+  "capabilities": [
+    {
+      "capability_id": "project-session-catalog",
+      "topology": "catalog",
+      "level": "unsupported",
+      "notes": "RFC 012B catalog assertions and tier composition are not implemented."
+    },
+    {
+      "capability_id": "history-sidecars",
+      "topology": "durable",
+      "level": "supported",
+      "notes": "Current decoder maps bounded sidecars into the existing database; candidate remains non-selectable."
+    },
+    {
+      "capability_id": "usage-runtime",
+      "topology": "durable",
+      "level": "degraded",
+      "notes": "Signal-derived usage lacks independent cross-version conformance."
+    },
+    {
+      "capability_id": "root-session-observation",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "Sibling ScopeProgram is not wired to common observer delivery."
+    }
+  ],
+  "stream_contracts": [
+    {
+      "stream_id": "session-membership",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "full_snapshot"
+    },
+    {
+      "stream_id": "chat-history",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "session-summaries",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "session-events",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "session-signals",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    },
+    {
+      "stream_id": "session-updates",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "stateless_record"
+    }
+  ],
+  "reports": {
+    "conformance_sha256": null,
+    "performance_sha256": null
+  },
+  "sanitizer_review": {
+    "status": "pending",
+    "reviewed_at": null,
+    "reviewer": null
+  },
+  "lifecycle": {
+    "candidate_at": "2026-08-15",
+    "promoted_at": null,
+    "retired_at": null,
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "known_limitations": [
+    "Candidate entries never confer runtime support.",
+    "No independent sanitized sidecar lifecycle corpus is bound to this release.",
+    "Catalog, scoped observation, and public durable/observation contract versions are pending."
+  ],
+  "drift_signatures": [],
+  "promotion_blockers": [
+    "Pin the Grok artifact/version and required markers.",
+    "Author independent sanitized sidecar lifecycle, precedence, usage, and unknown-record fixtures.",
+    "Reconcile candidate-only membership/update schema IDs with the adapter manifest.",
+    "Pass identity, tier, scope, cross-topology, performance, and sanitizer review gates.",
+    "Assign public durable and observation contract versions."
+  ]
+}

@@ -13,5 +13,11 @@ import type { UserInputRequestRevisionFact } from "./UserInputRequestRevisionFac
 
 /**
  * One RFC 012C revision, in the shape it crosses the observer wire.
+ *
+ * The two widest arms are boxed: an enum is as wide as its widest variant, and
+ * a qualified usage snapshot or a typed question set dwarfs the rest. `Box` is
+ * transparent to serde and to ts-rs, so neither the wire shape nor the
+ * generated TypeScript moves — the test below and the committed bindings both
+ * hold it to that.
  */
 export type RuntimeSemanticValue = { "ActorRunRevision": ActorRunRevisionFact } | { "ActorAffiliationRevision": ActorAffiliationRevisionFact } | { "UserInputRequestRevision": UserInputRequestRevisionFact } | { "MessageRevision": MessageRevisionFact } | { "ContentBlockRevision": ContentBlockRevisionFact } | { "NativeRuntimeMarkerRevision": NativeRuntimeMarkerRevisionFact } | { "TaskRevision": TaskRevisionFact } | { "PlanRevision": PlanRevisionFact } | { "ToolRevision": ToolRevisionFact } | { "EffectiveStateRevision": EffectiveStateRevisionFact } | { "UsageRevisionV2": UsageRevisionV2Fact };

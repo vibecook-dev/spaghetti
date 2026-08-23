@@ -681,17 +681,22 @@ def _validate_release(bundle: Bundle) -> list[str]:
     for duplicate in sorted(_duplicates(check_ids)):
         errors.append(f"{bundle.label}/conformance.json: duplicate check {duplicate}")
 
-    status = release["status"]
-    if not bundle.directory.name.startswith(f"{status}-"):
+    # A release is identified by its dated version, which is its directory. The
+    # maturity tier lives in one place — the scope program's declared status —
+    # so a release cannot claim one thing and its declarations another.
+    if bundle.directory.name != release["version"]:
         errors.append(
-            f"{bundle.label}: directory prefix does not match release status {status}"
+            f"{bundle.label}: directory name does not match release version {release['version']}"
         )
-    if status == "candidate":
+    promoted = scope["status"] == "promoted"
+    if not promoted:
         if not release["promotion_blockers"]:
-            errors.append(f"{bundle.label}: candidate support release must name promotion blockers")
+            errors.append(
+                f"{bundle.label}: an unpromoted support release must name promotion blockers"
+            )
         if release["lifecycle"]["promoted_at"] is not None:
-            errors.append(f"{bundle.label}: candidate cannot have promoted_at")
-    elif status == "promoted":
+            errors.append(f"{bundle.label}: an unpromoted release cannot have promoted_at")
+    else:
         if release["promotion_blockers"]:
             errors.append(f"{bundle.label}: promoted support release cannot have blockers")
         if release["sanitizer_review"]["status"] != "approved":
@@ -794,8 +799,8 @@ def _validate_release(bundle: Bundle) -> list[str]:
             errors.append(f"{bundle.label}: promoted ledger requires promoted ADS/source/scope documents")
         if release["lifecycle"]["promoted_at"] is None:
             errors.append(f"{bundle.label}: promoted support release needs promoted_at")
-    elif status == "retired" and release["lifecycle"]["retired_at"] is None:
-        errors.append(f"{bundle.label}: retired support release needs retired_at")
+    # Retirement is expressed by removing the bundle, not by a status a
+    # compiled adapter could still bind to.
     return errors
 
 
@@ -852,15 +857,21 @@ def main() -> int:
             print(f"ERROR: {error}")
         print(f"RFC 012A support contracts: {len(errors)} error(s), {len(bundles)} loaded bundle(s)")
         return 1
-    statuses: dict[str, int] = {"candidate": 0, "promoted": 0, "retired": 0}
-    for bundle in bundles:
-        status = bundle.document("support-release.json")["status"]
-        statuses[status] = statuses.get(status, 0) + 1
+    promoted = [
+        bundle
+        for bundle in bundles
+        if bundle.document("scope-programs.json")["status"] == "promoted"
+    ]
+    names = ", ".join(
+        f"{bundle.document('support-release.json')['adapter_id']}"
+        f"@{bundle.document('support-release.json')['version']}"
+        for bundle in promoted
+    )
     print(
         "RFC 012A support contracts: "
-        f"{len(bundles)} release bundle(s) valid "
-        f"({statuses['promoted']} promoted, {statuses['candidate']} candidate, "
-        f"{statuses['retired']} retired); only promoted releases are selectable"
+        f"{len(bundles)} release bundle(s) valid, "
+        f"{len(promoted)} selectable for runtime decoding"
+        + (f" ({names})" if names else "")
     )
     return 0
 

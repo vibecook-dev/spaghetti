@@ -428,7 +428,14 @@ fn validate_identifier_list(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupportReleaseDescriptor {
     pub support_release_id: String,
-    pub status: SupportReleaseStatus,
+    /// Dated release version, equal to the bundle directory name. There is no
+    /// separate candidate/promoted axis: a release's maturity is its scope
+    /// program's declared status, which is what the declaration rules gate on.
+    pub version: String,
+    /// Whether this release's scope program declares the promoted tier, and so
+    /// may be selected for runtime decoding. Derived at verification from that
+    /// declaration — never declared twice.
+    pub runtime_selectable: bool,
     pub capabilities: Vec<SupportCapabilityDeclaration>,
     pub artifact_compatibility: ArtifactCompatibilityDeclaration,
 }
@@ -537,7 +544,7 @@ struct SupportReleaseWire {
     schema_version: u32,
     support_release_id: String,
     adapter_id: String,
-    status: SupportReleaseStatus,
+    version: String,
     artifact_compatibility: ArtifactCompatibilityDeclaration,
     references: SupportReferenceSetWire,
     versions: SupportVersionsWire,
@@ -819,9 +826,12 @@ pub fn verify_support_release_bundle(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let descriptor = SupportReleaseDescriptor {
+    let mut descriptor = SupportReleaseDescriptor {
         support_release_id: release.support_release_id,
-        status: release.status,
+        version: release.version.clone(),
+        // Set once the scope program is parsed below; it is the declaration
+        // that decides selectability.
+        runtime_selectable: false,
         capabilities,
         artifact_compatibility: release.artifact_compatibility,
     };
@@ -956,29 +966,14 @@ pub fn verify_support_release_bundle(
         scope_programs.expect("support reference set always includes scope program");
     let source_declaration =
         source_declaration.expect("support reference set always includes source declaration");
-    let durable_access_supported = descriptor.status == SupportReleaseStatus::Promoted
-        && descriptor.declared_operation_permissions().durable;
+    descriptor.runtime_selectable = scope_programs.status == ScopeProgramStatus::Promoted;
+    let durable_access_supported =
+        descriptor.runtime_selectable && descriptor.declared_operation_permissions().durable;
     let observation_source_contracts = validate_scope_source_bindings(
         &scope_programs,
         &source_declaration,
         durable_access_supported,
     )?;
-    let scope_status_matches = match descriptor.status {
-        SupportReleaseStatus::Candidate => matches!(
-            scope_programs.status,
-            ScopeProgramStatus::Incomplete | ScopeProgramStatus::Candidate
-        ),
-        SupportReleaseStatus::Promoted => scope_programs.status == ScopeProgramStatus::Promoted,
-        // Retirement removes selection authority and may apply to a withdrawn
-        // candidate or a formerly promoted package without rewriting its
-        // digest-bound declaration documents.
-        SupportReleaseStatus::Retired => true,
-    };
-    if !scope_status_matches {
-        return Err(SupportContractError::invalid(
-            "scope-program status is incompatible with the support-release status",
-        ));
-    }
 
     let adapter_binding = AdapterSupportBinding {
         support_release_id: descriptor.support_release_id.clone(),
@@ -1462,7 +1457,7 @@ pub fn classify_runtime_support(
         .iter()
         .copied()
         .filter(|release| {
-            release.status == SupportReleaseStatus::Promoted
+            release.runtime_selectable
                 && release
                     .artifact_compatibility
                     .platforms
@@ -1624,8 +1619,7 @@ impl SupportCatalog {
         let mut matching_status = false;
         for release in self.releases.values().filter(|release| {
             release.adapter_id == adapter_id
-                && (!require_promoted
-                    || release.descriptor.status == SupportReleaseStatus::Promoted)
+                && (!require_promoted || release.descriptor.runtime_selectable)
         }) {
             matching_status = true;
             if release.verify_adapter_binding(adapter_id, binding).is_ok() {
@@ -1657,8 +1651,7 @@ impl SupportCatalog {
         let mut matching_status = false;
         for release in self.releases.values().filter(|release| {
             release.adapter_id == adapter_id
-                && (!require_promoted
-                    || release.descriptor.status == SupportReleaseStatus::Promoted)
+                && (!require_promoted || release.descriptor.runtime_selectable)
         }) {
             matching_status = true;
             if release.verify_adapter_binding(adapter_id, binding).is_ok()
@@ -3931,19 +3924,16 @@ mod tests {
         }
     }
 
-    fn fixture_scope_manifest(
-        adapter_id: &str,
-        status: SupportReleaseStatus,
-    ) -> ScopeProgramManifest {
+    fn fixture_scope_manifest(adapter_id: &str, promoted: bool) -> ScopeProgramManifest {
         ScopeProgramManifest {
             schema_version: 1,
             declaration_id: format!("{adapter_id}-scope"),
             adapter_id: adapter_id.to_string(),
             ads_id: format!("{adapter_id}-ads"),
-            status: match status {
-                SupportReleaseStatus::Candidate => ScopeProgramStatus::Candidate,
-                SupportReleaseStatus::Promoted => ScopeProgramStatus::Promoted,
-                SupportReleaseStatus::Retired => ScopeProgramStatus::Retired,
+            status: if promoted {
+                ScopeProgramStatus::Promoted
+            } else {
+                ScopeProgramStatus::Candidate
             },
             roots: vec!["root".to_string()],
             programs: vec![ScopeProgramDeclaration {
@@ -3986,7 +3976,7 @@ mod tests {
             adapter_binding: fixture_binding(&descriptor.support_release_id),
             scope_programs: fixture_scope_manifest(
                 &descriptor.artifact_compatibility.family,
-                descriptor.status,
+                descriptor.runtime_selectable,
             ),
             observation_source_contracts: BTreeMap::new(),
         }))
@@ -4033,8 +4023,7 @@ mod tests {
         let mut malformed_request = fixture.contract_request;
         malformed_request.selection_contract_version = 0;
         let binding = fixture_binding("candidate-only-support-v1");
-        let scope_programs =
-            fixture_scope_manifest("candidate-agent", SupportReleaseStatus::Candidate);
+        let scope_programs = fixture_scope_manifest("candidate-agent", false);
         let error = catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new("candidate-agent", &binding, &scope_programs),
@@ -4057,8 +4046,7 @@ mod tests {
             .find(|case| case.name == "exact")
             .unwrap();
         let binding = fixture_binding("fixture-support-v1");
-        let scope_programs =
-            fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
+        let scope_programs = fixture_scope_manifest("fixture-agent", true);
         let (exact_decision, durable) = catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
@@ -4185,10 +4173,7 @@ mod tests {
             .find(|case| case.name == "exact-capability-restricted")
             .unwrap();
         let restricted_binding = fixture_binding("capability-restricted-support-v1");
-        let restricted_scope = fixture_scope_manifest(
-            "capability-restricted-agent",
-            SupportReleaseStatus::Promoted,
-        );
+        let restricted_scope = fixture_scope_manifest("capability-restricted-agent", true);
         let restricted_registration = AdapterSupportRegistration::new(
             "capability-restricted-agent",
             &restricted_binding,
@@ -4255,7 +4240,7 @@ mod tests {
             "schema_version": 1,
             "support_release_id": "fixture-support",
             "adapter_id": "fixture-agent",
-            "status": "promoted",
+            "version": "2026-08-21",
             "artifact_compatibility": {
                 "family": "fixture-agent",
                 "platforms": ["test"],
@@ -4295,7 +4280,7 @@ mod tests {
 
         let verified = verify_support_release_bundle(&release, &documents).unwrap();
         assert_eq!(verified.adapter_id(), "fixture-agent");
-        assert_eq!(verified.descriptor().status, SupportReleaseStatus::Promoted);
+        assert!(verified.descriptor().runtime_selectable);
         assert_eq!(verified.descriptor().capabilities.len(), 3);
         assert_eq!(
             verified.descriptor().declared_operation_permissions(),
@@ -4413,7 +4398,7 @@ mod tests {
 
     #[test]
     fn promoted_directory_membership_retains_exact_bounds_and_lifecycle() {
-        let scope = fixture_scope_manifest("fixture", SupportReleaseStatus::Promoted);
+        let scope = fixture_scope_manifest("fixture", true);
         let mut source: SupportSourceDeclarationWire = serde_json::from_value(serde_json::json!({
             "streams": [{
                 "stream_id": "session-membership",
@@ -4754,8 +4739,7 @@ mod tests {
             .unwrap();
         let catalog = fixture_catalog(&fixture.releases);
         let binding = fixture_binding("fixture-support-v1");
-        let scope_programs =
-            fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
+        let scope_programs = fixture_scope_manifest("fixture-agent", true);
         let (_, authorization) = catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
@@ -4868,8 +4852,7 @@ mod tests {
         let fixture = fixture();
         let catalog = fixture_catalog(&fixture.releases);
         let binding = fixture_binding("fixture-support-v1");
-        let scope_programs =
-            fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
+        let scope_programs = fixture_scope_manifest("fixture-agent", true);
         let exact = fixture
             .runtime_cases
             .iter()
@@ -4930,8 +4913,7 @@ mod tests {
             .find(|case| case.name == "candidate-only-family")
             .unwrap();
         let candidate_binding = fixture_binding("candidate-only-support-v1");
-        let candidate_scope =
-            fixture_scope_manifest("candidate-agent", SupportReleaseStatus::Candidate);
+        let candidate_scope = fixture_scope_manifest("candidate-agent", false);
         assert!(catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new(
@@ -4952,10 +4934,7 @@ mod tests {
             .find(|case| case.name == "exact-capability-restricted")
             .unwrap();
         let restricted_binding = fixture_binding("capability-restricted-support-v1");
-        let restricted_scope = fixture_scope_manifest(
-            "capability-restricted-agent",
-            SupportReleaseStatus::Promoted,
-        );
+        let restricted_scope = fixture_scope_manifest("capability-restricted-agent", true);
         assert!(catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new(
@@ -5230,8 +5209,7 @@ mod tests {
         let mut oversized = candidate.probe.clone();
         oversized.markers.extend(one_over_markers());
         let candidate_binding = fixture_binding("candidate-only-support-v1");
-        let candidate_scope =
-            fixture_scope_manifest("candidate-agent", SupportReleaseStatus::Candidate);
+        let candidate_scope = fixture_scope_manifest("candidate-agent", false);
         let error = catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new(
@@ -5260,8 +5238,7 @@ mod tests {
             .find(|case| case.name == "exact")
             .unwrap();
         let binding = fixture_binding("fixture-support-v1");
-        let scope_programs =
-            fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
+        let scope_programs = fixture_scope_manifest("fixture-agent", true);
         let mut bounded = exact.probe.clone();
         bounded.markers = exact_bound_markers();
         catalog
@@ -5332,8 +5309,7 @@ mod tests {
         }
         let catalog = fixture_catalog(&releases);
         let binding = fixture_binding("Fixture-Support-v1");
-        let scope_programs =
-            fixture_scope_manifest("fixture-agent", SupportReleaseStatus::Promoted);
+        let scope_programs = fixture_scope_manifest("fixture-agent", true);
         let (_, authorization) = catalog
             .authorize_typed_access(
                 AdapterSupportRegistration::new("fixture-agent", &binding, &scope_programs),
