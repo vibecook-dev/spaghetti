@@ -244,7 +244,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
     const projects = await this.resolveProjects(project, query);
     const reports = await Promise.all(
       projects.map((item) =>
-        this.requireHost().client.getUsageActivity({
+        this.requireHost().client.getUsage({
           projectId: item.projectId,
           from: query.from,
           to: query.to,
@@ -253,17 +253,18 @@ class RustObservationService extends EventEmitter implements ObservationService 
     );
     const days = new Map<string, TokenActivityDay>();
     for (const report of reports) {
-      for (const day of report.days) {
+      for (const day of report.window?.days ?? []) {
         const values = usageValues(day.aggregate);
         const exactTokens = day.aggregate.exact.componentTotalTokens;
         const estimatedTokens = day.aggregate.estimated.componentTotalTokens;
+        const unknownResponses = day.aggregate.unknownContributionCount;
         const sourceId = projects.find((item) => item.projectId === report.projectId)?.adapterId;
         const current = days.get(day.date);
         if (!current) {
           days.set(day.date, {
             date: day.date,
             tokenUsage: values,
-            quality: activityQuality(exactTokens, estimatedTokens),
+            quality: activityQuality(exactTokens, estimatedTokens, unknownResponses),
             exactTokens,
             estimatedTokens,
             messageCount: day.aggregate.contributionCount,
@@ -277,7 +278,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
           current.messageCount += day.aggregate.contributionCount;
           current.sessionCount += day.aggregate.sessionCount;
           if (sourceId) current.sourceIds = [...new Set([...current.sourceIds, sourceId])].sort();
-          current.quality = activityQuality(current.exactTokens, current.estimatedTokens);
+          current.quality = activityQuality(current.exactTokens, current.estimatedTokens, unknownResponses);
         }
       }
     }
@@ -904,7 +905,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
           sessionCount: project.transcriptSessionCount,
           messageCount: project.messageCount,
           tokenUsage: usageValues(usage.aggregate),
-          tokensEstimated: usage.aggregate.estimatedContributionCount > 0,
+          tokensEstimated: tokensAreQualified(usage.aggregate),
           lastActiveAt: project.latestActivityAt ?? '',
           firstActiveAt,
           latestGitBranch: latest?.gitBranch ?? latest?.index?.gitBranch ?? '',
@@ -936,7 +937,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
       lastUpdate,
       lifespanMs: durationBetween(startTime, lastUpdate),
       tokenUsage: usageValues(usage.aggregate),
-      tokensEstimated: usage.aggregate.estimatedContributionCount > 0,
+      tokensEstimated: tokensAreQualified(usage.aggregate),
       messageCount: session.messageCount,
       fullPath: session.index?.fullPath ?? '',
       title: session.customTitle ?? session.aiTitle ?? '',
@@ -1181,6 +1182,15 @@ function usageValues(aggregate: SpaghettiEngineUsageAggregate): TokenUsageSummar
   };
 }
 
+/**
+ * True when the displayed total is not fully exact: either some bucket was
+ * derived or estimated, or some response asserted no bucket at all and the
+ * total is a floor rather than a measurement.
+ */
+function tokensAreQualified(aggregate: SpaghettiEngineUsageAggregate): boolean {
+  return aggregate.estimatedContributionCount > 0 || aggregate.unknownContributionCount > 0;
+}
+
 function addTokenUsage(target: TokenUsageSummary, source: TokenUsageSummary): void {
   target.inputTokens += source.inputTokens;
   target.outputTokens += source.outputTokens;
@@ -1189,9 +1199,14 @@ function addTokenUsage(target: TokenUsageSummary, source: TokenUsageSummary): vo
   target.totalTokens += source.totalTokens;
 }
 
-function activityQuality(exact: number, estimated: number): TokenActivityDay['quality'] {
-  if (exact > 0 && estimated > 0) return 'mixed';
-  if (estimated > 0) return 'estimated';
+/**
+ * A day is only `exact` when every response it contains asserted every bucket
+ * exactly. A response that asserted nothing makes the day's total a floor, so
+ * it downgrades the day rather than passing as exact.
+ */
+function activityQuality(exact: number, estimated: number, unknownResponses: number): TokenActivityDay['quality'] {
+  if (exact > 0 && (estimated > 0 || unknownResponses > 0)) return 'mixed';
+  if (estimated > 0 || unknownResponses > 0) return 'estimated';
   if (exact > 0) return 'exact';
   return 'unavailable';
 }

@@ -48,12 +48,11 @@ pub use facts::{
     SessionIndexEntrySnapshot, SessionIndexSnapshotFact, TaskCollectionKind, TaskItemSnapshot,
     TaskLifecycleState, TaskRevisionFact, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
     TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
-    TimestampQuality, TokenUsage, ToolRevisionFact, ToolRevisionKind, UsageAccounting,
-    UsageBucketsV2, UsageFact, UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact,
-    UsageScope, UsageValueAuthority, UsageValueProvenance, UserInputKind, UserInputLifecycleState,
-    UserInputOperation, UserInputOption, UserInputQuestion, UserInputRequestRevisionFact,
-    ValueQuality, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
-    WorkflowStatus,
+    TimestampQuality, ToolRevisionFact, ToolRevisionKind, UsageBucketsV2, UsageQualifiedValue,
+    UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
+    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputOption, UserInputQuestion,
+    UserInputRequestRevisionFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
+    WorkflowSnapshotFact, WorkflowStatus,
 };
 pub(crate) use facts::{
     BoundedNativeEvidence, RecordMappingDisposition, MAX_UNKNOWN_RAW_PAYLOAD_BYTES,

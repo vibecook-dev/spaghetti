@@ -503,11 +503,7 @@ describe('NapiTransport dispatch', () => {
     await client.listArtifacts({ sessionId: 'session' });
     await client.listSources();
     await client.getStats();
-    await client.getUsage({ projectId: 'project' });
-    await client.getUsageActivity({ projectId: 'project', from: '2026-08-01', to: '2026-08-12' });
-    await client.getRuntimeUsageV2({ projectId: 'project', sessionId: 'session' });
-    await client.getRuntimeUsageTotals({ scopes: [{ projectId: 'project' }] });
-    await client.getRuntimeUsageCompatibility({ scopes: [{ projectId: 'project' }] });
+    await client.getUsage({ projectId: 'project', from: '2026-08-01', to: '2026-08-12' });
     await client.getFactFamilyCoverage({
       projectId: 'project',
       sessionId: 'session',
@@ -548,10 +544,6 @@ describe('NapiTransport dispatch', () => {
         'listSources',
         'getStats',
         'getUsage',
-        'getUsageActivity',
-        'getRuntimeUsageV2',
-        'getRuntimeUsageTotals',
-        'getRuntimeUsageCompatibility',
         'getFactFamilyCoverage',
         'getRuntimeSnapshot',
         'getRunState',
@@ -640,11 +632,7 @@ describe('embedded SpaghettiClient', { skip: !native }, () => {
     await assert.rejects(client.listProjects({ cursor: 'not-a-cursor' }), (error) =>
       errorCode(error, 'cursor_invalid'),
     );
-    await assert.rejects(
-      client.getRuntimeUsageV2({ projectId: 'not-a-project-id', sessionId: 'not-a-session-id' }),
-      (error) => errorCode(error, 'invalid_request'),
-    );
-    await assert.rejects(client.getRuntimeUsageTotals({ scopes: [{ projectId: 'not-a-project-id' }] }), (error) =>
+    await assert.rejects(client.getUsage({ projectId: 'not-a-project-id', sessionId: 'not-a-session-id' }), (error) =>
       errorCode(error, 'invalid_request'),
     );
     await assert.rejects(

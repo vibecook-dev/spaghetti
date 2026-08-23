@@ -235,7 +235,7 @@ describe('multi-adapter observation host', { skip: !native }, () => {
       'the transport-neutral client must remain read-only',
     );
     assert.equal(
-      (host.clientInfo.methods as readonly string[]).includes('selectRuntimeUsageQuery'),
+      (host.clientInfo.methods as readonly string[]).includes('getUsage'),
       false,
       'query selection must remain an owner-only mutation',
     );
@@ -290,22 +290,11 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.ok(replay.outcome.recordsDecoded > 0);
     await assert.rejects(host.replayFactFamily(request), /authorization is stale/i);
 
-    const usage = await host.client.getRuntimeUsageV2({ projectId, sessionId, limit: 1 });
-    const promoted = await host.selectRuntimeUsageQuery({
-      projectId,
-      sessionId,
-      targetQueryId: 'runtime.usage-v2',
-      expectedMaterialized: usage.querySelection.materialized,
-      expectedSelectedQueryId: usage.querySelection.selected.queryId,
-      expectedSelectedContractVersion: usage.querySelection.selected.contractVersion,
-      expectedSelectionEpoch: usage.querySelection.selectionEpoch,
-      reason: 'observation host usage-v2 promotion smoke test',
-    });
-    assert.equal(promoted.selection.selected.queryId, 'runtime.usage-v2');
-    assert.equal(
-      (await host.client.getRuntimeUsageV2({ projectId, sessionId, limit: 1 })).projectionStatus,
-      'selected',
-    );
+    // Response-level usage is the only usage path, so a replay must leave the
+    // session's contribution total where it was.
+    const usage = await host.client.getUsage({ projectId, sessionId });
+    assert.equal(usage.contractVersion, 1);
+    assert.equal(usage.aggregate.contributionCount > 0, true);
   });
 
   test('serves one source-neutral product API for Claude, Codex, and Grok', async () => {

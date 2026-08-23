@@ -2555,44 +2555,6 @@ impl TokenUsage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UsageScope {
-    Record,
-    Message,
-    Turn,
-    Run,
-    Session,
-    Team,
-    Project,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UsageAccounting {
-    Delta,
-    Cumulative,
-    Snapshot,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ValueQuality {
-    NativeExact,
-    NativeApproximate,
-    DerivedExact,
-    Estimated,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UsageFact {
-    pub subject: EntityKey,
-    pub session: EntityKey,
-    pub scope: UsageScope,
-    pub accounting: UsageAccounting,
-    pub quality: ValueQuality,
-    pub values: TokenUsage,
-    pub model: Option<String>,
-    pub source_time: Option<QualifiedTimestamp>,
-}
-
 /// How a native usage response is identified inside one source object and
 /// generation. The enclosing canonical fact key supplies that scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2602,7 +2564,6 @@ pub enum UsageResponseIdentity {
     SourceRecordFallback,
 }
 
-/// Agent-neutral authority classification for a qualified runtime value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageValueAuthority {
@@ -2945,7 +2906,6 @@ pub enum Fact {
     WorkflowSnapshot(WorkflowSnapshotFact),
     WorkflowMemberEvent(WorkflowMemberEventFact),
     RunEvidence(RunEvidenceFact),
-    Usage(UsageFact),
     UsageRevisionV2(UsageRevisionV2Fact),
     UnknownRecord {
         native_kind: Option<String>,
@@ -3029,7 +2989,6 @@ impl Fact {
             Self::WorkflowSnapshot(_) => "workflow_snapshot",
             Self::WorkflowMemberEvent(_) => "workflow_member_event",
             Self::RunEvidence(_) => "run_evidence",
-            Self::Usage(_) => "usage",
             Self::UsageRevisionV2(_) => "runtime.usage-v2",
             Self::UnknownRecord { .. } => "unknown_record",
         }
@@ -3103,7 +3062,6 @@ impl Fact {
             Self::WorkflowSnapshot(fact) => Some(&fact.workflow),
             Self::WorkflowMemberEvent(fact) => Some(&fact.member),
             Self::RunEvidence(fact) => Some(&fact.run),
-            Self::Usage(fact) => Some(&fact.subject),
             Self::UsageRevisionV2(_) => None,
             Self::UnknownRecord { .. } => None,
         }

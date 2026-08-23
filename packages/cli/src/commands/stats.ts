@@ -13,13 +13,15 @@ export interface StatsOptions {
 export async function statsCommand(api: ObservationService, opts: StatsOptions): Promise<void> {
   const [storeStats, projects] = await Promise.all([api.getStats(), api.getProjectList()]);
 
-  // Aggregate totals
+  // Aggregate totals. These are response-level: one agent response
+  // contributes once no matter how many native rows revised its counters.
   let totalSessions = 0;
   let totalMessages = 0;
   let totalInput = 0;
   let totalOutput = 0;
   let totalCacheCreation = 0;
   let totalCacheRead = 0;
+  let qualifiedProjects = 0;
 
   for (const p of projects) {
     totalSessions += p.sessionCount;
@@ -28,7 +30,10 @@ export async function statsCommand(api: ObservationService, opts: StatsOptions):
     totalOutput += p.tokenUsage.outputTokens;
     totalCacheCreation += p.tokenUsage.cacheCreationTokens;
     totalCacheRead += p.tokenUsage.cacheReadTokens;
+    if (p.tokensEstimated) qualifiedProjects += 1;
   }
+  const tokenQuality =
+    qualifiedProjects === 0 ? 'exact' : qualifiedProjects === projects.length ? 'estimated' : 'mixed';
 
   // JSON output
   if (opts.json) {
@@ -51,6 +56,9 @@ export async function statsCommand(api: ObservationService, opts: StatsOptions):
         cacheCreation: totalCacheCreation,
         cacheRead: totalCacheRead,
         total: totalInput + totalOutput + totalCacheCreation + totalCacheRead,
+        /** `exact` only when every bucket of every response was exact. */
+        quality: tokenQuality,
+        projectsWithQualifiedTokens: qualifiedProjects,
       },
       topProjects: projects
         .map((p: any) => ({
@@ -96,6 +104,15 @@ export async function statsCommand(api: ObservationService, opts: StatsOptions):
   lines.push(`    Cache read:     ${theme.tokens(formatTokens(totalCacheRead))}`);
   lines.push(`    ${theme.muted('─'.repeat(30))}`);
   lines.push(`    Total:          ${theme.tokens(formatTokens(allTokens))}`);
+  lines.push(
+    `    Quality:        ${theme.value(tokenQuality)}${
+      qualifiedProjects > 0
+        ? theme.muted(
+            ` (${formatNumber(qualifiedProjects)} of ${formatNumber(projects.length)} projects not fully exact)`,
+          )
+        : ''
+    }`,
+  );
   lines.push('');
 
   // Top projects by tokens

@@ -67,8 +67,8 @@ const BOOTSTRAP_QUERY_INDEXES: &[(&str, &str)] = &[
         "CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key)",
     ),
     (
-        "idx_usage_contributions_session_time",
-        "CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id)",
+        "idx_usage_v2_response_session_time",
+        "CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session_time ON usage_v2_response_contributions(session_key, source_time, usage_key)",
     ),
 ];
 
@@ -209,7 +209,7 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// no-snapshot catalog build, kept separate from retained-refresh authority.
 /// v62: immutable RFC 012B coverage-plan replacement lineage, retaining an
 /// independently safe prior-plan snapshot while the successor builds.
-pub const SCHEMA_VERSION: u32 = 62;
+pub const SCHEMA_VERSION: u32 = 63;
 
 /// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
 /// template literal. Whitespace differs; structure does not.
@@ -1004,20 +1004,6 @@ CREATE TABLE IF NOT EXISTS projection_versions (
   updated_at INTEGER NOT NULL,
   detail TEXT,
   PRIMARY KEY (projection_id, scope_key)
-);
-
-CREATE TABLE IF NOT EXISTS query_pack_selections (
-  source_instance_id INTEGER NOT NULL REFERENCES source_instances(source_instance_id) ON DELETE CASCADE,
-  query_pack_id TEXT NOT NULL,
-  scope_key BLOB NOT NULL CHECK (length(scope_key) BETWEEN 1 AND 4096),
-  selected_query_id TEXT NOT NULL,
-  selected_contract_version INTEGER NOT NULL CHECK (selected_contract_version > 0),
-  rollback_query_id TEXT NOT NULL,
-  rollback_contract_version INTEGER NOT NULL CHECK (rollback_contract_version > 0),
-  selection_epoch INTEGER NOT NULL CHECK (selection_epoch > 0),
-  last_commit_seq INTEGER NOT NULL REFERENCES ingest_commits(commit_seq) ON DELETE RESTRICT,
-  updated_at INTEGER NOT NULL,
-  PRIMARY KEY (source_instance_id, query_pack_id, scope_key)
 );
 
 CREATE TABLE IF NOT EXISTS source_coverage_sets (
@@ -2113,32 +2099,6 @@ CREATE TABLE IF NOT EXISTS canonical_workflow_members (
 );
 
 
-CREATE TABLE IF NOT EXISTS usage_contributions (
-  fact_id BLOB PRIMARY KEY REFERENCES fact_records(fact_id) ON DELETE CASCADE,
-  subject_key BLOB NOT NULL,
-  session_key BLOB NOT NULL,
-  series_key BLOB NOT NULL,
-  scope TEXT NOT NULL,
-  accounting TEXT NOT NULL,
-  quality TEXT NOT NULL,
-  quality_bucket TEXT NOT NULL,
-  input_tokens INTEGER NOT NULL,
-  output_tokens INTEGER NOT NULL,
-  cache_creation_tokens INTEGER NOT NULL,
-  cache_read_tokens INTEGER NOT NULL,
-  reported_input_tokens INTEGER NOT NULL,
-  reported_output_tokens INTEGER NOT NULL,
-  reported_cache_creation_tokens INTEGER NOT NULL,
-  reported_cache_read_tokens INTEGER NOT NULL,
-  model TEXT,
-  source_time TEXT,
-  source_time_quality TEXT,
-  source_object_id INTEGER NOT NULL,
-  source_generation INTEGER NOT NULL,
-  cursor_end BLOB NOT NULL,
-  last_commit_seq INTEGER NOT NULL
-);
-
 -- RFC 012C shadow projection. Repeated qualification metadata is interned so
 -- response rows retain full value quality/provenance without multiplying the
 -- same agent-field strings across the corpus.
@@ -2261,24 +2221,6 @@ CREATE TABLE IF NOT EXISTS usage_v2_response_contributions (
     OR
     (effort_qualification_key IS NOT NULL AND (effort IS NULL OR length(effort) > 0))
   )
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_contributions_series_cursor
-ON usage_contributions (
-  series_key, source_generation, cursor_end, fact_id
-);
-
-CREATE TABLE IF NOT EXISTS usage_totals (
-  session_key BLOB PRIMARY KEY,
-  exact_input_tokens INTEGER NOT NULL DEFAULT 0,
-  exact_output_tokens INTEGER NOT NULL DEFAULT 0,
-  exact_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-  exact_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-  estimated_input_tokens INTEGER NOT NULL DEFAULT 0,
-  estimated_output_tokens INTEGER NOT NULL DEFAULT 0,
-  estimated_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
-  estimated_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-  last_commit_seq INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS workflows (
@@ -2421,12 +2363,14 @@ CREATE INDEX IF NOT EXISTS idx_canonical_messages_source_generation ON canonical
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_commit_seq DESC, run_key DESC);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_runs(source_object_id, source_generation);
-CREATE INDEX IF NOT EXISTS idx_usage_contributions_session_time ON usage_contributions(session_key, source_time, fact_id);
-CREATE INDEX IF NOT EXISTS idx_usage_contributions_source_generation ON usage_contributions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session ON usage_v2_response_contributions(session_key, usage_key);
+CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session_time ON usage_v2_response_contributions(session_key, source_time, usage_key);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_actor ON usage_v2_response_contributions(actor_run_key, usage_key);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_source_generation ON usage_v2_response_contributions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_session ON runtime_actor_runs_v2(session_key, actor_run_key);
+-- The usage scope bridge joins catalog sessions to RFC 012C identities on the
+-- native session id, so that column needs its own lookup path.
+CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_native_session ON runtime_actor_runs_v2(native_session_id, session_key);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_source_generation ON runtime_actor_runs_v2(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_affiliations_v2_actor ON runtime_actor_affiliations_v2(actor_run_key, dimension, affiliation_key);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_affiliations_v2_target ON runtime_actor_affiliations_v2(dimension, target_key, state, actor_run_key);
@@ -2519,7 +2463,6 @@ CREATE INDEX IF NOT EXISTS idx_canonical_workflows_session ON canonical_workflow
 CREATE INDEX IF NOT EXISTS idx_canonical_workflows_session_activity ON canonical_workflows(session_key, project_key, (CASE WHEN COALESCE(finished_at, started_at) IS NULL THEN 1 ELSE 0 END), COALESCE(finished_at, started_at, '') DESC, workflow_key DESC);
 CREATE INDEX IF NOT EXISTS idx_canonical_workflow_members_workflow ON canonical_workflow_members(workflow_key, native_agent_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_workflow_members_workflow_order ON canonical_workflow_members(workflow_key, native_agent_id, member_key);
-DROP INDEX IF EXISTS idx_usage_contributions_session;
 
 -- Persistent FTS5 (content-synced with messages)
 CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(text_content, content='messages', content_rowid='id');
@@ -2732,8 +2675,6 @@ const CURRENT_TABLES: &[&str] = &[
     "runtime_actor_runs_v2",
     "usage_v2_response_contributions",
     "usage_v2_qualification_specs",
-    "usage_totals",
-    "usage_contributions",
     "run_evidence",
     "canonical_messages",
     "canonical_runs",
@@ -2748,7 +2689,6 @@ const CURRENT_TABLES: &[&str] = &[
     "source_coverage_absences",
     "source_coverage_points",
     "source_coverage_sets",
-    "query_pack_selections",
     "projection_versions",
     "catalog_initial_source_failures",
     "catalog_refresh_source_failures",
@@ -3779,7 +3719,6 @@ mod tests {
             .expect("inspect catalog refresh lineage");
         assert_eq!(refreshing_snapshot_column, 1);
         assert!(object_exists(&conn, "table", "projection_versions"));
-        assert!(object_exists(&conn, "table", "query_pack_selections"));
         for table in [
             "source_coverage_sets",
             "source_coverage_points",
@@ -3895,7 +3834,7 @@ mod tests {
             "idx_canonical_sessions_source_generation",
             "idx_canonical_messages_source_generation",
             "idx_canonical_runs_source_generation",
-            "idx_usage_contributions_source_generation",
+            "idx_usage_v2_response_source_generation",
             "idx_run_evidence_compact",
             "idx_run_evidence_decisive",
             "idx_run_evidence_activity_time",
@@ -4008,8 +3947,16 @@ mod tests {
         ));
         assert!(object_exists(&conn, "table", "canonical_workflows"));
         assert!(object_exists(&conn, "table", "canonical_workflow_members"));
-        assert!(object_exists(&conn, "table", "usage_contributions"));
-        assert!(object_exists(&conn, "table", "usage_totals"));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "usage_v2_response_contributions"
+        ));
+        assert!(object_exists(
+            &conn,
+            "table",
+            "usage_v2_qualification_specs"
+        ));
         assert!(object_exists(
             &conn,
             "table",
@@ -4331,8 +4278,8 @@ mod tests {
             ),
             ("canonical_runs", "idx_canonical_runs_source_generation"),
             (
-                "usage_contributions",
-                "idx_usage_contributions_source_generation",
+                "usage_v2_response_contributions",
+                "idx_usage_v2_response_source_generation",
             ),
             ("run_evidence", "idx_run_evidence_source_generation"),
             (
@@ -4378,8 +4325,6 @@ mod tests {
               ON canonical_messages(session_key, source_generation, cursor_start);
             CREATE INDEX idx_canonical_message_blocks_run
               ON canonical_message_content_blocks(run_key, message_key, block_ordinal);
-            CREATE INDEX idx_usage_contributions_session
-              ON usage_contributions(session_key, fact_id);
             "#,
         )
         .expect("install superseded indexes");
@@ -4394,11 +4339,6 @@ mod tests {
             &conn,
             "index",
             "idx_canonical_message_blocks_run"
-        ));
-        assert!(!object_exists(
-            &conn,
-            "index",
-            "idx_usage_contributions_session"
         ));
 
         for (sql, expected_index) in [
