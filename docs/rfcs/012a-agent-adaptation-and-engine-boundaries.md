@@ -6,9 +6,9 @@
 - **Created:** 2026-08-15
 - **Ratified:** 2026-08-15
 - **Parent:** [RFC 012 umbrella](./012-evidence-backed-adapters-and-progressive-readiness.md)
-- **Program plan:** [RFC 012 implementation plan](./012-implementation-plan.md)
-- **Evidence:** [Phase 0 catalog census](./012-phase-0-census-2026-08-15.md)
-  and [Phase 0B runtime census](./012-runtime-observation-census-2026-08-15.md)
+- **Program plan:** [RFC 012 implementation plan](./archive/012-implementation-plan.md)
+- **Evidence:** [Phase 0 catalog census](./archive/012-phase-0-census-2026-08-15.md)
+  and [Phase 0B runtime census](./archive/012-runtime-observation-census-2026-08-15.md)
 - **Owns:** common/adapter dependency law, qualified-value/base identity
   contracts, stable source-instance/external entity references,
   source-record/fact/semantic-revision identity, common source/family coverage,
@@ -17,6 +17,39 @@
   promotion, and drift
 - **Does not own:** catalog reducers/readiness, runtime fact semantics, durable
   queries, or the scoped-observer lifecycle
+
+## Landing status (2026-08-23)
+
+The normative text below is unchanged and still ratified. This section says
+where it is implemented. Execution authority is
+[the RFC 012 landing plan](./012-landing-plan.md) — §3 for the landing surface,
+§8 for per-lane status with commits and measurements.
+
+| 012A element | State | Where it lives |
+| --- | --- | --- |
+| Common/adapter ownership boundary, forbidden edges | implemented | `crates/spaghetti-napi/src/adapter/` declares; `src/source/` and `src/engine/` own mechanics |
+| `SourceRecord -> FactBatch` seam | implemented | `src/adapter/facts.rs`, driven through `decode_runtime.rs` for both sinks |
+| Base identity: entity, source-record, fact, revision keys | implemented | `src/adapter/semantic.rs` |
+| External and semantic reference wrappers | implemented, generated | `ExternalEntityRef`, `CanonicalEntityKey`, `SemanticRevisionRef`, `FactRevisionId`, `NativeIdentity` in `packages/sdk/src/generated/` |
+| Qualified values (missing is not zero) | implemented | per-bucket qualification in `src/engine/usage_query.rs`; see [012C](./012c-runtime-semantics-and-usage-v2.md) §3.2 |
+| Source/fact-family coverage | implemented | `SpaghettiEngine.getFactFamilyCoverage` and `replayFactFamily` in `crates/spaghetti-napi/index.d.ts` |
+| Mapping dispositions and typed-unknown preservation | implemented | `Fact::UnknownRecord`; on the observer wire as `UnknownEvidenceEvent`, carrying size and digest and never native content |
+| ADS, fixtures, support ledger, conformance, promotion | implemented | `agent-support/`, validated by `scripts/agent_support/validate.py` — 6 bundles, 1 promoted, 5 candidate |
+| Scoped-relation declarations | partial | `agent-support/claude-code/candidate-2026-08-21/scope-programs.json` declares nine session-rooted relations — root transcript, descendant transcripts and metadata, workflow records, journals and child transcripts, team config and inbox, todo snapshot — and `src/observer/runtime.rs` refuses to attach to an adapter declaring no session-rooted program. But `src/observer/scope.rs` still resolves those locators in Rust against the relation ids rather than evaluating the declared program |
+| No hand-written TypeScript mirror of native output | implemented | `pnpm generate:types` (ts-rs) with a CI diff; 13,694 lines of hand-written contracts deleted and the SDK barrel curated from 38 exports to 17 |
+
+Adapter reality check: the Claude adapter emits **all eleven** RFC 012C fact
+families, each with a typed `RuntimeSemanticValue`
+(`src/claude/runtime_facts.rs`, proven end to end by
+`packages/sdk/src/__tests__/observe-session-families.test.ts`). Two families
+rest on narrower evidence than their name suggests — plans come from
+`ExitPlanMode`/`EnterPlanMode` tool evidence rather than `plans/<slug>.md`
+sidecars, and an orphaned `tool_result` claims no tool entity; both are recorded
+in [012C](./012c-runtime-semantics-and-usage-v2.md) §7.
+
+Grok usage is now exact per response, read from `turn_completed` records in
+`updates.jsonl`; the session-scoped estimate path is deleted. A turn that omits
+`cacheCreationTokens` leaves that bucket `unknown` rather than inferring it.
 
 ## 1. Summary
 

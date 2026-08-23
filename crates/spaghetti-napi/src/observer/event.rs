@@ -167,7 +167,11 @@ pub struct SemanticEvent {
     pub observed_at: i64,
     /// The reduced typed value, exactly as RFC 012C defines it for this family.
     /// Absent for a retraction.
-    #[ts(type = "unknown")]
+    ///
+    /// Carried as JSON because the observer is adapter-neutral, and typed for
+    /// TypeScript as the union it actually contains — `adapter/runtime_value.rs`
+    /// proves the two shapes agree for every family.
+    #[ts(as = "Option<crate::adapter::RuntimeSemanticValue>")]
     pub value: Option<serde_json::Value>,
 }
 

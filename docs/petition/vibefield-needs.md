@@ -1,3 +1,61 @@
+## Status vs landing (2026-08-23)
+
+This petition is the requirements document, written before implementation. It
+is unchanged below. This section says what Spaghetti actually ships as of the
+RFC 012 landing, so a reader does not mistake a requirement for a delivery.
+
+**Phase A (§7) is met on the Spaghetti side.** The surface, with generated type
+names and a working example for each item, is
+[docs/integration/vibefield-phase-a.md](../integration/vibefield-phase-a.md).
+
+| §7 Phase A — Spaghetti | State | Shipped as |
+| --- | --- | --- |
+| Stable project/session refs (§1.1) | shipped | `ExternalEntityRef`, aliased `SessionRef` / `ProjectRef`; `externalRef` on every catalog and history row |
+| Native session ID when available | shipped | `CatalogSessionRow.nativeSessionId`; `NativeIdentity` is namespaced, so one id from two products stays two identities |
+| Project association evidence (§1.5) | shipped | `associationBasis`, `associationQuality`, `associationProvenance`, and `identityConflicts[]` on each catalog session row |
+| Durable query watermark (§1.4) | shipped | `atCommitSeq` on every durable result; `queryWatermark()`, `isSameSnapshot()` |
+| Snapshot-consistent pagination (§1.4) | shipped | catalog cursors bound to the watermark page one was answered at |
+| Stable semantic event/revision IDs (§1.2) | shipped | `SemanticRevisionRef`, equal across durable queries and the scoped observer; `isSameRevision()` |
+| Scoped observer epoch + full-replacement resync (§1.3) | shipped | `scope_epoch`, `overflow`, `resync_complete` with a per-family manifest and digest |
+
+Four caveats a Phase A integrator needs:
+
+1. **The reference shape is not the one §1.1 proposed.** The petition sketched a
+   structured `{ adapterId, sourceInstanceId, sessionKey, nativeSessionId }`.
+   What shipped is an opaque digest — `ExternalEntityRef` — deriving from
+   exactly those inputs but exposing none of them. It satisfies every stated
+   requirement (restart-stable, order-independent, namespaced, conflicts
+   explicit) and additionally leaks no local path or database identifier.
+2. **Identity relations do not exist.** §1.1's "deleted or replaced source
+   evidence does not silently cause a different session to reuse the same
+   identity" holds — resolution returns `retracted` rather than retargeting.
+   But there is no alias, `SameEntity`, or `Supersedes` fact: a project moved
+   without provable native identity becomes a new project, and a conflict is
+   reported rather than related.
+3. **No one joins durable and live for you.** §1.2's cross-topology identity is
+   real — the same revision carries the same `SemanticRevisionRef` on both
+   sides — but the deduplication is VibeField's to write. Spaghetti ships the
+   identity, not the merge.
+4. **All eleven fact families are emitted, with typed values** — but two rest on
+   narrower evidence than their name suggests. `plan` revisions come from
+   `ExitPlanMode`/`EnterPlanMode` tool evidence, not from `plans/<slug>.md`
+   sidecars, which stay snapshot facts with no actor binding; and a
+   `tool_result` whose call fell outside the bounded correlation window keeps
+   content-block evidence without a guessed tool name. Both are recorded in
+   [RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §7.
+
+Phases B–D are untouched: no contribution facts, no `code.activity` family, and
+no Git or workspace observation exist in Spaghetti, which is what §5 asked for.
+
+Also relevant to anyone consuming token numbers: **usage is now response-level**
+and totals are about 2.13× lower than 0.7.x reported, because the old
+accounting added every streamed-response repeat. See
+[RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §6. Grok usage is
+exact per response as well, read from `turn_completed` records in
+`updates.jsonl` rather than estimated from a session aggregate.
+
+---
+
 ## Bottom line
 
 **Yes, but the new requirements are narrower than they first appear.**

@@ -78,11 +78,6 @@ impl ResolvedRequest {
     pub(crate) fn root_transcript_relative(&self) -> PathBuf {
         PathBuf::from(&self.project_slug).join(format!("{}.jsonl", self.native_session_id))
     }
-
-    /// `projects`-relative directory holding this session's declared children.
-    pub(crate) fn session_subtree_relative(&self) -> PathBuf {
-        PathBuf::from(&self.project_slug).join(&self.native_session_id)
-    }
 }
 
 impl ObserveSessionRequest {

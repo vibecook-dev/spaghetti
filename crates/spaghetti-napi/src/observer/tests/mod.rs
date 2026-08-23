@@ -3,5 +3,6 @@
 mod epoch;
 mod families;
 mod lifecycle;
+mod program;
 mod scope;
 mod support;
