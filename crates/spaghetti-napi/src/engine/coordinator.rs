@@ -990,56 +990,6 @@ impl ObservationCoordinator {
         }
     }
 
-    /// Discover and durably register every source instance without opening a
-    /// declared stream or decoding source content. RFC 012B uses this phase to
-    /// make the complete configured source set visible before any catalog or
-    /// history producer starts reading native objects.
-    pub(crate) fn discover_and_register_sources<A: AgentAdapter + ?Sized>(
-        &self,
-        adapter: &A,
-        configured_roots: Vec<PathBuf>,
-    ) -> Result<Vec<SourceInstance>, EngineError> {
-        self.check_cancelled()?;
-        validate_request(&ReconcileRequest {
-            configured_roots: configured_roots.clone(),
-            reason: "catalog_registration".to_string(),
-        })?;
-        let manifest = adapter.manifest();
-        manifest
-            .validate()
-            .map_err(|error| adapter_error("validate adapter manifest", error))?;
-        let discovered_at = now_unix_ms()?;
-        let specs = catch_adapter_panic("discover catalog source instances", || {
-            adapter.discover(&DiscoveryContext {
-                configured_roots,
-                observed_at: discovered_at,
-            })
-        })?
-        .map_err(|error| adapter_error("discover catalog source instances", error))?;
-        if specs.is_empty() {
-            return Err(EngineError::InvalidConfig(
-                "catalog registration discovered no source instances".to_string(),
-            ));
-        }
-
-        let mut stable_keys = BTreeSet::new();
-        let mut instances = Vec::with_capacity(specs.len());
-        for spec in specs {
-            self.check_cancelled()?;
-            spec.validate()
-                .map_err(|error| adapter_error("validate catalog source instance", error))?;
-            if !stable_keys.insert(spec.stable_key.as_bytes().to_vec()) {
-                return Err(observation_error(
-                    "validate catalog source instances",
-                    "adapter discovered the same stable instance key more than once",
-                ));
-            }
-            let id = self.reserve_instance(adapter, &spec, discovered_at)?;
-            instances.push(SourceInstance { id, spec });
-        }
-        Ok(instances)
-    }
-
     #[cfg(test)]
     fn with_append_record_limit(engine: Arc<SpaghettiEngineCore>, limit: usize) -> Self {
         assert!(limit > 0 && limit <= MAX_APPEND_RECORDS_PER_RECONCILE);
@@ -4305,10 +4255,6 @@ impl DurableObject {
                 committed_cursor: self.committed_cursor.clone(),
             }
         }
-    }
-
-    fn mark_persisted(&mut self) {
-        self.unpersisted = false;
     }
 
     fn advance(&mut self, checkpoint: &AppendCheckpoint, encoded: Vec<u8>) {

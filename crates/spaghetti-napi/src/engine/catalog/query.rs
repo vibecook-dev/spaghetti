@@ -293,7 +293,7 @@ pub fn read_project_page(
                 cursor_key,
                 i64::from(limit) + 1,
             ],
-            |row| decode_project_row(row),
+            decode_project_row,
         )
         .map_err(|error| sqlite_error("read catalog project page", error))?;
 

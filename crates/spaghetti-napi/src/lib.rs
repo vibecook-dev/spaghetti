@@ -37,6 +37,10 @@ pub mod observer;
 pub mod orchestrate;
 mod runtime_semantic_reducer;
 mod semantic_contract;
+// `#[napi]` registration is compiled out under `cfg(test)`, so under the
+// unit-test target this module's only consumers (the JS callers in
+// `packages/sdk/src/contracts/__tests__/rfc012*-napi.test.ts`) do not exist.
+#[cfg(not(test))]
 mod semantic_contract_napi;
 pub mod source;
 mod unknown_evidence_reducer;

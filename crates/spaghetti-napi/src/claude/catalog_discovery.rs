@@ -60,7 +60,10 @@ pub(super) fn discover(
     let snapshot = DirectorySnapshot::new(DirectorySnapshotConfig {
         max_entries: limits.max_entries,
         max_entries_per_directory: limits.max_entries,
-        max_depth: limits.max_depth.min(2).max(2),
+        // Claude's projects root is exactly two levels deep
+        // (<projects>/<project>/<session>.jsonl), so the scan depth is
+        // pinned rather than taken from `limits`.
+        max_depth: 2,
     })
     .map_err(|error| catalog_scan_error("claude_catalog_bounds", error))?;
 

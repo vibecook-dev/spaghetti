@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Params, Transaction};
+use rusqlite::{params, params_from_iter, OptionalExtension, Params, Transaction};
 
 use crate::adapter::{
     ContractCompleteness, DelegationFact, DelegationKind, DelegationMetadataFact,
@@ -19,7 +19,6 @@ use crate::adapter::{
 
 use super::artifact_projection::{apply_artifact_facts, retract_replayed_artifact_fact};
 use super::commit::{
-    apply_observation_commit_with_projection, apply_observation_commit_with_projection_and_hook,
     apply_observation_commit_with_projection_in_transaction, ChangeEntry, CommitDetail, CommitHook,
     CommitReceipt, ObservationCommit, ProjectionCommitContext, TransactionalProjectionWork,
 };
@@ -45,44 +44,6 @@ const CHANGE_SCHEMA_VERSION: u32 = 1;
 const FACT_INSERT_BATCH_ROWS: usize = 512;
 const MESSAGE_INSERT_BATCH_ROWS: usize = 256;
 const RUN_EVIDENCE_INSERT_BATCH_ROWS: usize = 512;
-
-/// Submit one already-decoded fact batch through the catalog/projection/cursor
-/// transaction. Public changes and the durable fact count are derived here;
-/// callers cannot supply adapter-owned event topics for typed commits.
-pub(super) fn apply_fact_observation_commit(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    batch: &FactBatch,
-) -> Result<CommitReceipt, EngineError> {
-    apply_fact_observation_commit_inner(connection, request, batch, None)
-}
-
-pub(super) fn apply_fact_observation_commit_with_hook(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    batch: &FactBatch,
-    hook: &dyn CommitHook,
-) -> Result<CommitReceipt, EngineError> {
-    apply_fact_observation_commit_inner(connection, request, batch, Some(hook))
-}
-
-fn apply_fact_observation_commit_inner(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    batch: &FactBatch,
-    hook: Option<&dyn CommitHook>,
-) -> Result<CommitReceipt, EngineError> {
-    let (request, projection) = prepare_fact_observation_commit(request, batch, hook)?;
-    match hook {
-        Some(hook) => apply_observation_commit_with_projection_and_hook(
-            connection,
-            &request,
-            &projection,
-            hook,
-        ),
-        None => apply_observation_commit_with_projection(connection, &request, &projection),
-    }
-}
 
 pub(super) fn apply_fact_observation_commit_in_transaction(
     transaction: &Transaction<'_>,
@@ -2081,18 +2042,6 @@ fn evidence_strength_rank(strength: EvidenceStrength) -> i64 {
     }
 }
 
-fn run_state_label(kind: &str) -> &'static str {
-    match kind {
-        "terminal_succeeded" => "succeeded",
-        "terminal_failed" => "failed",
-        "terminal_cancelled" => "cancelled",
-        "input_requested" | "waiting_observed" => "waiting",
-        "run_started" | "activity_observed" => "active",
-        "run_declared" => "declared",
-        _ => "unknown",
-    }
-}
-
 fn reduce_run_state(
     transaction: &Transaction<'_>,
     run_key: &[u8],
@@ -3832,6 +3781,7 @@ pub(super) fn execute_cached<P: Params>(
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     use std::cell::RefCell as StdRefCell;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -3840,6 +3790,7 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     use tempfile::TempDir;
+    #[cfg(feature = "legacy-oracle")]
     use walkdir::WalkDir;
 
     use crate::adapter::{
@@ -3869,22 +3820,31 @@ mod tests {
     };
 
     use super::*;
+    use crate::engine::commit::tests::{
+        apply_observation_commit, apply_observation_commit_with_projection,
+    };
     use crate::engine::commit::{
-        apply_observation_commit, apply_projection_version_commit, source_instance_catalog_id,
-        source_stream_catalog_id, ExpectedSourceCursor, ProjectionReadiness,
-        ProjectionVersionCommit, ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate,
-        SourceStreamSpec,
+        apply_projection_version_commit, source_instance_catalog_id, source_stream_catalog_id,
+        ExpectedSourceCursor, ProjectionReadiness, ProjectionVersionCommit,
+        ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate, SourceStreamSpec,
     };
-    use crate::engine::coverage_query::{
-        read_fact_family_coverage_page, FactFamilyCoveragePageRequest,
-        DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT,
-    };
-    use crate::engine::query_identity::{encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
     use crate::engine::unknown_evidence_projection::{
         read_unknown_evidence_snapshot, unknown_evidence_owner,
     };
     use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
-    use crate::unknown_evidence_reducer::{UnknownEvidenceOccurrence, UnknownEvidenceReducer};
+    use crate::unknown_evidence_reducer::UnknownEvidenceOccurrence;
+
+    /// Submit one already-decoded fact batch through the catalog/projection/cursor
+    /// transaction. Public changes and the durable fact count are derived here;
+    /// callers cannot supply adapter-owned event topics for typed commits.
+    pub(super) fn apply_fact_observation_commit(
+        connection: &mut Connection,
+        request: &ObservationCommit,
+        batch: &FactBatch,
+    ) -> Result<CommitReceipt, EngineError> {
+        let (request, projection) = prepare_fact_observation_commit(request, batch, None)?;
+        apply_observation_commit_with_projection(connection, &request, &projection)
+    }
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
     const PROJECT: &str = "-Users-fixture-project";
@@ -4995,20 +4955,7 @@ mod tests {
         connection.query_row(&sql, [], |row| row.get(0)).unwrap()
     }
 
-    fn persisted_project_session_ids(connection: &Connection) -> (String, String) {
-        let (project_key, session_key) = connection
-            .query_row(
-                "SELECT project_key, session_key FROM canonical_sessions ORDER BY session_key LIMIT 1",
-                [],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )
-            .unwrap();
-        (
-            encode_entity_id(PROJECT_ID_PREFIX, &project_key),
-            encode_entity_id(SESSION_ID_PREFIX, &session_key),
-        )
-    }
-
+    #[cfg(feature = "legacy-oracle")]
     struct ShadowCommit<'a> {
         stream: &'a str,
         decoder: &'a str,
@@ -5020,6 +4967,7 @@ mod tests {
         object_context: Option<&'a AdapterObjectContext>,
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_request(input: ShadowCommit<'_>) -> ObservationCommit {
         ObservationCommit {
             source: SourceInstanceSpec {
@@ -5071,6 +5019,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_ingest_fixture(root: &Path) -> Connection {
         let projects = root.join("projects");
         let adapter = ClaudeCodeAdapter::new();
@@ -5203,6 +5152,7 @@ mod tests {
     /// History parity only. Per-message token columns are gone: RFC 012C
     /// attributes usage to a response, not to a transcript record, and the
     /// corpus totals are proven against the independent oracle instead.
+    #[cfg(feature = "legacy-oracle")]
     type HistoryParityRow = (
         String,
         String,
@@ -5212,10 +5162,12 @@ mod tests {
         String,
     );
 
+    #[cfg(feature = "legacy-oracle")]
     fn normalized_json(raw: String) -> String {
         serde_json::to_string(&serde_json::from_str::<serde_json::Value>(&raw).unwrap()).unwrap()
     }
 
+    #[cfg(feature = "legacy-oracle")]
     type SessionParityRow = (String, String, String, String, String);
     type ExplicitDelegationRow = (
         Vec<u8>,
@@ -5235,6 +5187,7 @@ mod tests {
         Option<Vec<u8>>,
     );
 
+    #[cfg(feature = "legacy-oracle")]
     fn legacy_session_rows(connection: &Connection) -> Vec<SessionParityRow> {
         let mut rows = connection
             .prepare(
@@ -5261,6 +5214,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_session_rows(connection: &Connection) -> Vec<SessionParityRow> {
         let mut rows = connection
             .prepare(
@@ -5288,6 +5242,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn legacy_parent_rows(connection: &Connection) -> Vec<HistoryParityRow> {
         let mut rows = connection
             .prepare(
@@ -5314,6 +5269,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_parent_rows(connection: &Connection) -> Vec<HistoryParityRow> {
         let rows = connection
             .prepare(
@@ -5368,8 +5324,10 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     type SubagentParityRow = (String, Option<String>, String);
 
+    #[cfg(feature = "legacy-oracle")]
     fn legacy_subagent_rows(connection: &Connection) -> Vec<SubagentParityRow> {
         let mut rows = connection
             .prepare(
@@ -5389,6 +5347,7 @@ mod tests {
         rows
     }
 
+    #[cfg(feature = "legacy-oracle")]
     fn shadow_subagent_rows(connection: &Connection) -> Vec<SubagentParityRow> {
         let rows = connection
             .prepare(
@@ -5766,7 +5725,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_unknown_evidence_corrects_restarts_and_retracts_with_shared_digest() {
+    fn durable_unknown_evidence_corrects_restarts_and_retracts_the_retained_set() {
         let directory = TempDir::new().unwrap();
         let database_path = directory.path().join("unknown-evidence.db");
         let object_key = b"fixture-transcript";
@@ -5786,15 +5745,9 @@ mod tests {
         first_request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
         apply_fact_observation_commit(&mut connection, &first_request, &first_batch).unwrap();
 
-        let mut reference = UnknownEvidenceReducer::new(
-            crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
-            crate::unknown_evidence_reducer::MAX_UNKNOWN_EVIDENCE_SAMPLES,
-        )
-        .unwrap();
-        reference.apply(first_occurrence.clone()).unwrap();
         assert_eq!(
             read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
-            reference.snapshot().unwrap()
+            vec![first_occurrence.clone()]
         );
         assert_eq!(
             unknown_evidence_owner(&connection, &first_occurrence.evidence.source_record_id)
@@ -5821,11 +5774,10 @@ mod tests {
         correction_request.stream.consistency = crate::adapter::ConsistencyPolicy::SnapshotReplace;
         apply_fact_observation_commit(&mut connection, &correction_request, &corrected_batch)
             .unwrap();
-        reference.apply(corrected_occurrence).unwrap();
-        let corrected_snapshot = reference.snapshot().unwrap();
+        let corrected_retained = vec![corrected_occurrence];
         assert_eq!(
             read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
-            corrected_snapshot
+            corrected_retained
         );
         assert_eq!(count(&connection, "unknown_native_evidence"), 1);
 
@@ -5834,7 +5786,7 @@ mod tests {
         schema::initialize_schema(&connection).unwrap();
         assert_eq!(
             read_unknown_evidence_snapshot(&connection, object_id, 1).unwrap(),
-            corrected_snapshot
+            corrected_retained
         );
 
         let mut reset_request = request(
@@ -5853,12 +5805,9 @@ mod tests {
             &FactBatch::new(1, 1).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            read_unknown_evidence_snapshot(&connection, object_id, 2)
-                .unwrap()
-                .complete_count,
-            0
-        );
+        assert!(read_unknown_evidence_snapshot(&connection, object_id, 2)
+            .unwrap()
+            .is_empty());
         assert_eq!(count(&connection, "unknown_native_evidence"), 0);
     }
 
@@ -6247,7 +6196,6 @@ mod tests {
         assert!(run_evidence_outranks(&started, &declared));
         assert!(run_evidence_outranks(&succeeded, &started));
         assert!(!run_evidence_outranks(&declared, &succeeded));
-        assert_eq!(run_state_label(succeeded.kind), "succeeded");
         assert_eq!(
             max_optional_time(
                 started.last_activity_at.clone(),

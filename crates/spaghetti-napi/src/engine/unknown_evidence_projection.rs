@@ -14,10 +14,6 @@ use rusqlite::{Connection, OptionalExtension};
 #[cfg(test)]
 use crate::adapter::BoundedNativeEvidence;
 use crate::adapter::{Fact, FactBatch, RecordMappingDisposition, SourceRecordId};
-#[cfg(test)]
-use crate::unknown_evidence_reducer::{
-    UnknownEvidenceAggregateSnapshot, UnknownEvidenceReducer, MAX_UNKNOWN_EVIDENCE_SAMPLES,
-};
 use crate::unknown_evidence_reducer::{
     UnknownEvidenceOccurrence, UnknownEvidenceReductionError, MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
 };
@@ -180,12 +176,14 @@ fn retained_unknown_occurrences(
     Ok(occurrences)
 }
 
+/// The retained current-generation unknown-evidence set for one object,
+/// ordered by source identity so a comparison is independent of arrival order.
 #[cfg(test)]
 pub(super) fn read_unknown_evidence_snapshot(
     connection: &Connection,
     source_object_id: u64,
     generation: u64,
-) -> Result<UnknownEvidenceAggregateSnapshot, EngineError> {
+) -> Result<Vec<UnknownEvidenceOccurrence>, EngineError> {
     let mut statement = connection
         .prepare(
             r#"
@@ -215,11 +213,7 @@ pub(super) fn read_unknown_evidence_snapshot(
         )
         .map_err(|error| sqlite_error("read durable unknown evidence", error))?;
 
-    let mut reducer = UnknownEvidenceReducer::new(
-        MAX_UNKNOWN_EVIDENCE_OCCURRENCES,
-        MAX_UNKNOWN_EVIDENCE_SAMPLES,
-    )
-    .map_err(reduction_error)?;
+    let mut retained = Vec::new();
     for row in rows {
         let (source_record_id, family_hint, observed_bytes, payload_digest, sanitized_excerpt) =
             row.map_err(|error| sqlite_error("decode durable unknown evidence", error))?;
@@ -237,22 +231,20 @@ pub(super) fn read_unknown_evidence_snapshot(
         let observed_bytes = u64::try_from(observed_bytes).map_err(|_| {
             EngineError::InvalidCommit("durable unknown-evidence byte count is invalid".to_string())
         })?;
-        reducer
-            .apply(
-                UnknownEvidenceOccurrence::new(
-                    family_hint,
-                    BoundedNativeEvidence {
-                        source_record_id,
-                        observed_bytes,
-                        payload_digest,
-                        sanitized_excerpt,
-                    },
-                )
-                .map_err(reduction_error)?,
+        retained.push(
+            UnknownEvidenceOccurrence::new(
+                family_hint,
+                BoundedNativeEvidence {
+                    source_record_id,
+                    observed_bytes,
+                    payload_digest,
+                    sanitized_excerpt,
+                },
             )
-            .map_err(reduction_error)?;
+            .map_err(reduction_error)?,
+        );
     }
-    reducer.snapshot().map_err(reduction_error)
+    Ok(retained)
 }
 
 #[cfg(test)]

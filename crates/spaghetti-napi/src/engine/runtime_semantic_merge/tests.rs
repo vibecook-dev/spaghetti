@@ -1,5 +1,3 @@
-use serde_json::{json, Value};
-
 use super::*;
 use crate::adapter::{
     CanonicalFactId, ContentBlockRevisionFact, EffectiveStateDimension, EffectiveStateEvidenceKind,
@@ -12,10 +10,8 @@ use crate::semantic_contract::{
     decode_rfc012c_effective_state_v1, decode_rfc012c_interaction_v1, decode_rfc012c_message_v1,
     decode_rfc012c_native_marker_v1, decode_rfc012c_plan_v1, decode_rfc012c_task_v1,
     decode_rfc012c_tool_v1, parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire,
-    UsageExampleWire,
 };
 
-const RFC012A: &str = include_str!("../../../fixtures/contracts/rfc012a-v1.json");
 const RFC012C: &str = include_str!("../../../fixtures/contracts/rfc012c-runtime-v1.json");
 const RFC012C_INTERACTION: &str =
     include_str!("../../../fixtures/contracts/rfc012c-interaction-v1.json");
@@ -31,9 +27,6 @@ fn runtime_fixture() -> RuntimeContractFixtureWire {
     let parsed = parse_rfc012c_runtime_v1_json(RFC012C).expect("rfc012c fixture");
     serde_json::from_str(&parsed).expect("rfc012c typed fixture")
 }
-
-/// A retraction event for the same fact, as the observer emits one when the
-/// object that owned it resets or disappears.
 
 fn semantic_revision(
     fact_id: CanonicalFactId,
