@@ -13,17 +13,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::adapter::{
-    AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
-    AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
-    CapabilityGranularity, CapabilityId, CapabilitySupport, CatalogDiscoveryLimits,
-    ConsistencyPolicy, ContentBlock, DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy,
-    DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact,
-    FactBatch, MessageFact, MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy,
-    RunEvidenceFact, RunFact, ScopeProgramManifest, SessionFact, SourceAccess,
-    SourceCatalogDiscovery, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceRoot, SourceSnapshot, StreamAuthority, StreamId, StreamSpec,
-    SupportLevel, TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope,
-    ValueQuality,
+    ActorRunRevisionFact, ActorRunRole, AdapterDiagnostic, AdapterError, AdapterErrorClass,
+    AdapterId, AdapterManifest, AdapterObjectContext, AdapterSupportBinding, AgentAdapter,
+    Availability, CapabilityDeclaration, CapabilityGranularity, CapabilityId, CapabilitySupport,
+    CatalogDiscoveryLimits, ConsistencyPolicy, ContentBlock, ContractCompleteness, DecodeContext,
+    DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey,
+    EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole,
+    ObjectSelector, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue,
+    QualifiedValueQuality, RawRetentionPolicy, RunEvidenceFact, RunFact, ScopeProgramManifest,
+    SessionFact, SourceAccess, SourceCatalogDiscovery, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, SourceSnapshot, StreamAuthority,
+    StreamId, StreamSpec, SupportLevel, TimestampQuality, UsageBucketsV2, UsageQualifiedValue,
+    UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
 };
 use crate::source::{
     platform_path_key, read_stable_file_confined, AppendDelimitedConfig, DirectorySnapshotConfig,
@@ -109,6 +110,7 @@ const HISTORY_MESSAGES: &str = "history.messages";
 const HISTORY_CONTENT_BLOCKS: &str = "history.content_blocks";
 const HISTORY_TIMESTAMPS: &str = "history.timestamps";
 const RUNTIME_SESSION_ACTIVITY: &str = "runtime.session_activity";
+const RUNTIME_USAGE_V2: &str = "runtime.usage-v2";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const SOURCE_LIVE: &str = "source.live";
 const SOURCE_RECONCILE: &str = "source.reconcile";
@@ -358,7 +360,7 @@ impl AgentAdapter for GrokAdapter {
             ),
             SUMMARY_DECODER => decode_summary(self.adapter_id(), &session, record, output),
             EVENTS_DECODER => decode_event(self.adapter_id(), &session, record, output),
-            SIGNALS_DECODER => decode_signals(self.adapter_id(), &session, record, output),
+            SIGNALS_DECODER => decode_signals(&session, record, output),
             UPDATES_DECODER => Ok(DecodeDisposition::IgnoredKnown),
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
@@ -427,6 +429,13 @@ fn grok_capabilities() -> Vec<CapabilityDeclaration> {
             CapabilityGranularity::Run,
             Availability::Live,
             Some("turn events prove activity and waiting, while silence never proves session completion"),
+        ),
+        capability(
+            RUNTIME_USAGE_V2,
+            SupportLevel::Estimated,
+            CapabilityGranularity::Session,
+            Availability::EventuallyLive,
+            Some("one replaceable session-scoped revision; Grok publishes no per-response counters"),
         ),
         capability(
             USAGE_INPUT_TOKENS,
@@ -498,7 +507,12 @@ fn runtime_capabilities() -> Vec<CapabilityId> {
 }
 
 fn usage_capabilities() -> Vec<CapabilityId> {
-    ids(&[USAGE_INPUT_TOKENS, SOURCE_LIVE, SOURCE_RECONCILE])
+    ids(&[
+        RUNTIME_USAGE_V2,
+        USAGE_INPUT_TOKENS,
+        SOURCE_LIVE,
+        SOURCE_RECONCILE,
+    ])
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -918,6 +932,24 @@ fn decode_transcript(
                 parent_run: None,
             }),
         )?;
+        // RFC 012C actor identity. It is the bridge between the catalog's
+        // session and the topology-neutral keys usage-v2 contributions are
+        // written under, so a session without it would have unreachable usage.
+        output.push_native(
+            record,
+            session_context.session_id.as_bytes(),
+            Fact::ActorRunRevision(ActorRunRevisionFact {
+                actor_run: output
+                    .canonical_root_actor_run_key(session_context.session_id.as_bytes(), None)?,
+                session: output
+                    .canonical_entity_key("session", session_context.session_id.as_bytes())?,
+                role: ActorRunRole::Root,
+                parent_actor_run: None,
+                native_session_id: Some(session_context.session_id.clone()),
+                native_actor_id: None,
+                native_actor_type: None,
+            }),
+        )?;
         output.push(
             record,
             Fact::RunEvidence(RunEvidenceFact {
@@ -1072,7 +1104,6 @@ fn decode_event(
 }
 
 fn decode_signals(
-    adapter_id: &AdapterId,
     context: &GrokSessionContext,
     record: &SourceRecord,
     output: &mut FactBatch,
@@ -1095,24 +1126,77 @@ fn decode_signals(
     if context_tokens == 0 {
         return Ok(DecodeDisposition::IgnoredKnown);
     }
-    let (session, _, _) = entity_keys(adapter_id, record.source_instance_id, context)?;
-    output.push(
+    // Grok publishes no per-response counters. `contextTokensUsed` is the
+    // session's current context occupancy, so it is carried as one replaceable
+    // session-scoped estimate rather than being split across responses it
+    // cannot be attributed to.
+    let mut response_key = Vec::with_capacity(context.session_id.len() + 24);
+    response_key.extend_from_slice(b"grok-session-signals-v1\0");
+    push_key_component(&mut response_key, context.session_id.as_bytes());
+
+    let session = output.canonical_entity_key("session", context.session_id.as_bytes())?;
+    let actor_run = output.canonical_root_actor_run_key(context.session_id.as_bytes(), None)?;
+    let fact = UsageRevisionV2Fact {
+        session,
+        actor_run,
+        response_key: response_key.clone(),
+        response_identity: UsageResponseIdentity::SourceRecordFallback,
+        native_message_id: None,
+        request_id: None,
+        buckets: UsageBucketsV2 {
+            input_tokens: grok_estimated_context_tokens(context_tokens),
+            output_tokens: grok_unknown_bucket("signals.output_tokens"),
+            cache_creation_input_tokens: grok_unknown_bucket("signals.cache_creation_tokens"),
+            cache_read_input_tokens: grok_unknown_bucket("signals.cache_read_tokens"),
+        },
+        model: None,
+        effort: None,
+        source_time: context.updated_at.as_deref().map(native_timestamp),
+    };
+    fact.validate()?;
+    let semantic_revision_key = fact.semantic_revision_key()?;
+    output.push_native_object_scoped_with_revision(
         record,
-        Fact::Usage(UsageFact {
-            subject: session.clone(),
-            session,
-            scope: UsageScope::Session,
-            accounting: UsageAccounting::Snapshot,
-            quality: ValueQuality::Estimated,
-            values: TokenUsage {
-                input_tokens: context_tokens,
-                ..TokenUsage::default()
-            },
-            model: None,
-            source_time: context.updated_at.as_deref().map(native_timestamp),
-        }),
+        &response_key,
+        &semantic_revision_key,
+        Fact::UsageRevisionV2(fact),
     )?;
     Ok(DecodeDisposition::Applied)
+}
+
+/// Context occupancy is evidence about the session's input side, but it is not
+/// a native per-response counter: it is qualified `Estimated` with partial
+/// completeness so a consumer can never read it as exact accounting.
+fn grok_estimated_context_tokens(value: u64) -> UsageQualifiedValue<u64> {
+    QualifiedValue::from_parts(
+        Some(value),
+        QualifiedValueQuality::Estimated,
+        UsageValueAuthority::AdapterDerived,
+        ContractCompleteness::Partial,
+        None,
+        None,
+        UsageValueProvenance {
+            native_field: "signals.context_tokens_used".to_string(),
+            normalization_contract_version: 1,
+        },
+    )
+    .expect("static Grok usage-v2 estimated value is valid")
+}
+
+fn grok_unknown_bucket(native_field: &str) -> UsageQualifiedValue<u64> {
+    QualifiedValue::from_parts(
+        None,
+        QualifiedValueQuality::Unknown,
+        UsageValueAuthority::AdapterDerived,
+        ContractCompleteness::Unknown,
+        Some(QualifiedUnknownReason::Unsupported),
+        None,
+        UsageValueProvenance {
+            native_field: native_field.to_string(),
+            normalization_contract_version: 1,
+        },
+    )
+    .expect("static Grok usage-v2 unknown value is valid")
 }
 
 type DecodedChatContent = (
@@ -1702,13 +1786,15 @@ mod tests {
         assert_eq!(timed_messages, 16);
         let estimated: i64 = connection
             .query_row(
-                "SELECT SUM(estimated_input_tokens) FROM usage_totals",
+                "SELECT COALESCE(SUM(input_tokens), 0) FROM usage_v2_response_contributions",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(estimated, 17_400);
-        assert_eq!(count("usage_contributions"), 4);
+        // One replaceable session-scoped revision per session with signals,
+        // never one contribution per observed sidecar record.
+        assert_eq!(count("usage_v2_response_contributions"), 4);
     }
 
     #[test]
@@ -1817,8 +1903,8 @@ mod tests {
             let usage: (i64, i64) = connection
                 .query_row(
                     r#"
-                    SELECT SUM(estimated_input_tokens), COUNT(*)
-                    FROM usage_totals
+                    SELECT COALESCE(SUM(input_tokens), 0), COUNT(*)
+                    FROM usage_v2_response_contributions
                     "#,
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1899,7 +1985,7 @@ mod tests {
         let connection = rusqlite::Connection::open(database_path).unwrap();
         let usage: i64 = connection
             .query_row(
-                "SELECT SUM(estimated_input_tokens) FROM usage_totals",
+                "SELECT COALESCE(SUM(input_tokens), 0) FROM usage_v2_response_contributions",
                 [],
                 |row| row.get(0),
             )

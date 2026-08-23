@@ -25,6 +25,18 @@
 //! immediately (SQLite hands the reader a consistent snapshot) and reconciles
 //! in the background by size and modification time.
 
+/// Whether full-text structures are finalized, as a SQL scalar subquery.
+///
+/// The marker is durable — `schema_meta.query_bootstrap_state` exists only
+/// while finalization is incomplete — so every surface reads the same row
+/// instead of being handed an engine flag. One definition is what keeps the
+/// history page and the catalog page from disagreeing about one session.
+macro_rules! search_ready_sql {
+    () => {
+        "(SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')"
+    };
+}
+
 mod discovery;
 mod query;
 mod readiness;

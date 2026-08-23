@@ -927,14 +927,14 @@ async function runConformance(context: HarnessContext): Promise<ConformanceRepor
     assert.ok(project, `missing usage project ${legacyProject.slug}`);
     const [totals, activity] = await Promise.all([
       shadow.getUsage({ projectId: project.projectId }),
-      shadow.getUsageActivity({
+      shadow.getUsage({
         projectId: project.projectId,
         from: context.usageFrom,
         to: context.usageTo,
       }),
     ]);
     assertVersioned(totals, 'getUsage', atCommitSeq);
-    assertVersioned(activity, 'getUsageActivity', atCommitSeq);
+    assertVersioned(activity, 'getUsage window', atCommitSeq);
     const legacyActivity = legacy.getProjectTokenActivity(legacyProject, {
       sourceId: 'claude-code',
       from: context.usageFrom,
@@ -1165,7 +1165,7 @@ async function queryCases(context: HarnessContext): Promise<QueryCase[]> {
           to: context.usageTo,
         }),
       rust: () =>
-        shadow.getUsageActivity({
+        shadow.getUsage({
           projectId: context.messageProject.projectId,
           from: context.usageFrom,
           to: context.usageTo,

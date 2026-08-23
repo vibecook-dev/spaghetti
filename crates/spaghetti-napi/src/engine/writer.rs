@@ -1997,7 +1997,6 @@ mod tests {
             }],
             coverage_sets: Vec::new(),
             coverage_preconditions: Vec::new(),
-            query_pack_selections: Vec::new(),
         };
         assert!(client
             .commit_projection_versions(request.clone())

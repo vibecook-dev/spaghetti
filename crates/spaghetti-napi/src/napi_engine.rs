@@ -33,34 +33,24 @@ use crate::engine::{
     OwnerMetadata, PlanDetail, PlanPage, PlanPageRequest, QueryCancellationToken,
     QueryPerformanceSnapshot, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
     RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
-    RuntimeSnapshotRequest, RuntimeUsageCompatibilityBucket, RuntimeUsageCompatibilityReport,
-    RuntimeUsageCompatibilityRequest, RuntimeUsageCompatibilityTelemetrySnapshot,
-    RuntimeUsageLegacyTotals, RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionCommand,
-    RuntimeUsageQuerySelectionResult, RuntimeUsageQuerySelectionValue, RuntimeUsageTotalsReport,
-    RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, RuntimeUsageV2ActorContext,
-    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
-    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
-    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
-    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance, SearchHit,
-    SearchPage, SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest,
-    SessionIndexDetail, SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage,
-    SourcePageRequest, SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary,
-    SpaghettiEngineCore, StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
-    TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
-    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
-    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
-    TeamSummary, TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
-    ToolResultDetail, ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageActivityDay,
-    UsageActivityReport, UsageActivityRequest, UsageAggregate, UsageCoverageSummary,
-    UsageScopeRequest, UsageTokenValues, UsageTotalsReport, WorkflowDetails,
+    RuntimeSnapshotRequest, SearchHit, SearchPage, SearchPageRequest, SessionDetail,
+    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourceCapabilitySummary,
+    SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest, SourcePerformanceSnapshot,
+    SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore, StoragePerformanceSnapshot,
+    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
+    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
+    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
+    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, TimelineFacets,
+    TimelineMessage, TimelinePage, TimelinePageRequest, ToolResultDetail, ToolResultPage,
+    ToolResultPageRequest, UntimedUsageSummary, UsageAggregate, UsageCoverageSummary, UsageDay,
+    UsageReport, UsageRequest, UsageTokenValues, UsageWindow, UsageWindowReport, WorkflowDetails,
     WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage, WorkflowMemberPageRequest,
     WorkflowPage, WorkflowPageRequest, WorkflowSummary, WriterPerformanceSnapshot,
     CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
     DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
     DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
-    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT,
-    DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT, DEFAULT_TEAM_PAGE_LIMIT,
-    DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES, SELECTED_RUNTIME_USAGE_QUERY_ID,
+    DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
+    DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
 };
 use crate::grok::GrokAdapter;
 
@@ -2294,48 +2284,6 @@ impl From<WriterPerformanceSnapshot> for EngineWriterPerformanceStats {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageCompatibilityTelemetryStats {
-    pub samples: f64,
-    pub ready_samples: f64,
-    pub not_ready_samples: f64,
-    pub equal_samples: f64,
-    pub different_samples: f64,
-    pub incomparable_samples: f64,
-    pub equal_buckets: f64,
-    pub legacy_higher_buckets: f64,
-    pub v2_higher_buckets: f64,
-    pub incomparable_buckets: f64,
-    pub sampled_absolute_delta_tokens: f64,
-    pub max_absolute_delta_tokens: f64,
-    pub first_at_commit_seq: Option<f64>,
-    pub last_at_commit_seq: Option<f64>,
-}
-
-impl From<RuntimeUsageCompatibilityTelemetrySnapshot>
-    for EngineRuntimeUsageCompatibilityTelemetryStats
-{
-    fn from(value: RuntimeUsageCompatibilityTelemetrySnapshot) -> Self {
-        Self {
-            samples: value.samples as f64,
-            ready_samples: value.ready_samples as f64,
-            not_ready_samples: value.not_ready_samples as f64,
-            equal_samples: value.equal_samples as f64,
-            different_samples: value.different_samples as f64,
-            incomparable_samples: value.incomparable_samples as f64,
-            equal_buckets: value.equal_buckets as f64,
-            legacy_higher_buckets: value.legacy_higher_buckets as f64,
-            v2_higher_buckets: value.v2_higher_buckets as f64,
-            incomparable_buckets: value.incomparable_buckets as f64,
-            sampled_absolute_delta_tokens: value.sampled_absolute_delta_tokens as f64,
-            max_absolute_delta_tokens: value.max_absolute_delta_tokens as f64,
-            first_at_commit_seq: value.first_at_commit_seq.map(|value| value as f64),
-            last_at_commit_seq: value.last_at_commit_seq.map(|value| value as f64),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
 pub struct EngineQueryPerformanceStats {
     pub uptime_ms: f64,
     pub requests_enqueued: f64,
@@ -2344,7 +2292,6 @@ pub struct EngineQueryPerformanceStats {
     pub queue_depth: f64,
     pub queue_high_watermark: f64,
     pub oldest_active_ms: f64,
-    pub runtime_usage_compatibility: EngineRuntimeUsageCompatibilityTelemetryStats,
     pub timings: Vec<EngineNamedLatencyStats>,
 }
 
@@ -2358,7 +2305,6 @@ impl From<QueryPerformanceSnapshot> for EngineQueryPerformanceStats {
             queue_depth: value.queue_depth as f64,
             queue_high_watermark: value.queue_high_watermark as f64,
             oldest_active_ms: ns_to_ms(value.oldest_active_ns),
-            runtime_usage_compatibility: value.runtime_usage_compatibility.into(),
             timings: value.timings.into_iter().map(Into::into).collect(),
         }
     }
@@ -2540,24 +2486,16 @@ impl From<CanonicalStats> for EngineCanonicalStats {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
-pub struct EngineUsageScopeOptions {
+pub struct EngineUsageOptions {
     /// Opaque project identity returned by `listHistoryProjects`.
     pub project_id: String,
     /// Optional opaque session identity returned by `listHistorySessions`.
     pub session_id: Option<String>,
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineUsageActivityOptions {
-    /// Opaque project identity returned by `listHistoryProjects`.
-    pub project_id: String,
-    /// Optional opaque session identity returned by `listHistorySessions`.
-    pub session_id: Option<String>,
+    /// Inclusive calendar date in YYYY-MM-DD form. Supplying both `from` and
+    /// `to` adds the per-day series and the untimed remainder to the report.
+    pub from: Option<String>,
     /// Inclusive calendar date in YYYY-MM-DD form.
-    pub from: String,
-    /// Inclusive calendar date in YYYY-MM-DD form.
-    pub to: String,
+    pub to: Option<String>,
 }
 
 #[napi(object)]
@@ -2593,6 +2531,10 @@ pub struct EngineUsageAggregate {
     pub quality: String,
     pub exact_contribution_count: f64,
     pub estimated_contribution_count: f64,
+    /// Responses that assert no token bucket at all. They are never summed as
+    /// zero, so a consumer can tell missing evidence from real zero usage.
+    pub unknown_contribution_count: f64,
+    /// Distinct responses, not native rows.
     pub contribution_count: f64,
     pub session_count: f64,
 }
@@ -2606,6 +2548,7 @@ impl From<UsageAggregate> for EngineUsageAggregate {
             quality: value.quality,
             exact_contribution_count: value.exact_contribution_count as f64,
             estimated_contribution_count: value.estimated_contribution_count as f64,
+            unknown_contribution_count: value.unknown_contribution_count as f64,
             contribution_count: value.contribution_count as f64,
             session_count: value.session_count as f64,
         }
@@ -2615,68 +2558,39 @@ impl From<UsageAggregate> for EngineUsageAggregate {
 #[napi(object)]
 #[derive(Debug, Clone)]
 pub struct EngineUsageCoverage {
-    pub scope: String,
-    pub accounting: String,
+    /// `input`, `output`, `cache_creation`, or `cache_read`.
+    pub bucket: String,
     pub value_quality: String,
-    pub quality_bucket: String,
+    pub completeness: String,
+    pub unknown_reason: Option<String>,
+    pub authority: String,
+    pub native_field: String,
     pub model: Option<String>,
     pub source_time_quality: Option<String>,
     pub contribution_count: f64,
-    pub tokens: EngineUsageTokenValues,
+    pub tokens: f64,
 }
 
 impl From<UsageCoverageSummary> for EngineUsageCoverage {
     fn from(value: UsageCoverageSummary) -> Self {
         Self {
-            scope: value.scope,
-            accounting: value.accounting,
+            bucket: value.bucket,
             value_quality: value.value_quality,
-            quality_bucket: value.quality_bucket,
+            completeness: value.completeness,
+            unknown_reason: value.unknown_reason,
+            authority: value.authority,
+            native_field: value.native_field,
             model: value.model,
             source_time_quality: value.source_time_quality,
             contribution_count: value.contribution_count as f64,
-            tokens: value.tokens.into(),
+            tokens: value.tokens as f64,
         }
     }
 }
 
 #[napi(object)]
 #[derive(Debug, Clone)]
-pub struct EngineUsageTotals {
-    pub contract_version: u32,
-    pub at_commit_seq: f64,
-    pub project_id: String,
-    pub session_id: Option<String>,
-    pub aggregate: EngineUsageAggregate,
-    pub coverage: Vec<EngineUsageCoverage>,
-    pub first_source_time: Option<String>,
-    pub last_source_time: Option<String>,
-    pub first_observed_at_unix_ms: Option<f64>,
-    pub last_observed_at_unix_ms: Option<f64>,
-    pub last_commit_seq: Option<f64>,
-}
-
-impl From<UsageTotalsReport> for EngineUsageTotals {
-    fn from(value: UsageTotalsReport) -> Self {
-        Self {
-            contract_version: value.contract_version,
-            at_commit_seq: value.at_commit_seq as f64,
-            project_id: value.project_id,
-            session_id: value.session_id,
-            aggregate: value.aggregate.into(),
-            coverage: value.coverage.into_iter().map(Into::into).collect(),
-            first_source_time: value.first_source_time,
-            last_source_time: value.last_source_time,
-            first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
-            last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
-            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineUsageActivityDay {
+pub struct EngineUsageDay {
     pub date: String,
     pub aggregate: EngineUsageAggregate,
     pub first_source_time: String,
@@ -2686,8 +2600,8 @@ pub struct EngineUsageActivityDay {
     pub last_commit_seq: f64,
 }
 
-impl From<UsageActivityDay> for EngineUsageActivityDay {
-    fn from(value: UsageActivityDay) -> Self {
+impl From<UsageDay> for EngineUsageDay {
+    fn from(value: UsageDay) -> Self {
         Self {
             date: value.date,
             aggregate: value.aggregate.into(),
@@ -2704,7 +2618,6 @@ impl From<UsageActivityDay> for EngineUsageActivityDay {
 #[derive(Debug, Clone)]
 pub struct EngineUntimedUsage {
     pub aggregate: EngineUsageAggregate,
-    pub coverage: Vec<EngineUsageCoverage>,
     pub first_observed_at_unix_ms: Option<f64>,
     pub last_observed_at_unix_ms: Option<f64>,
     pub last_commit_seq: Option<f64>,
@@ -2714,7 +2627,6 @@ impl From<UntimedUsageSummary> for EngineUntimedUsage {
     fn from(value: UntimedUsageSummary) -> Self {
         Self {
             aggregate: value.aggregate.into(),
-            coverage: value.coverage.into_iter().map(Into::into).collect(),
             first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
             last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
             last_commit_seq: value.last_commit_seq.map(|value| value as f64),
@@ -2724,58 +2636,61 @@ impl From<UntimedUsageSummary> for EngineUntimedUsage {
 
 #[napi(object)]
 #[derive(Debug, Clone)]
-pub struct EngineUsageActivity {
+pub struct EngineUsageWindow {
+    pub from: String,
+    pub to: String,
+    pub days: Vec<EngineUsageDay>,
+    /// Contributions with no structurally valid source date. They are reported
+    /// rather than assigned to a fabricated day.
+    pub untimed: EngineUntimedUsage,
+}
+
+impl From<UsageWindowReport> for EngineUsageWindow {
+    fn from(value: UsageWindowReport) -> Self {
+        Self {
+            from: value.from,
+            to: value.to,
+            days: value.days.into_iter().map(Into::into).collect(),
+            untimed: value.untimed.into(),
+        }
+    }
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct EngineUsage {
     pub contract_version: u32,
     pub at_commit_seq: f64,
     pub project_id: String,
     pub session_id: Option<String>,
-    pub from: String,
-    pub to: String,
-    pub days: Vec<EngineUsageActivityDay>,
     pub aggregate: EngineUsageAggregate,
     pub coverage: Vec<EngineUsageCoverage>,
-    pub untimed: EngineUntimedUsage,
+    pub first_source_time: Option<String>,
+    pub last_source_time: Option<String>,
     pub first_observed_at_unix_ms: Option<f64>,
     pub last_observed_at_unix_ms: Option<f64>,
     pub last_commit_seq: Option<f64>,
+    /// Present only when the request carried a calendar window.
+    pub window: Option<EngineUsageWindow>,
 }
 
-impl From<UsageActivityReport> for EngineUsageActivity {
-    fn from(value: UsageActivityReport) -> Self {
+impl From<UsageReport> for EngineUsage {
+    fn from(value: UsageReport) -> Self {
         Self {
             contract_version: value.contract_version,
             at_commit_seq: value.at_commit_seq as f64,
             project_id: value.project_id,
             session_id: value.session_id,
-            from: value.from,
-            to: value.to,
-            days: value.days.into_iter().map(Into::into).collect(),
             aggregate: value.aggregate.into(),
             coverage: value.coverage.into_iter().map(Into::into).collect(),
-            untimed: value.untimed.into(),
+            first_source_time: value.first_source_time,
+            last_source_time: value.last_source_time,
             first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
             last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
             last_commit_seq: value.last_commit_seq.map(|value| value as f64),
+            window: value.window.map(Into::into),
         }
     }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2Options {
-    /// Opaque project identity returned by `listHistoryProjects`.
-    pub project_id: String,
-    /// Opaque session identity returned by `listHistorySessions`.
-    pub session_id: String,
-    /// Optional RFC 012A actor entity reference returned by this query.
-    pub actor_run_ref: Option<String>,
-    /// Optional `team` or `workflow` dimension; requires a target reference.
-    pub affiliation_dimension: Option<String>,
-    /// RFC 012A team/workflow target entity reference paired with dimension.
-    pub affiliation_target_ref: Option<String>,
-    pub cursor: Option<String>,
-    /// Page size. Defaults to 50 and is capped by the Rust query pack.
-    pub limit: Option<u32>,
 }
 
 #[napi(object)]
@@ -2952,611 +2867,6 @@ impl From<FactFamilyCoveragePage> for EngineFactFamilyCoveragePage {
             family_version: value.family_version,
             coverage: value.coverage.map(Into::into),
             items: value.items.into_iter().map(Into::into).collect(),
-            next_cursor: value.next_cursor,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2ExternalEntityRef {
-    pub external_entity_reference_version: u32,
-    pub entity_key: String,
-}
-
-impl From<RuntimeUsageV2ExternalEntityRef> for EngineRuntimeUsageV2ExternalEntityRef {
-    fn from(value: RuntimeUsageV2ExternalEntityRef) -> Self {
-        Self {
-            external_entity_reference_version: value.external_entity_reference_version,
-            entity_key: value.entity_key,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2SemanticRevisionRef {
-    pub semantic_reference_contract_version: u32,
-    pub fact_revision_id: String,
-}
-
-impl From<RuntimeUsageV2SemanticRevisionRef> for EngineRuntimeUsageV2SemanticRevisionRef {
-    fn from(value: RuntimeUsageV2SemanticRevisionRef) -> Self {
-        Self {
-            semantic_reference_contract_version: value.semantic_reference_contract_version,
-            fact_revision_id: value.fact_revision_id,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2ValueProvenance {
-    pub native_field: String,
-    pub normalization_contract_version: u32,
-}
-
-impl From<RuntimeUsageV2ValueProvenance> for EngineRuntimeUsageV2ValueProvenance {
-    fn from(value: RuntimeUsageV2ValueProvenance) -> Self {
-        Self {
-            native_field: value.native_field,
-            normalization_contract_version: value.normalization_contract_version,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2TokenValue {
-    pub value: Option<f64>,
-    pub quality: String,
-    pub authority: String,
-    pub completeness: String,
-    pub unknown_reason: Option<String>,
-    pub effective_at: Option<f64>,
-    pub provenance: EngineRuntimeUsageV2ValueProvenance,
-}
-
-impl From<RuntimeUsageV2TokenValue> for EngineRuntimeUsageV2TokenValue {
-    fn from(value: RuntimeUsageV2TokenValue) -> Self {
-        Self {
-            value: value.value.map(|value| value as f64),
-            quality: value.quality,
-            authority: value.authority,
-            completeness: value.completeness,
-            unknown_reason: value.unknown_reason,
-            effective_at: value.effective_at.map(|value| value as f64),
-            provenance: value.provenance.into(),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2TextValue {
-    pub value: Option<String>,
-    pub quality: String,
-    pub authority: String,
-    pub completeness: String,
-    pub unknown_reason: Option<String>,
-    pub effective_at: Option<f64>,
-    pub provenance: EngineRuntimeUsageV2ValueProvenance,
-}
-
-impl From<RuntimeUsageV2TextValue> for EngineRuntimeUsageV2TextValue {
-    fn from(value: RuntimeUsageV2TextValue) -> Self {
-        Self {
-            value: value.value,
-            quality: value.quality,
-            authority: value.authority,
-            completeness: value.completeness,
-            unknown_reason: value.unknown_reason,
-            effective_at: value.effective_at.map(|value| value as f64),
-            provenance: value.provenance.into(),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2Response {
-    pub usage_key: String,
-    pub semantic_revision_ref: EngineRuntimeUsageV2SemanticRevisionRef,
-    pub source_record_ref: String,
-    pub session_ref: EngineRuntimeUsageV2ExternalEntityRef,
-    pub actor_run_ref: EngineRuntimeUsageV2ExternalEntityRef,
-    pub response_key_base64: String,
-    pub response_identity: String,
-    pub native_message_id: Option<String>,
-    pub request_id: Option<String>,
-    pub input_tokens: EngineRuntimeUsageV2TokenValue,
-    pub output_tokens: EngineRuntimeUsageV2TokenValue,
-    pub cache_creation_input_tokens: EngineRuntimeUsageV2TokenValue,
-    pub cache_read_input_tokens: EngineRuntimeUsageV2TokenValue,
-    pub model: Option<EngineRuntimeUsageV2TextValue>,
-    pub effort: Option<EngineRuntimeUsageV2TextValue>,
-    pub source_time: Option<String>,
-    pub source_time_quality: Option<String>,
-    pub observed_at_unix_ms: f64,
-    pub source_generation: f64,
-    pub last_commit_seq: f64,
-}
-
-impl From<RuntimeUsageV2Response> for EngineRuntimeUsageV2Response {
-    fn from(value: RuntimeUsageV2Response) -> Self {
-        Self {
-            usage_key: value.usage_key,
-            semantic_revision_ref: value.semantic_revision_ref.into(),
-            source_record_ref: value.source_record_ref,
-            session_ref: value.session_ref.into(),
-            actor_run_ref: value.actor_run_ref.into(),
-            response_key_base64: value.response_key_base64,
-            response_identity: value.response_identity,
-            native_message_id: value.native_message_id,
-            request_id: value.request_id,
-            input_tokens: value.input_tokens.into(),
-            output_tokens: value.output_tokens.into(),
-            cache_creation_input_tokens: value.cache_creation_input_tokens.into(),
-            cache_read_input_tokens: value.cache_read_input_tokens.into(),
-            model: value.model.map(Into::into),
-            effort: value.effort.map(Into::into),
-            source_time: value.source_time,
-            source_time_quality: value.source_time_quality,
-            observed_at_unix_ms: value.observed_at_unix_ms as f64,
-            source_generation: value.source_generation as f64,
-            last_commit_seq: value.last_commit_seq as f64,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2Affiliation {
-    pub affiliation_ref: EngineRuntimeUsageV2ExternalEntityRef,
-    pub semantic_revision_ref: EngineRuntimeUsageV2SemanticRevisionRef,
-    pub dimension: String,
-    pub target_ref: EngineRuntimeUsageV2ExternalEntityRef,
-    pub member_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
-    pub native_target_id: Option<String>,
-    pub native_member_id: Option<String>,
-    pub state: String,
-    pub effective_at: Option<String>,
-    pub effective_at_quality: Option<String>,
-    pub observed_at_unix_ms: f64,
-    pub source_generation: f64,
-    pub last_commit_seq: f64,
-}
-
-impl From<RuntimeUsageV2Affiliation> for EngineRuntimeUsageV2Affiliation {
-    fn from(value: RuntimeUsageV2Affiliation) -> Self {
-        Self {
-            affiliation_ref: value.affiliation_ref.into(),
-            semantic_revision_ref: value.semantic_revision_ref.into(),
-            dimension: value.dimension,
-            target_ref: value.target_ref.into(),
-            member_ref: value.member_ref.map(Into::into),
-            native_target_id: value.native_target_id,
-            native_member_id: value.native_member_id,
-            state: value.state,
-            effective_at: value.effective_at,
-            effective_at_quality: value.effective_at_quality,
-            observed_at_unix_ms: value.observed_at_unix_ms as f64,
-            source_generation: value.source_generation as f64,
-            last_commit_seq: value.last_commit_seq as f64,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2ActorContext {
-    pub actor_run_ref: EngineRuntimeUsageV2ExternalEntityRef,
-    pub semantic_revision_ref: EngineRuntimeUsageV2SemanticRevisionRef,
-    pub session_ref: EngineRuntimeUsageV2ExternalEntityRef,
-    pub role: String,
-    pub parent_actor_run_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
-    pub native_session_id: Option<String>,
-    pub native_actor_id: Option<String>,
-    pub native_actor_type: Option<String>,
-    pub affiliations: Vec<EngineRuntimeUsageV2Affiliation>,
-    pub observed_at_unix_ms: f64,
-    pub source_generation: f64,
-    pub last_commit_seq: f64,
-}
-
-impl From<RuntimeUsageV2ActorContext> for EngineRuntimeUsageV2ActorContext {
-    fn from(value: RuntimeUsageV2ActorContext) -> Self {
-        Self {
-            actor_run_ref: value.actor_run_ref.into(),
-            semantic_revision_ref: value.semantic_revision_ref.into(),
-            session_ref: value.session_ref.into(),
-            role: value.role,
-            parent_actor_run_ref: value.parent_actor_run_ref.map(Into::into),
-            native_session_id: value.native_session_id,
-            native_actor_id: value.native_actor_id,
-            native_actor_type: value.native_actor_type,
-            affiliations: value.affiliations.into_iter().map(Into::into).collect(),
-            observed_at_unix_ms: value.observed_at_unix_ms as f64,
-            source_generation: value.source_generation as f64,
-            last_commit_seq: value.last_commit_seq as f64,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2BucketAggregate {
-    pub known_tokens: f64,
-    pub known_response_count: f64,
-    pub exact_response_count: f64,
-    pub non_exact_response_count: f64,
-    pub unknown_response_count: f64,
-    pub completeness: String,
-}
-
-impl From<RuntimeUsageV2BucketAggregate> for EngineRuntimeUsageV2BucketAggregate {
-    fn from(value: RuntimeUsageV2BucketAggregate) -> Self {
-        Self {
-            known_tokens: value.known_tokens as f64,
-            known_response_count: value.known_response_count as f64,
-            exact_response_count: value.exact_response_count as f64,
-            non_exact_response_count: value.non_exact_response_count as f64,
-            unknown_response_count: value.unknown_response_count as f64,
-            completeness: value.completeness.to_string(),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2Aggregate {
-    pub response_count: f64,
-    pub actor_count: f64,
-    pub input_tokens: EngineRuntimeUsageV2BucketAggregate,
-    pub output_tokens: EngineRuntimeUsageV2BucketAggregate,
-    pub cache_creation_input_tokens: EngineRuntimeUsageV2BucketAggregate,
-    pub cache_read_input_tokens: EngineRuntimeUsageV2BucketAggregate,
-}
-
-impl From<RuntimeUsageV2Aggregate> for EngineRuntimeUsageV2Aggregate {
-    fn from(value: RuntimeUsageV2Aggregate) -> Self {
-        Self {
-            response_count: value.response_count as f64,
-            actor_count: value.actor_count as f64,
-            input_tokens: value.input_tokens.into(),
-            output_tokens: value.output_tokens.into(),
-            cache_creation_input_tokens: value.cache_creation_input_tokens.into(),
-            cache_read_input_tokens: value.cache_read_input_tokens.into(),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2ProjectionReadiness {
-    pub projection_id: String,
-    pub desired_version: u32,
-    pub completed_version: Option<u32>,
-    pub state: String,
-    pub last_commit_seq: Option<f64>,
-    pub updated_at_unix_ms: Option<f64>,
-    pub detail: Option<String>,
-}
-
-impl From<RuntimeUsageV2ProjectionReadiness> for EngineRuntimeUsageV2ProjectionReadiness {
-    fn from(value: RuntimeUsageV2ProjectionReadiness) -> Self {
-        Self {
-            projection_id: value.projection_id,
-            desired_version: value.desired_version,
-            completed_version: value.completed_version,
-            state: value.state,
-            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
-            updated_at_unix_ms: value.updated_at_unix_ms.map(|value| value as f64),
-            detail: value.detail,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageQuerySelectionValue {
-    pub query_id: String,
-    pub contract_version: u32,
-}
-
-impl From<RuntimeUsageQuerySelectionValue> for EngineRuntimeUsageQuerySelectionValue {
-    fn from(value: RuntimeUsageQuerySelectionValue) -> Self {
-        Self {
-            query_id: value.query_id,
-            contract_version: value.contract_version,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageQuerySelection {
-    pub contract_version: u32,
-    pub query_pack_id: String,
-    pub source_instance_ref: Option<String>,
-    pub materialized: bool,
-    pub selected: EngineRuntimeUsageQuerySelectionValue,
-    pub rollback: EngineRuntimeUsageQuerySelectionValue,
-    pub selection_epoch: f64,
-    pub last_commit_seq: Option<f64>,
-    pub updated_at_unix_ms: Option<f64>,
-}
-
-impl From<RuntimeUsageQuerySelection> for EngineRuntimeUsageQuerySelection {
-    fn from(value: RuntimeUsageQuerySelection) -> Self {
-        Self {
-            contract_version: value.contract_version,
-            query_pack_id: value.query_pack_id,
-            source_instance_ref: value.source_instance_ref,
-            materialized: value.materialized,
-            selected: value.selected.into(),
-            rollback: value.rollback.into(),
-            selection_epoch: value.selection_epoch as f64,
-            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
-            updated_at_unix_ms: value.updated_at_unix_ms.map(|value| value as f64),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageTotalsOptions {
-    /// One to 128 canonical project/session scopes. Scopes must not overlap.
-    pub scopes: Vec<EngineUsageScopeOptions>,
-    /// Defaults to `selected`; explicit legacy and usage-v2 requests are also
-    /// available for compatibility and shadow comparison.
-    pub requested_query_id: Option<String>,
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageTotalsSelectionScope {
-    pub selection_scope_ref: String,
-    pub adapter_id: String,
-    pub session_count: f64,
-    pub query_selection: EngineRuntimeUsageQuerySelection,
-    pub projection_readiness: EngineRuntimeUsageV2ProjectionReadiness,
-    pub coverage_status: String,
-    pub v2_eligible: bool,
-}
-
-impl From<RuntimeUsageTotalsSelectionScope> for EngineRuntimeUsageTotalsSelectionScope {
-    fn from(value: RuntimeUsageTotalsSelectionScope) -> Self {
-        Self {
-            selection_scope_ref: value.selection_scope_ref,
-            adapter_id: value.adapter_id,
-            session_count: value.session_count as f64,
-            query_selection: value.query_selection.into(),
-            projection_readiness: value.projection_readiness.into(),
-            coverage_status: value.coverage_status,
-            v2_eligible: value.v2_eligible,
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageLegacyTotals {
-    pub aggregate: EngineUsageAggregate,
-    pub coverage: Vec<EngineUsageCoverage>,
-    pub first_source_time: Option<String>,
-    pub last_source_time: Option<String>,
-    pub first_observed_at_unix_ms: Option<f64>,
-    pub last_observed_at_unix_ms: Option<f64>,
-    pub last_commit_seq: Option<f64>,
-}
-
-impl From<RuntimeUsageLegacyTotals> for EngineRuntimeUsageLegacyTotals {
-    fn from(value: RuntimeUsageLegacyTotals) -> Self {
-        Self {
-            aggregate: value.aggregate.into(),
-            coverage: value.coverage.into_iter().map(Into::into).collect(),
-            first_source_time: value.first_source_time,
-            last_source_time: value.last_source_time,
-            first_observed_at_unix_ms: value.first_observed_at_unix_ms.map(|value| value as f64),
-            last_observed_at_unix_ms: value.last_observed_at_unix_ms.map(|value| value as f64),
-            last_commit_seq: value.last_commit_seq.map(|value| value as f64),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageTotals {
-    pub contract_version: u32,
-    pub at_commit_seq: f64,
-    pub requested_query_id: String,
-    pub status: String,
-    pub resolved_query: Option<EngineRuntimeUsageQuerySelectionValue>,
-    pub scopes: Vec<EngineUsageScopeOptions>,
-    pub selection_vector: Vec<EngineRuntimeUsageTotalsSelectionScope>,
-    pub legacy: Option<EngineRuntimeUsageLegacyTotals>,
-    pub usage_v2: Option<EngineRuntimeUsageV2Aggregate>,
-}
-
-impl From<RuntimeUsageTotalsReport> for EngineRuntimeUsageTotals {
-    fn from(value: RuntimeUsageTotalsReport) -> Self {
-        Self {
-            contract_version: value.contract_version,
-            at_commit_seq: value.at_commit_seq as f64,
-            requested_query_id: value.requested_query_id,
-            status: value.status,
-            resolved_query: value.resolved_query.map(Into::into),
-            scopes: value
-                .scopes
-                .into_iter()
-                .map(|scope| EngineUsageScopeOptions {
-                    project_id: scope.project_id,
-                    session_id: scope.session_id,
-                })
-                .collect(),
-            selection_vector: value.selection_vector.into_iter().map(Into::into).collect(),
-            legacy: value.legacy.map(Into::into),
-            usage_v2: value.usage_v2.map(Into::into),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageCompatibilityOptions {
-    /// One to 128 canonical project/session scopes. Scopes must not overlap.
-    pub scopes: Vec<EngineUsageScopeOptions>,
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageCompatibilityBucket {
-    pub legacy_exact_tokens: f64,
-    pub legacy_estimated_tokens: f64,
-    pub legacy_combined_tokens: f64,
-    pub v2_known_tokens: f64,
-    pub v2_unknown_response_count: f64,
-    pub v2_completeness: String,
-    pub relation: String,
-    pub absolute_delta_tokens: Option<f64>,
-}
-
-impl From<RuntimeUsageCompatibilityBucket> for EngineRuntimeUsageCompatibilityBucket {
-    fn from(value: RuntimeUsageCompatibilityBucket) -> Self {
-        Self {
-            legacy_exact_tokens: value.legacy_exact_tokens as f64,
-            legacy_estimated_tokens: value.legacy_estimated_tokens as f64,
-            legacy_combined_tokens: value.legacy_combined_tokens as f64,
-            v2_known_tokens: value.v2_known_tokens as f64,
-            v2_unknown_response_count: value.v2_unknown_response_count as f64,
-            v2_completeness: value.v2_completeness,
-            relation: value.relation,
-            absolute_delta_tokens: value.absolute_delta_tokens.map(|value| value as f64),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageCompatibility {
-    pub contract_version: u32,
-    pub at_commit_seq: f64,
-    pub comparison_ref: String,
-    pub status: String,
-    pub comparison_status: String,
-    pub scopes: Vec<EngineUsageScopeOptions>,
-    pub selection_vector: Vec<EngineRuntimeUsageTotalsSelectionScope>,
-    pub legacy: EngineUsageAggregate,
-    pub usage_v2: Option<EngineRuntimeUsageV2Aggregate>,
-    pub input_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
-    pub output_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
-    pub cache_creation_input_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
-    pub cache_read_input_tokens: Option<EngineRuntimeUsageCompatibilityBucket>,
-}
-
-impl From<RuntimeUsageCompatibilityReport> for EngineRuntimeUsageCompatibility {
-    fn from(value: RuntimeUsageCompatibilityReport) -> Self {
-        Self {
-            contract_version: value.contract_version,
-            at_commit_seq: value.at_commit_seq as f64,
-            comparison_ref: value.comparison_ref,
-            status: value.status,
-            comparison_status: value.comparison_status,
-            scopes: value
-                .scopes
-                .into_iter()
-                .map(|scope| EngineUsageScopeOptions {
-                    project_id: scope.project_id,
-                    session_id: scope.session_id,
-                })
-                .collect(),
-            selection_vector: value.selection_vector.into_iter().map(Into::into).collect(),
-            legacy: value.legacy.into(),
-            usage_v2: value.usage_v2.map(Into::into),
-            input_tokens: value.input_tokens.map(Into::into),
-            output_tokens: value.output_tokens.map(Into::into),
-            cache_creation_input_tokens: value.cache_creation_input_tokens.map(Into::into),
-            cache_read_input_tokens: value.cache_read_input_tokens.map(Into::into),
-        }
-    }
-}
-
-/// Compare-and-set authorization for the source instance resolved through one
-/// session. Every expected field must come from one `getRuntimeUsageV2()` page.
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageQuerySelectionOptions {
-    pub project_id: String,
-    pub session_id: String,
-    pub target_query_id: String,
-    pub expected_materialized: bool,
-    pub expected_selected_query_id: String,
-    pub expected_selected_contract_version: u32,
-    pub expected_selection_epoch: f64,
-    /// Bounded durable audit reason for this selection change.
-    pub reason: String,
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageQuerySelectionResult {
-    pub contract_version: u32,
-    pub at_commit_seq: f64,
-    pub project_id: String,
-    pub session_id: String,
-    pub selection: EngineRuntimeUsageQuerySelection,
-}
-
-impl From<RuntimeUsageQuerySelectionResult> for EngineRuntimeUsageQuerySelectionResult {
-    fn from(value: RuntimeUsageQuerySelectionResult) -> Self {
-        Self {
-            contract_version: value.contract_version,
-            at_commit_seq: value.at_commit_seq as f64,
-            project_id: value.project_id,
-            session_id: value.session_id,
-            selection: value.selection.into(),
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct EngineRuntimeUsageV2Page {
-    pub contract_version: u32,
-    pub at_commit_seq: f64,
-    pub projection_status: String,
-    pub projection_readiness: EngineRuntimeUsageV2ProjectionReadiness,
-    pub query_selection: EngineRuntimeUsageQuerySelection,
-    pub project_id: String,
-    pub session_id: String,
-    pub session_ref: Option<EngineRuntimeUsageV2ExternalEntityRef>,
-    pub actor_run_ref: Option<String>,
-    pub affiliation_dimension: Option<String>,
-    pub affiliation_target_ref: Option<String>,
-    pub aggregate: EngineRuntimeUsageV2Aggregate,
-    pub items: Vec<EngineRuntimeUsageV2Response>,
-    pub actors: Vec<EngineRuntimeUsageV2ActorContext>,
-    pub next_cursor: Option<String>,
-}
-
-impl From<RuntimeUsageV2Page> for EngineRuntimeUsageV2Page {
-    fn from(value: RuntimeUsageV2Page) -> Self {
-        Self {
-            contract_version: value.contract_version,
-            at_commit_seq: value.at_commit_seq as f64,
-            projection_status: value.projection_status,
-            projection_readiness: value.projection_readiness.into(),
-            query_selection: value.query_selection.into(),
-            project_id: value.project_id,
-            session_id: value.session_id,
-            session_ref: value.session_ref.map(Into::into),
-            actor_run_ref: value.actor_run_ref,
-            affiliation_dimension: value.affiliation_dimension,
-            affiliation_target_ref: value.affiliation_target_ref,
-            aggregate: value.aggregate.into(),
-            items: value.items.into_iter().map(Into::into).collect(),
-            actors: value.actors.into_iter().map(Into::into).collect(),
             next_cursor: value.next_cursor,
         }
     }
@@ -4756,125 +4066,18 @@ impl SpaghettiEngine {
         )
     }
 
-    /// Return canonical usage totals for one project or one verified session.
-    #[napi(ts_return_type = "Promise<EngineUsageTotals>")]
+    /// Return canonical response-level usage for one project or one verified
+    /// session. Supplying `from` and `to` adds the per-day series and the
+    /// contributions that no day can own.
+    #[napi(ts_return_type = "Promise<EngineUsage>")]
     pub fn get_usage(
         &self,
-        options: EngineUsageScopeOptions,
+        options: EngineUsageOptions,
         signal: Option<AbortSignal>,
-    ) -> AsyncTask<UsageTotalsTask> {
-        let cancellation = QueryCancellationToken::default();
-        if let Some(signal) = signal.as_ref() {
-            let abort_cancellation = cancellation.clone();
-            signal.on_abort(move || abort_cancellation.cancel());
-        }
-        AsyncTask::with_optional_signal(
-            UsageTotalsTask {
-                engine: Arc::clone(&self.inner),
-                options,
-                cancellation,
-            },
-            signal,
-        )
-    }
-
-    /// Return inclusive daily usage activity and separately surfaced untimed
-    /// contributions for one canonical project/session scope.
-    #[napi(ts_return_type = "Promise<EngineUsageActivity>")]
-    pub fn get_usage_activity(
-        &self,
-        options: EngineUsageActivityOptions,
-        signal: Option<AbortSignal>,
-    ) -> AsyncTask<UsageActivityTask> {
-        let cancellation = QueryCancellationToken::default();
-        if let Some(signal) = signal.as_ref() {
-            let abort_cancellation = cancellation.clone();
-            signal.on_abort(move || abort_cancellation.cancel());
-        }
-        AsyncTask::with_optional_signal(
-            UsageActivityTask {
-                engine: Arc::clone(&self.inner),
-                options,
-                cancellation,
-            },
-            signal,
-        )
-    }
-
-    /// Page canonical response-level usage revisions and their current actor
-    /// and affiliation context. This is an explicitly shadow-only RFC 012C
-    /// surface; legacy additive usage queries remain unchanged.
-    #[napi(ts_return_type = "Promise<EngineRuntimeUsageV2Page>")]
-    pub fn get_runtime_usage_v2(
-        &self,
-        options: EngineRuntimeUsageV2Options,
-        signal: Option<AbortSignal>,
-    ) -> AsyncTask<RuntimeUsageV2Task> {
-        let cancellation = QueryCancellationToken::default();
-        if let Some(signal) = signal.as_ref() {
-            let abort_cancellation = cancellation.clone();
-            signal.on_abort(move || abort_cancellation.cancel());
-        }
-        AsyncTask::with_optional_signal(
-            RuntimeUsageV2Task {
-                engine: Arc::clone(&self.inner),
-                options,
-                cancellation,
-            },
-            signal,
-        )
-    }
-
-    /// Negotiate every contributing source selection under one snapshot and
-    /// return exactly one labeled legacy or usage-v2 aggregate arm.
-    #[napi(ts_return_type = "Promise<EngineRuntimeUsageTotals>")]
-    pub fn get_runtime_usage_totals(
-        &self,
-        options: EngineRuntimeUsageTotalsOptions,
-        signal: Option<AbortSignal>,
-    ) -> AsyncTask<RuntimeUsageTotalsTask> {
+    ) -> AsyncTask<UsageTask> {
         let cancellation = cancellation_for_signal(signal.as_ref());
         AsyncTask::with_optional_signal(
-            RuntimeUsageTotalsTask {
-                engine: Arc::clone(&self.inner),
-                options,
-                cancellation,
-            },
-            signal,
-        )
-    }
-
-    /// Compare retained legacy and fully eligible usage-v2 totals without
-    /// treating their intentional semantic divergence as an automatic error.
-    #[napi(ts_return_type = "Promise<EngineRuntimeUsageCompatibility>")]
-    pub fn get_runtime_usage_compatibility(
-        &self,
-        options: EngineRuntimeUsageCompatibilityOptions,
-        signal: Option<AbortSignal>,
-    ) -> AsyncTask<RuntimeUsageCompatibilityTask> {
-        let cancellation = cancellation_for_signal(signal.as_ref());
-        AsyncTask::with_optional_signal(
-            RuntimeUsageCompatibilityTask {
-                engine: Arc::clone(&self.inner),
-                options,
-                cancellation,
-            },
-            signal,
-        )
-    }
-
-    /// Atomically promote or roll back one source-scoped runtime usage query.
-    /// Promotion requires a Ready/complete v2 barrier at commit time; rollback
-    /// remains available if that projection later becomes unhealthy.
-    #[napi(ts_return_type = "Promise<EngineRuntimeUsageQuerySelectionResult>")]
-    pub fn select_runtime_usage_query(
-        &self,
-        options: EngineRuntimeUsageQuerySelectionOptions,
-        signal: Option<AbortSignal>,
-    ) -> AsyncTask<RuntimeUsageQuerySelectionTask> {
-        let cancellation = cancellation_for_signal(signal.as_ref());
-        AsyncTask::with_optional_signal(
-            RuntimeUsageQuerySelectionTask {
+            UsageTask {
                 engine: Arc::clone(&self.inner),
                 options,
                 cancellation,
@@ -5438,39 +4641,9 @@ pub struct CanonicalStatsTask {
     cancellation: QueryCancellationToken,
 }
 
-pub struct UsageTotalsTask {
+pub struct UsageTask {
     engine: Arc<SpaghettiEngineCore>,
-    options: EngineUsageScopeOptions,
-    cancellation: QueryCancellationToken,
-}
-
-pub struct UsageActivityTask {
-    engine: Arc<SpaghettiEngineCore>,
-    options: EngineUsageActivityOptions,
-    cancellation: QueryCancellationToken,
-}
-
-pub struct RuntimeUsageV2Task {
-    engine: Arc<SpaghettiEngineCore>,
-    options: EngineRuntimeUsageV2Options,
-    cancellation: QueryCancellationToken,
-}
-
-pub struct RuntimeUsageTotalsTask {
-    engine: Arc<SpaghettiEngineCore>,
-    options: EngineRuntimeUsageTotalsOptions,
-    cancellation: QueryCancellationToken,
-}
-
-pub struct RuntimeUsageCompatibilityTask {
-    engine: Arc<SpaghettiEngineCore>,
-    options: EngineRuntimeUsageCompatibilityOptions,
-    cancellation: QueryCancellationToken,
-}
-
-pub struct RuntimeUsageQuerySelectionTask {
-    engine: Arc<SpaghettiEngineCore>,
-    options: EngineRuntimeUsageQuerySelectionOptions,
+    options: EngineUsageOptions,
     cancellation: QueryCancellationToken,
 }
 
@@ -6176,168 +5349,26 @@ impl Task for CanonicalStatsTask {
     }
 }
 
-impl Task for UsageTotalsTask {
-    type Output = EngineUsageTotals;
-    type JsValue = EngineUsageTotals;
+impl Task for UsageTask {
+    type Output = EngineUsage;
+    type JsValue = EngineUsage;
 
     fn compute(&mut self) -> Result<Self::Output> {
+        let window = match (self.options.from.clone(), self.options.to.clone()) {
+            (Some(from), Some(to)) => Some(UsageWindow { from, to }),
+            (None, None) => None,
+            _ => {
+                return Err(napi_error(EngineError::InvalidQuery(
+                    "usage window requires both from and to".to_string(),
+                )))
+            }
+        };
         self.engine
-            .usage_totals_cancellable(
-                UsageScopeRequest {
+            .usage_cancellable(
+                UsageRequest {
                     project_id: self.options.project_id.clone(),
                     session_id: self.options.session_id.clone(),
-                },
-                self.cancellation.clone(),
-            )
-            .map(Into::into)
-            .map_err(napi_error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-impl Task for UsageActivityTask {
-    type Output = EngineUsageActivity;
-    type JsValue = EngineUsageActivity;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.engine
-            .usage_activity_cancellable(
-                UsageActivityRequest {
-                    project_id: self.options.project_id.clone(),
-                    session_id: self.options.session_id.clone(),
-                    from: self.options.from.clone(),
-                    to: self.options.to.clone(),
-                },
-                self.cancellation.clone(),
-            )
-            .map(Into::into)
-            .map_err(napi_error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-impl Task for RuntimeUsageV2Task {
-    type Output = EngineRuntimeUsageV2Page;
-    type JsValue = EngineRuntimeUsageV2Page;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.engine
-            .runtime_usage_v2_cancellable(
-                RuntimeUsageV2PageRequest {
-                    project_id: self.options.project_id.clone(),
-                    session_id: self.options.session_id.clone(),
-                    actor_run_ref: self.options.actor_run_ref.clone(),
-                    affiliation_dimension: self.options.affiliation_dimension.clone(),
-                    affiliation_target_ref: self.options.affiliation_target_ref.clone(),
-                    cursor: self.options.cursor.clone(),
-                    limit: self
-                        .options
-                        .limit
-                        .unwrap_or(DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT),
-                },
-                self.cancellation.clone(),
-            )
-            .map(Into::into)
-            .map_err(napi_error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-impl Task for RuntimeUsageTotalsTask {
-    type Output = EngineRuntimeUsageTotals;
-    type JsValue = EngineRuntimeUsageTotals;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.engine
-            .runtime_usage_totals_cancellable(
-                RuntimeUsageTotalsRequest {
-                    scopes: self
-                        .options
-                        .scopes
-                        .iter()
-                        .map(|scope| UsageScopeRequest {
-                            project_id: scope.project_id.clone(),
-                            session_id: scope.session_id.clone(),
-                        })
-                        .collect(),
-                    requested_query_id: self
-                        .options
-                        .requested_query_id
-                        .clone()
-                        .unwrap_or_else(|| SELECTED_RUNTIME_USAGE_QUERY_ID.to_string()),
-                },
-                self.cancellation.clone(),
-            )
-            .map(Into::into)
-            .map_err(napi_error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-impl Task for RuntimeUsageCompatibilityTask {
-    type Output = EngineRuntimeUsageCompatibility;
-    type JsValue = EngineRuntimeUsageCompatibility;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        self.engine
-            .runtime_usage_compatibility_cancellable(
-                RuntimeUsageCompatibilityRequest {
-                    scopes: self
-                        .options
-                        .scopes
-                        .iter()
-                        .map(|scope| UsageScopeRequest {
-                            project_id: scope.project_id.clone(),
-                            session_id: scope.session_id.clone(),
-                        })
-                        .collect(),
-                },
-                self.cancellation.clone(),
-            )
-            .map(Into::into)
-            .map_err(napi_error)
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-impl Task for RuntimeUsageQuerySelectionTask {
-    type Output = EngineRuntimeUsageQuerySelectionResult;
-    type JsValue = EngineRuntimeUsageQuerySelectionResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        let expected_selection_epoch = safe_u64_from_js(
-            self.options.expected_selection_epoch,
-            "expectedSelectionEpoch",
-            true,
-        )?;
-        self.engine
-            .select_runtime_usage_query_cancellable(
-                RuntimeUsageQuerySelectionCommand {
-                    project_id: self.options.project_id.clone(),
-                    session_id: self.options.session_id.clone(),
-                    target_query_id: self.options.target_query_id.clone(),
-                    expected_materialized: self.options.expected_materialized,
-                    expected_selected_query_id: self.options.expected_selected_query_id.clone(),
-                    expected_selected_contract_version: self
-                        .options
-                        .expected_selected_contract_version,
-                    expected_selection_epoch,
-                    reason: self.options.reason.clone(),
+                    window,
                 },
                 self.cancellation.clone(),
             )

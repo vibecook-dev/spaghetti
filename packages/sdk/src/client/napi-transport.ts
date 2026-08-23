@@ -6,7 +6,6 @@ import {
   SPAGHETTI_QUERY_CONTRACT_VERSION,
   type AnySpaghettiProtocolRequest,
   type SpaghettiClientMethod,
-  type SpaghettiClientRequestMap,
   type SpaghettiClientResponseMap,
   type SpaghettiClientTransport,
   type SpaghettiProtocolRequest,
@@ -251,14 +250,6 @@ async function executeEngineRequest(
       return engine.getStats(signal);
     case 'getUsage':
       return engine.getUsage(request.payload, signal);
-    case 'getUsageActivity':
-      return engine.getUsageActivity(request.payload, signal);
-    case 'getRuntimeUsageV2':
-      return engine.getRuntimeUsageV2(request.payload, signal);
-    case 'getRuntimeUsageTotals':
-      return engine.getRuntimeUsageTotals(request.payload, signal);
-    case 'getRuntimeUsageCompatibility':
-      return engine.getRuntimeUsageCompatibility(request.payload, signal);
     case 'getFactFamilyCoverage':
       return engine.getFactFamilyCoverage(request.payload, signal);
     case 'getRuntimeSnapshot':

@@ -16,8 +16,6 @@ import {
   type SpaghettiEngineFactFamilyReplayOptions,
   type SpaghettiEngineFactFamilyReplayResult,
   type SpaghettiEngineHealth,
-  type SpaghettiEngineRuntimeUsageQuerySelectionOptions,
-  type SpaghettiEngineRuntimeUsageQuerySelectionResult,
   type SpaghettiEngineStatus,
   type SpaghettiReadiness,
 } from './native.js';
@@ -108,10 +106,6 @@ export interface ObservationHost {
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineFactFamilyReplayResult>;
   /** Owner-only compare-and-set promotion or rollback for one usage query pack. */
-  selectRuntimeUsageQuery(
-    request: SpaghettiEngineRuntimeUsageQuerySelectionOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineRuntimeUsageQuerySelectionResult>;
   stop(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   serveIpc(channel: SpaghettiIpcChannel, transportKind?: string): SpaghettiIpcHost;
   dispose(): Promise<SpaghettiEngineStatus>;
@@ -273,14 +267,6 @@ class NativeObservationHost implements ObservationHost {
       },
       signal,
     );
-  }
-
-  async selectRuntimeUsageQuery(
-    request: SpaghettiEngineRuntimeUsageQuerySelectionOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineRuntimeUsageQuerySelectionResult> {
-    this.assertRunning();
-    return await this.engine.selectRuntimeUsageQuery(request, signal);
   }
 
   stop(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus> {

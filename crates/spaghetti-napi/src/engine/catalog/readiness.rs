@@ -357,11 +357,9 @@ fn read_evidence(connection: &Connection) -> Result<Evidence, EngineError> {
         .map_err(|error| sqlite_error("read catalog convergence evidence", error))?;
 
     let search_ready: bool = connection
-        .query_row(
-            "SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row(concat!("SELECT ", search_ready_sql!()), [], |row| {
+            row.get(0)
+        })
         .map_err(|error| sqlite_error("read durable search readiness", error))?;
 
     Ok(Evidence {

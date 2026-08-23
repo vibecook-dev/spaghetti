@@ -26,8 +26,6 @@ mod query_pool;
 mod runtime_query;
 pub(crate) mod runtime_semantic_merge;
 mod runtime_semantic_projection;
-mod runtime_usage_query;
-mod runtime_usage_totals_query;
 mod search_query;
 mod session_index_projection;
 mod settings_projection;
@@ -52,9 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::adapter::{
-    AdapterId, AdapterRegistry, FactBatch, SourceCoverageSet, TypedAccessAuthorization,
-};
+use crate::adapter::{AdapterId, AdapterRegistry, FactBatch, TypedAccessAuthorization};
 use crate::source::{IngestPriority, SharedSourcePassPermit};
 pub use capability_query::{
     ArtifactDetail, ArtifactPage, ArtifactPageRequest, MemoryDocument, MemoryDocumentPage,
@@ -73,10 +69,7 @@ pub use commit::{
     ChangeLogRetentionPolicy, ChangeLogRetentionSnapshot, DEFAULT_CHANGE_LOG_MAX_AGE_MS,
     DEFAULT_CHANGE_LOG_MAX_PAYLOAD_BYTES, DEFAULT_CHANGE_LOG_MIN_RESUMABLE_COMMITS,
 };
-use commit::{
-    CommitReceipt, ObservationCommit, ProjectionVersionCommit, QueryPackProjectionGuard,
-    QueryPackSelectionExpectation, QueryPackSelectionUpdate, QueryPackSelectionValue,
-};
+use commit::{CommitReceipt, ObservationCommit, ProjectionVersionCommit};
 pub use coordinator::{
     FactFamilyReplayRequest, ObservationCoordinator, ReconcileOutcome, ReconcileRequest,
     ReconcileRetryTarget,
@@ -104,9 +97,9 @@ use owner_lock::DatabaseOwnerLock;
 pub use owner_lock::OwnerMetadata;
 pub use performance::{
     CheckpointPerformanceSnapshot, EnginePerformanceSnapshot, LatencySnapshot,
-    NamedLatencySnapshot, QueryPerformanceSnapshot, RuntimeUsageCompatibilityTelemetrySnapshot,
-    SourceDimensionPerformanceSnapshot, SourcePerformanceSnapshot, SourcePipelineSnapshot,
-    StoragePerformanceSnapshot, WriterPerformanceSnapshot,
+    NamedLatencySnapshot, QueryPerformanceSnapshot, SourceDimensionPerformanceSnapshot,
+    SourcePerformanceSnapshot, SourcePipelineSnapshot, StoragePerformanceSnapshot,
+    WriterPerformanceSnapshot,
 };
 use performance::{SourcePerformanceRecorder, SourceTelemetry};
 pub use query_pool::{
@@ -122,22 +115,6 @@ pub use runtime_query::{
     RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
     RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotEntry, RuntimeSnapshotRequest,
     DEFAULT_RUNTIME_PAGE_LIMIT, RUNTIME_QUERY_CONTRACT_VERSION,
-};
-pub use runtime_usage_query::{
-    RuntimeUsageQuerySelection, RuntimeUsageQuerySelectionValue, RuntimeUsageV2ActorContext,
-    RuntimeUsageV2Affiliation, RuntimeUsageV2Aggregate, RuntimeUsageV2BucketAggregate,
-    RuntimeUsageV2ExternalEntityRef, RuntimeUsageV2Page, RuntimeUsageV2PageRequest,
-    RuntimeUsageV2ProjectionReadiness, RuntimeUsageV2Response, RuntimeUsageV2SemanticRevisionRef,
-    RuntimeUsageV2TextValue, RuntimeUsageV2TokenValue, RuntimeUsageV2ValueProvenance,
-    DEFAULT_RUNTIME_USAGE_V2_PAGE_LIMIT, MAX_RUNTIME_USAGE_V2_PAGE_LIMIT,
-    RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION, RUNTIME_USAGE_V2_QUERY_CONTRACT_VERSION,
-};
-pub use runtime_usage_totals_query::{
-    RuntimeUsageCompatibilityBucket, RuntimeUsageCompatibilityReport,
-    RuntimeUsageCompatibilityRequest, RuntimeUsageLegacyTotals, RuntimeUsageTotalsReport,
-    RuntimeUsageTotalsRequest, RuntimeUsageTotalsSelectionScope, MAX_RUNTIME_USAGE_TOTALS_SCOPES,
-    RUNTIME_USAGE_COMPATIBILITY_QUERY_CONTRACT_VERSION,
-    RUNTIME_USAGE_TOTALS_QUERY_CONTRACT_VERSION, SELECTED_RUNTIME_USAGE_QUERY_ID,
 };
 pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
@@ -157,9 +134,9 @@ pub use timeline_query::{
     DEFAULT_TIMELINE_PAGE_LIMIT, MAX_TIMELINE_PAGE_PAYLOAD_BYTES, TIMELINE_QUERY_CONTRACT_VERSION,
 };
 pub use usage_query::{
-    UntimedUsageSummary, UsageActivityDay, UsageActivityReport, UsageActivityRequest,
-    UsageAggregate, UsageCoverageSummary, UsageScopeRequest, UsageTokenValues, UsageTotalsReport,
-    MAX_USAGE_ACTIVITY_DAYS, USAGE_QUERY_CONTRACT_VERSION,
+    UntimedUsageSummary, UsageAggregate, UsageCoverageSummary, UsageDay, UsageReport, UsageRequest,
+    UsageTokenValues, UsageWindow, UsageWindowReport, MAX_USAGE_WINDOW_DAYS,
+    USAGE_QUERY_CONTRACT_VERSION,
 };
 use writer::{WriterClient, WriterRuntime};
 
@@ -311,27 +288,6 @@ pub struct FactFamilyReplayResult {
     pub authorized_content_digest_ref: String,
     pub authorized_coverage_last_commit_seq: u64,
     pub outcome: ReconcileOutcome,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeUsageQuerySelectionCommand {
-    pub project_id: String,
-    pub session_id: String,
-    pub target_query_id: String,
-    pub expected_materialized: bool,
-    pub expected_selected_query_id: String,
-    pub expected_selected_contract_version: u32,
-    pub expected_selection_epoch: u64,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeUsageQuerySelectionResult {
-    pub contract_version: u32,
-    pub at_commit_seq: u64,
-    pub project_id: String,
-    pub session_id: String,
-    pub selection: RuntimeUsageQuerySelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1048,271 +1004,21 @@ impl SpaghettiEngineCore {
         queries.artifacts_cancellable(request, cancellation)
     }
 
-    /// Return all-time canonical usage totals for one project or one verified
-    /// session within that project.
-    pub fn usage_totals(
-        &self,
-        request: UsageScopeRequest,
-    ) -> Result<UsageTotalsReport, EngineError> {
+    /// Return canonical response-level usage for one project or one verified
+    /// session within that project. A window in the request adds the per-day
+    /// series and the contributions no day can own.
+    pub fn usage(&self, request: UsageRequest) -> Result<UsageReport, EngineError> {
         let (_, queries) = self.clients()?;
-        queries.usage_totals(request)
+        queries.usage(request)
     }
 
-    pub fn usage_totals_cancellable(
+    pub fn usage_cancellable(
         &self,
-        request: UsageScopeRequest,
+        request: UsageRequest,
         cancellation: QueryCancellationToken,
-    ) -> Result<UsageTotalsReport, EngineError> {
+    ) -> Result<UsageReport, EngineError> {
         let (_, queries) = self.clients()?;
-        queries.usage_totals_cancellable(request, cancellation)
-    }
-
-    /// Return inclusive daily canonical usage activity plus separately
-    /// reported contributions that have no valid source date.
-    pub fn usage_activity(
-        &self,
-        request: UsageActivityRequest,
-    ) -> Result<UsageActivityReport, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.usage_activity(request)
-    }
-
-    pub fn usage_activity_cancellable(
-        &self,
-        request: UsageActivityRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<UsageActivityReport, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.usage_activity_cancellable(request, cancellation)
-    }
-
-    /// Page RFC 012C response-level usage shadow state for one verified
-    /// session, optionally narrowed to an actor or one present affiliation.
-    pub fn runtime_usage_v2_cancellable(
-        &self,
-        request: RuntimeUsageV2PageRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageV2Page, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.runtime_usage_v2_cancellable(request, cancellation)
-    }
-
-    /// Durable usage-v2 query service plus scoped observer merge.
-    ///
-    /// Pure overlay join on already-typed contributions. FTS bootstrap does
-    /// not gate this path; it never parses native JSON.
-    pub(crate) fn merge_runtime_usage_live(
-        &self,
-        durable: &[runtime_semantic_merge::DurableUsageContribution],
-        durable_coverage: &SourceCoverageSet,
-        observer_events: &[runtime_semantic_merge::ScopedUsageObserverEvent],
-        observer_coverage: &SourceCoverageSet,
-    ) -> Result<runtime_semantic_merge::DurableLiveUsageMerge, EngineError> {
-        runtime_semantic_merge::merge_durable_and_scoped_usage(
-            durable,
-            durable_coverage,
-            observer_events,
-            observer_coverage,
-        )
-        .map_err(|error| EngineError::InvalidQuery(error.to_string()))
-    }
-
-    /// Reconcile any closed RFC 012C family through the same common reducer
-    /// used by durable ingestion and scoped projection. This remains a typed,
-    /// crate-private reference consumer while public family event contracts
-    /// are frozen; it accepts no native payload representation.
-    pub(crate) fn merge_runtime_semantic_live(
-        &self,
-        durable: &[runtime_semantic_merge::DurableRuntimeContribution],
-        durable_coverage: &SourceCoverageSet,
-        observer_events: &[runtime_semantic_merge::ScopedRuntimeObserverEvent],
-        observer_coverage: &SourceCoverageSet,
-    ) -> Result<runtime_semantic_merge::DurableLiveRuntimeMerge, EngineError> {
-        runtime_semantic_merge::merge_durable_and_scoped_runtime(
-            durable,
-            durable_coverage,
-            observer_events,
-            observer_coverage,
-        )
-        .map_err(|error| EngineError::InvalidQuery(error.to_string()))
-    }
-
-    /// Resolve a complete source-selection vector and return exactly one
-    /// labeled aggregate arm under the same durable read snapshot.
-    pub fn runtime_usage_totals_cancellable(
-        &self,
-        request: RuntimeUsageTotalsRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageTotalsReport, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.runtime_usage_totals_cancellable(request, cancellation)
-    }
-
-    /// Compare the retained legacy and eligible usage-v2 aggregate arms under
-    /// one snapshot. The query records only bounded owner-lifetime counters.
-    pub fn runtime_usage_compatibility_cancellable(
-        &self,
-        request: RuntimeUsageCompatibilityRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageCompatibilityReport, EngineError> {
-        let (_, queries) = self.clients()?;
-        queries.runtime_usage_compatibility_cancellable(request, cancellation)
-    }
-
-    /// Compare-and-set one source instance's runtime usage query selection.
-    /// Promotion is guarded by the current Ready projection/complete coverage
-    /// barrier; rollback remains available when that projection is unhealthy.
-    pub fn select_runtime_usage_query_cancellable(
-        &self,
-        command: RuntimeUsageQuerySelectionCommand,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageQuerySelectionResult, EngineError> {
-        if command.reason.trim().is_empty() || command.reason.len() > 4 * 1024 {
-            return Err(EngineError::InvalidConfig(
-                "runtime usage query selection requires a bounded reason".to_string(),
-            ));
-        }
-        if command.expected_selected_contract_version == 0
-            || command.expected_selected_query_id.trim().is_empty()
-            || !matches!(
-                command.target_query_id.as_str(),
-                runtime_usage_query::LEGACY_USAGE_QUERY_ID
-                    | runtime_usage_query::RUNTIME_USAGE_V2_QUERY_ID
-            )
-        {
-            return Err(EngineError::InvalidConfig(
-                "runtime usage query selection contains an unsupported query target".to_string(),
-            ));
-        }
-        let target_request = runtime_usage_query::RuntimeUsageQuerySelectionTargetRequest {
-            project_id: command.project_id.clone(),
-            session_id: command.session_id.clone(),
-        };
-        let target = self
-            .query_client()?
-            .runtime_usage_query_selection_target_cancellable(
-                target_request.clone(),
-                cancellation.clone(),
-            )?;
-        let requested = QueryPackSelectionValue {
-            query_id: command.target_query_id.clone(),
-            contract_version: 1,
-        };
-        if target.selection.selected.query_id == requested.query_id
-            && target.selection.selected.contract_version == requested.contract_version
-        {
-            return Ok(RuntimeUsageQuerySelectionResult {
-                contract_version:
-                    runtime_usage_query::RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION,
-                at_commit_seq: target.at_commit_seq,
-                project_id: command.project_id,
-                session_id: command.session_id,
-                selection: target.selection,
-            });
-        }
-        if target.selection.materialized != command.expected_materialized
-            || target.selection.selected.query_id != command.expected_selected_query_id
-            || target.selection.selected.contract_version
-                != command.expected_selected_contract_version
-            || target.selection.selection_epoch != command.expected_selection_epoch
-        {
-            return Err(EngineError::InvalidQuery(
-                "runtime usage query selection expectation is stale".to_string(),
-            ));
-        }
-        if cancellation.is_cancelled() {
-            return Err(EngineError::QueryCancelled);
-        }
-        let current = QueryPackSelectionValue {
-            query_id: target.selection.selected.query_id.clone(),
-            contract_version: target.selection.selected.contract_version,
-        };
-        let expected = if target.selection.materialized {
-            QueryPackSelectionExpectation::At {
-                selected: current.clone(),
-                selection_epoch: target.selection.selection_epoch,
-            }
-        } else {
-            QueryPackSelectionExpectation::Absent
-        };
-        let (rollback, projection_guard) = match command.target_query_id.as_str() {
-            runtime_usage_query::RUNTIME_USAGE_V2_QUERY_ID => {
-                if current.query_id != runtime_usage_query::LEGACY_USAGE_QUERY_ID
-                    || current.contract_version != 1
-                {
-                    return Err(EngineError::InvalidQuery(
-                        "runtime usage-v2 promotion requires the legacy usage selection"
-                            .to_string(),
-                    ));
-                }
-                (
-                    current,
-                    Some(QueryPackProjectionGuard {
-                        projection_id: runtime_semantic_projection::USAGE_V2_PROJECTION_ID
-                            .to_string(),
-                        projection_scope_key: target.stable_key.clone(),
-                        projection_version:
-                            runtime_semantic_projection::USAGE_V2_PROJECTION_VERSION,
-                        coverage_owner_id: runtime_semantic_projection::USAGE_V2_PROJECTION_ID
-                            .to_string(),
-                        coverage_domain_name: runtime_semantic_projection::USAGE_V2_PROJECTION_ID
-                            .to_string(),
-                        coverage_domain_version:
-                            runtime_semantic_projection::USAGE_V2_PROJECTION_VERSION,
-                    }),
-                )
-            }
-            runtime_usage_query::LEGACY_USAGE_QUERY_ID => {
-                if !target.selection.materialized
-                    || target.selection.rollback.query_id
-                        != runtime_usage_query::LEGACY_USAGE_QUERY_ID
-                    || target.selection.rollback.contract_version != 1
-                {
-                    return Err(EngineError::InvalidQuery(
-                        "runtime usage query has no retained legacy rollback target".to_string(),
-                    ));
-                }
-                (
-                    QueryPackSelectionValue {
-                        query_id: runtime_usage_query::LEGACY_USAGE_QUERY_ID.to_string(),
-                        contract_version: 1,
-                    },
-                    None,
-                )
-            }
-            _ => unreachable!("target query id was validated above"),
-        };
-        let now = engine_now_unix_ms()?;
-        self.commit_projection_versions(ProjectionVersionCommit {
-            source_instance_id: target.source_instance_id,
-            reason: command.reason,
-            started_at: now,
-            committed_at: now,
-            projection_versions: Vec::new(),
-            coverage_sets: Vec::new(),
-            coverage_preconditions: Vec::new(),
-            query_pack_selections: vec![QueryPackSelectionUpdate {
-                query_pack_id: runtime_usage_query::RUNTIME_USAGE_QUERY_PACK_ID.to_string(),
-                scope_key: target.stable_key,
-                expected,
-                selected: requested,
-                rollback,
-                projection_guard,
-            }],
-        })?;
-        let selected = self
-            .query_client()?
-            .runtime_usage_query_selection_target_cancellable(
-                target_request,
-                QueryCancellationToken::default(),
-            )?;
-        Ok(RuntimeUsageQuerySelectionResult {
-            contract_version: runtime_usage_query::RUNTIME_USAGE_QUERY_SELECTION_CONTRACT_VERSION,
-            at_commit_seq: selected.at_commit_seq,
-            project_id: command.project_id,
-            session_id: command.session_id,
-            selection: selected.selection,
-        })
+        queries.usage_cancellable(request, cancellation)
     }
 
     pub fn fact_family_coverage_cancellable(

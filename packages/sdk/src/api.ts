@@ -61,8 +61,9 @@ export interface ProjectListItem extends ProjectLocator {
   messageCount: number;
   tokenUsage: TokenUsageSummary;
   /**
-   * True when tokenUsage includes local estimates (e.g. Codex without
-   * token_count events). UI should show "~" / "est".
+   * True when tokenUsage is not fully exact: some bucket was derived or
+   * estimated, or some response asserted no bucket at all and the total is a
+   * floor rather than a measurement. UI should show "~" / "est".
    */
   tokensEstimated: boolean;
   lastActiveAt: string;

@@ -30,10 +30,10 @@ use crate::adapter::{
     SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
     StreamAuthority, StreamId, StreamSpec, SupportLevel, TaskCollectionKind, TaskItemSnapshot,
     TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
-    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, TokenUsage,
-    UsageAccounting, UsageBucketsV2, UsageFact, UsageQualifiedValue, UsageResponseIdentity,
-    UsageRevisionV2Fact, UsageScope, UsageValueAuthority, UsageValueProvenance, ValueQuality,
-    WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact, WorkflowStatus,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, TimestampQuality, UsageBucketsV2,
+    UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority,
+    UsageValueProvenance, WorkflowMemberEventFact, WorkflowMemberEventKind, WorkflowSnapshotFact,
+    WorkflowStatus,
 };
 use crate::claude::message_extractor;
 use crate::claude::session_metadata;
@@ -4235,27 +4235,6 @@ fn decode_transcript_record(
         }),
     )?;
 
-    let usage = TokenUsage {
-        input_tokens: projection.input_tokens,
-        output_tokens: projection.output_tokens,
-        cache_creation_tokens: projection.cache_creation_tokens,
-        cache_read_tokens: projection.cache_read_tokens,
-    };
-    if !usage.is_zero() {
-        output.push(
-            record,
-            Fact::Usage(UsageFact {
-                subject: message.clone(),
-                session: session.clone(),
-                scope: UsageScope::Message,
-                accounting: UsageAccounting::Delta,
-                quality: ValueQuality::NativeExact,
-                values: usage,
-                model,
-                source_time: source_time.clone(),
-            }),
-        )?;
-    }
     if let Some((semantic_key, fact)) =
         claude_usage_v2_fact(context, record, &value, source_time.clone(), output)?
     {
@@ -8641,7 +8620,7 @@ mod tests {
     }
 
     #[test]
-    fn assistant_record_emits_session_message_run_activity_and_exact_usage() {
+    fn assistant_record_emits_session_message_run_activity_and_response_usage() {
         let root = TempDir::new().unwrap();
         let adapter = ClaudeCodeAdapter::new();
         let object_context = adapter
@@ -8669,7 +8648,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(disposition, DecodeDisposition::Applied);
-        assert_eq!(batch.facts().len(), 7);
+        assert_eq!(batch.facts().len(), 6);
         let message = fact_values(&batch)
             .find_map(|fact| match fact {
                 Fact::Message(message) => Some(message),
@@ -8679,16 +8658,6 @@ mod tests {
         assert_eq!(message.role, MessageRole::Assistant);
         assert_eq!(message.content.len(), 2);
         assert_eq!(message.model.as_deref(), Some("claude-sonnet"));
-        let usage = fact_values(&batch)
-            .find_map(|fact| match fact {
-                Fact::Usage(usage) => Some(usage),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(usage.values.input_tokens, 10);
-        assert_eq!(usage.values.cache_read_tokens, 3);
-        assert_eq!(usage.scope, UsageScope::Message);
-        assert_eq!(usage.accounting, UsageAccounting::Delta);
         let (usage_v2, semantic_revision) = batch
             .facts()
             .iter()
@@ -8843,7 +8812,6 @@ mod tests {
                 .unwrap(),
             DecodeDisposition::Applied
         );
-        assert!(fact_values(&fallback_batch).all(|fact| !matches!(fact, Fact::Usage(_))));
         let fallback = fact_values(&fallback_batch)
             .find_map(|fact| match fact {
                 Fact::UsageRevisionV2(fact) => Some(fact),

@@ -64,10 +64,6 @@ export interface SpaghettiClientRequestMap {
   listSources: EngineRequest<'listSources'>;
   getStats: undefined;
   getUsage: EngineRequest<'getUsage'>;
-  getUsageActivity: EngineRequest<'getUsageActivity'>;
-  getRuntimeUsageV2: EngineRequest<'getRuntimeUsageV2'>;
-  getRuntimeUsageTotals: EngineRequest<'getRuntimeUsageTotals'>;
-  getRuntimeUsageCompatibility: EngineRequest<'getRuntimeUsageCompatibility'>;
   getFactFamilyCoverage: EngineRequest<'getFactFamilyCoverage'>;
   getRuntimeSnapshot: EngineRequest<'getRuntimeSnapshot'>;
   getRunState: GetRunStateRequest;
@@ -106,10 +102,6 @@ export interface SpaghettiClientResponseMap {
   listSources: EngineResult<'listSources'>;
   getStats: EngineResult<'getStats'>;
   getUsage: EngineResult<'getUsage'>;
-  getUsageActivity: EngineResult<'getUsageActivity'>;
-  getRuntimeUsageV2: EngineResult<'getRuntimeUsageV2'>;
-  getRuntimeUsageTotals: EngineResult<'getRuntimeUsageTotals'>;
-  getRuntimeUsageCompatibility: EngineResult<'getRuntimeUsageCompatibility'>;
   getFactFamilyCoverage: EngineResult<'getFactFamilyCoverage'>;
   getRuntimeSnapshot: EngineResult<'getRuntimeSnapshot'>;
   getRunState: EngineResult<'getRunState'>;
@@ -149,10 +141,6 @@ export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'listSources',
   'getStats',
   'getUsage',
-  'getUsageActivity',
-  'getRuntimeUsageV2',
-  'getRuntimeUsageTotals',
-  'getRuntimeUsageCompatibility',
   'getFactFamilyCoverage',
   'getRuntimeSnapshot',
   'getRunState',
@@ -445,22 +433,6 @@ export interface SpaghettiClient {
     request: SpaghettiClientRequestMap['getUsage'],
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['getUsage']>;
-  getUsageActivity(
-    request: SpaghettiClientRequestMap['getUsageActivity'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getUsageActivity']>;
-  getRuntimeUsageV2(
-    request: SpaghettiClientRequestMap['getRuntimeUsageV2'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageV2']>;
-  getRuntimeUsageTotals(
-    request: SpaghettiClientRequestMap['getRuntimeUsageTotals'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageTotals']>;
-  getRuntimeUsageCompatibility(
-    request: SpaghettiClientRequestMap['getRuntimeUsageCompatibility'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageCompatibility']>;
   getFactFamilyCoverage(
     request: SpaghettiClientRequestMap['getFactFamilyCoverage'],
     options?: SpaghettiQueryOptions,

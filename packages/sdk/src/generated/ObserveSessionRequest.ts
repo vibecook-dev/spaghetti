@@ -26,13 +26,13 @@ transcript_path: string,
  * When supplied, must equal the session id implied by the locator.
  * A mismatch fails the attach rather than emitting a provisional identity.
  */
-native_session_id: string | null,
+native_session_id?: string | null,
 /**
  * Follow declared child/sidecar relations. Defaults to true.
  */
-include_descendants: boolean | null, max_queued_events: number | null, max_queued_bytes: number | null,
+include_descendants?: boolean | null, max_queued_events?: number | null, max_queued_bytes?: number | null,
 /**
  * Bounded reconciliation fallback for filesystem notifications, which are
  * hints and are allowed to be lost or coalesced.
  */
-poll_interval_ms: number | null, };
+poll_interval_ms?: number | null, };

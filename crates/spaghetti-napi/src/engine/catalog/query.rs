@@ -141,18 +141,22 @@ pub enum CatalogEntityResolution {
 
 /// `catalog_state` for a session, derived inside the caller's snapshot.
 ///
-/// `searchable` needs the FTS pack, which is engine state rather than a row,
-/// so the caller passes it in; everything else is a join.
-const SESSION_STATE_SQL: &str = r#"
+/// Every term is a join or a durable marker, so one snapshot answers the whole
+/// expression and no engine flag has to be threaded through the read path.
+const SESSION_STATE_SQL: &str = concat!(
+    r#"
     CASE
         WHEN cs.transcript_present = 0 THEN 'discovered'
         WHEN can.session_key IS NULL THEN 'discovered'
         WHEN COALESCE(msg.message_count, 0) = 0 THEN 'transcript_backed'
-        WHEN (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
+        WHEN "#,
+    search_ready_sql!(),
+    r#"
             THEN 'searchable'
         ELSE 'hydrated'
     END
-"#;
+"#
+);
 
 /// SQL the history page borrows so both surfaces derive `catalog_state` from
 /// one definition. Keeping it here — rather than inline in `query_pool.rs` —
@@ -177,18 +181,9 @@ pub const HISTORY_PROJECT_CATALOG_CTE: &str = r#"
     ),
 "#;
 
-/// Whether full-text structures are finalized.
-///
-/// The marker is durable (`schema_meta.query_bootstrap_state` exists only
-/// while finalization is incomplete), so every surface reads the same row
-/// instead of being handed an engine flag. That is what keeps the history page
-/// and the catalog page from disagreeing about one session.
-pub const SEARCH_READY_SQL: &str = r#"
-    (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
-"#;
-
 /// Projected columns for a history project row.
-pub const HISTORY_PROJECT_CATALOG_COLUMNS: &str = r#"
+pub const HISTORY_PROJECT_CATALOG_COLUMNS: &str = concat!(
+    r#"
     cp.external_ref AS catalog_external_ref,
     CASE
         WHEN cp.project_key IS NULL THEN NULL
@@ -196,11 +191,14 @@ pub const HISTORY_PROJECT_CATALOG_COLUMNS: &str = r#"
         WHEN cr.hydrated_sessions < cr.catalog_sessions
             THEN CASE WHEN cr.backed_sessions >= cr.catalog_sessions
                       THEN 'transcript_backed' ELSE 'discovered' END
-        WHEN (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
+        WHEN "#,
+    search_ready_sql!(),
+    r#"
             THEN 'searchable'
         ELSE 'hydrated'
     END AS catalog_state,
-"#;
+"#
+);
 
 pub const HISTORY_PROJECT_CATALOG_JOINS: &str = r#"
     LEFT JOIN catalog_projects cp ON cp.project_key = p.project_key
@@ -208,17 +206,21 @@ pub const HISTORY_PROJECT_CATALOG_JOINS: &str = r#"
 "#;
 
 /// Projected columns for a history session row.
-pub const HISTORY_SESSION_CATALOG_COLUMNS: &str = r#"
+pub const HISTORY_SESSION_CATALOG_COLUMNS: &str = concat!(
+    r#"
     cat.external_ref AS catalog_external_ref,
     CASE
         WHEN cat.session_key IS NULL THEN NULL
         WHEN cat.transcript_present = 0 THEN 'discovered'
         WHEN COALESCE(ms.message_count, 0) = 0 THEN 'transcript_backed'
-        WHEN (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
+        WHEN "#,
+    search_ready_sql!(),
+    r#"
             THEN 'searchable'
         ELSE 'hydrated'
     END AS catalog_state,
-"#;
+"#
+);
 
 pub const HISTORY_SESSION_CATALOG_JOIN: &str =
     "LEFT JOIN catalog_sessions cat ON cat.session_key = cs.session_key";

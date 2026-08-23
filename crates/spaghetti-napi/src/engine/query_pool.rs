@@ -25,11 +25,9 @@ use super::capability_query::{
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
 };
 use super::catalog::{
-    encode_external_ref, read_project_page, read_readiness, read_session_page,
-    resolve_catalog_entity, CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest,
-    CatalogSessionPage, CatalogSessionPageRequest, Readiness, HISTORY_PROJECT_CATALOG_COLUMNS,
-    HISTORY_PROJECT_CATALOG_CTE, HISTORY_PROJECT_CATALOG_JOINS, HISTORY_SESSION_CATALOG_COLUMNS,
-    HISTORY_SESSION_CATALOG_JOIN,
+    read_project_page, read_readiness, read_session_page, resolve_catalog_entity,
+    CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest, CatalogSessionPage,
+    CatalogSessionPageRequest, Readiness,
 };
 use super::coverage_query::{
     read_fact_family_coverage_page, read_fact_family_replay_target,
@@ -51,26 +49,12 @@ use super::orchestration_query::{
 };
 use super::performance::{
     atomic_max, atomic_saturating_add, duration_ns, LatencyHistogram, NamedLatencySnapshot,
-    QueryPerformanceSnapshot, RuntimeUsageCompatibilityTelemetrySnapshot,
+    QueryPerformanceSnapshot,
 };
-use super::query_identity::{
-    decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
-};
+use super::query_identity::{decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX};
 use super::runtime_query::{
     read_run_state, read_runtime_snapshot, validate_run_state_request, validate_runtime_request,
     RunStateLookup, RunStateRequest, RuntimeSnapshot, RuntimeSnapshotRequest,
-};
-use super::runtime_usage_query::{
-    read_runtime_usage_query_selection_target, read_runtime_usage_v2_page,
-    validate_runtime_usage_query_selection_target, validate_runtime_usage_v2_page,
-    RuntimeUsageQuerySelectionTarget, RuntimeUsageQuerySelectionTargetRequest, RuntimeUsageV2Page,
-    RuntimeUsageV2PageRequest,
-};
-use super::runtime_usage_totals_query::{
-    read_runtime_usage_compatibility, read_runtime_usage_totals,
-    validate_runtime_usage_compatibility, validate_runtime_usage_totals,
-    RuntimeUsageCompatibilityReport, RuntimeUsageCompatibilityRequest, RuntimeUsageTotalsReport,
-    RuntimeUsageTotalsRequest,
 };
 use super::search_query::{read_search_page, validate_search_page, SearchPage, SearchPageRequest};
 use super::team_query::{
@@ -82,10 +66,7 @@ use super::team_query::{
 use super::timeline_query::{
     read_timeline_page, validate_timeline_page, TimelinePage, TimelinePageRequest,
 };
-use super::usage_query::{
-    read_usage_activity, read_usage_totals, validate_usage_activity, validate_usage_scope,
-    UsageActivityReport, UsageActivityRequest, UsageScopeRequest, UsageTotalsReport,
-};
+use super::usage_query::{read_usage, UsageReport, UsageRequest};
 use super::EngineError;
 
 const QUEUE_DEPTH_PER_WORKER: usize = 16;
@@ -459,41 +440,11 @@ enum QueryCommand {
         request: ArtifactPageRequest,
         response: Sender<Result<ArtifactPage, EngineError>>,
     },
-    UsageTotals {
+    Usage {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
-        request: UsageScopeRequest,
-        response: Sender<Result<UsageTotalsReport, EngineError>>,
-    },
-    UsageActivity {
-        cancellation_epoch: u64,
-        cancellation: QueryCancellationToken,
-        request: UsageActivityRequest,
-        response: Sender<Result<UsageActivityReport, EngineError>>,
-    },
-    RuntimeUsageV2 {
-        cancellation_epoch: u64,
-        cancellation: QueryCancellationToken,
-        request: RuntimeUsageV2PageRequest,
-        response: Sender<Result<RuntimeUsageV2Page, EngineError>>,
-    },
-    RuntimeUsageTotals {
-        cancellation_epoch: u64,
-        cancellation: QueryCancellationToken,
-        request: RuntimeUsageTotalsRequest,
-        response: Sender<Result<RuntimeUsageTotalsReport, EngineError>>,
-    },
-    RuntimeUsageCompatibility {
-        cancellation_epoch: u64,
-        cancellation: QueryCancellationToken,
-        request: RuntimeUsageCompatibilityRequest,
-        response: Sender<Result<RuntimeUsageCompatibilityReport, EngineError>>,
-    },
-    RuntimeUsageQuerySelectionTarget {
-        cancellation_epoch: u64,
-        cancellation: QueryCancellationToken,
-        request: RuntimeUsageQuerySelectionTargetRequest,
-        response: Sender<Result<RuntimeUsageQuerySelectionTarget, EngineError>>,
+        request: UsageRequest,
+        response: Sender<Result<UsageReport, EngineError>>,
     },
     FactFamilyCoverage {
         cancellation_epoch: u64,
@@ -660,24 +611,6 @@ struct QueryTelemetry {
     queue_wait: LatencyHistogram,
     execution: LatencyHistogram,
     active_started_ns: Box<[AtomicU64]>,
-    runtime_usage_compatibility: RuntimeUsageCompatibilityTelemetry,
-}
-
-struct RuntimeUsageCompatibilityTelemetry {
-    samples: AtomicU64,
-    ready_samples: AtomicU64,
-    not_ready_samples: AtomicU64,
-    equal_samples: AtomicU64,
-    different_samples: AtomicU64,
-    incomparable_samples: AtomicU64,
-    equal_buckets: AtomicU64,
-    legacy_higher_buckets: AtomicU64,
-    v2_higher_buckets: AtomicU64,
-    incomparable_buckets: AtomicU64,
-    sampled_absolute_delta_tokens: AtomicU64,
-    max_absolute_delta_tokens: AtomicU64,
-    first_at_commit_seq: AtomicU64,
-    last_at_commit_seq: AtomicU64,
 }
 
 /// Transport-neutral, request-scoped cancellation observed by query workers.
@@ -739,7 +672,6 @@ impl QueryControl {
                 queue_wait: LatencyHistogram::default(),
                 execution: LatencyHistogram::default(),
                 active_started_ns: (0..workers).map(|_| AtomicU64::new(0)).collect(),
-                runtime_usage_compatibility: RuntimeUsageCompatibilityTelemetry::new(),
             },
         }
     }
@@ -770,7 +702,6 @@ impl QueryTelemetry {
             oldest_active_ns: oldest_started_ns
                 .map(|started| now_ns.saturating_sub(started))
                 .unwrap_or(0),
-            runtime_usage_compatibility: self.runtime_usage_compatibility.snapshot(),
             timings: vec![
                 NamedLatencySnapshot {
                     name: "queue_wait".to_string(),
@@ -781,95 +712,6 @@ impl QueryTelemetry {
                     latency: execution,
                 },
             ],
-        }
-    }
-}
-
-impl RuntimeUsageCompatibilityTelemetry {
-    fn new() -> Self {
-        Self {
-            samples: AtomicU64::new(0),
-            ready_samples: AtomicU64::new(0),
-            not_ready_samples: AtomicU64::new(0),
-            equal_samples: AtomicU64::new(0),
-            different_samples: AtomicU64::new(0),
-            incomparable_samples: AtomicU64::new(0),
-            equal_buckets: AtomicU64::new(0),
-            legacy_higher_buckets: AtomicU64::new(0),
-            v2_higher_buckets: AtomicU64::new(0),
-            incomparable_buckets: AtomicU64::new(0),
-            sampled_absolute_delta_tokens: AtomicU64::new(0),
-            max_absolute_delta_tokens: AtomicU64::new(0),
-            first_at_commit_seq: AtomicU64::new(u64::MAX),
-            last_at_commit_seq: AtomicU64::new(0),
-        }
-    }
-
-    fn record(&self, report: &RuntimeUsageCompatibilityReport) {
-        let _ = self
-            .first_at_commit_seq
-            .fetch_min(report.at_commit_seq, Ordering::AcqRel);
-        atomic_max(&self.last_at_commit_seq, report.at_commit_seq);
-        match report.status.as_str() {
-            "ready" => atomic_saturating_add(&self.ready_samples, 1),
-            "not_ready" => atomic_saturating_add(&self.not_ready_samples, 1),
-            _ => {}
-        }
-        match report.comparison_status.as_str() {
-            "equal" => atomic_saturating_add(&self.equal_samples, 1),
-            "different" => atomic_saturating_add(&self.different_samples, 1),
-            "incomparable" => atomic_saturating_add(&self.incomparable_samples, 1),
-            "not_ready" => {}
-            _ => {}
-        }
-        for bucket in [
-            report.input_tokens.as_ref(),
-            report.output_tokens.as_ref(),
-            report.cache_creation_input_tokens.as_ref(),
-            report.cache_read_input_tokens.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            match bucket.relation.as_str() {
-                "equal" => atomic_saturating_add(&self.equal_buckets, 1),
-                "legacy_higher" => atomic_saturating_add(&self.legacy_higher_buckets, 1),
-                "v2_higher" => atomic_saturating_add(&self.v2_higher_buckets, 1),
-                "incomparable" => atomic_saturating_add(&self.incomparable_buckets, 1),
-                _ => continue,
-            }
-            if let Some(delta) = bucket.absolute_delta_tokens {
-                atomic_saturating_add(&self.sampled_absolute_delta_tokens, delta);
-                atomic_max(&self.max_absolute_delta_tokens, delta);
-            }
-        }
-        // Publish the sample count last. A snapshot that observes a non-zero
-        // count through its acquire load can then also observe the initialized
-        // commit bounds and classifications for that sample.
-        atomic_saturating_add(&self.samples, 1);
-    }
-
-    fn snapshot(&self) -> RuntimeUsageCompatibilityTelemetrySnapshot {
-        let samples = self.samples.load(Ordering::Acquire);
-        RuntimeUsageCompatibilityTelemetrySnapshot {
-            samples,
-            ready_samples: self.ready_samples.load(Ordering::Acquire),
-            not_ready_samples: self.not_ready_samples.load(Ordering::Acquire),
-            equal_samples: self.equal_samples.load(Ordering::Acquire),
-            different_samples: self.different_samples.load(Ordering::Acquire),
-            incomparable_samples: self.incomparable_samples.load(Ordering::Acquire),
-            equal_buckets: self.equal_buckets.load(Ordering::Acquire),
-            legacy_higher_buckets: self.legacy_higher_buckets.load(Ordering::Acquire),
-            v2_higher_buckets: self.v2_higher_buckets.load(Ordering::Acquire),
-            incomparable_buckets: self.incomparable_buckets.load(Ordering::Acquire),
-            sampled_absolute_delta_tokens: self
-                .sampled_absolute_delta_tokens
-                .load(Ordering::Acquire),
-            max_absolute_delta_tokens: self.max_absolute_delta_tokens.load(Ordering::Acquire),
-            first_at_commit_seq: (samples > 0)
-                .then(|| self.first_at_commit_seq.load(Ordering::Acquire)),
-            last_at_commit_seq: (samples > 0)
-                .then(|| self.last_at_commit_seq.load(Ordering::Acquire)),
         }
     }
 }
@@ -1009,11 +851,8 @@ impl QueryClient {
             .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
     }
 
-    pub fn usage_totals(
-        &self,
-        request: UsageScopeRequest,
-    ) -> Result<UsageTotalsReport, EngineError> {
-        self.usage_totals_cancellable(request, QueryCancellationToken::default())
+    pub fn usage(&self, request: UsageRequest) -> Result<UsageReport, EngineError> {
+        self.usage_cancellable(request, QueryCancellationToken::default())
     }
 
     pub fn session_details(
@@ -1265,129 +1104,18 @@ impl QueryClient {
         )
     }
 
-    pub fn usage_totals_cancellable(
+    pub fn usage_cancellable(
         &self,
-        request: UsageScopeRequest,
+        request: UsageRequest,
         cancellation: QueryCancellationToken,
-    ) -> Result<UsageTotalsReport, EngineError> {
-        validate_usage_scope(&request)?;
-        self.ensure_running()?;
-        if cancellation.is_cancelled() {
-            return Err(EngineError::QueryCancelled);
-        }
-
-        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
-        let (response_tx, response_rx) = bounded(1);
-        self.enqueue(QueryCommand::UsageTotals {
-            cancellation_epoch,
-            cancellation,
-            request,
-            response: response_tx,
-        })?;
-
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
-    }
-
-    pub fn usage_activity(
-        &self,
-        request: UsageActivityRequest,
-    ) -> Result<UsageActivityReport, EngineError> {
-        self.usage_activity_cancellable(request, QueryCancellationToken::default())
-    }
-
-    pub fn usage_activity_cancellable(
-        &self,
-        request: UsageActivityRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<UsageActivityReport, EngineError> {
-        validate_usage_activity(&request)?;
-        self.ensure_running()?;
-        if cancellation.is_cancelled() {
-            return Err(EngineError::QueryCancelled);
-        }
-
-        let cancellation_epoch = self.control.cancellation_epoch.load(Ordering::Acquire);
-        let (response_tx, response_rx) = bounded(1);
-        self.enqueue(QueryCommand::UsageActivity {
-            cancellation_epoch,
-            cancellation,
-            request,
-            response: response_tx,
-        })?;
-
-        response_rx
-            .recv()
-            .map_err(|_| EngineError::WorkerUnavailable { worker: "query" })?
-    }
-
-    pub fn runtime_usage_v2_cancellable(
-        &self,
-        request: RuntimeUsageV2PageRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageV2Page, EngineError> {
-        validate_runtime_usage_v2_page(&request)?;
+    ) -> Result<UsageReport, EngineError> {
         self.send_cancellable(
             cancellation,
-            |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageV2 {
+            |cancellation_epoch, cancellation, response| QueryCommand::Usage {
                 cancellation_epoch,
                 cancellation,
                 request,
                 response,
-            },
-        )
-    }
-
-    pub fn runtime_usage_totals_cancellable(
-        &self,
-        request: RuntimeUsageTotalsRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageTotalsReport, EngineError> {
-        validate_runtime_usage_totals(&request)?;
-        self.send_cancellable(
-            cancellation,
-            |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageTotals {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            },
-        )
-    }
-
-    pub fn runtime_usage_compatibility_cancellable(
-        &self,
-        request: RuntimeUsageCompatibilityRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageCompatibilityReport, EngineError> {
-        validate_runtime_usage_compatibility(&request)?;
-        self.send_cancellable(
-            cancellation,
-            |cancellation_epoch, cancellation, response| QueryCommand::RuntimeUsageCompatibility {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            },
-        )
-    }
-
-    pub(crate) fn runtime_usage_query_selection_target_cancellable(
-        &self,
-        request: RuntimeUsageQuerySelectionTargetRequest,
-        cancellation: QueryCancellationToken,
-    ) -> Result<RuntimeUsageQuerySelectionTarget, EngineError> {
-        validate_runtime_usage_query_selection_target(&request)?;
-        self.send_cancellable(
-            cancellation,
-            |cancellation_epoch, cancellation, response| {
-                QueryCommand::RuntimeUsageQuerySelectionTarget {
-                    cancellation_epoch,
-                    cancellation,
-                    request,
-                    response,
-                }
             },
         )
     }
@@ -2328,7 +2056,7 @@ fn query_thread(
                 );
                 let _ = response.send(result);
             }
-            QueryCommand::UsageTotals {
+            QueryCommand::Usage {
                 cancellation_epoch,
                 cancellation,
                 request,
@@ -2340,90 +2068,7 @@ fn query_thread(
                     &control,
                     cancellation_epoch,
                     &cancellation,
-                    || read_usage_totals(&connection, &request),
-                );
-                let _ = response.send(result);
-            }
-            QueryCommand::UsageActivity {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            } => {
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = run_cancellable_query(
-                    &connection,
-                    &control,
-                    cancellation_epoch,
-                    &cancellation,
-                    || read_usage_activity(&connection, &request),
-                );
-                let _ = response.send(result);
-            }
-            QueryCommand::RuntimeUsageV2 {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            } => {
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = run_cancellable_query(
-                    &connection,
-                    &control,
-                    cancellation_epoch,
-                    &cancellation,
-                    || read_runtime_usage_v2_page(&connection, &request),
-                );
-                let _ = response.send(result);
-            }
-            QueryCommand::RuntimeUsageTotals {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            } => {
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = run_cancellable_query(
-                    &connection,
-                    &control,
-                    cancellation_epoch,
-                    &cancellation,
-                    || read_runtime_usage_totals(&connection, &request),
-                );
-                let _ = response.send(result);
-            }
-            QueryCommand::RuntimeUsageCompatibility {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            } => {
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = run_cancellable_query(
-                    &connection,
-                    &control,
-                    cancellation_epoch,
-                    &cancellation,
-                    || read_runtime_usage_compatibility(&connection, &request),
-                );
-                if let Ok(report) = &result {
-                    control.telemetry.runtime_usage_compatibility.record(report);
-                }
-                let _ = response.send(result);
-            }
-            QueryCommand::RuntimeUsageQuerySelectionTarget {
-                cancellation_epoch,
-                cancellation,
-                request,
-                response,
-            } => {
-                let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = run_cancellable_query(
-                    &connection,
-                    &control,
-                    cancellation_epoch,
-                    &cancellation,
-                    || read_runtime_usage_query_selection_target(&connection, &request),
+                    || read_usage(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -3868,7 +3513,10 @@ mod tests {
             limit: DEFAULT_HISTORY_PAGE_LIMIT,
         };
         let sessions = client.history_sessions(page).unwrap();
-        let missing_session_id = encode_entity_id(SESSION_ID_PREFIX, b"missing-session");
+        let missing_session_id = encode_entity_id(
+            crate::engine::query_identity::SESSION_ID_PREFIX,
+            b"missing-session",
+        );
         let session_details = client
             .session_details(SessionDetailsRequest {
                 session_id: missing_session_id.clone(),
@@ -3914,17 +3562,20 @@ mod tests {
             })
             .unwrap();
         let usage = client
-            .usage_totals(UsageScopeRequest {
+            .usage(UsageRequest {
                 project_id: missing_project_id.clone(),
                 session_id: None,
+                window: None,
             })
             .unwrap();
         let usage_activity = client
-            .usage_activity(UsageActivityRequest {
+            .usage(UsageRequest {
                 project_id: missing_project_id.clone(),
                 session_id: None,
-                from: "2026-08-12".to_string(),
-                to: "2026-08-12".to_string(),
+                window: Some(crate::engine::usage_query::UsageWindow {
+                    from: "2026-08-12".to_string(),
+                    to: "2026-08-12".to_string(),
+                }),
             })
             .unwrap();
         let runtime = client
@@ -4037,9 +3688,10 @@ mod tests {
         assert_eq!(usage.aggregate.contribution_count, 0);
         assert!(usage.coverage.is_empty());
         assert_eq!(usage_activity.at_commit_seq, overview.commit_seq);
-        assert!(usage_activity.days.is_empty());
+        let usage_window = usage_activity.window.expect("windowed report");
+        assert!(usage_window.days.is_empty());
         assert_eq!(usage_activity.aggregate.contribution_count, 0);
-        assert_eq!(usage_activity.untimed.aggregate.contribution_count, 0);
+        assert_eq!(usage_window.untimed.aggregate.contribution_count, 0);
         assert_eq!(runtime.at_commit_seq, overview.commit_seq);
         assert!(runtime.entries.is_empty());
         assert_eq!(teams.at_commit_seq, overview.commit_seq);
@@ -4211,11 +3863,13 @@ mod tests {
 
         let queued_client = client.clone();
         let queued = thread::spawn(move || {
-            queued_client.usage_activity(UsageActivityRequest {
+            queued_client.usage(UsageRequest {
                 project_id: encode_entity_id(PROJECT_ID_PREFIX, b"project"),
                 session_id: None,
-                from: "2026-01-01".to_string(),
-                to: "2026-12-31".to_string(),
+                window: Some(crate::engine::usage_query::UsageWindow {
+                    from: "2026-01-01".to_string(),
+                    to: "2026-12-31".to_string(),
+                }),
             })
         });
         while client.commands.is_empty() {
@@ -4396,7 +4050,10 @@ mod tests {
             client.timeline_cancellable(
                 TimelinePageRequest {
                     project_id: encode_entity_id(PROJECT_ID_PREFIX, b"project"),
-                    session_id: encode_entity_id(SESSION_ID_PREFIX, b"session"),
+                    session_id: encode_entity_id(
+                        crate::engine::query_identity::SESSION_ID_PREFIX,
+                        b"session"
+                    ),
                     roles: Vec::new(),
                     native_kinds: Vec::new(),
                     include_content_kinds: Vec::new(),
@@ -4432,7 +4089,10 @@ mod tests {
             client.workflows_cancellable(
                 WorkflowPageRequest {
                     project_id: encode_entity_id(PROJECT_ID_PREFIX, b"project"),
-                    session_id: encode_entity_id(SESSION_ID_PREFIX, b"session"),
+                    session_id: encode_entity_id(
+                        crate::engine::query_identity::SESSION_ID_PREFIX,
+                        b"session"
+                    ),
                     cursor: None,
                     limit: DEFAULT_HISTORY_PAGE_LIMIT,
                 },

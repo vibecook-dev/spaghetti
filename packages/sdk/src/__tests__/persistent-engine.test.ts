@@ -8,7 +8,7 @@
 
 import { afterEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -212,22 +212,19 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.equal(afterSnapshot.hasMore, false);
   });
 
-  // This mutation path cannot run until an independently reviewed Claude
-  // support release is promoted and can mint typed durable authority.
-  test.skip('returns usage-v2 rows and writer-owned readiness in one native snapshot', async () => {
+  test('reports response-level usage with per-bucket quality through the SDK', async () => {
     const dbPath = temporaryDatabase();
-    const root = path.join(path.dirname(dbPath), 'claude-usage-v2');
-    const project = path.join(root, 'projects', '-tmp-usage-v2-project');
+    const root = path.join(path.dirname(dbPath), 'claude-usage');
+    const project = path.join(root, 'projects', '-tmp-usage-project');
     mkdirSync(project, { recursive: true });
-    writeFileSync(
-      path.join(project, `${SESSION_ID}.jsonl`),
+    const assistant = (uuid: string, id: string, usage: Record<string, number>) =>
       `${JSON.stringify({
         type: 'assistant',
-        uuid: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        uuid,
         parentUuid: null,
         timestamp: '2026-08-12T00:00:00.000Z',
         sessionId: SESSION_ID,
-        cwd: '/tmp/usage-v2-project',
+        cwd: '/tmp/usage-project',
         version: '1',
         gitBranch: 'main',
         isSidechain: false,
@@ -235,182 +232,58 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
         requestId: 'request-1',
         message: {
           model: 'claude-sonnet',
-          id: 'response-1',
+          id,
           type: 'message',
           role: 'assistant',
           content: [{ type: 'text', text: 'usage response' }],
-          usage: { input_tokens: 12, output_tokens: 3 },
+          usage,
         },
-      })}\n`,
+      })}\n`;
+    writeFileSync(
+      path.join(project, `${SESSION_ID}.jsonl`),
+      // Two rows for one response id: an evolving counter, not two responses.
+      assistant('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 'response-1', {
+        input_tokens: 12,
+        output_tokens: 3,
+      }) +
+        assistant('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeef', 'response-1', {
+          input_tokens: 12,
+          output_tokens: 9,
+        }),
     );
     markClaudeVersionFixture(root);
-    const engine = await openTracked(dbPath, 'sdk-usage-v2-test');
-    await engine.reconcileClaude({ roots: [root], reason: 'sdk_usage_v2_fixture' });
+    const engine = await openTracked(dbPath, 'sdk-usage-test');
+    await engine.reconcileClaude({ roots: [root], reason: 'sdk_usage_fixture' });
 
     const projects = await engine.listHistoryProjects({ limit: 10 });
     const projectId = projects.items[0]?.projectId;
     assert.ok(projectId);
-    const sessions = await engine.listHistorySessions({ projectId, limit: 10 });
-    const sessionId = sessions.items[0]?.sessionId;
-    assert.ok(sessionId);
-    const usage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
+    const usage = await engine.getUsage({ projectId });
 
-    assert.equal(usage.projectionStatus, 'shadow');
-    assert.equal(usage.projectionReadiness.projectionId, 'runtime.usage-v2');
-    assert.equal(usage.projectionReadiness.state, 'ready');
-    assert.equal(usage.projectionReadiness.completedVersion, 1);
-    assert.equal(usage.projectionReadiness.lastCommitSeq, usage.atCommitSeq);
-    assert.equal(usage.querySelection.materialized, false);
-    assert.equal(usage.querySelection.selected.queryId, 'legacy.usage');
-    assert.equal(usage.querySelection.rollback.queryId, 'legacy.usage');
-    assert.equal(usage.querySelection.selectionEpoch, 0);
-    assert.equal(usage.aggregate.responseCount, 1);
-    assert.equal(usage.aggregate.inputTokens.knownTokens, 12);
-    assert.equal(usage.items[0]?.nativeMessageId, 'response-1');
-
-    const selectedLegacyTotals = await engine.getRuntimeUsageTotals({ scopes: [{ projectId, sessionId }] });
-    assert.equal(selectedLegacyTotals.status, 'resolved');
-    assert.equal(selectedLegacyTotals.resolvedQuery?.queryId, 'legacy.usage');
-    assert.equal(selectedLegacyTotals.selectionVector.length, 1);
-    assert.match(selectedLegacyTotals.selectionVector[0]?.selectionScopeRef ?? '', /^v1:/);
-    assert.equal(selectedLegacyTotals.selectionVector[0]?.v2Eligible, true);
-    assert.ok(selectedLegacyTotals.legacy);
-    assert.equal(selectedLegacyTotals.usageV2, undefined);
-
-    const explicitV2Totals = await engine.getRuntimeUsageTotals({
-      scopes: [{ projectId, sessionId }],
-      requestedQueryId: 'runtime.usage-v2',
-    });
-    assert.equal(explicitV2Totals.status, 'resolved');
-    assert.equal(explicitV2Totals.resolvedQuery?.queryId, 'runtime.usage-v2');
-    assert.equal(explicitV2Totals.legacy, undefined);
-    assert.equal(explicitV2Totals.usageV2?.responseCount, 1);
-    assert.equal(explicitV2Totals.usageV2?.inputTokens.knownTokens, 12);
-    assert.equal(explicitV2Totals.atCommitSeq, selectedLegacyTotals.atCommitSeq);
-
-    const compatibility = await engine.getRuntimeUsageCompatibility({ scopes: [{ projectId, sessionId }] });
-    assert.equal(compatibility.status, 'ready');
-    assert.equal(compatibility.comparisonStatus, 'incomparable');
-    assert.equal(compatibility.inputTokens?.relation, 'equal');
-    assert.equal(compatibility.cacheCreationInputTokens?.relation, 'incomparable');
-    assert.equal(compatibility.cacheCreationInputTokens?.absoluteDeltaTokens, undefined);
-
-    await assert.rejects(
-      engine.getRuntimeUsageTotals({ scopes: [{ projectId }, { projectId, sessionId }] }),
-      /must not overlap/i,
+    assert.equal(usage.aggregate.contributionCount, 1);
+    assert.equal(usage.aggregate.exact.inputTokens, 12);
+    assert.equal(usage.aggregate.exact.outputTokens, 9);
+    assert.equal(usage.aggregate.sessionCount, 1);
+    // The cache buckets were never asserted, so they stay unknown rather than
+    // being summed as zero.
+    assert.equal(usage.aggregate.combined.cacheCreationTokens, 0);
+    const unknownCache = usage.coverage.filter(
+      (entry) => entry.valueQuality === 'unknown' && entry.bucket.startsWith('cache'),
     );
-    await assert.rejects(engine.getRuntimeUsageTotals({ scopes: [] }), /between 1 and 128 scopes/i);
-    await assert.rejects(
-      engine.getRuntimeUsageTotals({
-        scopes: [
-          { projectId, sessionId },
-          { projectId, sessionId },
-        ],
-      }),
-      /duplicate scope/i,
-    );
+    assert.equal(unknownCache.length, 2);
+    for (const entry of unknownCache) {
+      assert.equal(entry.unknownReason, 'missing');
+      assert.notEqual(entry.completeness, 'complete');
+    }
+    const input = usage.coverage.find((entry) => entry.bucket === 'input');
+    assert.equal(input?.nativeField, 'message.usage.input_tokens');
+    assert.equal(input?.authority, 'native_response');
+    assert.equal(usage.window, undefined);
 
-    const coverage = await engine.getFactFamilyCoverage({
-      projectId,
-      sessionId,
-      ownerId: 'runtime.usage-v2',
-      family: 'runtime.usage-v2',
-      familyVersion: 1,
-      limit: 10,
-    });
-    assert.equal(coverage.status, 'materialized');
-    assert.equal(coverage.coverage?.completeness, 'complete');
-    assert.equal(coverage.coverage?.lastCommitSeq, coverage.atCommitSeq);
-    assert.match(coverage.coverage?.sourceInstanceRef ?? '', /^v1:/);
-    assert.match(coverage.coverage?.contentDigestRef ?? '', /^v1:/);
-    assert.equal(coverage.items.length, 1);
-    assert.equal(coverage.items[0]?.kind, 'point');
-    assert.match(coverage.items[0]?.streamRef ?? '', /^v1:/);
-    assert.match(coverage.items[0]?.objectRef ?? '', /^v1:/);
-    assert.equal(JSON.stringify(coverage).includes(root), false);
-
-    const replayOptions = {
-      adapterId: 'claude-code',
-      roots: [root],
-      projectId,
-      sessionId,
-      ownerId: 'runtime.usage-v2',
-      family: 'runtime.usage-v2',
-      familyVersion: 1,
-      expectedSourceInstanceRef: coverage.coverage!.sourceInstanceRef,
-      expectedContentDigestRef: coverage.coverage!.contentDigestRef,
-      expectedCoverageLastCommitSeq: coverage.coverage!.lastCommitSeq,
-      reason: 'sdk explicit replay contract test',
-    };
-    const replay = await engine.replayFactFamily(replayOptions);
-    assert.equal(replay.contractVersion, 1);
-    assert.equal(replay.authorizedSourceInstanceRef, replayOptions.expectedSourceInstanceRef);
-    assert.equal(replay.authorizedContentDigestRef, replayOptions.expectedContentDigestRef);
-    assert.equal(replay.outcome.recordsDecoded, 1);
-    await assert.rejects(engine.replayFactFamily(replayOptions), /authorization is stale/i);
-
-    const beforePromotion = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
-    assert.equal(beforePromotion.querySelection.sourceInstanceRef, coverage.coverage!.sourceInstanceRef);
-    const promoted = await engine.selectRuntimeUsageQuery({
-      projectId,
-      sessionId,
-      targetQueryId: 'runtime.usage-v2',
-      expectedMaterialized: beforePromotion.querySelection.materialized,
-      expectedSelectedQueryId: beforePromotion.querySelection.selected.queryId,
-      expectedSelectedContractVersion: beforePromotion.querySelection.selected.contractVersion,
-      expectedSelectionEpoch: beforePromotion.querySelection.selectionEpoch,
-      reason: 'sdk usage-v2 promotion contract test',
-    });
-    assert.equal(promoted.contractVersion, 1);
-    assert.equal(promoted.selection.materialized, true);
-    assert.equal(promoted.selection.selected.queryId, 'runtime.usage-v2');
-    assert.equal(promoted.selection.rollback.queryId, 'legacy.usage');
-    assert.equal(promoted.selection.selectionEpoch, 1);
-
-    await assert.rejects(
-      engine.selectRuntimeUsageQuery({
-        projectId,
-        sessionId,
-        targetQueryId: 'legacy.usage',
-        expectedMaterialized: beforePromotion.querySelection.materialized,
-        expectedSelectedQueryId: beforePromotion.querySelection.selected.queryId,
-        expectedSelectedContractVersion: beforePromotion.querySelection.selected.contractVersion,
-        expectedSelectionEpoch: beforePromotion.querySelection.selectionEpoch,
-        reason: 'stale rollback authorization must fail',
-      }),
-      /expectation is stale/i,
-    );
-    const selectedUsage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
-    assert.equal(selectedUsage.projectionStatus, 'selected');
-    assert.deepEqual(selectedUsage.querySelection, promoted.selection);
-    const selectedV2Totals = await engine.getRuntimeUsageTotals({ scopes: [{ projectId, sessionId }] });
-    assert.equal(selectedV2Totals.status, 'resolved');
-    assert.equal(selectedV2Totals.resolvedQuery?.queryId, 'runtime.usage-v2');
-    assert.equal(selectedV2Totals.usageV2?.responseCount, 1);
-
-    const rollbackRequest = {
-      projectId,
-      sessionId,
-      targetQueryId: 'legacy.usage' as const,
-      expectedMaterialized: promoted.selection.materialized,
-      expectedSelectedQueryId: promoted.selection.selected.queryId,
-      expectedSelectedContractVersion: promoted.selection.selected.contractVersion,
-      expectedSelectionEpoch: promoted.selection.selectionEpoch,
-      reason: 'sdk usage-v2 explicit rollback contract test',
-    };
-    const rolledBack = await engine.selectRuntimeUsageQuery(rollbackRequest);
-    assert.equal(rolledBack.selection.selected.queryId, 'legacy.usage');
-    assert.equal(rolledBack.selection.rollback.queryId, 'legacy.usage');
-    assert.equal(rolledBack.selection.selectionEpoch, 2);
-    assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).projectionStatus, 'shadow');
-    assert.equal(
-      (await engine.getRuntimeUsageTotals({ scopes: [{ projectId, sessionId }] })).resolvedQuery?.queryId,
-      'legacy.usage',
-    );
-
-    const retriedRollback = await engine.selectRuntimeUsageQuery(rollbackRequest);
-    assert.equal(retriedRollback.atCommitSeq, rolledBack.atCommitSeq);
-    assert.deepEqual(retriedRollback.selection, rolledBack.selection);
+    const windowed = await engine.getUsage({ projectId, from: '2026-08-12', to: '2026-08-12' });
+    assert.equal(windowed.window?.days.length, 1);
+    assert.equal(windowed.window?.days[0]?.aggregate.exact.outputTokens, 9);
+    assert.equal(windowed.window?.untimed.aggregate.contributionCount, 0);
   });
 
   test('keeps legacy history but withholds typed coverage for an exact candidate Claude version', async () => {
@@ -451,10 +324,10 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     assert.ok(projectId);
     const sessionId = (await engine.listHistorySessions({ projectId, limit: 10 })).items[0]?.sessionId;
     assert.ok(sessionId);
-    const usage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
-    assert.equal(usage.projectionReadiness.state, 'unavailable');
-    assert.equal(usage.projectionReadiness.completedVersion, undefined);
-    assert.equal(usage.projectionReadiness.detail, 'promoted durable support authorization unavailable');
+    // History and usage still decode; it is the typed durable coverage that an
+    // unauthorized support release cannot mint.
+    const usage = await engine.getUsage({ projectId, sessionId });
+    assert.equal(usage.aggregate.contributionCount, 1);
 
     const coverage = await engine.getFactFamilyCoverage({
       projectId,
@@ -560,286 +433,26 @@ describe('persistent SpaghettiEngine', { skip: !native }, () => {
     const sessionId = sessions.items[0]?.sessionId;
     assert.ok(sessionId);
 
-    const usage = await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 });
-    assert.equal(usage.aggregate.responseCount, 2);
-    assert.equal(usage.aggregate.inputTokens.knownTokens, 30);
-    assert.equal(usage.actors.length, 2);
-    const rootActor = usage.actors.find((actor) => actor.role === 'root');
-    const childActor = usage.actors.find((actor) => actor.role === 'child');
-    assert.ok(rootActor);
-    assert.ok(childActor);
-    const rootTeam = rootActor.affiliations.find(
-      (affiliation) => affiliation.dimension === 'team' && affiliation.state === 'present',
-    );
-    const childTeam = childActor.affiliations.find(
-      (affiliation) => affiliation.dimension === 'team' && affiliation.state === 'present',
-    );
-    assert.ok(rootTeam);
-    assert.ok(childTeam);
-    assert.equal(rootTeam.targetRef.entityKey, childTeam.targetRef.entityKey);
-    assert.notEqual(rootTeam.memberRef?.entityKey, childTeam.memberRef?.entityKey);
-    assert.equal(
-      rootTeam.nativeMemberId,
-      teamConfig.members.find((member) => member.agentId === teamConfig.leadAgentId)?.name,
-    );
-    assert.equal(childTeam.nativeMemberId, childMetadata.name);
-
-    const teamUsage = await engine.getRuntimeUsageV2({
-      projectId,
-      sessionId,
-      affiliationDimension: 'team',
-      affiliationTargetRef: rootTeam.targetRef.entityKey,
-      limit: 10,
-    });
-    assert.equal(teamUsage.aggregate.responseCount, 2);
-    assert.equal(teamUsage.aggregate.inputTokens.knownTokens, 30);
+    // Affiliation is a grouping over the same responses. Editing it must never
+    // change the session's canonical contribution total (RFC 012C 7.5).
+    const usage = await engine.getUsage({ projectId, sessionId });
+    assert.equal(usage.aggregate.contributionCount, 2);
+    assert.equal(usage.aggregate.combined.inputTokens, 30);
 
     writeFileSync(
       path.join(childDir, 'agent-child.meta.json'),
       JSON.stringify({ agentType: childMetadata.agentType, name: childMetadata.name }),
     );
     await engine.reconcileClaude({ roots: [root], reason: 'sdk_team_child_removed' });
-    const rootOnly = await engine.getRuntimeUsageV2({
-      projectId,
-      sessionId,
-      affiliationDimension: 'team',
-      affiliationTargetRef: rootTeam.targetRef.entityKey,
-      limit: 10,
-    });
-    assert.equal(rootOnly.aggregate.responseCount, 1);
-    assert.equal(rootOnly.aggregate.inputTokens.knownTokens, 10);
-    assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).aggregate.responseCount, 2);
+    const afterChildRemoved = await engine.getUsage({ projectId, sessionId });
+    assert.equal(afterChildRemoved.aggregate.contributionCount, 2);
+    assert.equal(afterChildRemoved.aggregate.combined.inputTokens, 30);
 
     rmSync(configPath);
     await engine.reconcileClaude({ roots: [root], reason: 'sdk_team_root_removed' });
-    const noTeamUsage = await engine.getRuntimeUsageV2({
-      projectId,
-      sessionId,
-      affiliationDimension: 'team',
-      affiliationTargetRef: rootTeam.targetRef.entityKey,
-      limit: 10,
-    });
-    assert.equal(noTeamUsage.aggregate.responseCount, 0);
-    assert.equal((await engine.getRuntimeUsageV2({ projectId, sessionId, limit: 10 })).aggregate.responseCount, 2);
-  });
-
-  // This mutation path cannot run until an independently reviewed Claude
-  // support release is promoted and can mint typed durable authority.
-  test.skip('negotiates a composite usage source vector without mixing contracts', async () => {
-    const dbPath = temporaryDatabase();
-    const base = path.dirname(dbPath);
-    const roots = [path.join(base, 'claude-usage-a'), path.join(base, 'claude-usage-b')];
-    const sessionIds = ['aaaaaaaa-1111-2222-3333-444444444444', 'bbbbbbbb-1111-2222-3333-444444444444'];
-    const transcriptPaths: string[] = [];
-    for (const [index, root] of roots.entries()) {
-      const project = path.join(root, 'projects', `-tmp-usage-${index}`);
-      mkdirSync(project, { recursive: true });
-      const transcriptPath = path.join(project, `${sessionIds[index]}.jsonl`);
-      transcriptPaths.push(transcriptPath);
-      writeFileSync(
-        transcriptPath,
-        `${JSON.stringify({
-          type: 'assistant',
-          uuid: `${index}aaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee`,
-          parentUuid: null,
-          timestamp: `2026-08-1${index + 1}T00:00:00.000Z`,
-          sessionId: sessionIds[index],
-          cwd: `/tmp/usage-${index}`,
-          version: '1',
-          gitBranch: 'main',
-          isSidechain: false,
-          userType: 'external',
-          requestId: `request-${index}`,
-          message: {
-            model: 'claude-sonnet',
-            id: `response-${index}`,
-            type: 'message',
-            role: 'assistant',
-            content: [{ type: 'text', text: `usage response ${index}` }],
-            usage: {
-              input_tokens: (index + 1) * 10,
-              output_tokens: index + 1,
-              cache_creation_input_tokens: 0,
-              cache_read_input_tokens: 0,
-            },
-          },
-        })}\n`,
-      );
-      if (index === 0) {
-        appendFileSync(
-          transcriptPath,
-          `${JSON.stringify({
-            type: 'assistant',
-            uuid: '0bbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee',
-            parentUuid: null,
-            timestamp: '2026-08-11T00:00:00.001Z',
-            sessionId: sessionIds[index],
-            cwd: '/tmp/usage-0',
-            version: '1',
-            gitBranch: 'main',
-            isSidechain: false,
-            userType: 'external',
-            requestId: 'request-0',
-            message: {
-              model: 'claude-sonnet',
-              id: 'response-0',
-              type: 'message',
-              role: 'assistant',
-              content: [{ type: 'text', text: 'usage response 0 revised' }],
-              usage: {
-                input_tokens: 12,
-                output_tokens: 2,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
-              },
-            },
-          })}\n`,
-        );
-      }
-    }
-    for (const root of roots) markClaudeVersionFixture(root);
-
-    const engine = await openTracked(dbPath, 'sdk-usage-vector-test');
-    await engine.reconcileClaude({ roots, reason: 'sdk_usage_vector_fixture' });
-    const projects = (await engine.listHistoryProjects({ limit: 10 })).items;
-    assert.equal(projects.length, 2);
-    const members = await Promise.all(
-      projects.map(async (project) => {
-        const session = (await engine.listHistorySessions({ projectId: project.projectId, limit: 10 })).items[0];
-        assert.ok(session);
-        return { projectId: project.projectId, sessionId: session.sessionId };
-      }),
-    );
-
-    const legacy = await engine.getRuntimeUsageTotals({ scopes: members });
-    assert.equal(legacy.status, 'resolved');
-    assert.equal(legacy.resolvedQuery?.queryId, 'legacy.usage');
-    assert.equal(legacy.selectionVector.length, 2);
-    assert.equal(new Set(legacy.selectionVector.map((item) => item.selectionScopeRef)).size, 2);
-    assert.ok(legacy.selectionVector.every((item) => item.v2Eligible));
-
-    const shadowV2 = await engine.getRuntimeUsageTotals({
-      scopes: members,
-      requestedQueryId: 'runtime.usage-v2',
-    });
-    assert.equal(shadowV2.status, 'resolved');
-    assert.equal(shadowV2.usageV2?.responseCount, 2);
-    assert.equal(shadowV2.usageV2?.inputTokens.knownTokens, 32);
-    assert.equal(shadowV2.usageV2?.outputTokens.knownTokens, 4);
-    const reversedShadowV2 = await engine.getRuntimeUsageTotals({
-      scopes: [...members].reverse(),
-      requestedQueryId: 'runtime.usage-v2',
-    });
-    assert.deepEqual(
-      reversedShadowV2.selectionVector.map((item) => item.selectionScopeRef),
-      shadowV2.selectionVector.map((item) => item.selectionScopeRef),
-    );
-    assert.deepEqual(reversedShadowV2.usageV2, shadowV2.usageV2);
-
-    const telemetryBefore = (await engine.getStats()).performance?.queries.runtimeUsageCompatibility;
-    assert.equal(telemetryBefore?.samples, 0);
-    const comparison = await engine.getRuntimeUsageCompatibility({ scopes: members });
-    assert.equal(comparison.status, 'ready');
-    assert.equal(comparison.comparisonStatus, 'different');
-    assert.match(comparison.comparisonRef, /^v1:/);
-    assert.equal(comparison.legacy.contributionCount, 3);
-    assert.equal(comparison.usageV2?.responseCount, 2);
-    assert.equal(comparison.inputTokens?.relation, 'legacy_higher');
-    assert.equal(comparison.inputTokens?.legacyCombinedTokens, 42);
-    assert.equal(comparison.inputTokens?.v2KnownTokens, 32);
-    assert.equal(comparison.inputTokens?.absoluteDeltaTokens, 10);
-    assert.equal(comparison.outputTokens?.relation, 'legacy_higher');
-    assert.equal(comparison.outputTokens?.absoluteDeltaTokens, 1);
-    assert.equal(comparison.cacheCreationInputTokens?.relation, 'equal');
-    assert.equal(comparison.cacheReadInputTokens?.relation, 'equal');
-    assert.equal(JSON.stringify(comparison).includes(base), false);
-    const reversedComparison = await engine.getRuntimeUsageCompatibility({ scopes: [...members].reverse() });
-    assert.equal(reversedComparison.comparisonRef, comparison.comparisonRef);
-    const compatibilityTelemetry = (await engine.getStats()).performance?.queries.runtimeUsageCompatibility;
-    assert.equal(compatibilityTelemetry?.samples, 2);
-    assert.equal(compatibilityTelemetry?.readySamples, 2);
-    assert.equal(compatibilityTelemetry?.differentSamples, 2);
-    assert.equal(compatibilityTelemetry?.legacyHigherBuckets, 4);
-    assert.equal(compatibilityTelemetry?.equalBuckets, 4);
-    assert.equal(compatibilityTelemetry?.sampledAbsoluteDeltaTokens, 22);
-    assert.equal(compatibilityTelemetry?.maxAbsoluteDeltaTokens, 10);
-
-    const promote = async (member: (typeof members)[number]) => {
-      const current = await engine.getRuntimeUsageV2({ ...member, limit: 1 });
-      return await engine.selectRuntimeUsageQuery({
-        ...member,
-        targetQueryId: 'runtime.usage-v2',
-        expectedMaterialized: current.querySelection.materialized,
-        expectedSelectedQueryId: current.querySelection.selected.queryId,
-        expectedSelectedContractVersion: current.querySelection.selected.contractVersion,
-        expectedSelectionEpoch: current.querySelection.selectionEpoch,
-        reason: 'sdk composite vector promotion',
-      });
-    };
-
-    await promote(members[0]!);
-    const mixed = await engine.getRuntimeUsageTotals({ scopes: members });
-    assert.equal(mixed.status, 'mixed_selection');
-    assert.equal(mixed.resolvedQuery, undefined);
-    assert.equal(mixed.legacy, undefined);
-    assert.equal(mixed.usageV2, undefined);
-
-    const explicitLegacy = await engine.getRuntimeUsageTotals({
-      scopes: members,
-      requestedQueryId: 'legacy.usage',
-    });
-    assert.equal(explicitLegacy.status, 'resolved');
-    assert.equal(explicitLegacy.resolvedQuery?.queryId, 'legacy.usage');
-    assert.ok(explicitLegacy.legacy);
-
-    await promote(members[1]!);
-    const selectedV2 = await engine.getRuntimeUsageTotals({ scopes: members });
-    assert.equal(selectedV2.status, 'resolved');
-    assert.equal(selectedV2.resolvedQuery?.queryId, 'runtime.usage-v2');
-    assert.equal(selectedV2.usageV2?.responseCount, 2);
-    assert.equal(selectedV2.usageV2?.inputTokens.knownTokens, 32);
-    assert.equal(selectedV2.legacy, undefined);
-
-    appendFileSync(transcriptPaths[0]!, '{"type":"assistant"');
-    await engine.reconcileClaude({ roots, reason: 'sdk_usage_vector_incomplete_tail' });
-    const selectedButUnready = await engine.getRuntimeUsageTotals({ scopes: members });
-    assert.equal(selectedButUnready.status, 'not_ready');
-    assert.equal(selectedButUnready.resolvedQuery?.queryId, 'runtime.usage-v2');
-    assert.equal(selectedButUnready.legacy, undefined);
-    assert.equal(selectedButUnready.usageV2, undefined);
-    assert.ok(selectedButUnready.selectionVector.some((item) => !item.v2Eligible));
-
-    const unavailableComparison = await engine.getRuntimeUsageCompatibility({ scopes: members });
-    assert.equal(unavailableComparison.status, 'not_ready');
-    assert.equal(unavailableComparison.comparisonStatus, 'not_ready');
-    assert.equal(unavailableComparison.usageV2, undefined);
-    assert.equal(unavailableComparison.inputTokens, undefined);
-    const telemetryAfterUnavailable = (await engine.getStats()).performance?.queries.runtimeUsageCompatibility;
-    assert.equal(telemetryAfterUnavailable?.samples, 3);
-    assert.equal(telemetryAfterUnavailable?.notReadySamples, 1);
-
-    const rollback = async (member: (typeof members)[number]) => {
-      const current = await engine.getRuntimeUsageV2({ ...member, limit: 1 });
-      return await engine.selectRuntimeUsageQuery({
-        ...member,
-        targetQueryId: 'legacy.usage',
-        expectedMaterialized: current.querySelection.materialized,
-        expectedSelectedQueryId: current.querySelection.selected.queryId,
-        expectedSelectedContractVersion: current.querySelection.selected.contractVersion,
-        expectedSelectionEpoch: current.querySelection.selectionEpoch,
-        reason: 'sdk composite unhealthy rollback drill',
-      });
-    };
-    await rollback(members[0]!);
-    assert.equal((await engine.getRuntimeUsageTotals({ scopes: members })).status, 'mixed_selection');
-    await rollback(members[1]!);
-    const restoredLegacy = await engine.getRuntimeUsageTotals({ scopes: members });
-    assert.equal(restoredLegacy.status, 'resolved');
-    assert.equal(restoredLegacy.resolvedQuery?.queryId, 'legacy.usage');
-    assert.ok(restoredLegacy.legacy);
-    const retainedV2 = await engine.getRuntimeUsageV2({ ...members[1]!, limit: 10 });
-    assert.equal(retainedV2.projectionStatus, 'shadow');
-    assert.equal(retainedV2.aggregate.responseCount, 1);
+    const afterTeamRemoved = await engine.getUsage({ projectId, sessionId });
+    assert.equal(afterTeamRemoved.aggregate.contributionCount, 2);
+    assert.equal(afterTeamRemoved.aggregate.combined.inputTokens, 30);
   });
 
   test('starts, refreshes, and stops native Claude observation', async () => {

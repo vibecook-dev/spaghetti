@@ -92,8 +92,8 @@
       "evidence": [
         {
           "state": "implemented",
-          "target": "crates/spaghetti-napi/src/engine/runtime_semantic_merge.rs",
-          "claim": "Durable and scoped usage contributions carry SemanticRevisionRef; overlay replacement is grouped by canonical fact identity; observer delivery is deduplicated by event_id; coverage comparison gates overlay retirement."
+          "target": "crates/spaghetti-napi/src/runtime_semantic_reducer.rs",
+          "claim": "Durable and scoped topologies share one decoder, fact set, provenance, and reducer law; each owns its delivery projection. The durable projection writes response contributions keyed by SemanticRevisionRef."
         }
       ]
     },
@@ -343,9 +343,9 @@
       "rollback": "Consumers may disable the scoped overlay and read durable state only.",
       "evidence": [
         {
-          "state": "implemented",
-          "target": "crates/spaghetti-napi/src/engine/runtime_semantic_merge.rs",
-          "claim": "Durable/live merge deduplicates by event_id, preserves A-B-A, retires complete overlays, and keeps stale overlay on incomparable coverage."
+          "state": "planned",
+          "target": "crates/spaghetti-napi/src/engine/usage_query.rs",
+          "claim": "Durable half implemented: at_commit_seq is durable-only and every response contribution carries its semantic revision. The scoped overlay merge is not implemented; the module that claimed it was reachable only from its own tests and was deleted with the shadow usage stack."
         }
       ]
     }

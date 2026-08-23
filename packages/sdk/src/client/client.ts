@@ -245,34 +245,6 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     return this.query('getUsage', request, options);
   }
 
-  getUsageActivity(
-    request: SpaghettiClientRequestMap['getUsageActivity'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getUsageActivity']> {
-    return this.query('getUsageActivity', request, options);
-  }
-
-  getRuntimeUsageV2(
-    request: SpaghettiClientRequestMap['getRuntimeUsageV2'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageV2']> {
-    return this.query('getRuntimeUsageV2', request, options);
-  }
-
-  getRuntimeUsageTotals(
-    request: SpaghettiClientRequestMap['getRuntimeUsageTotals'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageTotals']> {
-    return this.query('getRuntimeUsageTotals', request, options);
-  }
-
-  getRuntimeUsageCompatibility(
-    request: SpaghettiClientRequestMap['getRuntimeUsageCompatibility'],
-    options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['getRuntimeUsageCompatibility']> {
-    return this.query('getRuntimeUsageCompatibility', request, options);
-  }
-
   getFactFamilyCoverage(
     request: SpaghettiClientRequestMap['getFactFamilyCoverage'],
     options?: SpaghettiQueryOptions,

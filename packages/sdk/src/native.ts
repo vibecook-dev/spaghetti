@@ -1207,24 +1207,6 @@ export interface SpaghettiEngineWriterPerformanceStats {
   timings: SpaghettiEngineNamedLatencyStats[];
 }
 
-/** Bounded owner-lifetime samples; repeated comparison queries remain visible. */
-export interface SpaghettiEngineRuntimeUsageCompatibilityTelemetryStats {
-  samples: number;
-  readySamples: number;
-  notReadySamples: number;
-  equalSamples: number;
-  differentSamples: number;
-  incomparableSamples: number;
-  equalBuckets: number;
-  legacyHigherBuckets: number;
-  v2HigherBuckets: number;
-  incomparableBuckets: number;
-  sampledAbsoluteDeltaTokens: number;
-  maxAbsoluteDeltaTokens: number;
-  firstAtCommitSeq?: number;
-  lastAtCommitSeq?: number;
-}
-
 export interface SpaghettiEngineQueryPerformanceStats {
   uptimeMs: number;
   requestsEnqueued: number;
@@ -1233,7 +1215,6 @@ export interface SpaghettiEngineQueryPerformanceStats {
   queueDepth: number;
   queueHighWatermark: number;
   oldestActiveMs: number;
-  runtimeUsageCompatibility: SpaghettiEngineRuntimeUsageCompatibilityTelemetryStats;
   timings: SpaghettiEngineNamedLatencyStats[];
 }
 
@@ -1304,18 +1285,18 @@ export interface SpaghettiEngineCanonicalStats {
   performance?: SpaghettiEnginePerformanceStats;
 }
 
-export interface SpaghettiEngineUsageScopeOptions {
+export interface SpaghettiEngineUsageOptions {
   /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
   projectId: string;
   /** Optional opaque session identity returned by {@link SpaghettiEngine.listHistorySessions}. */
   sessionId?: string;
-}
-
-export interface SpaghettiEngineUsageActivityOptions extends SpaghettiEngineUsageScopeOptions {
+  /**
+   * Inclusive calendar date in YYYY-MM-DD form. Supplying both `from` and `to`
+   * adds the per-day series and the untimed remainder to the report.
+   */
+  from?: string;
   /** Inclusive calendar date in YYYY-MM-DD form. */
-  from: string;
-  /** Inclusive calendar date in YYYY-MM-DD form. */
-  to: string;
+  to?: string;
 }
 
 export interface SpaghettiEngineUsageTokenValues {
@@ -1328,9 +1309,17 @@ export interface SpaghettiEngineUsageTokenValues {
 }
 
 export type SpaghettiEngineUsageQuality = 'exact' | 'estimated' | 'mixed' | 'unavailable';
-export type SpaghettiEngineUsageScope = 'record' | 'message' | 'turn' | 'run' | 'session' | 'team' | 'project';
-export type SpaghettiEngineUsageAccounting = 'delta' | 'cumulative' | 'snapshot';
-export type SpaghettiEngineValueQuality = 'native_exact' | 'native_approximate' | 'derived_exact' | 'estimated';
+export type SpaghettiEngineUsageBucket = 'input' | 'output' | 'cache_creation' | 'cache_read';
+export type SpaghettiEngineUsageValueQuality = 'exact' | 'native_claimed' | 'derived' | 'estimated' | 'unknown';
+export type SpaghettiEngineUsageCompleteness = 'complete' | 'partial' | 'unknown';
+export type SpaghettiEngineUsageUnknownReason =
+  | 'missing'
+  | 'unsupported'
+  | 'withheld'
+  | 'not_yet_observed'
+  | 'ambiguous'
+  | 'malformed';
+export type SpaghettiEngineUsageAuthority = 'native_response' | 'adapter_derived';
 
 export interface SpaghettiEngineUsageAggregate {
   exact: SpaghettiEngineUsageTokenValues;
@@ -1339,36 +1328,28 @@ export interface SpaghettiEngineUsageAggregate {
   quality: SpaghettiEngineUsageQuality;
   exactContributionCount: number;
   estimatedContributionCount: number;
+  /** Responses asserting no bucket at all. Never summed as zero. */
+  unknownContributionCount: number;
+  /** Distinct responses, not native rows. */
   contributionCount: number;
   sessionCount: number;
 }
 
+/** One qualified bucket population inside the requested scope. */
 export interface SpaghettiEngineUsageCoverage {
-  scope: SpaghettiEngineUsageScope;
-  accounting: SpaghettiEngineUsageAccounting;
-  valueQuality: SpaghettiEngineValueQuality;
-  qualityBucket: 'exact' | 'estimated';
+  bucket: SpaghettiEngineUsageBucket;
+  valueQuality: SpaghettiEngineUsageValueQuality;
+  completeness: SpaghettiEngineUsageCompleteness;
+  unknownReason?: SpaghettiEngineUsageUnknownReason;
+  authority: SpaghettiEngineUsageAuthority;
+  nativeField: string;
   model?: string;
   sourceTimeQuality?: SpaghettiEngineTimestampQuality;
   contributionCount: number;
-  tokens: SpaghettiEngineUsageTokenValues;
+  tokens: number;
 }
 
-export interface SpaghettiEngineUsageTotals {
-  contractVersion: number;
-  atCommitSeq: number;
-  projectId: string;
-  sessionId?: string;
-  aggregate: SpaghettiEngineUsageAggregate;
-  coverage: SpaghettiEngineUsageCoverage[];
-  firstSourceTime?: string;
-  lastSourceTime?: string;
-  firstObservedAtUnixMs?: number;
-  lastObservedAtUnixMs?: number;
-  lastCommitSeq?: number;
-}
-
-export interface SpaghettiEngineUsageActivityDay {
+export interface SpaghettiEngineUsageDay {
   date: string;
   aggregate: SpaghettiEngineUsageAggregate;
   firstSourceTime: string;
@@ -1380,213 +1361,24 @@ export interface SpaghettiEngineUsageActivityDay {
 
 export interface SpaghettiEngineUntimedUsage {
   aggregate: SpaghettiEngineUsageAggregate;
-  coverage: SpaghettiEngineUsageCoverage[];
   firstObservedAtUnixMs?: number;
   lastObservedAtUnixMs?: number;
   lastCommitSeq?: number;
 }
 
-export interface SpaghettiEngineUsageActivity {
+export interface SpaghettiEngineUsageWindow {
+  from: string;
+  to: string;
+  days: SpaghettiEngineUsageDay[];
+  /** Contributions with no structurally valid source date. */
+  untimed: SpaghettiEngineUntimedUsage;
+}
+
+export interface SpaghettiEngineUsage {
   contractVersion: number;
   atCommitSeq: number;
   projectId: string;
   sessionId?: string;
-  from: string;
-  to: string;
-  days: SpaghettiEngineUsageActivityDay[];
-  aggregate: SpaghettiEngineUsageAggregate;
-  coverage: SpaghettiEngineUsageCoverage[];
-  untimed: SpaghettiEngineUntimedUsage;
-  firstObservedAtUnixMs?: number;
-  lastObservedAtUnixMs?: number;
-  lastCommitSeq?: number;
-}
-
-/** Query one response-revision usage page from the RFC 012C shadow projection. */
-export interface SpaghettiEngineRuntimeUsageV2Options extends SpaghettiEngineHistoryPageOptions {
-  /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
-  projectId: string;
-  /** Opaque session identity returned by {@link SpaghettiEngine.listHistorySessions}. */
-  sessionId: string;
-  /** Optional RFC 012A actor entity reference returned by a prior page. */
-  actorRunRef?: string;
-  /** Optional affiliation dimension. It must be paired with affiliationTargetRef. */
-  affiliationDimension?: 'team' | 'workflow';
-  /** RFC 012A team/workflow target entity reference paired with affiliationDimension. */
-  affiliationTargetRef?: string;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2ExternalEntityRef {
-  externalEntityReferenceVersion: number;
-  entityKey: string;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2SemanticRevisionRef {
-  semanticReferenceContractVersion: number;
-  factRevisionId: string;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2ValueProvenance {
-  nativeField: string;
-  normalizationContractVersion: number;
-}
-
-export type SpaghettiEngineRuntimeUsageV2Quality = 'exact' | 'native_claimed' | 'derived' | 'estimated' | 'unknown';
-export type SpaghettiEngineRuntimeUsageV2Completeness = 'complete' | 'partial' | 'unknown';
-export type SpaghettiEngineRuntimeUsageV2UnknownReason =
-  | 'missing'
-  | 'unsupported'
-  | 'withheld'
-  | 'not_yet_observed'
-  | 'ambiguous'
-  | 'malformed';
-export type SpaghettiEngineRuntimeUsageV2Authority = 'native_response' | 'adapter_derived';
-
-export interface SpaghettiEngineRuntimeUsageV2TokenValue {
-  value?: number;
-  quality: SpaghettiEngineRuntimeUsageV2Quality;
-  authority: SpaghettiEngineRuntimeUsageV2Authority;
-  completeness: SpaghettiEngineRuntimeUsageV2Completeness;
-  unknownReason?: SpaghettiEngineRuntimeUsageV2UnknownReason;
-  effectiveAt?: number;
-  provenance: SpaghettiEngineRuntimeUsageV2ValueProvenance;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2TextValue {
-  value?: string;
-  quality: SpaghettiEngineRuntimeUsageV2Quality;
-  authority: SpaghettiEngineRuntimeUsageV2Authority;
-  completeness: SpaghettiEngineRuntimeUsageV2Completeness;
-  unknownReason?: SpaghettiEngineRuntimeUsageV2UnknownReason;
-  effectiveAt?: number;
-  provenance: SpaghettiEngineRuntimeUsageV2ValueProvenance;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2Response {
-  usageKey: string;
-  semanticRevisionRef: SpaghettiEngineRuntimeUsageV2SemanticRevisionRef;
-  sourceRecordRef: string;
-  sessionRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  actorRunRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  responseKeyBase64: string;
-  responseIdentity: 'native_message_id' | 'source_record_fallback';
-  nativeMessageId?: string;
-  requestId?: string;
-  inputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
-  outputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
-  cacheCreationInputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
-  cacheReadInputTokens: SpaghettiEngineRuntimeUsageV2TokenValue;
-  model?: SpaghettiEngineRuntimeUsageV2TextValue;
-  effort?: SpaghettiEngineRuntimeUsageV2TextValue;
-  sourceTime?: string;
-  sourceTimeQuality?: SpaghettiEngineTimestampQuality;
-  observedAtUnixMs: number;
-  sourceGeneration: number;
-  lastCommitSeq: number;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2Affiliation {
-  affiliationRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  semanticRevisionRef: SpaghettiEngineRuntimeUsageV2SemanticRevisionRef;
-  dimension: 'team' | 'workflow';
-  targetRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  memberRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  nativeTargetId?: string;
-  nativeMemberId?: string;
-  state: 'present' | 'removed' | 'unknown';
-  effectiveAt?: string;
-  effectiveAtQuality?: SpaghettiEngineTimestampQuality;
-  observedAtUnixMs: number;
-  sourceGeneration: number;
-  lastCommitSeq: number;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2ActorContext {
-  actorRunRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  semanticRevisionRef: SpaghettiEngineRuntimeUsageV2SemanticRevisionRef;
-  sessionRef: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  role: 'root' | 'child';
-  parentActorRunRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  nativeSessionId?: string;
-  nativeActorId?: string;
-  nativeActorType?: string;
-  /** Current revisions, including explicit removed and unknown relations. */
-  affiliations: SpaghettiEngineRuntimeUsageV2Affiliation[];
-  observedAtUnixMs: number;
-  sourceGeneration: number;
-  lastCommitSeq: number;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2BucketAggregate {
-  knownTokens: number;
-  knownResponseCount: number;
-  exactResponseCount: number;
-  nonExactResponseCount: number;
-  unknownResponseCount: number;
-  completeness: SpaghettiEngineRuntimeUsageV2Completeness;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2Aggregate {
-  responseCount: number;
-  actorCount: number;
-  inputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
-  outputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
-  cacheCreationInputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
-  cacheReadInputTokens: SpaghettiEngineRuntimeUsageV2BucketAggregate;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2ProjectionReadiness {
-  projectionId: 'runtime.usage-v2';
-  desiredVersion: number;
-  completedVersion?: number;
-  /** `untracked` is explicit legacy/direct-fixture state, never an alias for ready. */
-  state: 'ready' | 'stale_safe' | 'pending' | 'unavailable' | 'untracked';
-  lastCommitSeq?: number;
-  updatedAtUnixMs?: number;
-  detail?: string;
-}
-
-export interface SpaghettiEngineRuntimeUsageQuerySelectionValue {
-  queryId: 'legacy.usage' | 'runtime.usage-v2';
-  contractVersion: number;
-}
-
-export interface SpaghettiEngineRuntimeUsageQuerySelection {
-  contractVersion: number;
-  queryPackId: 'runtime.usage';
-  /** Opaque common source identity once matching usage-v2 coverage exists. */
-  sourceInstanceRef?: string;
-  /** False means the immutable compatibility default legacy.usage@1 at epoch zero. */
-  materialized: boolean;
-  selected: SpaghettiEngineRuntimeUsageQuerySelectionValue;
-  rollback: SpaghettiEngineRuntimeUsageQuerySelectionValue;
-  selectionEpoch: number;
-  lastCommitSeq?: number;
-  updatedAtUnixMs?: number;
-}
-
-export type SpaghettiEngineRuntimeUsageTotalsQueryId = 'selected' | 'legacy.usage' | 'runtime.usage-v2';
-
-export interface SpaghettiEngineRuntimeUsageTotalsOptions {
-  /** One to 128 canonical scopes. Project-wide and session scopes may not overlap. */
-  scopes: SpaghettiEngineUsageScopeOptions[];
-  /** Defaults to `selected`; explicit values support compatibility and shadow comparison. */
-  requestedQueryId?: SpaghettiEngineRuntimeUsageTotalsQueryId;
-}
-
-export interface SpaghettiEngineRuntimeUsageTotalsSelectionScope {
-  /** Query-local opaque vector identity; not an RFC 012A sourceInstanceRef. */
-  selectionScopeRef: string;
-  adapterId: string;
-  sessionCount: number;
-  querySelection: SpaghettiEngineRuntimeUsageQuerySelection;
-  projectionReadiness: SpaghettiEngineRuntimeUsageV2ProjectionReadiness;
-  coverageStatus: 'complete' | 'partial' | 'unavailable' | 'not_materialized' | 'inconsistent';
-  /** True only when the current v2 promotion guard is satisfied. */
-  v2Eligible: boolean;
-}
-
-export interface SpaghettiEngineRuntimeUsageLegacyTotals {
   aggregate: SpaghettiEngineUsageAggregate;
   coverage: SpaghettiEngineUsageCoverage[];
   firstSourceTime?: string;
@@ -1594,103 +1386,10 @@ export interface SpaghettiEngineRuntimeUsageLegacyTotals {
   firstObservedAtUnixMs?: number;
   lastObservedAtUnixMs?: number;
   lastCommitSeq?: number;
+  /** Present only when the request carried a calendar window. */
+  window?: SpaghettiEngineUsageWindow;
 }
 
-export interface SpaghettiEngineRuntimeUsageTotals {
-  contractVersion: number;
-  atCommitSeq: number;
-  requestedQueryId: SpaghettiEngineRuntimeUsageTotalsQueryId;
-  status: 'resolved' | 'mixed_selection' | 'not_ready' | 'unsupported_selection';
-  resolvedQuery?: SpaghettiEngineRuntimeUsageQuerySelectionValue;
-  scopes: SpaghettiEngineUsageScopeOptions[];
-  selectionVector: SpaghettiEngineRuntimeUsageTotalsSelectionScope[];
-  /** Present exactly when the resolved query is legacy.usage. */
-  legacy?: SpaghettiEngineRuntimeUsageLegacyTotals;
-  /** Present exactly when the resolved query is runtime.usage-v2. */
-  usageV2?: SpaghettiEngineRuntimeUsageV2Aggregate;
-}
-
-export interface SpaghettiEngineRuntimeUsageCompatibilityOptions {
-  /** One to 128 canonical scopes. Project-wide and session scopes may not overlap. */
-  scopes: SpaghettiEngineUsageScopeOptions[];
-}
-
-export interface SpaghettiEngineRuntimeUsageCompatibilityBucket {
-  legacyExactTokens: number;
-  legacyEstimatedTokens: number;
-  legacyCombinedTokens: number;
-  v2KnownTokens: number;
-  v2UnknownResponseCount: number;
-  v2Completeness: SpaghettiEngineRuntimeUsageV2Completeness;
-  relation: 'equal' | 'legacy_higher' | 'v2_higher' | 'incomparable';
-  /** Absent only when the v2 bucket is incomplete and therefore incomparable. */
-  absoluteDeltaTokens?: number;
-}
-
-export interface SpaghettiEngineRuntimeUsageCompatibility {
-  contractVersion: number;
-  atCommitSeq: number;
-  /** Opaque, request-order-independent identity for this scope set and commit. */
-  comparisonRef: string;
-  status: 'ready' | 'not_ready';
-  comparisonStatus: 'equal' | 'different' | 'incomparable' | 'not_ready';
-  scopes: SpaghettiEngineUsageScopeOptions[];
-  selectionVector: SpaghettiEngineRuntimeUsageTotalsSelectionScope[];
-  legacy: SpaghettiEngineUsageAggregate;
-  usageV2?: SpaghettiEngineRuntimeUsageV2Aggregate;
-  inputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
-  outputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
-  cacheCreationInputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
-  cacheReadInputTokens?: SpaghettiEngineRuntimeUsageCompatibilityBucket;
-}
-
-/**
- * Compare-and-set authorization for the source instance resolved through one
- * session. Copy every expected field from one `getRuntimeUsageV2()` page.
- */
-export interface SpaghettiEngineRuntimeUsageQuerySelectionOptions {
-  projectId: string;
-  sessionId: string;
-  targetQueryId: 'legacy.usage' | 'runtime.usage-v2';
-  expectedMaterialized: boolean;
-  expectedSelectedQueryId: 'legacy.usage' | 'runtime.usage-v2';
-  expectedSelectedContractVersion: number;
-  expectedSelectionEpoch: number;
-  /** Bounded durable audit reason for this selection change. */
-  reason: string;
-}
-
-export interface SpaghettiEngineRuntimeUsageQuerySelectionResult {
-  contractVersion: number;
-  atCommitSeq: number;
-  projectId: string;
-  sessionId: string;
-  selection: SpaghettiEngineRuntimeUsageQuerySelection;
-}
-
-export interface SpaghettiEngineRuntimeUsageV2Page {
-  contractVersion: number;
-  atCommitSeq: number;
-  /** `selected` is explicit; `not_materialized` means this session has no v2 projection yet. */
-  projectionStatus: 'shadow' | 'selected' | 'not_materialized';
-  /** Writer-owned readiness at the same atCommitSeq as rows and aggregates. */
-  projectionReadiness: SpaghettiEngineRuntimeUsageV2ProjectionReadiness;
-  /** Source-scoped migration selection from the same durable snapshot. */
-  querySelection: SpaghettiEngineRuntimeUsageQuerySelection;
-  projectId: string;
-  sessionId: string;
-  sessionRef?: SpaghettiEngineRuntimeUsageV2ExternalEntityRef;
-  actorRunRef?: string;
-  affiliationDimension?: 'team' | 'workflow';
-  affiliationTargetRef?: string;
-  aggregate: SpaghettiEngineRuntimeUsageV2Aggregate;
-  items: SpaghettiEngineRuntimeUsageV2Response[];
-  /** Actor contexts referenced by this page, not an unbounded session actor list. */
-  actors: SpaghettiEngineRuntimeUsageV2ActorContext[];
-  nextCursor?: string;
-}
-
-/** Page one normalized RFC 012A fact-family coverage set. */
 export interface SpaghettiEngineFactFamilyCoverageOptions extends SpaghettiEngineHistoryPageOptions {
   /** Opaque project identity returned by {@link SpaghettiEngine.listHistoryProjects}. */
   projectId: string;
@@ -2080,7 +1779,8 @@ export interface SpaghettiEngineAdapterObservationOptions extends SpaghettiEngin
   adapterId: string;
 }
 
-export interface SpaghettiEngineConfiguredObservationSourceOptions extends SpaghettiEngineAdapterObservationOptions {}
+/** One source in a configured startup unit. Alias, not a narrowing. */
+export type SpaghettiEngineConfiguredObservationSourceOptions = SpaghettiEngineAdapterObservationOptions;
 
 export interface SpaghettiEngineConfiguredObservationOptions {
   /** Complete source set planned as one startup unit before history scans begin. */
@@ -2222,27 +1922,7 @@ export interface SpaghettiEngine {
   ): Promise<SpaghettiEngineArtifactPage>;
   listSources(options?: SpaghettiEngineHistoryPageOptions, signal?: AbortSignal): Promise<SpaghettiEngineSourcePage>;
   getStats(signal?: AbortSignal): Promise<SpaghettiEngineCanonicalStats>;
-  getUsage(options: SpaghettiEngineUsageScopeOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsageTotals>;
-  getUsageActivity(
-    options: SpaghettiEngineUsageActivityOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineUsageActivity>;
-  getRuntimeUsageV2(
-    options: SpaghettiEngineRuntimeUsageV2Options,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineRuntimeUsageV2Page>;
-  getRuntimeUsageTotals(
-    options: SpaghettiEngineRuntimeUsageTotalsOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineRuntimeUsageTotals>;
-  getRuntimeUsageCompatibility(
-    options: SpaghettiEngineRuntimeUsageCompatibilityOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineRuntimeUsageCompatibility>;
-  selectRuntimeUsageQuery(
-    options: SpaghettiEngineRuntimeUsageQuerySelectionOptions,
-    signal?: AbortSignal,
-  ): Promise<SpaghettiEngineRuntimeUsageQuerySelectionResult>;
+  getUsage(options: SpaghettiEngineUsageOptions, signal?: AbortSignal): Promise<SpaghettiEngineUsage>;
   getFactFamilyCoverage(
     options: SpaghettiEngineFactFamilyCoverageOptions,
     signal?: AbortSignal,

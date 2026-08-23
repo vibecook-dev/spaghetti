@@ -217,7 +217,7 @@ describe('multi-adapter observation host', { skip: !native }, () => {
       'the transport-neutral client must remain read-only',
     );
     assert.equal(
-      (host.clientInfo.methods as readonly string[]).includes('selectRuntimeUsageQuery'),
+      (host.clientInfo.methods as readonly string[]).includes('getUsage'),
       false,
       'query selection must remain an owner-only mutation',
     );
@@ -272,22 +272,11 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.ok(replay.outcome.recordsDecoded > 0);
     await assert.rejects(host.replayFactFamily(request), /authorization is stale/i);
 
-    const usage = await host.client.getRuntimeUsageV2({ projectId, sessionId, limit: 1 });
-    const promoted = await host.selectRuntimeUsageQuery({
-      projectId,
-      sessionId,
-      targetQueryId: 'runtime.usage-v2',
-      expectedMaterialized: usage.querySelection.materialized,
-      expectedSelectedQueryId: usage.querySelection.selected.queryId,
-      expectedSelectedContractVersion: usage.querySelection.selected.contractVersion,
-      expectedSelectionEpoch: usage.querySelection.selectionEpoch,
-      reason: 'observation host usage-v2 promotion smoke test',
-    });
-    assert.equal(promoted.selection.selected.queryId, 'runtime.usage-v2');
-    assert.equal(
-      (await host.client.getRuntimeUsageV2({ projectId, sessionId, limit: 1 })).projectionStatus,
-      'selected',
-    );
+    // Response-level usage is the only usage path, so a replay must leave the
+    // session's contribution total where it was.
+    const usage = await host.client.getUsage({ projectId, sessionId });
+    assert.equal(usage.contractVersion, 1);
+    assert.equal(usage.aggregate.contributionCount > 0, true);
   });
 
   test('serves one source-neutral product API for Claude, Codex, and Grok', async () => {
@@ -488,10 +477,14 @@ describe('history query contract survives the catalog', { skip: !native }, () =>
   });
 });
 
+/** Copy a row without the named keys. */
+function omit(row: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([key]) => !keys.includes(key)));
+}
+
 /** Drop the one field the history path does not populate deterministically. */
 function withoutFirstPrompt(row: Record<string, unknown>): Record<string, unknown> {
-  const { firstPrompt: _prompt, ...rest } = row;
-  return rest;
+  return omit(row, ['firstPrompt']);
 }
 
 /** Remove `lastCommitSeq` wherever it appears, including on nested index rows. */
@@ -523,18 +516,16 @@ function projectKey(project: { adapterId: string; nativeProjectKey: string }): s
  * number of commits changes. Its real contract is asserted separately.
  */
 function normalizeProject(row: Record<string, unknown>): Record<string, unknown> {
-  const { externalRef: _ref, catalogState: _state, ...rest } = stripWatermarks(row);
   return {
-    ...rest,
+    ...omit(stripWatermarks(row), ['externalRef', 'catalogState']),
     projectId: `#project:${String(row.adapterId)}:${String(row.nativeProjectKey)}`,
     sourceInstanceId: `#source:${String(row.adapterId)}`,
   };
 }
 
 function normalizeSession(row: Record<string, unknown>, adapterId: string): Record<string, unknown> {
-  const { externalRef: _ref, catalogState: _state, ...rest } = stripWatermarks(row);
   return {
-    ...rest,
+    ...omit(stripWatermarks(row), ['externalRef', 'catalogState']),
     sessionId: `#session:${String(row.nativeSessionId)}`,
     projectId: `#project:${adapterId}:${String(row.nativeProjectKey)}`,
   };

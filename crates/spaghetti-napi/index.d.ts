@@ -119,35 +119,12 @@ export declare class SpaghettiEngine {
    * counts. Compatibility-cache tables are intentionally excluded.
    */
   getStats(signal?: AbortSignal | undefined | null): Promise<EngineCanonicalStats>
-  /** Return canonical usage totals for one project or one verified session. */
-  getUsage(options: EngineUsageScopeOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsageTotals>
   /**
-   * Return inclusive daily usage activity and separately surfaced untimed
-   * contributions for one canonical project/session scope.
+   * Return canonical response-level usage for one project or one verified
+   * session. Supplying `from` and `to` adds the per-day series and the
+   * contributions that no day can own.
    */
-  getUsageActivity(options: EngineUsageActivityOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsageActivity>
-  /**
-   * Page canonical response-level usage revisions and their current actor
-   * and affiliation context. This is an explicitly shadow-only RFC 012C
-   * surface; legacy additive usage queries remain unchanged.
-   */
-  getRuntimeUsageV2(options: EngineRuntimeUsageV2Options, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageV2Page>
-  /**
-   * Negotiate every contributing source selection under one snapshot and
-   * return exactly one labeled legacy or usage-v2 aggregate arm.
-   */
-  getRuntimeUsageTotals(options: EngineRuntimeUsageTotalsOptions, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageTotals>
-  /**
-   * Compare retained legacy and fully eligible usage-v2 totals without
-   * treating their intentional semantic divergence as an automatic error.
-   */
-  getRuntimeUsageCompatibility(options: EngineRuntimeUsageCompatibilityOptions, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageCompatibility>
-  /**
-   * Atomically promote or roll back one source-scoped runtime usage query.
-   * Promotion requires a Ready/complete v2 barrier at commit time; rollback
-   * remains available if that projection later becomes unhealthy.
-   */
-  selectRuntimeUsageQuery(options: EngineRuntimeUsageQuerySelectionOptions, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeUsageQuerySelectionResult>
+  getUsage(options: EngineUsageOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsage>
   /**
    * Page normalized RFC 012A coverage for one fact family using opaque
    * common identities. The result shares one durable commit watermark and
@@ -1033,7 +1010,6 @@ export interface EngineQueryPerformanceStats {
   queueDepth: number
   queueHighWatermark: number
   oldestActiveMs: number
-  runtimeUsageCompatibility: EngineRuntimeUsageCompatibilityTelemetryStats
   timings: Array<EngineNamedLatencyStats>
 }
 
@@ -1198,289 +1174,6 @@ export interface EngineRuntimeSnapshotOptions {
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
-}
-
-export interface EngineRuntimeUsageCompatibility {
-  contractVersion: number
-  atCommitSeq: number
-  comparisonRef: string
-  status: string
-  comparisonStatus: string
-  scopes: Array<EngineUsageScopeOptions>
-  selectionVector: Array<EngineRuntimeUsageTotalsSelectionScope>
-  legacy: EngineUsageAggregate
-  usageV2?: EngineRuntimeUsageV2Aggregate
-  inputTokens?: EngineRuntimeUsageCompatibilityBucket
-  outputTokens?: EngineRuntimeUsageCompatibilityBucket
-  cacheCreationInputTokens?: EngineRuntimeUsageCompatibilityBucket
-  cacheReadInputTokens?: EngineRuntimeUsageCompatibilityBucket
-}
-
-export interface EngineRuntimeUsageCompatibilityBucket {
-  legacyExactTokens: number
-  legacyEstimatedTokens: number
-  legacyCombinedTokens: number
-  v2KnownTokens: number
-  v2UnknownResponseCount: number
-  v2Completeness: string
-  relation: string
-  absoluteDeltaTokens?: number
-}
-
-export interface EngineRuntimeUsageCompatibilityOptions {
-  /** One to 128 canonical project/session scopes. Scopes must not overlap. */
-  scopes: Array<EngineUsageScopeOptions>
-}
-
-export interface EngineRuntimeUsageCompatibilityTelemetryStats {
-  samples: number
-  readySamples: number
-  notReadySamples: number
-  equalSamples: number
-  differentSamples: number
-  incomparableSamples: number
-  equalBuckets: number
-  legacyHigherBuckets: number
-  v2HigherBuckets: number
-  incomparableBuckets: number
-  sampledAbsoluteDeltaTokens: number
-  maxAbsoluteDeltaTokens: number
-  firstAtCommitSeq?: number
-  lastAtCommitSeq?: number
-}
-
-export interface EngineRuntimeUsageLegacyTotals {
-  aggregate: EngineUsageAggregate
-  coverage: Array<EngineUsageCoverage>
-  firstSourceTime?: string
-  lastSourceTime?: string
-  firstObservedAtUnixMs?: number
-  lastObservedAtUnixMs?: number
-  lastCommitSeq?: number
-}
-
-export interface EngineRuntimeUsageQuerySelection {
-  contractVersion: number
-  queryPackId: string
-  sourceInstanceRef?: string
-  materialized: boolean
-  selected: EngineRuntimeUsageQuerySelectionValue
-  rollback: EngineRuntimeUsageQuerySelectionValue
-  selectionEpoch: number
-  lastCommitSeq?: number
-  updatedAtUnixMs?: number
-}
-
-/**
- * Compare-and-set authorization for the source instance resolved through one
- * session. Every expected field must come from one `getRuntimeUsageV2()` page.
- */
-export interface EngineRuntimeUsageQuerySelectionOptions {
-  projectId: string
-  sessionId: string
-  targetQueryId: string
-  expectedMaterialized: boolean
-  expectedSelectedQueryId: string
-  expectedSelectedContractVersion: number
-  expectedSelectionEpoch: number
-  /** Bounded durable audit reason for this selection change. */
-  reason: string
-}
-
-export interface EngineRuntimeUsageQuerySelectionResult {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId: string
-  selection: EngineRuntimeUsageQuerySelection
-}
-
-export interface EngineRuntimeUsageQuerySelectionValue {
-  queryId: string
-  contractVersion: number
-}
-
-export interface EngineRuntimeUsageTotals {
-  contractVersion: number
-  atCommitSeq: number
-  requestedQueryId: string
-  status: string
-  resolvedQuery?: EngineRuntimeUsageQuerySelectionValue
-  scopes: Array<EngineUsageScopeOptions>
-  selectionVector: Array<EngineRuntimeUsageTotalsSelectionScope>
-  legacy?: EngineRuntimeUsageLegacyTotals
-  usageV2?: EngineRuntimeUsageV2Aggregate
-}
-
-export interface EngineRuntimeUsageTotalsOptions {
-  /** One to 128 canonical project/session scopes. Scopes must not overlap. */
-  scopes: Array<EngineUsageScopeOptions>
-  /**
-   * Defaults to `selected`; explicit legacy and usage-v2 requests are also
-   * available for compatibility and shadow comparison.
-   */
-  requestedQueryId?: string
-}
-
-export interface EngineRuntimeUsageTotalsSelectionScope {
-  selectionScopeRef: string
-  adapterId: string
-  sessionCount: number
-  querySelection: EngineRuntimeUsageQuerySelection
-  projectionReadiness: EngineRuntimeUsageV2ProjectionReadiness
-  coverageStatus: string
-  v2Eligible: boolean
-}
-
-export interface EngineRuntimeUsageV2ActorContext {
-  actorRunRef: EngineRuntimeUsageV2ExternalEntityRef
-  semanticRevisionRef: EngineRuntimeUsageV2SemanticRevisionRef
-  sessionRef: EngineRuntimeUsageV2ExternalEntityRef
-  role: string
-  parentActorRunRef?: EngineRuntimeUsageV2ExternalEntityRef
-  nativeSessionId?: string
-  nativeActorId?: string
-  nativeActorType?: string
-  affiliations: Array<EngineRuntimeUsageV2Affiliation>
-  observedAtUnixMs: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineRuntimeUsageV2Affiliation {
-  affiliationRef: EngineRuntimeUsageV2ExternalEntityRef
-  semanticRevisionRef: EngineRuntimeUsageV2SemanticRevisionRef
-  dimension: string
-  targetRef: EngineRuntimeUsageV2ExternalEntityRef
-  memberRef?: EngineRuntimeUsageV2ExternalEntityRef
-  nativeTargetId?: string
-  nativeMemberId?: string
-  state: string
-  effectiveAt?: string
-  effectiveAtQuality?: string
-  observedAtUnixMs: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineRuntimeUsageV2Aggregate {
-  responseCount: number
-  actorCount: number
-  inputTokens: EngineRuntimeUsageV2BucketAggregate
-  outputTokens: EngineRuntimeUsageV2BucketAggregate
-  cacheCreationInputTokens: EngineRuntimeUsageV2BucketAggregate
-  cacheReadInputTokens: EngineRuntimeUsageV2BucketAggregate
-}
-
-export interface EngineRuntimeUsageV2BucketAggregate {
-  knownTokens: number
-  knownResponseCount: number
-  exactResponseCount: number
-  nonExactResponseCount: number
-  unknownResponseCount: number
-  completeness: string
-}
-
-export interface EngineRuntimeUsageV2ExternalEntityRef {
-  externalEntityReferenceVersion: number
-  entityKey: string
-}
-
-export interface EngineRuntimeUsageV2Options {
-  /** Opaque project identity returned by `listHistoryProjects`. */
-  projectId: string
-  /** Opaque session identity returned by `listHistorySessions`. */
-  sessionId: string
-  /** Optional RFC 012A actor entity reference returned by this query. */
-  actorRunRef?: string
-  /** Optional `team` or `workflow` dimension; requires a target reference. */
-  affiliationDimension?: string
-  /** RFC 012A team/workflow target entity reference paired with dimension. */
-  affiliationTargetRef?: string
-  cursor?: string
-  /** Page size. Defaults to 50 and is capped by the Rust query pack. */
-  limit?: number
-}
-
-export interface EngineRuntimeUsageV2Page {
-  contractVersion: number
-  atCommitSeq: number
-  projectionStatus: string
-  projectionReadiness: EngineRuntimeUsageV2ProjectionReadiness
-  querySelection: EngineRuntimeUsageQuerySelection
-  projectId: string
-  sessionId: string
-  sessionRef?: EngineRuntimeUsageV2ExternalEntityRef
-  actorRunRef?: string
-  affiliationDimension?: string
-  affiliationTargetRef?: string
-  aggregate: EngineRuntimeUsageV2Aggregate
-  items: Array<EngineRuntimeUsageV2Response>
-  actors: Array<EngineRuntimeUsageV2ActorContext>
-  nextCursor?: string
-}
-
-export interface EngineRuntimeUsageV2ProjectionReadiness {
-  projectionId: string
-  desiredVersion: number
-  completedVersion?: number
-  state: string
-  lastCommitSeq?: number
-  updatedAtUnixMs?: number
-  detail?: string
-}
-
-export interface EngineRuntimeUsageV2Response {
-  usageKey: string
-  semanticRevisionRef: EngineRuntimeUsageV2SemanticRevisionRef
-  sourceRecordRef: string
-  sessionRef: EngineRuntimeUsageV2ExternalEntityRef
-  actorRunRef: EngineRuntimeUsageV2ExternalEntityRef
-  responseKeyBase64: string
-  responseIdentity: string
-  nativeMessageId?: string
-  requestId?: string
-  inputTokens: EngineRuntimeUsageV2TokenValue
-  outputTokens: EngineRuntimeUsageV2TokenValue
-  cacheCreationInputTokens: EngineRuntimeUsageV2TokenValue
-  cacheReadInputTokens: EngineRuntimeUsageV2TokenValue
-  model?: EngineRuntimeUsageV2TextValue
-  effort?: EngineRuntimeUsageV2TextValue
-  sourceTime?: string
-  sourceTimeQuality?: string
-  observedAtUnixMs: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineRuntimeUsageV2SemanticRevisionRef {
-  semanticReferenceContractVersion: number
-  factRevisionId: string
-}
-
-export interface EngineRuntimeUsageV2TextValue {
-  value?: string
-  quality: string
-  authority: string
-  completeness: string
-  unknownReason?: string
-  effectiveAt?: number
-  provenance: EngineRuntimeUsageV2ValueProvenance
-}
-
-export interface EngineRuntimeUsageV2TokenValue {
-  value?: number
-  quality: string
-  authority: string
-  completeness: string
-  unknownReason?: string
-  effectiveAt?: number
-  provenance: EngineRuntimeUsageV2ValueProvenance
-}
-
-export interface EngineRuntimeUsageV2ValueProvenance {
-  nativeField: string
-  normalizationContractVersion: number
 }
 
 export interface EngineSearchHit {
@@ -2028,47 +1721,25 @@ export interface EngineToolResultPageOptions {
 
 export interface EngineUntimedUsage {
   aggregate: EngineUsageAggregate
-  coverage: Array<EngineUsageCoverage>
   firstObservedAtUnixMs?: number
   lastObservedAtUnixMs?: number
   lastCommitSeq?: number
 }
 
-export interface EngineUsageActivity {
+export interface EngineUsage {
   contractVersion: number
   atCommitSeq: number
   projectId: string
   sessionId?: string
-  from: string
-  to: string
-  days: Array<EngineUsageActivityDay>
   aggregate: EngineUsageAggregate
   coverage: Array<EngineUsageCoverage>
-  untimed: EngineUntimedUsage
+  firstSourceTime?: string
+  lastSourceTime?: string
   firstObservedAtUnixMs?: number
   lastObservedAtUnixMs?: number
   lastCommitSeq?: number
-}
-
-export interface EngineUsageActivityDay {
-  date: string
-  aggregate: EngineUsageAggregate
-  firstSourceTime: string
-  lastSourceTime: string
-  firstObservedAtUnixMs: number
-  lastObservedAtUnixMs: number
-  lastCommitSeq: number
-}
-
-export interface EngineUsageActivityOptions {
-  /** Opaque project identity returned by `listHistoryProjects`. */
-  projectId: string
-  /** Optional opaque session identity returned by `listHistorySessions`. */
-  sessionId?: string
-  /** Inclusive calendar date in YYYY-MM-DD form. */
-  from: string
-  /** Inclusive calendar date in YYYY-MM-DD form. */
-  to: string
+  /** Present only when the request carried a calendar window. */
+  window?: EngineUsageWindow
 }
 
 export interface EngineUsageAggregate {
@@ -2078,26 +1749,52 @@ export interface EngineUsageAggregate {
   quality: string
   exactContributionCount: number
   estimatedContributionCount: number
+  /**
+   * Responses that assert no token bucket at all. They are never summed as
+   * zero, so a consumer can tell missing evidence from real zero usage.
+   */
+  unknownContributionCount: number
+  /** Distinct responses, not native rows. */
   contributionCount: number
   sessionCount: number
 }
 
 export interface EngineUsageCoverage {
-  scope: string
-  accounting: string
+  /** `input`, `output`, `cache_creation`, or `cache_read`. */
+  bucket: string
   valueQuality: string
-  qualityBucket: string
+  completeness: string
+  unknownReason?: string
+  authority: string
+  nativeField: string
   model?: string
   sourceTimeQuality?: string
   contributionCount: number
-  tokens: EngineUsageTokenValues
+  tokens: number
 }
 
-export interface EngineUsageScopeOptions {
+export interface EngineUsageDay {
+  date: string
+  aggregate: EngineUsageAggregate
+  firstSourceTime: string
+  lastSourceTime: string
+  firstObservedAtUnixMs: number
+  lastObservedAtUnixMs: number
+  lastCommitSeq: number
+}
+
+export interface EngineUsageOptions {
   /** Opaque project identity returned by `listHistoryProjects`. */
   projectId: string
   /** Optional opaque session identity returned by `listHistorySessions`. */
   sessionId?: string
+  /**
+   * Inclusive calendar date in YYYY-MM-DD form. Supplying both `from` and
+   * `to` adds the per-day series and the untimed remainder to the report.
+   */
+  from?: string
+  /** Inclusive calendar date in YYYY-MM-DD form. */
+  to?: string
 }
 
 export interface EngineUsageTokenValues {
@@ -2112,18 +1809,15 @@ export interface EngineUsageTokenValues {
   componentTotalTokens: number
 }
 
-export interface EngineUsageTotals {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId?: string
-  aggregate: EngineUsageAggregate
-  coverage: Array<EngineUsageCoverage>
-  firstSourceTime?: string
-  lastSourceTime?: string
-  firstObservedAtUnixMs?: number
-  lastObservedAtUnixMs?: number
-  lastCommitSeq?: number
+export interface EngineUsageWindow {
+  from: string
+  to: string
+  days: Array<EngineUsageDay>
+  /**
+   * Contributions with no structurally valid source date. They are reported
+   * rather than assigned to a fabricated day.
+   */
+  untimed: EngineUntimedUsage
 }
 
 export interface EngineWorkflowDetails {
