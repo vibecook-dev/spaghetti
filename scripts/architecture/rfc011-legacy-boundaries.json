@@ -71,7 +71,7 @@
       "allowed": []
     },
     "rfc012_semantic_contract_boundary_violations": {
-      "description": "RFC 012A/012C fixture JSON parsers stay store-free, and the N-API helpers remain JSON-string only without becoming a public query or object-mirror surface.",
+      "description": "RFC 012A/012C fixture parsing is Rust-only and store-free. Neither a TypeScript mirror of it nor a `parseRfc012*` helper on the N-API surface may return: types cross as generated bindings, and conformance is a test against real Rust output.",
       "allowed": []
     },
     "migrated_client_direct_engine_queries": {
