@@ -3,8 +3,9 @@
 //! This module owns attachment-bound confined directory listing and member
 //! reads. It joins declaration/runtime stream proof to the exact source
 //! instance approved by the scoped attachment, prepares nonconstructible
-//! decoder inputs, and runs the declaration-owned ReplaceDocument driver plus
-//! store-agnostic decode without granting adapters any additional source access.
+//! decoder inputs, and runs the declaration-owned ReplaceDocument or
+//! AppendDelimited driver plus store-agnostic decode without granting adapters
+//! any additional source access.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -14,11 +15,12 @@ use std::sync::Arc;
 
 use crate::adapter::{
     AdapterError, AdapterErrorClass, AdapterId, AdapterObjectContext, AgentAdapter,
-    CanonicalSourceInstanceKey, CoverageAbsenceKind, CoverageObjectKey, CoverageStreamKey,
-    DecodeDisposition, DriverSpec, Fact, FactBatch, FactSemanticContext, RawRetentionPolicy,
-    RecordMappingDisposition, ScopeJoinUpdate, ScopeRelationPrimitive, SourceAccess,
-    SourceInstance, SourceInstanceKey, SourceObjectDescriptor, SourceObjectList,
-    SourceObjectListRequest, SourceQuery, SourceRows, SourceSnapshot, StreamSpec,
+    CanonicalSourceInstanceKey, CoverageAbsenceKind, CoverageObjectKey, CoveragePosition,
+    CoveragePositionKind, CoverageStreamKey, DecodeDisposition, DriverSpec, Fact, FactBatch,
+    FactSemanticContext, RawRetentionPolicy, RecordMappingDisposition, ScopeJoinUpdate,
+    ScopeRelationPrimitive, SourceAccess, SourceInstance, SourceInstanceKey,
+    SourceObjectDescriptor, SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRows,
+    SourceSnapshot, StreamSpec,
 };
 use crate::decode_runtime::{
     bootstrap_object_without_source_access, decode_record, diagnostic_excerpt, DecodeRuntimeLimits,
@@ -26,15 +28,15 @@ use crate::decode_runtime::{
 };
 use crate::source::{
     confined_relative_path_from_key, confined_relative_path_key, read_stable_file_confined,
-    AccessBudgetError, AccessObjectToken, AccessOperation, AccessOutcome,
-    AuditedDirectoryScanError, AuthorizedObservationDirectoryEntryReservation,
-    AuthorizedObservationDirectoryReadAuthority, AuthorizedObservationDirectoryRootAuthority,
-    AuthorizedObservationRuntimeStreamReservation, DirectoryChange, DirectoryCheckpoint,
-    DirectoryEntryAuditReservation, DirectoryEntryAuditor, DirectoryEntryKind, DirectoryEntryState,
-    DirectoryScan, DirectorySelection, DirectorySnapshot, DirectorySnapshotConfig,
-    DriverQuarantine, FileStamp, GlobPattern, RecordOrigin, ReplaceCheckpoint, ReplaceDocument,
-    ReplaceDocumentConfig, ReplaceRead, Revision, ScopeAccessRequest, SourceRecord,
-    SourceRecordState, StableRead,
+    AccessBudgetError, AccessObjectToken, AccessOperation, AccessOutcome, AppendCheckpoint,
+    AppendDelimitedFile, AppendItem, AppendRead, AppendTransition, AuditedDirectoryScanError,
+    AuthorizedObservationDirectoryEntryReservation, AuthorizedObservationDirectoryReadAuthority,
+    AuthorizedObservationDirectoryRootAuthority, AuthorizedObservationRuntimeStreamReservation,
+    DirectoryChange, DirectoryCheckpoint, DirectoryEntryAuditReservation, DirectoryEntryAuditor,
+    DirectoryEntryKind, DirectoryEntryState, DirectoryScan, DirectorySelection, DirectorySnapshot,
+    DirectorySnapshotConfig, DriverQuarantine, FileStamp, GlobPattern, RecordOrigin,
+    ReplaceCheckpoint, ReplaceDocument, ReplaceDocumentConfig, ReplaceRead, Revision,
+    ScopeAccessRequest, SourceRecord, SourceRecordState, StableRead,
 };
 
 use super::{
@@ -44,6 +46,7 @@ use super::{
 
 const MEMBERSHIP_STREAM_DOMAIN: &[u8] = b"spaghetti/rfc012d/scope-relation-membership-stream/v1\0";
 const MEMBERSHIP_OBJECT_NAMESPACE: &str = "spaghetti.scope-relation-membership-v1";
+const DIRECTORY_MEMBER_MAX_RECORDS: usize = 8_192;
 const DIRECTORY_MEMBER_MAX_FACTS: usize = 8_192;
 const DIRECTORY_MEMBER_MAX_DIAGNOSTICS: usize = 256;
 
@@ -362,9 +365,9 @@ pub(crate) struct ScopedObservationDirectoryMemberContent {
     bytes: Vec<u8>,
 }
 
-/// One successfully bootstrapped whole-document member. Callers cannot supply
-/// or replace its adapter object context, stream, source instance, descriptor,
-/// semantic context, revision, or payload.
+/// One successfully bootstrapped member. Callers cannot supply or replace its
+/// adapter object context, stream, source instance, descriptor, semantic
+/// context, revision, or payload.
 pub(crate) struct ScopedObservationDirectoryMemberDecodeInput {
     binding: ScopedObservationDirectoryMemberBinding,
     object_context: AdapterObjectContext,
@@ -393,32 +396,38 @@ pub(crate) struct ScopedObservationDirectoryMemberFrameFailure {
     input: Box<ScopedObservationDirectoryMemberDecodeInput>,
 }
 
-/// Whole-document child after one confined ReplaceDocument read and one
+enum ScopedObservationDirectoryMemberPosition {
+    Replace(ReplaceCheckpoint),
+    Append(AppendCheckpoint),
+}
+
+pub(super) enum ScopedObservationDirectoryMemberDecodedItem {
+    Record {
+        record: Box<SourceRecord>,
+        disposition: DecodeDisposition,
+        mapping_disposition: RecordMappingDisposition,
+        batch: Box<FactBatch>,
+        scope_join_updates: Vec<ScopeJoinUpdate>,
+        quarantined: bool,
+    },
+    DriverQuarantine(DriverQuarantine),
+}
+
+/// Child after one confined stable read, declaration-owned framing, and
 /// store-agnostic decode. Facts remain crate-private until admission.
 pub(crate) struct ScopedObservationDirectoryMemberDecodedSnapshot {
     binding: ScopedObservationDirectoryMemberBinding,
     object_context: AdapterObjectContext,
-    checkpoint: ReplaceCheckpoint,
-    record: SourceRecord,
-    disposition: DecodeDisposition,
-    mapping_disposition: RecordMappingDisposition,
-    batch: FactBatch,
-    scope_join_updates: Vec<ScopeJoinUpdate>,
+    position: ScopedObservationDirectoryMemberPosition,
+    items: Vec<ScopedObservationDirectoryMemberDecodedItem>,
     next_decoder_state: Option<Vec<u8>>,
-    quarantined: bool,
 }
 
 pub(super) struct ScopedObservationDirectoryMemberAdmissionParts {
     pub binding: ScopedObservationDirectoryMemberBinding,
     pub object_context: AdapterObjectContext,
-    pub checkpoint: ReplaceCheckpoint,
-    pub record: SourceRecord,
-    pub disposition: DecodeDisposition,
-    pub mapping_disposition: RecordMappingDisposition,
-    pub batch: FactBatch,
-    pub scope_join_updates: Vec<ScopeJoinUpdate>,
+    pub items: Vec<ScopedObservationDirectoryMemberDecodedItem>,
     pub next_decoder_state: Option<Vec<u8>>,
-    pub quarantined: bool,
 }
 
 pub(crate) struct ScopedObservationDirectoryMemberObserveFailure {
@@ -432,7 +441,7 @@ pub(crate) enum ScopedObservationDirectoryMemberObserveFailureKind {
     Decode(ScopedDecodeFailureClass),
 }
 
-/// Path-free child lifecycle after the declaration-owned ReplaceDocument pass.
+/// Path-free child lifecycle after the declaration-owned source-driver pass.
 /// Present carries decoded facts; missing is explicit absence; oversized never
 /// enters decode or projection.
 pub(crate) enum ScopedObservationDirectoryMemberLifecycle {
@@ -751,20 +760,53 @@ impl fmt::Debug for ScopedObservationDirectoryMemberFrameFailure {
 
 impl fmt::Debug for ScopedObservationDirectoryMemberDecodedSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let record_count = self
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ScopedObservationDirectoryMemberDecodedItem::Record { .. }
+                )
+            })
+            .count();
+        let driver_quarantine_count = self.items.len().saturating_sub(record_count);
+        let fact_count = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ScopedObservationDirectoryMemberDecodedItem::Record { batch, .. } => Some(batch),
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => None,
+            })
+            .map(|batch| batch.facts().len())
+            .sum::<usize>();
+        let diagnostic_count = self
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ScopedObservationDirectoryMemberDecodedItem::Record { batch, .. } => Some(batch),
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => None,
+            })
+            .map(|batch| batch.diagnostics().len())
+            .sum::<usize>();
         formatter
             .debug_struct("ScopedObservationDirectoryMemberDecodedSnapshot")
             .field("binding", &self.binding)
             .field("object_context_version", &self.object_context.version())
             .field("object_context_bytes", &self.object_context.payload().len())
-            .field("generation", &self.checkpoint.generation)
-            .field("has_checkpoint_revision", &true)
-            .field("record_state", &self.record.state)
-            .field("record_bytes", &self.record.payload.len())
-            .field("disposition", &self.disposition)
-            .field("fact_count", &self.batch.facts().len())
-            .field("diagnostic_count", &self.batch.diagnostics().len())
+            .field("generation", &self.generation())
+            .field(
+                "append_framing",
+                &matches!(
+                    &self.position,
+                    ScopedObservationDirectoryMemberPosition::Append(_)
+                ),
+            )
+            .field("record_count", &record_count)
+            .field("driver_quarantine_count", &driver_quarantine_count)
+            .field("fact_count", &fact_count)
+            .field("diagnostic_count", &diagnostic_count)
             .field("has_next_decoder_state", &self.next_decoder_state.is_some())
-            .field("quarantined", &self.quarantined)
             .finish_non_exhaustive()
     }
 }
@@ -1386,7 +1428,7 @@ impl ScopedObservationDirectoryListing {
                 input: Box::new(input),
             });
         }
-        input.observe_retained_replace(origin, decoder_state)
+        input.observe_retained(origin, decoder_state)
     }
 
     pub(super) fn finalize_for_membership(
@@ -1648,7 +1690,10 @@ impl ScopedObservationDirectoryMemberBinding {
 
     fn valid_for_dependency_free_bootstrap(&self) -> bool {
         let identity = self.identity();
-        valid_dependency_free_replace_binding(
+        matches!(
+            self.runtime_stream().driver,
+            DriverSpec::ReplaceDocument(_) | DriverSpec::AppendDelimited(_)
+        ) && valid_dependency_free_binding(
             &identity.source,
             &identity.semantic_context,
             self.runtime_stream(),
@@ -1678,7 +1723,7 @@ impl ScopedObservationDirectoryMemberBinding {
     }
 }
 
-fn valid_dependency_free_replace_binding(
+fn valid_dependency_free_binding(
     source: &ScopedSourceObjectIdentity,
     semantic_context: &FactSemanticContext,
     stream: &StreamSpec,
@@ -1704,7 +1749,6 @@ fn valid_dependency_free_replace_binding(
     instance.id != 0
         && stream.validate(instance).is_ok()
         && canonical_source_instance.as_ref().ok() == Some(&source.source_instance_key)
-        && matches!(stream.driver, DriverSpec::ReplaceDocument(_))
         && stream.id == descriptor.stream_id
         && stream.id.as_str().as_bytes() == semantic_context.stream_key()
         && stream.driver.framing_contract_version() == semantic_context.framing_contract_version()
@@ -1784,8 +1828,41 @@ impl ScopedObservationDirectoryMemberDecodeInput {
 
     /// Frame the exact retained stable read and decode it without another
     /// native open. Missing, unstable, and oversized outcomes are decided by
-    /// `read_next_member` before a decode input can exist.
-    pub(super) fn observe_retained_replace(
+    /// `read_next_member` before a decode input can exist. Append-delimited
+    /// members replay from offset zero because each directory reconcile is a
+    /// fresh whole-scope epoch; a prior epoch's decoder state is never carried
+    /// into that replay.
+    pub(super) fn observe_retained(
+        self,
+        origin: &RecordOrigin,
+        decoder_state: Option<&[u8]>,
+    ) -> Result<
+        ScopedObservationDirectoryMemberLifecycle,
+        ScopedObservationDirectoryMemberObserveFailure,
+    > {
+        match &self.binding.runtime_stream().driver {
+            DriverSpec::ReplaceDocument(_) => self.observe_retained_replace(origin, decoder_state),
+            DriverSpec::AppendDelimited(_) => self.observe_retained_append(origin),
+            _ => Err(ScopedObservationDirectoryMemberObserveFailure {
+                kind: ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidConfiguration,
+                ),
+                input: Box::new(self),
+            }),
+        }
+    }
+
+    fn into_observe_failure(
+        self,
+        kind: ScopedObservationDirectoryMemberObserveFailureKind,
+    ) -> ScopedObservationDirectoryMemberObserveFailure {
+        ScopedObservationDirectoryMemberObserveFailure {
+            kind,
+            input: Box::new(self),
+        }
+    }
+
+    fn observe_retained_replace(
         self,
         origin: &RecordOrigin,
         decoder_state: Option<&[u8]>,
@@ -1802,24 +1879,204 @@ impl ScopedObservationDirectoryMemberDecodeInput {
                 });
             }
         };
-        self.decode_replace_record(record, checkpoint, decoder_state)
+        let (item, next_decoder_state) = match self.decode_member_record(&record, decoder_state) {
+            Ok(decoded) => decoded,
+            Err(kind) => {
+                return Err(ScopedObservationDirectoryMemberObserveFailure {
+                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Decode(kind),
+                    input: Box::new(self),
+                });
+            }
+        };
+        Ok(ScopedObservationDirectoryMemberLifecycle::Present(
+            Box::new(ScopedObservationDirectoryMemberDecodedSnapshot {
+                binding: self.binding,
+                object_context: self.object_context,
+                position: ScopedObservationDirectoryMemberPosition::Replace(checkpoint),
+                items: vec![item],
+                next_decoder_state,
+            }),
+        ))
     }
 
-    fn decode_replace_record(
+    fn observe_retained_append(
         self,
-        record: SourceRecord,
-        checkpoint: ReplaceCheckpoint,
-        decoder_state: Option<&[u8]>,
+        origin: &RecordOrigin,
     ) -> Result<
         ScopedObservationDirectoryMemberLifecycle,
         ScopedObservationDirectoryMemberObserveFailure,
+    > {
+        if !self.binding.valid_for_dependency_free_bootstrap()
+            || origin.source_instance_id != self.binding.source_instance().id
+        {
+            return Err(self.into_observe_failure(
+                ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidCursor,
+                ),
+            ));
+        }
+        let DriverSpec::AppendDelimited(config) = &self.binding.runtime_stream().driver else {
+            return Err(self.into_observe_failure(
+                ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                    ScopedSourceFailureClass::InvalidConfiguration,
+                ),
+            ));
+        };
+        let driver = match AppendDelimitedFile::new(config.clone()) {
+            Ok(driver) => driver,
+            Err(error) => {
+                return Err(self.into_observe_failure(
+                    ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                        super::source_failure_class(&error),
+                    ),
+                ));
+            }
+        };
+
+        let mut previous = None::<AppendCheckpoint>;
+        let mut decoded_items = Vec::new();
+        let mut next_decoder_state = None::<Vec<u8>>;
+        let mut total_facts = 0_usize;
+        let mut total_diagnostics = 0_usize;
+        loop {
+            let read = match driver.frame_retained_stable(
+                &self.stamp,
+                &self.bytes,
+                self.content_revision,
+                previous.as_ref(),
+                origin,
+                false,
+            ) {
+                Ok(read) => read,
+                Err(error) => {
+                    return Err(self.into_observe_failure(
+                        ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                            super::source_failure_class(&error),
+                        ),
+                    ));
+                }
+            };
+            let AppendRead::Batch {
+                items,
+                checkpoint,
+                transition,
+                needs_retry,
+                more_available,
+                ..
+            } = read
+            else {
+                return Err(self.into_observe_failure(
+                    ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                        ScopedSourceFailureClass::InvalidCursor,
+                    ),
+                ));
+            };
+            let expected_transition = if previous.is_some() {
+                AppendTransition::Continued
+            } else {
+                AppendTransition::Initial
+            };
+            if transition != expected_transition
+                || previous.as_ref().is_some_and(|prior| {
+                    checkpoint.committed_offset <= prior.committed_offset
+                        || checkpoint.generation != prior.generation
+                })
+                || decoded_items.len().saturating_add(items.len()) > DIRECTORY_MEMBER_MAX_RECORDS
+            {
+                return Err(self.into_observe_failure(
+                    ScopedObservationDirectoryMemberObserveFailureKind::Source(
+                        ScopedSourceFailureClass::LimitExceeded,
+                    ),
+                ));
+            }
+
+            for item in items {
+                match item {
+                    AppendItem::Quarantined(quarantine) => decoded_items.push(
+                        ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(quarantine),
+                    ),
+                    AppendItem::Record(record) => {
+                        let (item, state) = match self
+                            .decode_member_record(&record, next_decoder_state.as_deref())
+                        {
+                            Ok(decoded) => decoded,
+                            Err(kind) => {
+                                return Err(self.into_observe_failure(
+                                    ScopedObservationDirectoryMemberObserveFailureKind::Decode(
+                                        kind,
+                                    ),
+                                ));
+                            }
+                        };
+                        let ScopedObservationDirectoryMemberDecodedItem::Record { batch, .. } =
+                            &item
+                        else {
+                            unreachable!("record decode always returns a record item");
+                        };
+                        total_facts = match total_facts.checked_add(batch.facts().len()) {
+                            Some(total) if total <= DIRECTORY_MEMBER_MAX_FACTS => total,
+                            _ => {
+                                return Err(self.into_observe_failure(
+                                    ScopedObservationDirectoryMemberObserveFailureKind::Decode(
+                                        ScopedDecodeFailureClass::InvalidContract,
+                                    ),
+                                ));
+                            }
+                        };
+                        total_diagnostics =
+                            match total_diagnostics.checked_add(batch.diagnostics().len()) {
+                                Some(total) if total <= DIRECTORY_MEMBER_MAX_DIAGNOSTICS => total,
+                                _ => {
+                                    return Err(self.into_observe_failure(
+                                        ScopedObservationDirectoryMemberObserveFailureKind::Decode(
+                                            ScopedDecodeFailureClass::InvalidContract,
+                                        ),
+                                    ));
+                                }
+                            };
+                        decoded_items.push(item);
+                        next_decoder_state = state;
+                    }
+                }
+            }
+
+            if more_available {
+                previous = Some(checkpoint);
+                continue;
+            }
+            if needs_retry || checkpoint.committed_offset != self.bytes.len() as u64 {
+                return Err(self.into_observe_failure(
+                    ScopedObservationDirectoryMemberObserveFailureKind::Decode(
+                        ScopedDecodeFailureClass::Transient,
+                    ),
+                ));
+            }
+            return Ok(ScopedObservationDirectoryMemberLifecycle::Present(
+                Box::new(ScopedObservationDirectoryMemberDecodedSnapshot {
+                    binding: self.binding,
+                    object_context: self.object_context,
+                    position: ScopedObservationDirectoryMemberPosition::Append(checkpoint),
+                    items: decoded_items,
+                    next_decoder_state,
+                }),
+            ));
+        }
+    }
+
+    fn decode_member_record(
+        &self,
+        record: &SourceRecord,
+        decoder_state: Option<&[u8]>,
+    ) -> Result<
+        (ScopedObservationDirectoryMemberDecodedItem, Option<Vec<u8>>),
+        ScopedDecodeFailureClass,
     > {
         let attempt = decode_record(DecodeRuntimeRequest {
             adapter: self.binding.adapter().as_ref(),
             decoder: &self.binding.runtime_stream().decoder,
             object_context: &self.object_context,
             source_access: &DirectoryMemberSourceAccessDenied,
-            record: &record,
+            record,
             semantic_context: self.binding.identity().semantic_context(),
             decoder_state,
             retention: self.binding.runtime_stream().retention,
@@ -1830,36 +2087,20 @@ impl ScopedObservationDirectoryMemberDecodeInput {
         });
         let decoded = match attempt.result {
             Ok(decoded) if decoded.disposition != DecodeDisposition::RetryTransient => decoded,
-            Ok(_) => {
-                return Err(ScopedObservationDirectoryMemberObserveFailure {
-                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Decode(
-                        ScopedDecodeFailureClass::Transient,
-                    ),
-                    input: Box::new(self),
-                });
-            }
-            Err(error) => {
-                return Err(ScopedObservationDirectoryMemberObserveFailure {
-                    kind: ScopedObservationDirectoryMemberObserveFailureKind::Decode(
-                        super::decode_failure_class(&error),
-                    ),
-                    input: Box::new(self),
-                });
-            }
+            Ok(_) => return Err(ScopedDecodeFailureClass::Transient),
+            Err(error) => return Err(super::decode_failure_class(&error)),
         };
-        Ok(ScopedObservationDirectoryMemberLifecycle::Present(
-            Box::new(ScopedObservationDirectoryMemberDecodedSnapshot {
-                binding: self.binding,
-                object_context: self.object_context,
-                checkpoint,
-                record,
+        let next_decoder_state = decoded.next_decoder_state.clone();
+        Ok((
+            ScopedObservationDirectoryMemberDecodedItem::Record {
+                record: Box::new(record.clone()),
                 disposition: decoded.disposition,
                 mapping_disposition: decoded.mapping_disposition,
-                batch: decoded.batch,
+                batch: Box::new(decoded.batch),
                 scope_join_updates: decoded.scope_join_updates,
-                next_decoder_state: decoded.next_decoder_state,
                 quarantined: decoded.quarantined,
-            }),
+            },
+            next_decoder_state,
         ))
     }
 
@@ -1967,37 +2208,87 @@ impl ScopedObservationDirectoryMemberDecodedSnapshot {
     }
 
     pub(super) fn generation(&self) -> u64 {
-        self.checkpoint.generation
+        match &self.position {
+            ScopedObservationDirectoryMemberPosition::Replace(checkpoint) => checkpoint.generation,
+            ScopedObservationDirectoryMemberPosition::Append(checkpoint) => checkpoint.generation,
+        }
     }
 
-    pub(super) fn revision(&self) -> Revision {
-        self.checkpoint.revision
+    pub(super) fn coverage_position(&self) -> Result<CoveragePosition, ()> {
+        match &self.position {
+            ScopedObservationDirectoryMemberPosition::Replace(checkpoint) => {
+                CoveragePosition::derive(
+                    CoveragePositionKind::SnapshotRevision,
+                    checkpoint.revision.as_bytes(),
+                    None,
+                )
+                .map_err(|_| ())
+            }
+            ScopedObservationDirectoryMemberPosition::Append(checkpoint) => {
+                super::scoped_append_coverage_position(checkpoint)
+            }
+        }
+    }
+
+    pub(super) fn uses_append_framing(&self) -> bool {
+        matches!(
+            &self.position,
+            ScopedObservationDirectoryMemberPosition::Append(_)
+        )
+    }
+
+    pub(super) fn has_quarantine(&self) -> bool {
+        self.items.iter().any(|item| match item {
+            ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => true,
+            ScopedObservationDirectoryMemberDecodedItem::Record { quarantined, .. } => *quarantined,
+        })
+    }
+
+    pub(super) fn admission_frame_count(&self) -> usize {
+        self.items.len()
     }
 
     pub(super) fn admission_measurement(&self) -> Option<(u64, u64)> {
-        let semantic_items = self
-            .batch
-            .facts()
-            .len()
-            .checked_add(self.batch.diagnostics().len())?
-            .max(1);
-        let data_events = u64::try_from(semantic_items).ok()?;
-        let mut retained_native_bytes = match self.binding.runtime_stream().retention {
-            RawRetentionPolicy::None | RawRetentionPolicy::HashOnly => 0,
-            RawRetentionPolicy::DiagnosticExcerpt => {
-                u64::try_from(diagnostic_excerpt(&self.record.payload).len()).ok()?
+        let mut data_events = 0_u64;
+        let mut retained_native_bytes = 0_u64;
+        for item in &self.items {
+            match item {
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => {
+                    data_events = data_events.checked_add(1)?;
+                }
+                ScopedObservationDirectoryMemberDecodedItem::Record {
+                    record,
+                    batch,
+                    scope_join_updates,
+                    ..
+                } => {
+                    let semantic_items = batch
+                        .facts()
+                        .len()
+                        .checked_add(batch.diagnostics().len())?
+                        .max(1);
+                    data_events = data_events.checked_add(u64::try_from(semantic_items).ok()?)?;
+                    let retained_record_bytes = match self.binding.runtime_stream().retention {
+                        RawRetentionPolicy::None | RawRetentionPolicy::HashOnly => 0,
+                        RawRetentionPolicy::DiagnosticExcerpt => {
+                            u64::try_from(diagnostic_excerpt(&record.payload).len()).ok()?
+                        }
+                        RawRetentionPolicy::Full => u64::try_from(record.payload.len()).ok()?,
+                    };
+                    retained_native_bytes =
+                        retained_native_bytes.checked_add(retained_record_bytes)?;
+                    for fact in batch.facts() {
+                        if let Fact::UnknownRecord { raw_payload, .. } = &fact.value {
+                            retained_native_bytes = retained_native_bytes
+                                .checked_add(u64::try_from(raw_payload.len()).ok()?)?;
+                        }
+                    }
+                    for update in scope_join_updates {
+                        retained_native_bytes = retained_native_bytes
+                            .checked_add(u64::try_from(update.retained_bytes()).ok()?)?;
+                    }
+                }
             }
-            RawRetentionPolicy::Full => u64::try_from(self.record.payload.len()).ok()?,
-        };
-        for fact in self.batch.facts() {
-            if let Fact::UnknownRecord { raw_payload, .. } = &fact.value {
-                retained_native_bytes =
-                    retained_native_bytes.checked_add(u64::try_from(raw_payload.len()).ok()?)?;
-            }
-        }
-        for update in &self.scope_join_updates {
-            retained_native_bytes =
-                retained_native_bytes.checked_add(u64::try_from(update.retained_bytes()).ok()?)?;
         }
         Some((data_events, retained_native_bytes))
     }
@@ -2006,30 +2297,47 @@ impl ScopedObservationDirectoryMemberDecodedSnapshot {
         ScopedObservationDirectoryMemberAdmissionParts {
             binding: self.binding,
             object_context: self.object_context,
-            checkpoint: self.checkpoint,
-            record: self.record,
-            disposition: self.disposition,
-            mapping_disposition: self.mapping_disposition,
-            batch: self.batch,
-            scope_join_updates: self.scope_join_updates,
+            items: self.items,
             next_decoder_state: self.next_decoder_state,
-            quarantined: self.quarantined,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn disposition_for_test(&self) -> DecodeDisposition {
-        self.disposition
+        self.items
+            .iter()
+            .find_map(|item| match item {
+                ScopedObservationDirectoryMemberDecodedItem::Record { disposition, .. } => {
+                    Some(*disposition)
+                }
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => None,
+            })
+            .expect("focused decoded-member fixture retains one record")
     }
 
     #[cfg(test)]
     pub(crate) fn fact_count_for_test(&self) -> usize {
-        self.batch.facts().len()
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                ScopedObservationDirectoryMemberDecodedItem::Record { batch, .. } => Some(batch),
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => None,
+            })
+            .map(|batch| batch.facts().len())
+            .sum()
     }
 
     #[cfg(test)]
     pub(crate) fn facts_for_test(&self) -> &[crate::adapter::FactEnvelope] {
-        self.batch.facts()
+        self.items
+            .iter()
+            .find_map(|item| match item {
+                ScopedObservationDirectoryMemberDecodedItem::Record { batch, .. } => {
+                    Some(batch.facts())
+                }
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => None,
+            })
+            .expect("focused decoded-member fixture retains one record")
     }
 
     #[cfg(test)]
@@ -2039,7 +2347,28 @@ impl ScopedObservationDirectoryMemberDecodedSnapshot {
 
     #[cfg(test)]
     pub(crate) fn record_payload_for_test(&self) -> &[u8] {
-        &self.record.payload
+        self.items
+            .iter()
+            .find_map(|item| match item {
+                ScopedObservationDirectoryMemberDecodedItem::Record { record, .. } => {
+                    Some(record.payload.as_slice())
+                }
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => None,
+            })
+            .expect("focused decoded-member fixture retains one record")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_payloads_for_test(&self) -> Vec<&[u8]> {
+        self.items
+            .iter()
+            .filter_map(|item| match item {
+                ScopedObservationDirectoryMemberDecodedItem::Record { record, .. } => {
+                    Some(record.payload.as_slice())
+                }
+                ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(_) => None,
+            })
+            .collect()
     }
 }
 
@@ -2144,13 +2473,14 @@ impl ScopedObservationRelatedObjectBinding {
             self.identity.primitive,
             ScopeRelationPrimitive::SiblingObject
                 | ScopeRelationPrimitive::ReferencedObjectFromField
-        ) && valid_dependency_free_replace_binding(
-            &self.identity.source,
-            &self.identity.semantic_context,
-            &self.runtime_stream,
-            &self.source_instance,
-            &self.descriptor,
-        )
+        ) && matches!(self.runtime_stream.driver, DriverSpec::ReplaceDocument(_))
+            && valid_dependency_free_binding(
+                &self.identity.source,
+                &self.identity.semantic_context,
+                &self.runtime_stream,
+                &self.source_instance,
+                &self.descriptor,
+            )
     }
 
     fn bootstrap_object_context(

@@ -101,7 +101,7 @@ mod watermark_wire;
 
 use observation_source_access::{
     ScopedObservationDirectoryListing, ScopedObservationDirectoryMemberAdmissionParts,
-    ScopedObservationDirectoryMemberContent,
+    ScopedObservationDirectoryMemberContent, ScopedObservationDirectoryMemberDecodedItem,
     ScopedObservationDirectoryMemberRead as ScopedDirectoryMemberRead,
     ScopedObservationRelatedObjectAdmissionParts, ScopedObservationRelatedObjectCoverageState,
     ScopedObservationRelatedObjectIdentity,
@@ -1850,9 +1850,10 @@ impl ScopedObservationAdmissionLane {
         Ok(())
     }
 
-    /// Admit one reserved directory child's ReplaceDocument observation.
-    /// Present files enqueue decoded facts; missing files contribute explicit
-    /// absence coverage; oversized children stay outside this seam.
+    /// Admit one reserved directory child's complete source-driver
+    /// observation. Present files enqueue every decoded frame atomically;
+    /// missing files contribute explicit absence coverage; oversized children
+    /// stay outside this seam.
     pub(crate) fn admit_directory_member(
         &mut self,
         access_pass_id: u64,
@@ -1951,8 +1952,10 @@ impl ScopedObservationAdmissionLane {
             }
             ScopedObservationDirectoryMemberLifecycle::Present(snapshot) => {
                 let generation = snapshot.generation();
-                let revision = snapshot.revision();
                 let retention = snapshot.runtime_stream().retention;
+                let uses_append_framing = snapshot.uses_append_framing();
+                let has_quarantine = snapshot.has_quarantine();
+                let frame_count = snapshot.admission_frame_count();
                 let measurement = match snapshot.admission_measurement() {
                     Some(measurement) => measurement,
                     None => {
@@ -1987,32 +1990,24 @@ impl ScopedObservationAdmissionLane {
                         ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
                     ));
                 }
-                let Some(after_ordinal) = self.next_lane_ordinal.checked_add(1) else {
+                let frame_count_u64 = match u64::try_from(frame_count) {
+                    Ok(frame_count) => frame_count,
+                    Err(_) => {
+                        return Err(fail(
+                            ScopedAdmissionError::CapacityExhausted,
+                            ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                        ));
+                    }
+                };
+                let Some(after_ordinal) = self.next_lane_ordinal.checked_add(frame_count_u64)
+                else {
                     return Err(fail(
                         ScopedAdmissionError::CapacityExhausted,
                         ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
                     ));
                 };
-                let position = match CoveragePosition::derive(
-                    CoveragePositionKind::SnapshotRevision,
-                    revision.as_bytes(),
-                    None,
-                ) {
+                let position = match snapshot.coverage_position() {
                     Ok(position) => position,
-                    Err(_) => {
-                        return Err(fail(
-                            ScopedAdmissionError::InvalidCoverage,
-                            ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
-                        ));
-                    }
-                };
-                let point = match scoped_decode_coverage_point(
-                    &source,
-                    generation,
-                    Some(position),
-                    CoverageStatus::ExactSnapshot,
-                ) {
-                    Ok(point) => point,
                     Err(()) => {
                         return Err(fail(
                             ScopedAdmissionError::InvalidCoverage,
@@ -2020,36 +2015,88 @@ impl ScopedObservationAdmissionLane {
                         ));
                     }
                 };
+                let (status, completeness, explicit_errors) = if uses_append_framing {
+                    if has_quarantine {
+                        (
+                            CoverageStatus::Unavailable {
+                                reason: "directory_member_quarantine".to_string(),
+                            },
+                            CoverageSetCompleteness::Unavailable,
+                            vec![CoverageError {
+                                stream_key: Some(source.stream_key),
+                                object_key: Some(source.object_key),
+                                code: "directory_member_quarantine".to_string(),
+                            }],
+                        )
+                    } else {
+                        (
+                            CoverageStatus::CompleteThrough,
+                            CoverageSetCompleteness::Complete,
+                            Vec::new(),
+                        )
+                    }
+                } else {
+                    (
+                        CoverageStatus::ExactSnapshot,
+                        CoverageSetCompleteness::Complete,
+                        Vec::new(),
+                    )
+                };
+                let point =
+                    match scoped_decode_coverage_point(&source, generation, Some(position), status)
+                    {
+                        Ok(point) => point,
+                        Err(()) => {
+                            return Err(fail(
+                                ScopedAdmissionError::InvalidCoverage,
+                                ScopedObservationDirectoryMemberLifecycle::Present(snapshot),
+                            ));
+                        }
+                    };
                 let ScopedObservationDirectoryMemberAdmissionParts {
                     binding: _binding,
                     object_context: _object_context,
-                    checkpoint: _checkpoint,
-                    record,
-                    disposition,
-                    mapping_disposition,
-                    batch,
-                    scope_join_updates,
+                    items,
                     next_decoder_state,
-                    quarantined,
                 } = (*snapshot).into_admission_parts();
-                let item = ScopedDecodedAppendItem::Record {
-                    evidence: Box::new(scoped_record_evidence(&record, retention)),
-                    disposition,
-                    mapping_disposition: Box::new(mapping_disposition),
-                    batch: Box::new(batch),
-                    scope_join_updates,
-                    quarantined,
-                };
-                let lane_ordinal = self.next_lane_ordinal;
-                self.decoded.push_back(QueuedDecodedFrame {
-                    object_token,
-                    source: source.clone(),
-                    lane_ordinal,
-                    phase,
-                    item: Box::new(item),
-                    data_events: measurement.0,
-                    retained_native_bytes: measurement.1,
-                });
+                let mut lane_ordinal = self.next_lane_ordinal;
+                for item in items {
+                    let item = match item {
+                        ScopedObservationDirectoryMemberDecodedItem::DriverQuarantine(
+                            quarantine,
+                        ) => ScopedDecodedAppendItem::DriverQuarantine(quarantine),
+                        ScopedObservationDirectoryMemberDecodedItem::Record {
+                            record,
+                            disposition,
+                            mapping_disposition,
+                            batch,
+                            scope_join_updates,
+                            quarantined,
+                        } => ScopedDecodedAppendItem::Record {
+                            evidence: Box::new(scoped_record_evidence(&record, retention)),
+                            disposition,
+                            mapping_disposition: Box::new(mapping_disposition),
+                            batch,
+                            scope_join_updates,
+                            quarantined,
+                        },
+                    };
+                    let item_measurement = decoded_item_measurement(&item)
+                        .expect("directory member measurement was prevalidated before admission");
+                    self.decoded.push_back(QueuedDecodedFrame {
+                        object_token,
+                        source: source.clone(),
+                        lane_ordinal,
+                        phase,
+                        item: Box::new(item),
+                        data_events: item_measurement.0,
+                        retained_native_bytes: item_measurement.1,
+                    });
+                    lane_ordinal = lane_ordinal
+                        .checked_add(1)
+                        .expect("directory member lane range was prevalidated");
+                }
+                debug_assert_eq!(lane_ordinal, after_ordinal);
                 self.next_lane_ordinal = after_ordinal;
                 self.queued_data_events = next_events;
                 self.queued_retained_native_bytes = next_bytes;
@@ -2066,22 +2113,29 @@ impl ScopedObservationAdmissionLane {
                         self.dynamic_member_decoder_states.remove(&source);
                     }
                 }
+                // An empty append member still completes after every frame
+                // already queued in this admission lane. Anchoring it to the
+                // last allocated ordinal prevents its coverage from becoming
+                // visible ahead of an earlier nonempty sibling.
+                let through_lane_ordinal = after_ordinal
+                    .checked_sub(1)
+                    .expect("directory member lane ordinals start at one");
                 self.stage_coverage_update(
-                    lane_ordinal,
+                    through_lane_ordinal,
                     access_pass_id,
                     ScopedCoveragePassEvidence::AccessAttempt,
                     ScopedOfferedDecodeCoverage {
                         source,
                         point: Some(point),
                         explicit_absence_or_deletion: None,
-                        explicit_errors: Vec::new(),
-                        completeness: CoverageSetCompleteness::Complete,
+                        explicit_errors,
+                        completeness,
                     },
                 );
                 Ok(ScopedAdmissionReceipt {
                     object_token,
                     admission_token,
-                    through_lane_ordinal: lane_ordinal,
+                    through_lane_ordinal,
                     data_events: measurement.0,
                     retained_native_bytes: measurement.1,
                     control_items: 0,

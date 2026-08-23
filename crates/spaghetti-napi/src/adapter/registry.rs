@@ -746,7 +746,7 @@ pub(crate) mod tests {
             "access_root":"home",
             "locator":"todos/{native-session-id}-agent-{native-actor-id}.json",
             "identity_inputs":["native-session-id","native-actor-id"],
-            "bounds":{"max_fan_out":1,"max_depth":1,"max_objects":1,"max_bytes":1048576,"max_rows":0},
+            "bounds":{"max_fan_out":4,"max_depth":1,"max_objects":4,"max_bytes":4194304,"max_rows":0},
             "observation_binding":{"stream_id":"todo-snapshots","source_pattern":"todos/*-agent-*.json"},
             "unavailable_behavior":"skip_optional",
             "claim_refs":["scope-evidence"]
@@ -3315,7 +3315,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn configured_real_claude_root_join_reads_and_replays_todo_sidecar() {
+    async fn configured_real_claude_root_descendant_and_todo_sources_compose() {
         const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
 
         let probe_calls = Arc::new(AtomicUsize::new(0));
@@ -3333,6 +3333,21 @@ pub(crate) mod tests {
         .into_bytes();
         transcript_bytes.push(b'\n');
         std::fs::write(&transcript, transcript_bytes).unwrap();
+        let descendant = descendants.join("agent-a1.jsonl");
+        let mut descendant_bytes = format!(
+            r#"{{"type":"user","uuid":"child-message","parentUuid":null,"timestamp":"2026-08-11T00:00:01Z","sessionId":"{SESSION}","cwd":"/repo/.worktrees/a1","version":"1","gitBranch":"main","isSidechain":true,"userType":"external","message":{{"role":"user","content":"inspect the scoped parser"}}}}"#
+        )
+        .into_bytes();
+        descendant_bytes.push(b'\n');
+        descendant_bytes.extend_from_slice(
+            format!(
+                r#"{{"type":"assistant","uuid":"child-answer","parentUuid":"child-message","timestamp":"2026-08-11T00:00:02Z","sessionId":"{SESSION}","cwd":"/repo/.worktrees/a1","version":"1","gitBranch":"main","isSidechain":true,"userType":"external","requestId":"child-request","message":{{"model":"claude-sonnet","id":"child-api-message","type":"message","role":"assistant","content":[{{"type":"text","text":"scoped parser inspected"}}],"usage":{{"input_tokens":2,"output_tokens":3,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}}}}"#
+            )
+            .as_bytes(),
+        );
+        descendant_bytes.push(b'\n');
+        let descendant_len = u64::try_from(descendant_bytes.len()).unwrap();
+        std::fs::write(&descendant, &descendant_bytes).unwrap();
         let todo = root.join(format!("todos/{SESSION}-agent-{SESSION}.json"));
         std::fs::write(
             &todo,
@@ -3367,7 +3382,7 @@ pub(crate) mod tests {
         assert_eq!(prepared.objects().len(), 1);
         assert_eq!(prepared.directory_bindings().len(), 1);
         assert_eq!(prepared.related_relation_bindings().len(), 1);
-        assert_eq!(prepared.required_coverage_objects(), 8);
+        assert_eq!(prepared.required_coverage_objects(), 11);
         let callback_slot = Arc::new(std::sync::Mutex::new(None));
         let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
         let drops = Arc::new(AtomicUsize::new(0));
@@ -3390,6 +3405,7 @@ pub(crate) mod tests {
         let mut supervisor_task = tokio::spawn(supervisor.run_until_stopped());
 
         let mut root_actor_seen = false;
+        let mut child_actor_seen = false;
         let mut bootstrap = None;
         for _ in 0..32 {
             let yielded = tokio::select! {
@@ -3406,6 +3422,14 @@ pub(crate) mod tests {
             ) {
                 root_actor_seen = true;
             }
+            if matches!(
+                &yielded.envelope.event,
+                ScopedObservationEvent::ActorRun { revision, .. }
+                    if revision.role == ActorRunRole::Child
+                        && revision.native_session_id.as_deref() == Some(SESSION)
+            ) {
+                child_actor_seen = true;
+            }
             if let ScopedObservationEvent::ObserverBootstrapComplete { barrier } =
                 &yielded.envelope.event
             {
@@ -3421,6 +3445,10 @@ pub(crate) mod tests {
         assert!(
             root_actor_seen,
             "the real Claude decoder must project the root actor"
+        );
+        assert!(
+            child_actor_seen,
+            "the append-delimited descendant must project a child actor"
         );
         let bootstrap = bootstrap.expect("real Claude related scope must complete bootstrap");
         assert_eq!(bootstrap.scope_coverage.relations().len(), 3);
@@ -3448,9 +3476,21 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(
             decode.points.len() + decode.explicit_absence_or_deletion.len(),
-            4,
-            "root, descendant membership, todo membership, and todo object must be complete"
+            6,
+            "root, descendant membership/member, todo membership, and two actor todo objects must be complete"
         );
+        let descendant_stream =
+            CoverageStreamKey::derive("claude-code", b"subagent-transcripts").unwrap();
+        let descendant_point = decode
+            .points
+            .iter()
+            .find(|point| point.stream_key == descendant_stream)
+            .expect("the descendant member must retain decode coverage");
+        assert_eq!(descendant_point.status, CoverageStatus::CompleteThrough);
+        assert!(descendant_point.position.as_ref().is_some_and(|position| {
+            position.kind == CoveragePositionKind::AppendCursor
+                && position.monotonic_order == Some(descendant_len)
+        }));
 
         std::fs::write(
             &todo,
@@ -3495,7 +3535,7 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(
             replacement_decode.points.len() + replacement_decode.explicit_absence_or_deletion.len(),
-            4
+            6
         );
         assert!(matches!(
             poll_task.await.unwrap().unwrap(),
@@ -3519,6 +3559,81 @@ pub(crate) mod tests {
         assert_eq!(probe_calls.load(Ordering::Acquire), 1);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         assert!(callback_slot.lock().unwrap().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configured_real_claude_incomplete_descendant_fails_closed() {
+        const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
+
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_claude_related_registry(Arc::clone(&probe_calls));
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-private-incomplete-root");
+        let project = root.join("projects/project");
+        let descendants = project.join(SESSION).join("subagents");
+        std::fs::create_dir_all(&descendants).unwrap();
+        let transcript = project.join(format!("{SESSION}.jsonl"));
+        let mut transcript_bytes = format!(
+            r#"{{"type":"user","uuid":"root-message","parentUuid":null,"timestamp":"2026-08-11T00:00:00Z","sessionId":"{SESSION}","cwd":"/repo","version":"1","gitBranch":"main","isSidechain":false,"userType":"external","message":{{"role":"user","content":"compose the tree"}}}}"#
+        )
+        .into_bytes();
+        transcript_bytes.push(b'\n');
+        std::fs::write(&transcript, transcript_bytes).unwrap();
+        std::fs::write(
+            descendants.join("agent-partial.jsonl"),
+            format!(
+                r#"{{"type":"user","uuid":"partial-message","parentUuid":null,"timestamp":"2026-08-11T00:00:01Z","sessionId":"{SESSION}","cwd":"/repo/.worktrees/a1","version":"1","gitBranch":"main","isSidechain":true,"userType":"external","message":{{"role":"user","content":"unfinished"}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_claude_related_request(root, SESSION),
+        )
+        .unwrap()
+        .unwrap();
+        let prepared = attachment.prepare_append_runtime(32, 16).unwrap();
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opened = prepared
+            .open_with_watcher_factory(ConfiguredScopedObservationRuntimeOptions::default(), {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let (mut runtime, handle, supervisor) = opened.into_parts();
+        let result = tokio::time::timeout(Duration::from_secs(2), supervisor.run_until_stopped())
+            .await
+            .unwrap();
+        assert!(matches!(
+            &result,
+            ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(
+                crate::scoped_observation::configured_attachment::ConfiguredScopedObservationRuntimeError::SourcePass
+            )
+        ));
+        let rendered = format!("{result:?}");
+        assert_eq!(rendered, "BootstrapFailed(SourcePass)");
+        for private in ["configured-private", "agent-partial", "unfinished"] {
+            assert!(!rendered.contains(private));
+        }
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(callback_slot.lock().unwrap().is_none());
+
+        let close = handle.request_close();
+        assert!(close.wait_async().await.complete);
+        assert!(runtime.next_event().await.unwrap().is_none());
     }
 
     #[cfg(unix)]
