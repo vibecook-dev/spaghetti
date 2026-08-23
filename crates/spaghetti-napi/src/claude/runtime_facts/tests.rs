@@ -7,7 +7,7 @@
 //! assertions: a frozen fixture is a source of records here, never a golden
 //! byte pattern.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::adapter::{
@@ -1038,4 +1038,300 @@ fn decode_throughput_and_fact_identity_digest() {
         elapsed.as_secs_f64() * 1000.0 / megabytes,
     );
     println!("fact identity digest: {}", hasher.finalize().to_hex());
+}
+
+// ---------------------------------------------------------------------------
+// Revision identity: what makes two facts for one entity two revisions.
+//
+// Each case below is a shape real transcripts contain that used to derive one
+// `FactRevisionId` twice. Emitting it twice is what the durable writer rejects
+// with `UNIQUE constraint failed: fact_records.semantic_fact_revision_id`, so
+// these decode through the whole batch the way the engine does: a repeated
+// identity fails the decode itself, before any assertion runs.
+// ---------------------------------------------------------------------------
+
+/// Every canonical revision one transcript emits, in emission order.
+fn revisions(batch: &FactBatch, family: &str) -> Vec<FactSemanticRevision> {
+    batch
+        .facts()
+        .iter()
+        .filter(|envelope| envelope.value.kind() == family)
+        .map(|envelope| {
+            envelope
+                .semantic_revision
+                .expect("a runtime fact always carries a canonical semantic revision")
+        })
+        .collect()
+}
+
+fn assert_one_entity_with_distinct_revisions(
+    revisions: &[FactSemanticRevision],
+    expected: usize,
+    family: &str,
+) {
+    assert_eq!(revisions.len(), expected, "{family} revision count");
+    let entities: BTreeSet<_> = revisions.iter().map(|semantic| semantic.fact_id).collect();
+    assert_eq!(
+        entities.len(),
+        1,
+        "{family} must keep one entity across the repeat"
+    );
+    let identities: BTreeSet<_> = revisions
+        .iter()
+        .map(|semantic| semantic.fact_revision_id)
+        .collect();
+    assert_eq!(
+        identities.len(),
+        expected,
+        "{family} gave two revisions of one entity a single identity"
+    );
+    for semantic in revisions {
+        assert_eq!(
+            semantic.semantic_revision_ref.fact_revision_id, semantic.fact_revision_id,
+            "the public join reference must name the revision it belongs to"
+        );
+    }
+}
+
+/// A session that moves off a model and back is three revisions, not two.
+///
+/// The third proves the model was effective again; deriving its identity from
+/// the value alone made it the first revision's identity, because a returning
+/// value normalizes identically.
+#[test]
+fn a_dimension_returning_to_an_earlier_value_is_a_distinct_revision() {
+    let blocks = serde_json::json!([{"type": "text", "text": "ok"}]);
+    let batch = decode_transcript(&[
+        &assistant_line(
+            "11111111-1111-1111-1111-111111111111",
+            "model-a",
+            blocks.clone(),
+        ),
+        &assistant_line(
+            "22222222-2222-2222-2222-222222222222",
+            "model-b",
+            blocks.clone(),
+        ),
+        &assistant_line("33333333-3333-3333-3333-333333333333", "model-a", blocks),
+    ]);
+
+    let model = revisions(&batch, "runtime.effective-state");
+    assert_one_entity_with_distinct_revisions(&model, 3, "runtime.effective-state");
+
+    let states = reduce_family(&batch, "runtime.effective-state");
+    assert_eq!(states.len(), 1, "one actor and dimension is one entity");
+    let Some(Fact::EffectiveStateRevision(state)) = states.values().next() else {
+        panic!("the effective-state family reduced to something else");
+    };
+    assert_eq!(state.dimension, EffectiveStateDimension::Model);
+    assert_eq!(
+        state.value.value.as_deref(),
+        Some("model-a"),
+        "the last revision wins, and the last evidence is the model it returned to"
+    );
+}
+
+/// A record repeated verbatim is a second observation of one fact.
+///
+/// Real transcripts do repeat a line — same `uuid`, byte-identical message —
+/// and both occurrences are evidence. They name one message entity and one
+/// content-block entity, at two positions in the object.
+#[test]
+fn a_verbatim_repeated_record_is_a_distinct_revision_of_one_fact() {
+    let line = assistant_line(
+        "44444444-4444-4444-4444-444444444444",
+        "model-a",
+        serde_json::json!([{"type": "text", "text": "the same thing twice"}]),
+    );
+    let batch = decode_transcript(&[&line, &line]);
+
+    assert_one_entity_with_distinct_revisions(
+        &revisions(&batch, "runtime.message"),
+        2,
+        "runtime.message",
+    );
+    assert_one_entity_with_distinct_revisions(
+        &revisions(&batch, "runtime.content-block"),
+        2,
+        "runtime.content-block",
+    );
+    assert_eq!(
+        reduce_family(&batch, "runtime.message").len(),
+        1,
+        "a repeated record does not create a second message"
+    );
+}
+
+/// A `tool_use` id repeated with identical input keeps one call entity.
+#[test]
+fn a_repeated_tool_call_is_a_distinct_revision_of_one_call() {
+    let line = assistant_line(
+        "55555555-5555-5555-5555-555555555555",
+        "model-a",
+        serde_json::json!([
+            {"type": "tool_use", "id": "toolu_repeat", "name": "Read", "input": {"path": "p"}},
+        ]),
+    );
+    let second = assistant_line(
+        "66666666-6666-6666-6666-666666666666",
+        "model-a",
+        serde_json::json!([
+            {"type": "tool_use", "id": "toolu_repeat", "name": "Read", "input": {"path": "p"}},
+        ]),
+    );
+    let batch = decode_transcript(&[&line, &second]);
+
+    assert_one_entity_with_distinct_revisions(
+        &revisions(&batch, "runtime.tool"),
+        2,
+        "runtime.tool",
+    );
+    let tools = reduce_family(&batch, "runtime.tool");
+    assert_eq!(tools.len(), 1, "one native call id is one tool entity");
+}
+
+/// A permission mode that toggles and returns behaves like the model does.
+#[test]
+fn a_permission_mode_returning_to_an_earlier_value_is_a_distinct_revision() {
+    fn moded(uuid: &str, mode: &str) -> String {
+        let mut record: serde_json::Value = serde_json::from_str(&assistant_line(
+            uuid,
+            "model-a",
+            serde_json::json!([{"type": "text", "text": "ok"}]),
+        ))
+        .expect("assistant record");
+        record["permissionMode"] = serde_json::Value::String(mode.to_string());
+        record.to_string()
+    }
+    let batch = decode_transcript(&[
+        &moded("77777777-7777-7777-7777-777777777777", "default"),
+        &moded("88888888-8888-8888-8888-888888888888", "acceptEdits"),
+        &moded("99999999-9999-9999-9999-999999999999", "default"),
+    ]);
+
+    let all = revisions(&batch, "runtime.effective-state");
+    // One model revision (the model never changes) plus three permission-mode
+    // revisions; the identities must all be distinct.
+    let identities: BTreeSet<_> = all
+        .iter()
+        .map(|semantic| semantic.fact_revision_id)
+        .collect();
+    assert_eq!(
+        identities.len(),
+        all.len(),
+        "two revisions shared one identity"
+    );
+    let permission: Vec<_> = all
+        .iter()
+        .copied()
+        .filter(|semantic| {
+            batch.facts().iter().any(|envelope| {
+                envelope.semantic_revision == Some(*semantic)
+                    && matches!(
+                        &envelope.value,
+                        Fact::EffectiveStateRevision(fact)
+                            if fact.dimension == EffectiveStateDimension::PermissionMode
+                    )
+            })
+        })
+        .collect();
+    assert_one_entity_with_distinct_revisions(&permission, 3, "permission mode");
+}
+
+/// The general invariant, over a transcript built to repeat itself.
+///
+/// Recurring shapes are the point: the same tool called with the same input,
+/// a model that oscillates, and records repeated verbatim. Every fact must
+/// still carry its own revision identity — for the families that bind their
+/// record — and the repeated shapes must really land on shared entities,
+/// otherwise the test would pass by emitting unrelated facts.
+///
+/// `runtime.usage-v2` is the deliberate counterexample and is asserted as
+/// such: re-asserted usage *is* one revision, and its commit path is written
+/// to ignore the repeat rather than to distinguish it.
+#[test]
+fn a_repetitive_transcript_gives_every_fact_its_own_revision_identity() {
+    let mut lines: Vec<String> = Vec::new();
+    for turn in 0..300_u32 {
+        let uuid = format!("{turn:08x}-0000-0000-0000-000000000000");
+        // Two models and two tool inputs, so both recur every other turn.
+        let model = if turn % 2 == 0 { "model-a" } else { "model-b" };
+        let path = if turn % 4 < 2 { "alpha" } else { "beta" };
+        let call = format!("toolu_{}", turn % 8);
+        lines.push(assistant_line(
+            &uuid,
+            model,
+            serde_json::json!([
+                {"type": "text", "text": "same text every turn"},
+                {"type": "tool_use", "id": call, "name": "Read", "input": {"path": path}},
+            ]),
+        ));
+        lines.push(user_line(
+            &format!("{turn:08x}-1111-0000-0000-000000000000"),
+            serde_json::json!([
+                {"type": "tool_result", "tool_use_id": call, "content": "same result"},
+            ]),
+        ));
+        if turn % 10 == 0 {
+            // A verbatim repeat of the turn just written.
+            lines.push(lines[lines.len() - 2].clone());
+        }
+    }
+    let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
+
+    const RECORD_BOUND: [&str; 8] = [
+        "runtime.message",
+        "runtime.content-block",
+        "runtime.tool",
+        "runtime.user-input-request",
+        "runtime.effective-state",
+        "runtime.native-marker",
+        "runtime.task",
+        "runtime.plan",
+    ];
+
+    let mut identities: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut entities: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+    let mut usage_identities: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut facts = 0_usize;
+    let mut repeated_usage = 0_usize;
+    decode_each_record(&borrowed, |batch| {
+        for envelope in batch.facts() {
+            let Some(semantic) = envelope.semantic_revision else {
+                continue;
+            };
+            let identity = semantic.fact_revision_id.as_bytes().to_vec();
+            if envelope.value.kind() == "runtime.usage-v2" {
+                if !usage_identities.insert(identity) {
+                    repeated_usage += 1;
+                }
+                continue;
+            }
+            if !RECORD_BOUND.contains(&envelope.value.kind()) {
+                continue;
+            }
+            facts += 1;
+            assert!(
+                identities.insert(identity),
+                "two facts claimed one revision identity in {}",
+                envelope.value.kind()
+            );
+            *entities
+                .entry(semantic.fact_id.as_bytes().to_vec())
+                .or_default() += 1;
+        }
+    });
+
+    assert!(
+        facts > 2_000,
+        "the generated transcript should be substantial"
+    );
+    assert!(
+        entities.values().any(|revisions| *revisions > 1),
+        "the generated transcript must actually revisit entities"
+    );
+    assert!(
+        repeated_usage > 0,
+        "identical usage must stay one revision; this transcript repeats it"
+    );
 }
