@@ -71,7 +71,7 @@ jobs:
       # Code changing its on-disk format needs a machine that actually runs it.
       - name: Validate types (type lookups; real-data checks skip on CI)
         run: pnpm validate
-      # Run BOTH the SDK and CLI suites (test:packages). The `@vibecook/spaghetti`
+      # Run the SDK, CLI, and playground suites (test:packages). The `@vibecook/spaghetti`
       # filter alone matched only the CLI. The SDK suite needs the built native
       # addon + better-sqlite3, both present here: `pnpm build` above ran
       # `pnpm -r build` (which builds the native crate) and better-sqlite3 is a
