@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -27,22 +27,53 @@ use super::object::{DecodedFact, ObjectReset, ObservedObject, UnknownRecord};
 use super::queue::{Admission, Delivery};
 use super::request::ResolvedRequest;
 use super::scope::{
-    resolve_members, watch_anchors, JoinedLocators, ScopeMemberKey, StreamCatalog,
+    resolve_members, watch_anchors, JoinedLocators, ScopeMember, ScopeMemberKey, StreamCatalog,
     ROOT_TRANSCRIPT_STREAM,
 };
 use super::state::{ScopeState, StateChange};
 use super::ObserverError;
 
-/// Reconciliation passes are bounded so one very large append cannot hold the
-/// owner thread away from close or control delivery indefinitely.
-const MAX_PASSES_PER_WAKE: usize = 64;
+/// Live reconciliation is bounded so one very large append cannot hold the
+/// owner thread away from close or control delivery indefinitely. Whatever is
+/// left simply continues on the next wake.
+///
+/// Bootstrap is deliberately NOT bounded this way. Its barrier claims complete
+/// coverage, so stopping early would publish a manifest that says "complete"
+/// over a truncated count and then deliver the remainder as `Live` — data that
+/// was on disk before attach arriving labelled as new activity. Bootstrap
+/// still checks for close on every pass, so it stays interruptible.
+const MAX_LIVE_PASSES_PER_WAKE: usize = 64;
 
 /// A wake reason for the owner thread.
 pub(crate) enum Wake {
-    /// A watcher fired, or a consumer asked for a low-latency pass.
-    Hint,
+    /// A watcher fired for these paths. An empty list means the backend woke us
+    /// without saying what changed, which is a hint to sweep rather than guess.
+    Changed(Vec<PathBuf>),
+    /// A consumer asked for a low-latency pass. It drains what is already known
+    /// to be dirty; the periodic sweep is what makes missed notifications safe.
+    Poll,
     Close,
 }
+
+/// Notifications are hints, so reconciliation must re-read everything on a
+/// bounded cadence no matter what the watcher said. This is that cadence,
+/// expressed as a multiple of the configured poll interval.
+const SWEEP_INTERVAL_MULTIPLIER: u32 = 4;
+
+/// Floor for that cadence. A caller may ask for a 10 ms poll interval to get
+/// low-latency hints; without a floor that would put a whole-scope sweep on
+/// every pass, which is the cost this design exists to avoid.
+const MIN_SWEEP_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A watcher burst larger than this stops being worth tracking individually;
+/// the pass degrades to a full sweep, which is slower but cannot lose a change.
+const MAX_TRACKED_DIRTY_PATHS: usize = 4_096;
+
+/// Objects re-read per sweep tick on a larger scope. A sweep is a correctness
+/// fallback, not a deadline, so it is spread across ticks: every object is still
+/// re-read within `ceil(objects / slice)` cadences, but no single pass pays for
+/// the whole scope and shows up as a latency spike.
+const SWEEP_SLICE_OBJECTS: usize = 64;
 
 /// Everything the owner thread needs. Built on the calling thread so that
 /// `open()` fails fast on a bad request rather than in the background.
@@ -62,6 +93,19 @@ pub(crate) struct ObserverRuntime {
     joined: JoinedLocators,
     state: ScopeState,
     next_local_object_id: u64,
+    /// Objects with known pending work: watcher-flagged, newly discovered, or
+    /// mid-batch. An ordinary pass reads these and nothing else.
+    dirty: BTreeSet<ScopeMemberKey>,
+    /// Absolute path of every member, for mapping watcher events onto objects.
+    member_paths: BTreeMap<PathBuf, ScopeMemberKey>,
+    /// The resolved member set. Re-resolved on a sweep or when the scope grows,
+    /// not on every pass — enumerating a large session tree is itself I/O.
+    members: Vec<ScopeMember>,
+    /// Forces the next pass to read every member and re-resolve membership.
+    sweep_due: bool,
+    last_sweep: Instant,
+    /// Position in the member list for the next sweep slice.
+    sweep_cursor: usize,
     root_key: ScopeMemberKey,
     phase: ObserverPhase,
     /// Set when this epoch lost continuity. Ordinary delivery stops, but
@@ -138,6 +182,13 @@ impl ObserverRuntime {
             joined: JoinedLocators::default(),
             state: ScopeState::default(),
             next_local_object_id: 1,
+            dirty: BTreeSet::new(),
+            member_paths: BTreeMap::new(),
+            members: Vec::new(),
+            // The first pass is always a sweep: nothing is known yet.
+            sweep_due: true,
+            last_sweep: Instant::now(),
+            sweep_cursor: 0,
             root_key,
             phase: ObserverPhase::Bootstrap,
             replacement_pending: false,
@@ -145,10 +196,18 @@ impl ObserverRuntime {
     }
 
     /// Install watches, then bootstrap, then serve. Runs on the owner thread.
-    pub(crate) fn run(mut self, wake: Receiver<Wake>, hint: Sender<Wake>) {
+    ///
+    /// `install` is false only in tests, which use it to prove that the bounded
+    /// sweep — not the watcher — is what makes a missed notification safe.
+    pub(crate) fn run_with_watcher(
+        mut self,
+        wake: Receiver<Wake>,
+        hint: Sender<Wake>,
+        install: bool,
+    ) {
         // Watch before scan. A watcher installed after the scan would miss
         // every append that landed during it.
-        let _watcher = install_watcher(&self.request, hint);
+        let _watcher = install.then(|| install_watcher(&self.request, hint));
 
         self.phase = ObserverPhase::Bootstrap;
         self.reconcile_until_drained();
@@ -160,10 +219,20 @@ impl ObserverRuntime {
                 break;
             }
             match wake.recv_timeout(self.request.poll_interval) {
-                Ok(Wake::Close) => break,
-                Ok(Wake::Hint) | Err(RecvTimeoutError::Timeout) => {
+                Ok(first) => {
+                    let mut closing = self.absorb(first);
+                    // Drain the rest of the burst before doing any I/O: a
+                    // hundred appends across a hundred children should cost one
+                    // pass, not a hundred.
+                    while let Ok(next) = wake.try_recv() {
+                        closing |= self.absorb(next);
+                    }
+                    if closing {
+                        break;
+                    }
                     self.reconcile_until_drained();
                 }
+                Err(RecvTimeoutError::Timeout) => self.reconcile_until_drained(),
                 Err(RecvTimeoutError::Disconnected) => break,
             }
             if let Some(message) = self.delivery.take_terminal_error() {
@@ -185,13 +254,58 @@ impl ObserverRuntime {
             }));
     }
 
+    /// Fold one wake into pending state. Returns true when it asked to close.
+    fn absorb(&mut self, wake: Wake) -> bool {
+        match wake {
+            Wake::Close => return true,
+            // A poll sweeps at any scope size. `appears_unchanged` reduces an
+            // untouched object to one `stat`, so this stays independent of how
+            // long the filesystem takes to deliver a notification without
+            // putting a full read of every member on the latency path.
+            Wake::Poll => self.sweep_due = true,
+            Wake::Changed(paths) => {
+                if paths.is_empty() || paths.len() > MAX_TRACKED_DIRTY_PATHS {
+                    // The backend coalesced or overflowed. Fall back to truth.
+                    self.sweep_due = true;
+                } else {
+                    for path in paths {
+                        self.mark_dirty_path(&path);
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Map one changed path onto a member. A path we do not recognise may be a
+    /// child that has just appeared, so it re-opens membership rather than
+    /// being discarded.
+    fn mark_dirty_path(&mut self, path: &Path) {
+        if let Some(key) = self.member_paths.get(path) {
+            if self.dirty.len() < MAX_TRACKED_DIRTY_PATHS {
+                self.dirty.insert(key.clone());
+            } else {
+                self.sweep_due = true;
+            }
+            return;
+        }
+        // Unknown path under a watched root: the scope may have grown.
+        self.sweep_due = true;
+    }
+
     /// Reconcile until no object reports more bytes ready, then publish a
     /// replacement epoch if this one lost continuity along the way.
     fn reconcile_until_drained(&mut self) {
-        for _ in 0..MAX_PASSES_PER_WAKE {
+        let bounded = self.phase != ObserverPhase::Bootstrap;
+        let mut passes = 0_usize;
+        loop {
             if self.delivery.is_closing() {
                 break;
             }
+            if bounded && passes >= MAX_LIVE_PASSES_PER_WAKE {
+                break;
+            }
+            passes += 1;
             if !self.reconcile_once() {
                 break;
             }
@@ -201,23 +315,74 @@ impl ObserverRuntime {
         }
     }
 
-    /// One pass over the current member set. Returns true when another pass is
-    /// needed because a driver had more bytes ready or the scope grew.
-    fn reconcile_once(&mut self) -> bool {
-        let members = resolve_members(&self.request, &self.catalog, &self.joined);
-        let current: BTreeSet<ScopeMemberKey> =
-            members.iter().map(|member| member.key.clone()).collect();
+    /// Is a full sweep due? Notifications are hints and filesystem backends
+    /// drop and coalesce them, so reconciliation has to re-read everything on a
+    /// bounded cadence regardless of what the watcher reported.
+    fn sweep_now(&self) -> bool {
+        if self.sweep_due {
+            return true;
+        }
+        // Bootstrap already enumerated the scope once. Re-sweeping mid-bootstrap
+        // re-opens every sibling on every pass while one large transcript works
+        // through its batches, which is quadratic in the size of the tree.
+        if self.phase == ObserverPhase::Bootstrap {
+            return false;
+        }
+        let cadence =
+            (self.request.poll_interval * SWEEP_INTERVAL_MULTIPLIER).max(MIN_SWEEP_INTERVAL);
+        self.last_sweep.elapsed() >= cadence
+    }
 
-        // Objects that left the declared scope retract the facts they owned.
-        let departed: Vec<_> = self.known_members.difference(&current).cloned().collect();
-        for key in departed {
-            self.objects.remove(&key);
-            self.object_errors.remove(&key);
-            self.known_members.remove(&key);
-            self.retract_owned(&key, None);
+    /// Re-resolve membership and rebuild the path index. This walks the session
+    /// subtree, so it runs on a sweep rather than on every pass.
+    fn resolve_scope(&mut self) {
+        self.members = resolve_members(&self.request, &self.catalog, &self.joined);
+        self.member_paths = self
+            .members
+            .iter()
+            .map(|member| {
+                (
+                    self.request
+                        .agent_root
+                        .join(&member.key.root_name)
+                        .join(&member.key.relative_path),
+                    member.key.clone(),
+                )
+            })
+            .collect();
+    }
+
+    /// One pass. Returns true when another is needed because a driver had more
+    /// bytes ready or the scope grew.
+    fn reconcile_once(&mut self) -> bool {
+        let sweeping = self.sweep_now();
+        if sweeping {
+            self.sweep_due = false;
+            self.last_sweep = Instant::now();
+            self.resolve_scope();
         }
 
-        for member in members {
+        let current: BTreeSet<ScopeMemberKey> = self
+            .members
+            .iter()
+            .map(|member| member.key.clone())
+            .collect();
+
+        // Objects that left the declared scope retract the facts they owned.
+        // Only a sweep can observe a departure, since nothing notifies us about
+        // a path that no longer exists.
+        if sweeping {
+            let departed: Vec<_> = self.known_members.difference(&current).cloned().collect();
+            for key in departed {
+                self.objects.remove(&key);
+                self.object_errors.remove(&key);
+                self.known_members.remove(&key);
+                self.dirty.remove(&key);
+                self.retract_owned(&key, None);
+            }
+        }
+
+        for member in std::mem::take(&mut self.members) {
             let key = member.key.clone();
             if !self.objects.contains_key(&key) {
                 let local_object_id = self.next_local_object_id;
@@ -225,25 +390,81 @@ impl ObserverRuntime {
                 match ObservedObject::bind(
                     self.adapter.as_ref(),
                     &self.instance,
-                    member,
+                    member.clone(),
                     local_object_id,
                 ) {
                     Ok(Some(object)) => {
                         self.objects.insert(key.clone(), object);
+                        // A newly bound object has never been read.
+                        self.dirty.insert(key.clone());
                     }
                     // Declared relations whose driver is out of the v1 scoped
                     // surface stay unopened; that is not an error.
-                    Ok(None) => continue,
+                    Ok(None) => {
+                        self.members.push(member);
+                        continue;
+                    }
                     Err(error) => {
                         self.record_object_error(&key, error.to_string(), true);
+                        self.members.push(member);
                         continue;
                     }
                 }
             }
             self.known_members.insert(key);
+            self.members.push(member);
         }
 
-        let keys: Vec<_> = self.objects.keys().cloned().collect();
+        // An ordinary pass reads what the watcher flagged or what is still
+        // mid-batch. A sweep adds a bounded slice of everything else, so the
+        // fallback covers the whole scope over successive ticks without any
+        // single pass paying for all of it.
+        let mut keys: Vec<ScopeMemberKey> = self
+            .dirty
+            .iter()
+            .filter(|key| self.objects.contains_key(*key))
+            .cloned()
+            .collect();
+        for key in &keys {
+            self.dirty.remove(key);
+        }
+        // Flagged objects are read whatever `stat` says: the watcher already
+        // told us they changed, and a same-size same-mtime rewrite is exactly
+        // the case a stat cannot see.
+        let forced: BTreeSet<ScopeMemberKey> = keys.iter().cloned().collect();
+        if sweeping {
+            let all: Vec<ScopeMemberKey> = self.objects.keys().cloned().collect();
+            // Unchanged objects cost a `stat`, so a sweep can cover the whole
+            // scope. The slice remains the bound for a scope large enough that
+            // even stating all of it would show up on the latency path.
+            let slice = if all.len() <= SWEEP_SLICE_OBJECTS * 16 {
+                all.len()
+            } else {
+                SWEEP_SLICE_OBJECTS * 16
+            };
+            if self.sweep_cursor >= all.len() {
+                self.sweep_cursor = 0;
+            }
+            let taken: Vec<ScopeMemberKey> = all
+                .iter()
+                .cycle()
+                .skip(self.sweep_cursor)
+                .take(slice.min(all.len()))
+                .cloned()
+                .collect();
+            self.sweep_cursor = if slice >= all.len() {
+                0
+            } else {
+                (self.sweep_cursor + slice) % all.len().max(1)
+            };
+            let already: BTreeSet<&ScopeMemberKey> = keys.iter().collect();
+            let extra: Vec<ScopeMemberKey> = taken
+                .into_iter()
+                .filter(|key| !already.contains(key))
+                .collect();
+            keys.extend(extra);
+        }
+
         let mut more = false;
         let observed_at = now_ms();
         for key in keys {
@@ -253,9 +474,18 @@ impl ObserverRuntime {
             let Some(object) = self.objects.get_mut(&key) else {
                 continue;
             };
+            if !forced.contains(&key) && object.appears_unchanged() {
+                continue;
+            }
             let pass = object.reconcile(self.adapter.as_ref(), observed_at);
+            self.delivery.count_object_read();
             let generation = object.generation();
-            more |= pass.more_available;
+            // Only this object continues; a partially drained transcript must
+            // not drag every sibling through another read.
+            if pass.more_available {
+                self.dirty.insert(key.clone());
+                more = true;
+            }
 
             if let Some(reset) = pass.reset {
                 self.emit_reset(&key, reset, generation);
@@ -267,6 +497,8 @@ impl ObserverRuntime {
                 self.retract_owned(&key, None);
             }
             if self.joined.apply(&pass.joins) {
+                // Evidence named a sidecar we were not following yet.
+                self.sweep_due = true;
                 more = true;
             }
             for fact in &pass.facts {
@@ -723,10 +955,15 @@ fn actor_run_of(value: &Fact) -> Option<CanonicalEntityKey> {
 /// nearest existing ancestor so that attaching before the session directory
 /// exists still observes its creation.
 fn install_watcher(request: &ResolvedRequest, hint: Sender<Wake>) -> Option<RecommendedWatcher> {
-    let mut watcher = notify::recommended_watcher(move |_event| {
-        // Notifications are hints; a full channel already means a pass is
-        // pending, so dropping the extra wake is correct.
-        let _unused = hint.try_send(Wake::Hint);
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        // Notifications are hints. Report the paths when the backend gives
+        // them; an empty list makes the owner sweep instead of guessing.
+        let paths = event.map(|event| event.paths).unwrap_or_default();
+        // A full channel already means a pass is pending, but dropping a change
+        // notice would lose the path, so degrade to a pathless wake that sweeps.
+        if hint.try_send(Wake::Changed(paths)).is_err() {
+            let _unused = hint.try_send(Wake::Changed(Vec::new()));
+        }
     })
     .ok()?;
     let mut watched: BTreeSet<PathBuf> = BTreeSet::new();
@@ -771,7 +1008,7 @@ pub(crate) fn wake_channel() -> (Sender<Wake>, Receiver<Wake>) {
 /// Ask the owner thread to run a pass now. Used by `poll()` as the
 /// low-latency hint RFC 012D describes.
 pub(crate) fn nudge(sender: &Sender<Wake>) {
-    let _unused = sender.try_send(Wake::Hint);
+    let _unused = sender.try_send(Wake::Poll);
 }
 
 pub(crate) fn signal_close(sender: &Sender<Wake>) {

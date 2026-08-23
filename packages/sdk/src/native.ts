@@ -2066,6 +2066,12 @@ export interface NativeSessionObserver {
 export interface NativeSessionObserverStatus {
   scopeEpoch: number;
   offeredThroughSequence: number;
+  /**
+   * Source objects opened since attach. A pass reads what the watcher flagged
+   * plus a bounded sweep slice, so this tracks real activity rather than the
+   * size of the session tree.
+   */
+  objectReads: number;
   queuedSemantic: number;
   queuedControl: number;
   retainedBytes: number;

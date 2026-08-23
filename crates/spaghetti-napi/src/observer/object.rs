@@ -111,6 +111,9 @@ pub(crate) struct ObservedObject {
     object_context: AdapterObjectContext,
     semantic_context: FactSemanticContext,
     origin: RecordOrigin,
+    /// `(len, mtime)` at the last completed read, for the cheap unchanged-check
+    /// a sweep uses before deciding to open anything.
+    last_stat: Option<(u64, std::time::SystemTime)>,
     decoder_state: Option<Vec<u8>>,
     generation: u64,
     present: bool,
@@ -195,6 +198,7 @@ impl ObservedObject {
             object_context,
             semantic_context,
             origin,
+            last_stat: None,
             decoder_state: None,
             generation: 0,
             present: false,
@@ -215,14 +219,52 @@ impl ObservedObject {
         self.present
     }
 
+    /// Cheap pre-check for a sweep: has this object plausibly changed?
+    ///
+    /// A `stat` costs a fraction of an open-and-frame, which is what lets a
+    /// sweep cover a large scope without becoming a latency spike. It is only
+    /// ever used to skip work: anything it cannot rule out is read normally,
+    /// and an object it wrongly skips is still caught by the next full read,
+    /// so the worst case is bounded staleness rather than a lost change.
+    pub(crate) fn appears_unchanged(&self) -> bool {
+        let Some((len, mtime)) = self.last_stat else {
+            return false;
+        };
+        let path = self.root.join(&self.member.key.relative_path);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                let Ok(modified) = metadata.modified() else {
+                    return false;
+                };
+                metadata.len() == len && modified == mtime
+            }
+            // Missing or unreadable is a change worth handling properly.
+            Err(_) => false,
+        }
+    }
+
+    fn record_stat(&mut self) {
+        let path = self.root.join(&self.member.key.relative_path);
+        self.last_stat = std::fs::symlink_metadata(&path).ok().and_then(|metadata| {
+            metadata
+                .modified()
+                .ok()
+                .map(|mtime| (metadata.len(), mtime))
+        });
+    }
+
     /// Read every complete record newer than the checkpoint and decode it.
     pub(crate) fn reconcile(&mut self, adapter: &dyn AgentAdapter, observed_at: i64) -> ObjectPass {
         self.origin.observed_at = observed_at;
         let root = self.root.clone();
-        match &mut self.driver {
+        let pass = match &mut self.driver {
             Driver::Append { .. } => self.reconcile_append(adapter, &root),
             Driver::Replace { .. } => self.reconcile_replace(adapter, &root),
+        };
+        if pass.error.is_none() {
+            self.record_stat();
         }
+        pass
     }
 
     fn reconcile_append(&mut self, adapter: &dyn AgentAdapter, root: &Path) -> ObjectPass {

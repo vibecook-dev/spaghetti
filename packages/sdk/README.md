@@ -163,15 +163,6 @@ event are still delivered and the loop returns rather than throwing, so a
 consumer applying events never loses the ones it already has to a rejection it
 did not ask for.
 
-> **Known deviation (as of 0.8.0-dev).** On a session tree whose per-family
-> revision count exceeds 65,536, `bootstrap_complete` is emitted early: the
-> barrier reports the truncated count as complete coverage, and the remaining
-> revisions arrive afterwards labelled `phase: "live"` even though they were
-> already on disk at attach. Nothing is lost, but a consumer that commits its
-> staged epoch at the barrier will briefly treat existing entities as absent,
-> and one that distinguishes cold state from live activity will see the
-> remainder as new. Sessions below that bound are unaffected.
-
 ### Replacing `watchSessionTranscript`
 
 `watchSessionTranscript` still works and still ships, but it is superseded and
