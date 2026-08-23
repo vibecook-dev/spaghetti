@@ -35,14 +35,21 @@ where it is implemented. Execution authority is
 | Source/fact-family coverage | implemented | `SpaghettiEngine.getFactFamilyCoverage` and `replayFactFamily` in `crates/spaghetti-napi/index.d.ts` |
 | Mapping dispositions and typed-unknown preservation | implemented | `Fact::UnknownRecord`; on the observer wire as `UnknownEvidenceEvent`, carrying size and digest and never native content |
 | ADS, fixtures, support ledger, conformance, promotion | implemented | `agent-support/`, validated by `scripts/agent_support/validate.py` — 6 bundles, 1 promoted, 5 candidate |
-| Scoped-relation declarations | partial | `src/observer/scope.rs` admits every object through a named declared relation, but the relation set and its bounds are Rust constants mirroring `source-declarations.json` rather than an evaluated `ScopeProgram`; lane L5 restores that |
+| Scoped-relation declarations | partial | `agent-support/claude-code/candidate-2026-08-21/scope-programs.json` declares nine session-rooted relations — root transcript, descendant transcripts and metadata, workflow records, journals and child transcripts, team config and inbox, todo snapshot — and `src/observer/runtime.rs` refuses to attach to an adapter declaring no session-rooted program. But `src/observer/scope.rs` still resolves those locators in Rust against the relation ids rather than evaluating the declared program |
 | No hand-written TypeScript mirror of native output | implemented | `pnpm generate:types` (ts-rs) with a CI diff; 13,694 lines of hand-written contracts deleted and the SDK barrel curated from 38 exports to 17 |
 
-Adapter reality check: the Claude adapter emits three of the eleven RFC 012C
-fact families today — `actor_run`, `actor_affiliation`, and `usage_v2`. The
-other eight have reducers, fixtures, and observer wire but no emitter. Lane L5
-writes them, collapses the per-adapter triplicates, and replaces the
-candidate/promoted pair with one `version` field.
+Adapter reality check: the Claude adapter emits **all eleven** RFC 012C fact
+families, each with a typed `RuntimeSemanticValue`
+(`src/claude/runtime_facts.rs`, proven end to end by
+`packages/sdk/src/__tests__/observe-session-families.test.ts`). Two families
+rest on narrower evidence than their name suggests — plans come from
+`ExitPlanMode`/`EnterPlanMode` tool evidence rather than `plans/<slug>.md`
+sidecars, and an orphaned `tool_result` claims no tool entity; both are recorded
+in [012C](./012c-runtime-semantics-and-usage-v2.md) §7.
+
+Grok usage is now exact per response, read from `turn_completed` records in
+`updates.jsonl`; the session-scoped estimate path is deleted. A turn that omits
+`cacheCreationTokens` leaves that bucket `unknown` rather than inferring it.
 
 ## 1. Summary
 

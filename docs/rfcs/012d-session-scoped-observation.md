@@ -20,7 +20,7 @@ an application-receipt protocol between the SDK helper and its consumer, a
 bounded artifact-read API, and a `poll()` completion-ticket algebra. The first
 implementation of that was ~74k lines and no consumer ever attached to it.
 
-What shipped is 3,636 production lines over `append_delimited` and
+What shipped is 3,640 production lines over `append_delimited` and
 `decode_record`, sharing the RFC 012C reducers with durable ingestion. Every
 semantic guarantee below is enforced and tested; the negotiation, receipt, and
 artifact layers are not there, and §8 says so.
@@ -137,6 +137,13 @@ eleven semantic variants sharing `SemanticEvent`, plus `unknown_evidence`,
 `ClosedEvent`, `SourceErrorEvent`, `ObserverErrorEvent`,
 `UnknownEvidenceEvent`.
 
+`SemanticEvent.value` is a `RuntimeSemanticValue`: one externally tagged
+variant per family, generated from the RFC 012C fact types. The observer
+carries it as JSON because it is adapter-neutral;
+`crates/spaghetti-napi/src/adapter/runtime_value.rs` proves the transported
+shape and the generated type agree for every family. Narrowing on `family`
+narrows the value. `value` is `null` on a retraction.
+
 Usage documentation: `packages/sdk/README.md`, section *Watching one session*.
 
 ## 5. Acceptance tests
@@ -179,6 +186,9 @@ signal ending iteration cleanly, an already-aborted signal closing immediately,
 and an invalid locator failing at attach.
 `packages/sdk/src/__tests__/session-observer.test.ts` (3) covers the native
 binding directly, including the JSON-string request form.
+`packages/sdk/src/__tests__/observe-session-families.test.ts` (2) is the
+end-to-end proof that native decode reaches TypeScript as typed values, and
+that the bootstrap barrier reports the families it actually reduced.
 
 ## 6. Performance, measured
 
@@ -187,8 +197,9 @@ binding directly, including the JSON-string request form.
   pre-check sweep.
 - Object opens during bootstrap: 21,254 → **1,428**.
 - Root bootstrap of a 43.7 MB tree: **635 ms**, decoder-bound — adapter 64%,
-  I/O 22%, reduce 10%. Getting under the landing plan §6 budget of 500 ms for a
-  50 MB tree is Claude-decode work, tracked as lane L5 item 3.
+  I/O 22%, reduce 10%. That was measured before the L5 decoder work; whether it
+  now meets the landing plan §6 budget of 500 ms for a 50 MB tree is for lane
+  L7's perf report to state, not this document.
 
 ## 7. Superseded sections of the 2026-08-15 draft
 
@@ -231,13 +242,17 @@ binding directly, including the JSON-string request form.
 - **`capabilities()`.** Per-family `Supported | Degraded | Unsupported`
   reporting does not exist on the observer. The `family_manifest` in a barrier
   is the closest thing: it says what was actually reduced.
-- **Eight of eleven Claude families.** The wire carries all eleven, but the
-  Claude adapter emits only `actor_run`, `actor_affiliation`, and `usage_v2`
-  (RFC 012C §7). Lane L5 adds the rest.
 - **Multi-observer isolation as a tested property.** Each attachment owns its
   queue, epoch, and cancellation state, and two attachments to one tree are
   tested — but "three roots, one slow enough to overflow, others keeping
   latency" from the draft's §22 is not a test that exists.
+
+All eleven families are emitted and typed. The two places where the native
+evidence is narrower than the family — plan revisions coming from
+`ExitPlanMode`/`EnterPlanMode` tool evidence rather than from `plans/<slug>.md`
+sidecars, and an orphaned `tool_result` keeping content-block evidence without a
+guessed tool name — are documented in
+[RFC 012C](./012c-runtime-semantics-and-usage-v2.md) §7.
 
 ## 9. Compatibility
 

@@ -49,7 +49,7 @@ front matter used to point at are retired and archived.
 | §3 umbrella decision | State | Where it lives |
 | --- | --- | --- |
 | 1. One decode/provenance spine | implemented | `crates/spaghetti-napi/src/{core,source}/` + `decode_runtime.rs`; the observer decodes through the same `decode_record` (`src/observer/mod.rs`) |
-| 2. Common owns mechanics, adapters own interpretation | implemented; per-adapter collapse outstanding | `src/adapter/`; lane L5 |
+| 2. Common owns mechanics, adapters own interpretation | implemented | `src/adapter/` declares the seam; `src/claude/runtime_facts.rs` interprets — all eleven families emitted (lane L5) |
 | 3. Evidence-backed agent support | implemented | `agent-support/`, `scripts/agent_support/validate.py` |
 | 4. Catalog membership is a first-class fact | implemented | `src/engine/catalog/` — [012B](./012b-catalog-readiness-and-progressive-startup.md) |
 | 5. Readiness is a vector | implemented | `Readiness` in `src/engine/catalog/readiness.rs`, generated to `packages/sdk/src/generated/Readiness.ts` |
@@ -67,13 +67,19 @@ front matter used to point at are retired and archived.
 | 17. Product identity and contribution stay downstream | held | nothing shipped decides aliases, cross-device groups, or contribution |
 | 18. Physical extraction is incremental | held | still one crate; the ratchets in `scripts/code_shape/` enforce shape instead |
 
-Two things a reader should not infer from the table. The Claude adapter emits
-three of the eleven RFC 012C fact families today — `actor_run`,
-`actor_affiliation`, `usage_v2`; the other eight have reducers, fixtures, and
-observer wire but no emitter, and arrive with lane L5. And `SCHEMA_VERSION` 64
-forces a full rebuild at first start: the catalog appears in about 100 ms, but
-history and search converge in the background, which on a large corpus
-currently takes hours until lane L7 lands.
+Two things a reader should not infer from the table.
+
+`SCHEMA_VERSION` 64 forces a full rebuild at first start: the catalog appears in
+about 100 ms, but history and search converge in the background, which on a
+large corpus currently takes hours until lane L7 lands.
+
+And "implemented" for the fact families means all eleven are emitted with typed
+values — not that every family has equally strong native evidence. Two
+documented limits: plan revisions come from `ExitPlanMode`/`EnterPlanMode` tool
+evidence rather than from `plans/<slug>.md` sidecars, which stay snapshot facts
+with no actor binding; and a `tool_result` whose call fell outside the bounded
+correlation window keeps its content-block evidence without a guessed tool
+name. Both are in [012C](./012c-runtime-semantics-and-usage-v2.md) §7.
 
 ## 1. Summary
 

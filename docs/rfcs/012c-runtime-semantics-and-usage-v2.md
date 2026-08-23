@@ -106,8 +106,10 @@ evidence — it is never assigned to the root.
 `native_marker`, `effective_state`, `actor_run`, `actor_affiliation`,
 `usage_v2` (`ObserverFamily` in `crates/spaghetti-napi/src/observer/event.rs`,
 `RuntimeSemanticFamily` in `runtime_semantic_reducer.rs`). Every one has a
-reducer, a fixture, and a place on the observer wire. See §7 for which of them
-the Claude adapter emits today.
+reducer, a fixture, a typed value, a place on the observer wire, and — as of
+lane L5 — a Claude emitter in
+`crates/spaghetti-napi/src/claude/runtime_facts.rs`. §7 records the two places
+where the evidence available is weaker than the family.
 
 ## 4. Shipped interface
 
@@ -121,8 +123,16 @@ the Claude adapter emits today.
 
 **Generated types.** `SemanticRevisionRef`, `FactRevisionId`, `ActorRef`,
 `ActorAttribution`, `SemanticOperation`, `ObserverFamily`, `SemanticEvent` in
-`packages/sdk/src/generated/`. `SemanticEvent.value` is still `unknown`: the
-per-family value types come from `adapter/facts.rs` in Wave 2 (lane L5).
+`packages/sdk/src/generated/`.
+
+`SemanticEvent.value` is a **`RuntimeSemanticValue`** — an externally tagged
+union with one variant per family (`{ MessageRevision: MessageRevisionFact }`,
+`{ ToolRevision: ToolRevisionFact }`, and so on), generated from the same
+`adapter/facts.rs` types the decoder emits;
+`crates/spaghetti-napi/src/adapter/runtime_value.rs` proves the wire shape and
+the typed shape agree for every family. Narrowing on `family` narrows the value
+with it, so nothing is cast. `value` is `null` for a retraction — the reducer
+removed the entity, so there is no current value to carry.
 
 **Native surface.** `SpaghettiEngine.getUsage(...)` and
 `SpaghettiEngine.getStats(...)` in `crates/spaghetti-napi/index.d.ts` return
@@ -168,6 +178,12 @@ real corpus slice (5,238 responses).
 `observer/tests/lifecycle.rs` —
 `a_repeated_usage_row_adds_nothing_and_a_correction_replaces_it`.
 
+**End to end, native decode to typed TypeScript.**
+`packages/sdk/src/__tests__/observe-session-families.test.ts` drives a real
+`.claude`-shaped tree through the observer and asserts the families arrive with
+typed values, plus that the bootstrap barrier reports the families it actually
+reduced.
+
 ## 6. The correction, in numbers
 
 On the full Claude corpus, response-level accounting reports **36.88B tokens
@@ -179,20 +195,37 @@ as separate consumption. `getStats` p95 improved 24%; `getUsage` p95 rose
 
 Codex and Grok also emit response-level facts now. The Codex legacy path had
 double-counted cache-read inside input and reasoning inside output; the Grok
-delta was zero.
+delta was zero at the time of that measurement.
 
-## 7. Not implemented, and what is arriving
+Grok usage has since become **exact per response** rather than a session-scoped
+estimate: one `turn_completed` record in `updates.jsonl` is one response
+contribution (`crates/spaghetti-napi/src/grok/adapter.rs`). The estimate path
+is deleted. `cacheCreationTokens` is absent on some turns and stays `unknown`
+there rather than being inferred, and context occupancy is explicitly *not*
+treated as per-response usage.
 
-**Claude emits three of the eleven families today**: `actor_run`,
-`actor_affiliation`, and `usage_v2`. `message`, `content_block`, `tool`,
-`effective_state`, `user_input_request`, `task`, `plan`, and `native_marker`
-have reducers, fixtures, and observer wire, but no Claude emitter. Lane L5 of
-the landing (landing plan §7, Wave 2) writes those emitters and puts
-`ts_rs::TS` on `adapter/facts.rs` so `SemanticEvent.value` becomes typed. Until
-then a consumer sees those eight families only as absence, not as evidence of
-absence.
+## 7. Where the evidence is weaker than the family
 
-Also not implemented, deliberately:
+All eleven families are emitted by the Claude decoder
+(`crates/spaghetti-napi/src/claude/runtime_facts.rs`). Two places deserve a
+consumer's attention, because the family exists but the native evidence behind
+it is narrower than the name suggests:
+
+- **Plans come from tool evidence, not from plan documents.** `PLAN_TOOLS`
+  is `["ExitPlanMode", "EnterPlanMode"]`: a `plan` revision is derived from
+  those tool calls in the transcript, which is where actor binding exists.
+  The `plans/<slug>.md` sidecars remain snapshot facts with no actor binding —
+  they are not a second source of `plan` revisions, and
+  `plan-document-from-evidence` is not among the relations the Claude scope
+  program declares.
+- **An orphaned `tool_result` claims no tool entity.** If a result's call fell
+  outside the bounded per-object correlation window, the result keeps its
+  content-block evidence — which already carries the native call id — and no
+  `tool` revision is emitted for it. RFC 012C forbids inventing the tool name a
+  `tool_result` never carries, so the honest outcome is content-block evidence
+  without a guessed name rather than a fabricated tool.
+
+Not implemented, deliberately:
 
 - **Usage migration machinery** — selection, promotion, rollback, the
   compatibility query and its telemetry, and the legacy projection they
@@ -236,7 +269,8 @@ Also not implemented, deliberately:
 RFC 012C is met for this landing when usage matches the independent
 qualified-bucket oracle at response, session, and project scope; unknown is
 never reported as zero; an exact repeat adds nothing and a downward revision
-corrects; a generation reset retracts before replay; and durable and observer
-reduction of the same fact produce the same revision reference. All five hold
-as of 2026-08-23 (landing plan §8, lanes L1 and L3). The remaining eight Claude
-emitters (§7) are outstanding.
+corrects; a generation reset retracts before replay; durable and observer
+reduction of the same fact produce the same revision reference; and every
+supported family is actually emitted with a typed value. All six hold as of
+2026-08-23 (landing plan §8, lanes L1, L3, and L5). The two evidence limits in
+§7 are documented behaviour, not outstanding work.

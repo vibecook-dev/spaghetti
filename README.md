@@ -129,7 +129,7 @@ spag doctor
 
 - **Claude Code** — projects/sessions under `~/.claude`, messages, plans, todos, memory, subagents, workflows, teams, hooks/channels
 - **OpenAI Codex** — rollouts under `~/.codex/sessions/**`, chat turns, official `token_count` usage (tiktoken estimate when events are missing)
-- **Grok CLI (xAI)** — `~/.grok/sessions/**/chat_history.jsonl`, conversational turns, turn-scoped timestamps (`events.jsonl`), session token aggregates (`signals.json`); tool I/O and `updates.jsonl` deliberately skipped
+- **Grok CLI (xAI)** — `~/.grok/sessions/**/chat_history.jsonl`, conversational turns, turn-scoped timestamps (`events.jsonl`), exact per-response token usage from `turn_completed` records in `updates.jsonl`; tool I/O deliberately skipped
 - One Rust-owned local SQLite index under `~/.spaghetti/cache`
 
 ## Built for two audiences
@@ -186,6 +186,17 @@ const observer = observeSession({
 for await (const event of observer) {
   if (event.type === 'bootstrap_complete') commitStagedEpoch(event.scope_epoch);
   else if (isSemanticEvent(event)) apply(event);
+}
+```
+
+All eleven semantic families arrive — messages, content blocks, tools,
+user-input requests, plans, tasks, native markers, effective state, actor runs,
+affiliations, and usage — each with a typed value, so narrowing on `family`
+narrows `event.value` with it:
+
+```ts
+if (isSemanticEvent(event) && event.family === 'tool' && event.value) {
+  const tool = event.value.ToolRevision; // typed, no cast
 }
 ```
 

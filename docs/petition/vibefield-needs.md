@@ -36,9 +36,13 @@ Four caveats a Phase A integrator needs:
    real — the same revision carries the same `SemanticRevisionRef` on both
    sides — but the deduplication is VibeField's to write. Spaghetti ships the
    identity, not the merge.
-4. **The Claude adapter emits three of eleven fact families today** —
-   `actor_run`, `actor_affiliation`, `usage_v2`. The other eight are wired and
-   reduced but have no emitter yet.
+4. **All eleven fact families are emitted, with typed values** — but two rest on
+   narrower evidence than their name suggests. `plan` revisions come from
+   `ExitPlanMode`/`EnterPlanMode` tool evidence, not from `plans/<slug>.md`
+   sidecars, which stay snapshot facts with no actor binding; and a
+   `tool_result` whose call fell outside the bounded correlation window keeps
+   content-block evidence without a guessed tool name. Both are recorded in
+   [RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §7.
 
 Phases B–D are untouched: no contribution facts, no `code.activity` family, and
 no Git or workspace observation exist in Spaghetti, which is what §5 asked for.
@@ -46,7 +50,9 @@ no Git or workspace observation exist in Spaghetti, which is what §5 asked for.
 Also relevant to anyone consuming token numbers: **usage is now response-level**
 and totals are about 2.13× lower than 0.7.x reported, because the old
 accounting added every streamed-response repeat. See
-[RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §6.
+[RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §6. Grok usage is
+exact per response as well, read from `turn_completed` records in
+`updates.jsonl` rather than estimated from a session aggregate.
 
 ---
 

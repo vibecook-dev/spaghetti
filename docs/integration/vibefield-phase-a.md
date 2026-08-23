@@ -207,12 +207,18 @@ Full detail and the porting table:
 
 ## Known limits
 
-- **Three of eleven fact families.** The Claude adapter emits `actor_run`,
-  `actor_affiliation`, and `usage_v2` today. `message`, `content_block`, `tool`,
-  `effective_state`, `user_input_request`, `task`, `plan`, and `native_marker`
-  arrive with lane L5.
-- **`SemanticEvent.value` is `unknown`** until the per-family value types are
-  generated (same lane).
+- **Two families rest on narrower evidence than their name.** All eleven are
+  emitted with typed values, but `plan` revisions come from
+  `ExitPlanMode`/`EnterPlanMode` tool evidence rather than from
+  `plans/<slug>.md` sidecars (which stay snapshot facts with no actor binding),
+  and an orphaned `tool_result` keeps content-block evidence without a guessed
+  tool name. Both are recorded in
+  [RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §7.
+- **The per-family value types are not nameable from the package entry point.**
+  `SemanticEvent.value` is a typed `RuntimeSemanticValue` and narrowing on
+  `family` narrows it, but the union and its `*Fact` members are not exported
+  and there is no `./generated` subpath. Derive what you need:
+  `type V = NonNullable<SemanticEvent['value']>`.
 - **No identity relations.** Alias, `SameEntity`, `Supersedes`, and `ReplacedBy`
   facts do not exist. A project moved without provable native identity becomes a
   new project. Conflicts are reported, never resolved.

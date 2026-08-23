@@ -133,25 +133,56 @@ event are still delivered and the loop returns. That is deliberate — a consume
 applying events should not lose the ones it already has to a rejection it did
 not ask for.
 
-## What you actually receive today
+## What you actually receive
 
-The wire carries all eleven families. **The Claude adapter emits three of
-them**: `actor_run`, `actor_affiliation`, and `usage_v2`.
+**All eleven families are emitted by the Claude decoder**: `message`,
+`content_block`, `tool`, `user_input_request`, `plan`, `task`, `native_marker`,
+`effective_state`, `actor_run`, `actor_affiliation`, `usage_v2`.
 
-`message`, `content_block`, `tool`, `effective_state`, `user_input_request`,
-`task`, `plan`, and `native_marker` have reducers, fixtures, and wire support
-but no Claude emitter yet — they arrive with lane L5 of the landing. Plan for
-them (switch on `family`, treat an unhandled family as ignorable) but do not
-ship a feature that depends on them yet.
-
-`SemanticEvent.value` is typed `unknown` until L5 puts `ts_rs::TS` on
-`adapter/facts.rs`. Narrow on `family` and validate at your own boundary:
+`SemanticEvent.value` is a `RuntimeSemanticValue` — an externally tagged union
+with one variant per family. Narrowing on `family` narrows the value with it, so
+there is nothing to cast:
 
 ```ts
-if (isSemanticEvent(event) && event.family === 'usage_v2') {
-  const usage = event.value as MyUsageShape; // your contract, for now
+if (isSemanticEvent(event) && event.family === 'tool' && event.value) {
+  const tool = event.value.ToolRevision;
+  apply(tool.tool_name, tool.kind, tool.correlated_native_id);
 }
 ```
+
+`value` is `null` on a retraction — the reducer removed the entity, so there is
+no current value. Every other event has one.
+
+### Naming the value types
+
+The barrel exports `SemanticEvent` but not `RuntimeSemanticValue` or the
+per-family `*Fact` types, and there is no `./generated` subpath in the package
+`exports` map. Structural narrowing (above) needs no import and is the normal
+path. When you want to name a shape for a handler signature, derive it:
+
+```ts
+import type { SemanticEvent } from '@vibecook/spaghetti-sdk';
+
+type RuntimeSemanticValue = NonNullable<SemanticEvent['value']>;
+type ToolRevisionFact = Extract<RuntimeSemanticValue, { ToolRevision: unknown }>['ToolRevision'];
+```
+
+### Two evidence limits worth knowing
+
+Both are deliberate, and both mean *the family is honest about what the native
+data proves* rather than filling a gap with a guess:
+
+- **`plan` revisions come from tool evidence.** They are derived from
+  `ExitPlanMode` and `EnterPlanMode` tool calls in the transcript, which is
+  where actor binding exists. The `plans/<slug>.md` sidecars stay snapshot facts
+  with no actor binding and are not a second source of plan revisions. If you
+  are showing "the current plan for this actor", the tool-derived revisions are
+  the stream to use.
+- **An orphaned `tool_result` claims no tool entity.** If a result's call fell
+  outside the bounded per-object correlation window, you get the
+  `content_block` evidence — which carries the native call id — and no `tool`
+  revision. Do not synthesise a tool from it; the tool name genuinely is not in
+  the data.
 
 Native content never travels on this stream: transcript streams are declared
 `HashOnly`, so `event.source` carries the record's digest and byte range, not
@@ -166,7 +197,7 @@ its bytes. If you need message text, read it yourself or use a durable query.
 | `tail.onError(cb)` | `source_error` (one object) and `error` (the observer) events, in stream order |
 | `tail.poll()` | not needed — the watcher-directed sweep does it; latency is ~8 ms p95 |
 | `tail.stop()` | `await observer.close()`, or `options.signal` |
-| `event.message` (a raw `SessionMessage`) | a reduced RFC 012C revision in `event.value`, plus `event.family` |
+| `event.message` (a raw `SessionMessage`) | a typed `RuntimeSemanticValue` in `event.value`, plus `event.family`; `message` and `content_block` are the closest equivalents |
 | `event.msgIndex`, `event.byteOffset` | `event.sequence` for order; `event.source.byte_start` / `byte_end` for position |
 | `event.rewrite` | a `reset` event naming the object, its old and new generation, and the reason |
 | one file | root transcript + subagent transcripts + declared sidecars |
@@ -183,13 +214,14 @@ this stream delivers.
 1. Bump the SDK. Keep `watchSessionTranscript` running and unchanged.
 2. Attach `observeSession` in parallel behind a flag, applying into a shadow
    reducer. Compare against the tail's output on real sessions.
-3. Move `usage_v2` off the tail first — it is emitted today and it is where the
-   tail was least correct (it saw repeated rows as separate consumption).
-4. Handle `overflow`/`resync_complete` properly before you rely on the observer
+3. Move `usage_v2` off the tail first — it is where the tail was least correct
+   (it saw repeated rows as separate consumption, roughly 2× over).
+4. Then `message` and `content_block`, which is where the tail's raw lines were
+   actually being used; the reduced revisions replace your own parsing.
+5. Handle `overflow`/`resync_complete` properly before you rely on the observer
    for anything you would not recompute.
-5. Flip the flag; keep the tail as fallback for one release.
-6. Remove the tail import once L5 lands the remaining families and you no
-   longer need raw lines.
+6. Flip the flag; keep the tail as fallback for one release.
+7. Remove the tail import once you no longer need raw lines.
 
 ## Not there yet
 
@@ -199,3 +231,5 @@ this stream delivers.
   `consumer_requested`, but only `queue_full` is produced today.
 - No `capabilities()`. The `family_manifest` on a barrier is the honest
   substitute: it reports what was actually reduced.
+- The per-family value types are not nameable from the package entry point —
+  derive them from `SemanticEvent['value']` as shown above.

@@ -27,7 +27,13 @@ never summed as zero, so a total is labelled `exact`, `estimated`, or `mixed`
 instead of implying a precision it does not have.
 
 Codex totals also change: its legacy path double-counted cache-read inside
-input and reasoning inside output. Grok totals are unchanged.
+input and reasoning inside output.
+
+Grok totals change too, and become **exact**. Usage is now read per response
+from `turn_completed` records in `updates.jsonl` instead of being estimated
+from a session-scoped aggregate; the estimate path is deleted. A turn that does
+not report `cacheCreationTokens` leaves that bucket unknown rather than
+inferring it, and context occupancy is explicitly not treated as usage.
 
 ### ⚠ BREAKING — the first run rebuilds the whole index
 
@@ -85,7 +91,17 @@ modules are generated from Rust and exported from the same entry point.
   `scope_epoch`, and — on semantic events — the same `semantic_revision_ref` a
   durable query returns for that revision. Losing continuity is explicit: the
   observer says so and replaces the epoch with a full snapshot rather than
-  dropping events. See
+  dropping events.
+
+  All eleven RFC 012C families are on the stream — message, content block,
+  tool, user-input request, plan, task, native marker, effective state, actor
+  run, actor affiliation, usage — and `SemanticEvent.value` is a typed
+  `RuntimeSemanticValue`, so narrowing on `family` narrows the value with it
+  and nothing needs casting. Two evidence limits are documented rather than
+  papered over: `plan` revisions come from `ExitPlanMode`/`EnterPlanMode` tool
+  evidence rather than `plans/<slug>.md` sidecars, and a `tool_result` whose
+  call fell outside the bounded correlation window keeps its content-block
+  evidence without a guessed tool name. See
   [SDK README](packages/sdk/README.md#watching-one-session-observesession) and
   [the migration note](docs/integration/chopsticks-observe-session.md).
 - **`getReadiness()`** on the observation service (`readiness()` on the native
