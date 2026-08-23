@@ -5,7 +5,7 @@
   [012-parallel-work-handoff.md](./archive/012-parallel-work-handoff.md), and the
   wave I/III runbooks as the program's execution authority.
 - **Written:** 2026-08-23
-- **Base:** `d478679` (local `main`, 536 commits ahead of `origin/main` = `7d24381`)
+- **Base:** `d478679` (2026-08-23 start); **landing head `ab070428`** (local `main`, 701 commits ahead of `origin/main` = `7d24381`, unpushed)
 - **Semantic authorities (unchanged):** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
   (ratified) and [RFC 012A](./012a-agent-adaptation-and-engine-boundaries.md) (ratified);
   [012B](./012b-catalog-readiness-and-progressive-startup.md),
