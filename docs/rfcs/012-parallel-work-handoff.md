@@ -1,7 +1,8 @@
 # RFC 012 parallel execution runbook
 
-- **Status:** Superseded for Wave 2+ by
-  [012-wave-i-execution.md](./012-wave-i-execution.md)
+- **Status:** SUPERSEDED on 2026-08-23 by
+  [012-landing-plan.md](./012-landing-plan.md). Kept for history; do not
+  update. The RFC documents remain the semantic authorities.
 - **Written:** 2026-08-19
 - **Current product-code base:** `67a1ae9` (historical Wave 1 assignment base)
 - **Assignment base:** the primary-integrator commit containing this runbook;

@@ -1,6 +1,8 @@
 # RFC 012 Wave I execution runbook
 
-- **Status:** Wave I lanes merged at `f53bbc7`; Claude promotion blocked
+- **Status:** SUPERSEDED on 2026-08-23 by
+  [012-landing-plan.md](./012-landing-plan.md). Kept for history; do not
+  update. The RFC documents remain the semantic authorities.
 - **Written:** 2026-08-21
 - **Product-code predecessor:** `aa9b15d`
 - **Assignment base:** the integrator commit that lands this file; announced as

@@ -1,15 +1,8 @@
 # RFC 012 implementation and validation program
 
-- **Status:** Active non-normative roadmap. C3's durable usage-v2 migration and
-  A4's new-adapter proof have met their package gates. The public native host
-  now verifies every compiled built-in support package, but all current-agent
-  releases remain candidates and therefore grant no typed RFC 012 authority.
-  The retained RFC 011 compatibility path cannot publish promoted RFC 012
-  coverage, replay it, or select its query pack. The bounded native/SDK scoped
-  observer transport has landed, but related-object scope composition,
-  remaining runtime families, released downstream integration, complete
-  performance reports, and default-on rollout are still in progress.
-  Child-RFC 012B/C/D ratification remains a later product decision.
+- **Status:** SUPERSEDED on 2026-08-23 by
+  [012-landing-plan.md](./012-landing-plan.md). Kept for history; do not
+  update. The RFC documents remain the semantic authorities.
 - **Created:** 2026-08-15
 - **Umbrella:** [RFC 012](./012-evidence-backed-adapters-and-progressive-readiness.md)
 - **Child contracts:** [012A](./012a-agent-adaptation-and-engine-boundaries.md),
@@ -21,6 +14,8 @@
   and [cold-start profile](./011-playground-cold-start-profile-2026-08-15.md)
 - **Downstream requirements:**
   [VibeField aggregation and contribution needs](../petition/vibefield-needs.md)
+- **Implementation maintenance:**
+  [RFC 012 implementation de-duplication plan](./012-implementation-deduplication-plan.md)
 
 ## 1. Role of this document
 
