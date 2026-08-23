@@ -429,7 +429,7 @@ fn supported_registry_requires_and_retains_a_promoted_digest_binding() {
     let mut scoped_offer = offer;
     scoped_offer.observation_contract_versions = vec![1];
     let (scoped_decision, scoped_authorization) = registry
-        .authorize_scoped_if_supported(
+        .authorize_typed_access(
             &AdapterId::new("fixture").unwrap(),
             &NativeArtifactProbe {
                 family: "fixture".to_string(),
@@ -438,10 +438,10 @@ fn supported_registry_requires_and_retains_a_promoted_digest_binding() {
                 markers: vec!["fixture.marker".to_string()],
                 contradictory_markers: false,
             },
+            SupportOperation::ScopedTypedObservation,
             &scoped_request,
             &scoped_offer,
         )
-        .unwrap()
         .unwrap();
     assert!(scoped_decision.permissions().scoped_observation);
     assert_eq!(
@@ -463,14 +463,14 @@ fn supported_registry_requires_and_retains_a_promoted_digest_binding() {
         contradictory_markers: false,
     };
     assert!(registry
-        .authorize_scoped_if_supported(
+        .authorize_typed_access(
             &AdapterId::new("fixture").unwrap(),
             &unsupported_probe,
+            SupportOperation::ScopedTypedObservation,
             &scoped_request,
             &scoped_offer,
         )
-        .unwrap()
-        .is_none());
+        .is_err());
 
     let empty_report = plan.report();
     assert!(empty_report.verify_digest());

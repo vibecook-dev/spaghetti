@@ -168,9 +168,7 @@ fn retained_unknown_occurrences(
                 ));
             }
             RecordMappingDisposition::Mapped { .. }
-            | RecordMappingDisposition::IgnoredKnown { .. }
-            | RecordMappingDisposition::Malformed { .. }
-            | RecordMappingDisposition::UnsupportedVersion { .. } => {}
+            | RecordMappingDisposition::IgnoredKnown { .. } => {}
         }
     }
     Ok(occurrences)

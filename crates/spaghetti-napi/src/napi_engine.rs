@@ -2579,7 +2579,6 @@ mod support_binding_tests {
     };
     use crate::adapter::{
         verify_support_release_bundle, AdapterId, AgentAdapter, SupportBundleDocument,
-        SupportReleaseStatus,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::codex::CodexAdapter;

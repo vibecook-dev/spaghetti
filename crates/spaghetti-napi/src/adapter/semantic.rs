@@ -29,7 +29,6 @@ const FACT_REVISION_ID_VERSION: u32 = 1;
 const REFERENCE_ENCODING_VERSION: &str = "v1";
 const DIGEST_BYTES: usize = 32;
 const MAX_COMPONENT_BYTES: usize = 64 * 1024;
-const MAX_COVERAGE_MEMBERSHIP_BYTES: usize = 64 * 1024 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const MAX_COVERAGE_POINTS_PER_SET: usize = 250_000;
 const MAX_COVERAGE_ABSENCES_PER_SET: usize = 250_000;
@@ -314,45 +313,6 @@ opaque_digest_type!(CoverageObjectKey);
 opaque_digest_type!(CoverageDeclarationDigest);
 opaque_digest_type!(CoverageMembershipRevision);
 opaque_digest_type!(CoveragePositionRef);
-
-/// Incremental encoder for a single coverage-membership contract component.
-/// It produces the same digest as [`CoverageMembershipRevision::derive`] for
-/// inputs that fit the legacy component bound, while allowing a source set to
-/// hash its bounded membership without materializing one large byte buffer.
-pub(crate) struct CoverageMembershipRevisionBuilder {
-    hasher: blake3::Hasher,
-    expected_bytes: usize,
-    written_bytes: usize,
-}
-
-impl CoverageMembershipRevisionBuilder {
-    pub(crate) fn update(&mut self, bytes: &[u8]) -> Result<(), SemanticContractError> {
-        let written_bytes = self
-            .written_bytes
-            .checked_add(bytes.len())
-            .ok_or_else(|| SemanticContractError::invalid("coverage membership length overflow"))?;
-        if written_bytes > self.expected_bytes {
-            return Err(SemanticContractError::invalid(
-                "coverage membership wrote more than its declared byte length",
-            ));
-        }
-        self.hasher.update(bytes);
-        self.written_bytes = written_bytes;
-        Ok(())
-    }
-
-    pub(crate) fn finish(self) -> Result<CoverageMembershipRevision, SemanticContractError> {
-        if self.written_bytes != self.expected_bytes {
-            return Err(SemanticContractError::invalid(format!(
-                "coverage membership wrote {} of {} declared bytes",
-                self.written_bytes, self.expected_bytes
-            )));
-        }
-        Ok(CoverageMembershipRevision::from_digest(
-            *self.hasher.finalize().as_bytes(),
-        ))
-    }
-}
 
 impl CanonicalSourceInstanceKey {
     pub fn derive(
@@ -921,33 +881,6 @@ impl CoverageMembershipRevision {
             b"coverage-membership",
             &[membership],
         )))
-    }
-
-    pub(crate) fn begin_streaming(
-        encoded_membership_bytes: usize,
-    ) -> Result<CoverageMembershipRevisionBuilder, SemanticContractError> {
-        if encoded_membership_bytes == 0 {
-            return Err(SemanticContractError::invalid(
-                "coverage membership must not be empty",
-            ));
-        }
-        if encoded_membership_bytes > MAX_COVERAGE_MEMBERSHIP_BYTES {
-            return Err(SemanticContractError::invalid(format!(
-                "coverage membership exceeds {MAX_COVERAGE_MEMBERSHIP_BYTES} streaming bytes"
-            )));
-        }
-        let mut hasher = blake3::Hasher::new();
-        let domain = b"coverage-membership";
-        hasher.update(b"spaghetti/rfc012a/contract\0");
-        hasher.update(&(domain.len() as u64).to_be_bytes());
-        hasher.update(domain);
-        hasher.update(&1_u64.to_be_bytes());
-        hasher.update(&(encoded_membership_bytes as u64).to_be_bytes());
-        Ok(CoverageMembershipRevisionBuilder {
-            hasher,
-            expected_bytes: encoded_membership_bytes,
-            written_bytes: 0,
-        })
     }
 }
 
@@ -1906,42 +1839,6 @@ mod tests {
         }]);
         assert!(serde_json::from_value::<SourceCoverageSet>(wire.clone()).is_ok());
         wire
-    }
-
-    #[test]
-    fn streaming_membership_digest_matches_legacy_and_scales_past_one_component() {
-        let components: [&[u8]; 3] = [b"provider-stream", b"object-key", b"generation-one"];
-        let mut encoded = Vec::new();
-        for component in components {
-            encoded.extend_from_slice(&(component.len() as u64).to_be_bytes());
-            encoded.extend_from_slice(component);
-        }
-        let legacy = CoverageMembershipRevision::derive(&encoded).unwrap();
-        let mut streaming = CoverageMembershipRevision::begin_streaming(encoded.len()).unwrap();
-        for component in components {
-            streaming
-                .update(&(component.len() as u64).to_be_bytes())
-                .unwrap();
-            streaming.update(component).unwrap();
-        }
-        assert_eq!(streaming.finish().unwrap(), legacy);
-
-        let chunk = [7_u8; 1_024];
-        let total = 65 * chunk.len();
-        assert!(CoverageMembershipRevision::derive(&vec![7_u8; total]).is_err());
-        let mut first = CoverageMembershipRevision::begin_streaming(total).unwrap();
-        let mut replay = CoverageMembershipRevision::begin_streaming(total).unwrap();
-        for _ in 0..65 {
-            first.update(&chunk).unwrap();
-            replay.update(&chunk).unwrap();
-        }
-        assert_eq!(first.finish().unwrap(), replay.finish().unwrap());
-
-        let mut incomplete = CoverageMembershipRevision::begin_streaming(2).unwrap();
-        incomplete.update(b"x").unwrap();
-        assert!(incomplete.finish().is_err());
-        let mut overflow = CoverageMembershipRevision::begin_streaming(1).unwrap();
-        assert!(overflow.update(b"xx").is_err());
     }
 
     #[test]

@@ -30,6 +30,8 @@ const MAX_USER_INPUT_QUESTIONS: usize = 32;
 const MAX_USER_INPUT_OPTIONS: usize = 32;
 const MAX_RECORD_MAPPINGS_PER_BATCH: usize = 65_536;
 
+mod native_marker_identity;
+
 mod base64_bytes {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
@@ -1426,18 +1428,6 @@ impl NativeRuntimeMarkerRevisionFact {
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn stable_native_fact_key(&self) -> Result<Vec<u8>, AdapterError> {
-        self.validate()?;
-        let mut encoded = Vec::new();
-        encoded.extend_from_slice(b"spaghetti/runtime.native-marker/stable-native-key\0");
-        encoded.extend_from_slice(&1_u32.to_be_bytes());
-        push_component(&mut encoded, self.session.as_bytes());
-        push_component(&mut encoded, self.actor_run.as_bytes());
-        encoded.push(native_runtime_marker_kind_tag(&self.value));
-        push_component(&mut encoded, self.native_marker_id.as_bytes());
-        Ok(encoded)
     }
 
     pub(crate) fn semantic_revision_key(&self) -> Result<[u8; FACT_HASH_BYTES], AdapterError> {
