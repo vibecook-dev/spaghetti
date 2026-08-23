@@ -6,9 +6,9 @@
 - **Created:** 2026-08-15
 - **Ratified:** 2026-08-15
 - **Parent:** [RFC 012 umbrella](./012-evidence-backed-adapters-and-progressive-readiness.md)
-- **Program plan:** [RFC 012 implementation plan](./012-implementation-plan.md)
-- **Evidence:** [Phase 0 catalog census](./012-phase-0-census-2026-08-15.md)
-  and [Phase 0B runtime census](./012-runtime-observation-census-2026-08-15.md)
+- **Program plan:** [RFC 012 implementation plan](./archive/012-implementation-plan.md)
+- **Evidence:** [Phase 0 catalog census](./archive/012-phase-0-census-2026-08-15.md)
+  and [Phase 0B runtime census](./archive/012-runtime-observation-census-2026-08-15.md)
 - **Owns:** common/adapter dependency law, qualified-value/base identity
   contracts, stable source-instance/external entity references,
   source-record/fact/semantic-revision identity, common source/family coverage,

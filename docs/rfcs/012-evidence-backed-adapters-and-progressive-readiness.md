@@ -11,10 +11,10 @@
 - **Scope:** the shared architectural center for agent adaptation, progressive
   durable readiness, common runtime semantics, and database-free scoped
   observation
-- **Program plan:** [RFC 012 implementation and validation plan](./012-implementation-plan.md)
+- **Program plan:** [RFC 012 implementation and validation plan](./archive/012-implementation-plan.md)
 - **Evidence:** [playground cold-start profile](./011-playground-cold-start-profile-2026-08-15.md),
-  [Phase 0 catalog evidence](./012-phase-0-census-2026-08-15.md), and
-  [Phase 0B runtime evidence](./012-runtime-observation-census-2026-08-15.md)
+  [Phase 0 catalog evidence](./archive/012-phase-0-census-2026-08-15.md), and
+  [Phase 0B runtime evidence](./archive/012-runtime-observation-census-2026-08-15.md)
 - **Downstream requirements:**
   [VibeField aggregation and contribution needs](../petition/vibefield-needs.md)
 - **Foundation:** [RFC 011](./011-rust-observation-query-engine.md)

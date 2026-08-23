@@ -1,8 +1,8 @@
 # RFC 012 landing plan
 
-- **Status:** Active. Supersedes [012-implementation-plan.md](./012-implementation-plan.md),
-  [012-implementation-deduplication-plan.md](./012-implementation-deduplication-plan.md),
-  [012-parallel-work-handoff.md](./012-parallel-work-handoff.md), and the
+- **Status:** Active. Supersedes [012-implementation-plan.md](./archive/012-implementation-plan.md),
+  [012-implementation-deduplication-plan.md](./archive/012-implementation-deduplication-plan.md),
+  [012-parallel-work-handoff.md](./archive/012-parallel-work-handoff.md), and the
   wave I/III runbooks as the program's execution authority.
 - **Written:** 2026-08-23
 - **Base:** `d478679` (local `main`, 536 commits ahead of `origin/main` = `7d24381`)
