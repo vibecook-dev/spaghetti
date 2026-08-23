@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "support_release_id": "factory-support-2026-08-21",
+  "adapter_id": "factory",
+  "version": "2026-08-21",
+  "artifact_compatibility": {
+    "family": "factory",
+    "platforms": [
+      "darwin"
+    ],
+    "exact_versions": [],
+    "ranges": [],
+    "required_markers": [
+      "sessionid.shape",
+      "record-type"
+    ],
+    "forward_catalog_only": false
+  },
+  "references": {
+    "ads": {
+      "path": "agent-support/factory/2026-08-21/ads.json",
+      "sha256": "sha256:d5448cc906505854fb4ad19a9756eaea7a3ac8b58bf91b638c511d3eb6bea613"
+    },
+    "source_declaration": {
+      "path": "agent-support/factory/2026-08-21/source-declarations.json",
+      "sha256": "sha256:7380e8a26ed7d3ba324a9f467a57167612eb0cadf94d2115ce58327732c342b0"
+    },
+    "scope_program": {
+      "path": "agent-support/factory/2026-08-21/scope-programs.json",
+      "sha256": "sha256:1605bee5e0091e8690d6c13bee0668aa5d765ed81d6b9869f6f3e3d1d39d679b"
+    },
+    "evidence": {
+      "path": "agent-support/factory/2026-08-21/evidence.json",
+      "sha256": "sha256:217059067e7d9a720df1865af9456637d3c87e4204f6d2b9d65febd84da1a115"
+    },
+    "conformance": {
+      "path": "agent-support/factory/2026-08-21/conformance.json",
+      "sha256": "sha256:034c62911780bc47bf296c925294c95bf5d6bb55f4582c30a7426c2391d82408"
+    }
+  },
+  "versions": {
+    "adapter_package": "0.7.0",
+    "decoder_contract": 1,
+    "decoder_state": [
+      1
+    ],
+    "source_record_identity": 1,
+    "fact_identity": 1,
+    "external_entity_reference": 1,
+    "semantic_revision_reference": 1,
+    "coverage": [
+      1
+    ],
+    "durable_contracts": {},
+    "observation_contracts": {}
+  },
+  "capabilities": [
+    {
+      "capability_id": "project-session-catalog",
+      "topology": "catalog",
+      "level": "unsupported",
+      "notes": "RFC 012B catalog assertions and tier composition are not implemented."
+    },
+    {
+      "capability_id": "session-transcripts",
+      "topology": "durable",
+      "level": "supported",
+      "notes": "Current decoder maps bounded jsonl sessionId records; candidate remains non-selectable."
+    },
+    {
+      "capability_id": "root-session-observation",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "Sibling ScopeProgram is not wired to common observer delivery."
+    }
+  ],
+  "stream_contracts": [
+    {
+      "stream_id": "session-membership",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "full_snapshot"
+    },
+    {
+      "stream_id": "session-transcripts",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    },
+    {
+      "stream_id": "session-documents",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_revision"
+    }
+  ],
+  "reports": {
+    "conformance_sha256": null,
+    "performance_sha256": null
+  },
+  "sanitizer_review": {
+    "status": "pending",
+    "reviewed_at": null,
+    "reviewer": null
+  },
+  "lifecycle": {
+    "candidate_at": "2026-08-21",
+    "promoted_at": null,
+    "retired_at": null,
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "known_limitations": [
+    "Candidate entries never confer runtime support.",
+    "Catalog and scoped capabilities are unsupported.",
+    "No independent sanitized transcript lifecycle corpus is bound to this release."
+  ],
+  "drift_signatures": [],
+  "promotion_blockers": [
+    "Pin the Factory.ai artifact/version and required markers.",
+    "Author independent sanitized lifecycle, identity, and unknown-record fixtures.",
+    "Pass identity, tier, scope, cross-topology, performance, and sanitizer review gates.",
+    "Assign public durable and observation contract versions."
+  ]
+}

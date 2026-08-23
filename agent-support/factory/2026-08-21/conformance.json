@@ -2,7 +2,7 @@
   "schema_version": 1,
   "manifest_id": "factory-conformance-2026-08-21-candidate",
   "adapter_id": "factory",
-  "support_release_id": "factory-support-2026-08-21-candidate",
+  "support_release_id": "factory-support-2026-08-21",
   "checks": [
     { "check_id": "schema-validation", "requirement": "All ADS/support documents pass strict schemas and cross-reference checks.", "status": "pass", "command": "python3 scripts/agent_support/validate.py", "report_sha256": null, "claim_refs": ["factory-source-observed"] },
     { "check_id": "sanitizer", "requirement": "All committed fixtures pass deterministic sanitizer and prohibited-field checks.", "status": "pass", "command": "python3 -m unittest scripts.agent_support.test_contracts", "report_sha256": null, "claim_refs": ["factory-privacy-policy"] },

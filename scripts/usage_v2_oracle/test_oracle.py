@@ -14,11 +14,11 @@ from oracle import OracleError, analyze_document, analyze_fixture, source_record
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = (
     REPO_ROOT
-    / "agent-support/claude-code/candidate-2026-08-21/fixtures/usage-v2/response-revisions.json"
+    / "agent-support/claude-code/2026-08-21/fixtures/usage-v2/response-revisions.json"
 )
 REPORT = (
     REPO_ROOT
-    / "agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-oracle-v1.json"
+    / "agent-support/claude-code/2026-08-21/reports/usage-v2-oracle-v1.json"
 )
 
 

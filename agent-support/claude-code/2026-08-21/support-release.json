@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "support_release_id": "claude-code-support-2026-08-21-candidate",
+  "support_release_id": "claude-code-support-2026-08-21",
   "adapter_id": "claude-code",
-  "status": "candidate",
+  "version": "2026-08-21",
   "artifact_compatibility": {
     "family": "claude-code",
     "platforms": [
@@ -21,24 +21,24 @@
   },
   "references": {
     "ads": {
-      "path": "agent-support/claude-code/candidate-2026-08-21/ads.json",
-      "sha256": "sha256:d88b3e31bb3b8d7ebe7e3147a30adf774801301f164ccdfa8518545b98cb34ab"
+      "path": "agent-support/claude-code/2026-08-21/ads.json",
+      "sha256": "sha256:d2dcb70882c8cf3b314c59c2a9246242291ac75aca660b4a341fba9859c22997"
     },
     "source_declaration": {
-      "path": "agent-support/claude-code/candidate-2026-08-21/source-declarations.json",
+      "path": "agent-support/claude-code/2026-08-21/source-declarations.json",
       "sha256": "sha256:a1da27b6370c89e6d8bbc8b8fe671ab3cee4544758699729970617b29fd4ae0d"
     },
     "scope_program": {
-      "path": "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
+      "path": "agent-support/claude-code/2026-08-21/scope-programs.json",
       "sha256": "sha256:d7f48d920b393ca8fbc6767e3262619955ffa82e5d6ea43909087836d89101ad"
     },
     "evidence": {
-      "path": "agent-support/claude-code/candidate-2026-08-21/evidence.json",
-      "sha256": "sha256:c543a6d524728861e1c3e4dfbe8f0f40fd584fd550b4311a6b95b5a45221c18a"
+      "path": "agent-support/claude-code/2026-08-21/evidence.json",
+      "sha256": "sha256:2737cead40022c3e9be4b12f6dee3adb02a73c2c5061a7c79910ecdd3ac3b902"
     },
     "conformance": {
-      "path": "agent-support/claude-code/candidate-2026-08-21/conformance.json",
-      "sha256": "sha256:8d31d91b6ddbc619de9f3eaa4b8d9e63518bf4f4f4f823e075e35b265bcd8cb8"
+      "path": "agent-support/claude-code/2026-08-21/conformance.json",
+      "sha256": "sha256:6fa95ebb833f3f313585447d7a8736639ace44b0e14ef4a01f9598c61027cec6"
     }
   },
   "versions": {

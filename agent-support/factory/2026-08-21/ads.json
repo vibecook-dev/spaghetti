@@ -111,7 +111,7 @@
       "claim_refs": ["factory-source-observed", "factory-identity-open"]
     }
   ],
-  "scope_program_manifest": "agent-support/factory/candidate-2026-08-21/scope-programs.json",
+  "scope_program_manifest": "agent-support/factory/2026-08-21/scope-programs.json",
   "size_limits": [
     { "limit_id": "jsonl-record", "applies_to": "session transcript records", "max_bytes": 4194304, "claim_refs": ["factory-source-observed"] },
     { "limit_id": "jsonl-batch", "applies_to": "session transcript batches", "max_bytes": 8388608, "claim_refs": ["factory-source-observed"] },

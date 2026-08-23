@@ -2,7 +2,7 @@
   "schema_version": 1,
   "manifest_id": "fixture-agent-conformance-2026-08-21-promoted",
   "adapter_id": "fixture-agent",
-  "support_release_id": "fixture-agent-support-2026-08-21-promoted",
+  "support_release_id": "fixture-agent-support-2026-08-21",
   "checks": [
     {
       "check_id": "schema-validation",

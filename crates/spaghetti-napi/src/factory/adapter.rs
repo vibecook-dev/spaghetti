@@ -22,7 +22,7 @@ use crate::source::{
 const ADAPTER_ID: &str = "factory";
 const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../agent-support/factory/candidate-2026-08-21/scope-programs.json"
+    "/../../agent-support/factory/2026-08-21/scope-programs.json"
 ));
 const MEMBERSHIP_STREAM: &str = "session-membership";
 const TRANSCRIPT_STREAM: &str = "session-transcripts";
@@ -52,10 +52,10 @@ impl FactoryAdapter {
                 contract_version: 1,
                 support_binding: Some(
                     AdapterSupportBinding::new(
-                        "factory-support-2026-08-21-candidate",
+                        "factory-support-2026-08-21",
                         env!("CARGO_PKG_VERSION"),
                         1,
-                        "sha256:a4a6db05829944a46e6ae48f33b4793968e8595c8e8b22917d4a3b20524ba1f4",
+                        "sha256:d5448cc906505854fb4ad19a9756eaea7a3ac8b58bf91b638c511d3eb6bea613",
                         "sha256:7380e8a26ed7d3ba324a9f467a57167612eb0cadf94d2115ce58327732c342b0",
                         "sha256:1605bee5e0091e8690d6c13bee0668aa5d765ed81d6b9869f6f3e3d1d39d679b",
                     )

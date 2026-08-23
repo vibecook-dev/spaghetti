@@ -50,7 +50,7 @@
     { "association_id": "session-project", "from_kind": "session", "to_kind": "project", "precedence": ["session_meta cwd", "rollout locator"], "conflict_behavior": "retain_conflict", "claim_refs": ["codex-identity-open"] }
   ],
   "join_rules": [],
-  "scope_program_manifest": "agent-support/codex/candidate-2026-08-15/scope-programs.json",
+  "scope_program_manifest": "agent-support/codex/2026-08-15/scope-programs.json",
   "size_limits": [
     { "limit_id": "jsonl-record", "applies_to": "rollout records", "max_bytes": 4194304, "claim_refs": ["codex-source-observed"] },
     { "limit_id": "jsonl-batch", "applies_to": "rollout batches", "max_bytes": 8388608, "claim_refs": ["codex-source-observed"] }

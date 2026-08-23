@@ -34,42 +34,42 @@ pub(crate) fn verified_support_release(
     crate::adapter::verify_support_release_bundle(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/codex/candidate-2026-08-15/support-release.json"
+            "/../../agent-support/codex/2026-08-15/support-release.json"
         )),
         &[
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/codex/candidate-2026-08-15/ads.json",
+                "agent-support/codex/2026-08-15/ads.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/codex/candidate-2026-08-15/ads.json"
+                    "/../../agent-support/codex/2026-08-15/ads.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/codex/candidate-2026-08-15/source-declarations.json",
+                "agent-support/codex/2026-08-15/source-declarations.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/codex/candidate-2026-08-15/source-declarations.json"
+                    "/../../agent-support/codex/2026-08-15/source-declarations.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/codex/candidate-2026-08-15/scope-programs.json",
+                "agent-support/codex/2026-08-15/scope-programs.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/codex/candidate-2026-08-15/scope-programs.json"
+                    "/../../agent-support/codex/2026-08-15/scope-programs.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/codex/candidate-2026-08-15/evidence.json",
+                "agent-support/codex/2026-08-15/evidence.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/codex/candidate-2026-08-15/evidence.json"
+                    "/../../agent-support/codex/2026-08-15/evidence.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/codex/candidate-2026-08-15/conformance.json",
+                "agent-support/codex/2026-08-15/conformance.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/codex/candidate-2026-08-15/conformance.json"
+                    "/../../agent-support/codex/2026-08-15/conformance.json"
                 )),
             ),
         ],
@@ -78,7 +78,7 @@ pub(crate) fn verified_support_release(
 
 const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../agent-support/codex/candidate-2026-08-15/scope-programs.json"
+    "/../../agent-support/codex/2026-08-15/scope-programs.json"
 ));
 const ROLLOUT_STREAM: &str = "rollout-sessions";
 const ROLLOUT_DECODER: &str = "codex-rollout-record";
@@ -114,10 +114,10 @@ impl CodexAdapter {
                 contract_version: 1,
                 support_binding: Some(
                     AdapterSupportBinding::new(
-                        "codex-support-2026-08-15-candidate",
+                        "codex-support-2026-08-15",
                         env!("CARGO_PKG_VERSION"),
                         1,
-                        "sha256:0256d195021bb939f4af366b631eaf04c9121a880380852fde9913331673961e",
+                        "sha256:bea1546229c7336f7e3cf79d4b634f7796edc0ab5b2295c3e4065180a901df5b",
                         "sha256:c4d6d49516dc525fb7b3d514924c1024b6998a1831c44c9c6b7936f96163c25b",
                         "sha256:7990862cac4b59164dd8d25218077cce33e12fc15b66086e2763fcf6057a9fa5",
                     )

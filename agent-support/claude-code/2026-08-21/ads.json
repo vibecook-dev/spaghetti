@@ -761,7 +761,7 @@
       ]
     }
   ],
-  "scope_program_manifest": "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
+  "scope_program_manifest": "agent-support/claude-code/2026-08-21/scope-programs.json",
   "size_limits": [
     {
       "limit_id": "jsonl-record",

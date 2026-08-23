@@ -1155,7 +1155,7 @@ unknown responses. All 5,182 declared transcript objects produced complete
 coverage and `Ready` v1. Six retained typed-projection diagnostics were scoped
 outside usage-v2 and remained visible as audit evidence without manufacturing
 a usage gap. The committed aggregate-only report is
-[`usage-v2-private-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-private-parity-v1.json)
+[`usage-v2-private-parity-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-private-parity-v1.json)
 with digest
 `sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`.
 
@@ -1168,7 +1168,7 @@ metadata, overwhelmingly native source time, and therefore remain replaceable
 corrections rather than additive burn. The census also found 262
 non-consecutive returns to an earlier complete semantic value. Those are
 ordered reversions, not suppressible retries. The aggregate-only report is
-[`usage-v2-semantic-revision-census-v1.json`](../../agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-semantic-revision-census-v1.json)
+[`usage-v2-semantic-revision-census-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-census-v1.json)
 with digest
 `sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d`.
 
@@ -1182,7 +1182,7 @@ mistaken for current-source evidence. Ingest completed in 358.25 seconds; the
 snapshot differs from earlier runs, so this timing is descriptive and not a
 controlled causal performance claim. The
 aggregate-only report is
-[`usage-v2-semantic-revision-parity-v1.json`](../../agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-semantic-revision-parity-v1.json)
+[`usage-v2-semantic-revision-parity-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-parity-v1.json)
 with digest
 `sha256:3f3e0606e1dd228771f0778c9299a9cdbd62fbb11b555352a36d693bdcf7ad76`.
 
@@ -1195,10 +1195,10 @@ owned by that sidecar path. Both produce the same canonical team/member
 namespace without comparing opaque transcript filenames to config agent IDs.
 Snapshot replacement retracts an edited or deleted sidecar's prior edge while
 leaving actor usage untouched. The aggregate-only native census report is
-[`team-affiliation-census-v1.json`](../../agent-support/claude-code/candidate-2026-08-21/reports/team-affiliation-census-v1.json).
+[`team-affiliation-census-v1.json`](../../agent-support/claude-code/2026-08-21/reports/team-affiliation-census-v1.json).
 
 The representative external compatibility-window report is now retained as
-[`usage-v2-compatibility-window-v1.json`](../../agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-compatibility-window-v1.json)
+[`usage-v2-compatibility-window-v1.json`](../../agent-support/claude-code/2026-08-21/reports/usage-v2-compatibility-window-v1.json)
 with digest
 `sha256:3f4eaa7c8144fe078c9df71ca6cb72a3b0c9a9e5390bcecb7433b455e1087a83`.
 On a stable ephemeral clone, the independent census and durable ingest matched

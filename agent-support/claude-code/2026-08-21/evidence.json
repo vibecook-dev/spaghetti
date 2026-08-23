@@ -79,7 +79,7 @@
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/identity/replay-reorder.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/identity/replay-reorder.json",
           "sha256": "sha256:1ff8f02e79f88436eac7f0120ce043aca7e02b1358e82dbfd6a05a5abbf09762",
           "locator": "declared-input identity matrix for replay, registration reorder, path-spelling, replacement, move/clone/cross-device, never-reuse, generation-scoped supersession, same-session multi-family inputs, child sidecar parentage, and ambiguous joins; not decoder-executed fact or revision identities"
         }
@@ -225,31 +225,31 @@
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/usage-v2/response-revisions.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/usage-v2/response-revisions.json",
           "sha256": "sha256:3038ee09f9e7977516e2d83da2d4a47f6523d3082957446096d2af3b6dcc490f",
           "locator": "root and child response revisions, missing buckets, malformed correction, and generation reset"
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/team-affiliation/team-config.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/team-affiliation/team-config.json",
           "sha256": "sha256:ff0d82d01785953b6496a0298a78b44ebbcd5984b5c5fceaaffe84b1db5af0bb",
           "locator": "native team config root-lead identity inputs and unique member namespace"
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/team-affiliation/subagent-meta.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/team-affiliation/subagent-meta.json",
           "sha256": "sha256:cf8d8717c5845211c394fb74b793ae132ef4f7c468762696b1bd1b3947527d61",
           "locator": "path-owned child metadata teamName/name correlation inputs"
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-oracle-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/usage-v2-oracle-v1.json",
           "sha256": "sha256:7f2eb34ca11164a5e19e8b1791cc839e9668f0f1b671034a88e81bcb629c492c",
           "locator": "oracle contract v1 qualified response, actor, session, and aggregate report"
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-private-parity-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/usage-v2-private-parity-v1.json",
           "sha256": "sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e",
           "locator": "exact private corpus response, actor, session, bucket, readiness, and source-coverage parity"
         },
@@ -261,7 +261,7 @@
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/team-affiliation-census-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/team-affiliation-census-v1.json",
           "sha256": "sha256:3dd951eb006578dc1567a0429f05175cc64c5895944320300655b6f8b3131bdd",
           "locator": "aggregate-only root lead, child metadata, ambiguity, and transcript-presence census"
         },
@@ -273,7 +273,7 @@
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-compatibility-window-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/usage-v2-compatibility-window-v1.json",
           "sha256": "sha256:3f4eaa7c8144fe078c9df71ca6cb72a3b0c9a9e5390bcecb7433b455e1087a83",
           "locator": "privacy-reduced external compatibility-window snapshot, directional bucket comparison, ingest exactness, and Ready coverage"
         },
@@ -328,13 +328,13 @@
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-semantic-revision-census-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-census-v1.json",
           "sha256": "sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d",
           "locator": "aggregate-only exact complete snapshot, counter-equal metadata correction, semantic reversion, and downward-revision census"
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-semantic-revision-parity-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-parity-v1.json",
           "sha256": "sha256:3f3e0606e1dd228771f0778c9299a9cdbd62fbb11b555352a36d693bdcf7ad76",
           "locator": "artifact-bound contract-22 exact durable parity, Ready coverage, and final foreign-key integrity"
         }
@@ -353,7 +353,7 @@
         },
         {
           "kind": "code_reference",
-          "path": "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
+          "path": "agent-support/claude-code/2026-08-21/scope-programs.json",
           "sha256": "sha256:d7f48d920b393ca8fbc6767e3262619955ffa82e5d6ea43909087836d89101ad",
           "locator": "eleven concrete observation bindings with exact stream, source-pattern, and directory-selector coordinates"
         },
@@ -371,37 +371,37 @@
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/transitions/root-transcript-lifecycle.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/transitions/root-transcript-lifecycle.json",
           "sha256": "sha256:7a3ab4591f771fb49967356b772b84852f3ce9fae804e314e7b6444dccf82f3b",
           "locator": "two complete synthetic transcript records and one replacement user record"
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/transitions/descendant-membership.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/transitions/descendant-membership.json",
           "sha256": "sha256:086025f1965167e1d5c381ffdca7eaaad67df3da8307ff8c83664b16a9ce24ae",
           "locator": "two synthetic child metadata shapes sharing one parent session"
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/transitions/team-inbox-replace-delete.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/transitions/team-inbox-replace-delete.json",
           "sha256": "sha256:d1fa4fc0d2c626504feffbe6243f8efb5d429182b3547a91ff79f90ede770c6c",
           "locator": "one synthetic inbox with the same message marked unread then read"
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/transitions/todo-plan-replace.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/transitions/todo-plan-replace.json",
           "sha256": "sha256:f80165eb98464df434175e3b7390e4cd27db05a5c9a88bc16df1770f3e32767d",
           "locator": "todo items pending then completed plus one plan markdown body"
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/transitions/workflow-journal-append.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/transitions/workflow-journal-append.json",
           "sha256": "sha256:50075187a805b166664f02b0ad3bb0f769ed437964127b8c3c2b20b95a30b17c",
           "locator": "one running workflow, two sequential journal steps, and one child actor"
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/scope-access-budget-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/scope-access-budget-v1.json",
           "sha256": "sha256:b2ba311edd98e6d43135e2a192ea2581997ba01fef55661cb36bd6eb634da982",
           "locator": "synthetic worksheet of declared relation bounds; not a benchmark or executed access-ledger result"
         }
@@ -420,13 +420,13 @@
         },
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/unknown-retention/unknown-field-bounded.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/unknown-retention/unknown-field-bounded.json",
           "sha256": "sha256:d14d988348d9abc55f3e21e5773ef39b190fc2dc84b275101fb459ba81a98f3f",
           "locator": "one assistant record with one extra synthetic unknown field"
         },
         {
           "kind": "experiment_report",
-          "path": "agent-support/claude-code/candidate-2026-08-21/reports/sanitizer-review-inputs-v1.json",
+          "path": "agent-support/claude-code/2026-08-21/reports/sanitizer-review-inputs-v1.json",
           "sha256": "sha256:8c559028bd6fb510cf2e72147946cca2e49a3a5120df7933d9588154948f8eb1",
           "locator": "human sanitizer-review inputs; review remains pending"
         }
@@ -439,7 +439,7 @@
       "sources": [
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/drift/bridge-session-account-fields.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/drift/bridge-session-account-fields.json",
           "sha256": "sha256:bf0f47f0714a21411d7173bb5671e7019a08b31cb184c58c62c0c185ff573c5d",
           "locator": "synthetic shape preserving field names and value categories"
         },
@@ -470,7 +470,7 @@
       "sources": [
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/drift/active-session-name-since.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/drift/active-session-name-since.json",
           "sha256": "sha256:ace27b42da80aba0e50f998abafae97e1a33de899e6c086b585b30387b4ad685",
           "locator": "synthetic shape preserving numeric timestamp category"
         },
@@ -501,7 +501,7 @@
       "sources": [
         {
           "kind": "sanitized_fixture",
-          "path": "agent-support/claude-code/candidate-2026-08-21/fixtures/drift/settings-auto-mode.json",
+          "path": "agent-support/claude-code/2026-08-21/fixtures/drift/settings-auto-mode.json",
           "sha256": "sha256:82db0579e356b746ce6c33a8fce35dca1460a5c9219c223281ad25d04c2fe400",
           "locator": "synthetic shape preserving policy field names and string-array categories"
         },

@@ -63,42 +63,42 @@ pub(crate) fn verified_support_release(
     crate::adapter::verify_support_release_bundle(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/candidate-2026-08-21/support-release.json"
+            "/../../agent-support/claude-code/2026-08-21/support-release.json"
         )),
         &[
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/claude-code/candidate-2026-08-21/ads.json",
+                "agent-support/claude-code/2026-08-21/ads.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/claude-code/candidate-2026-08-21/ads.json"
+                    "/../../agent-support/claude-code/2026-08-21/ads.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/claude-code/candidate-2026-08-21/source-declarations.json",
+                "agent-support/claude-code/2026-08-21/source-declarations.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/claude-code/candidate-2026-08-21/source-declarations.json"
+                    "/../../agent-support/claude-code/2026-08-21/source-declarations.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/claude-code/candidate-2026-08-21/scope-programs.json",
+                "agent-support/claude-code/2026-08-21/scope-programs.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/claude-code/candidate-2026-08-21/scope-programs.json"
+                    "/../../agent-support/claude-code/2026-08-21/scope-programs.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/claude-code/candidate-2026-08-21/evidence.json",
+                "agent-support/claude-code/2026-08-21/evidence.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/claude-code/candidate-2026-08-21/evidence.json"
+                    "/../../agent-support/claude-code/2026-08-21/evidence.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/claude-code/candidate-2026-08-21/conformance.json",
+                "agent-support/claude-code/2026-08-21/conformance.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/claude-code/candidate-2026-08-21/conformance.json"
+                    "/../../agent-support/claude-code/2026-08-21/conformance.json"
                 )),
             ),
         ],
@@ -107,7 +107,7 @@ pub(crate) fn verified_support_release(
 
 const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../agent-support/claude-code/candidate-2026-08-21/scope-programs.json"
+    "/../../agent-support/claude-code/2026-08-21/scope-programs.json"
 ));
 const PARENT_STREAM: &str = "session-transcripts";
 const SUBAGENT_STREAM: &str = "subagent-transcripts";
@@ -212,10 +212,10 @@ impl ClaudeCodeAdapter {
                 contract_version: 23,
                 support_binding: Some(
                     AdapterSupportBinding::new(
-                        "claude-code-support-2026-08-21-candidate",
+                        "claude-code-support-2026-08-21",
                         env!("CARGO_PKG_VERSION"),
                         23,
-                        "sha256:d88b3e31bb3b8d7ebe7e3147a30adf774801301f164ccdfa8518545b98cb34ab",
+                        "sha256:d2dcb70882c8cf3b314c59c2a9246242291ac75aca660b4a341fba9859c22997",
                         "sha256:a1da27b6370c89e6d8bbc8b8fe671ab3cee4544758699729970617b29fd4ae0d",
                         "sha256:d7f48d920b393ca8fbc6767e3262619955ffa82e5d6ea43909087836d89101ad",
                     )
@@ -3673,7 +3673,7 @@ mod tests {
         );
         let source_declaration_document = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/candidate-2026-08-21/source-declarations.json"
+            "/../../agent-support/claude-code/2026-08-21/source-declarations.json"
         ));
         assert_eq!(
             support.source_declaration_digest(),
@@ -3981,7 +3981,7 @@ mod tests {
 
         let source_declaration: Value = serde_json::from_slice(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/claude-code/candidate-2026-08-21/source-declarations.json"
+            "/../../agent-support/claude-code/2026-08-21/source-declarations.json"
         )))
         .unwrap();
         let persisted = source_declaration["streams"]
@@ -6266,8 +6266,8 @@ mod tests {
     #[test]
     fn native_team_config_and_subagent_metadata_share_canonical_affiliation_keys() {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let fixture = repository
-            .join("agent-support/claude-code/candidate-2026-08-21/fixtures/team-affiliation");
+        let fixture =
+            repository.join("agent-support/claude-code/2026-08-21/fixtures/team-affiliation");
         let team_fixture: Value =
             serde_json::from_slice(&std::fs::read(fixture.join("team-config.json")).unwrap())
                 .unwrap();

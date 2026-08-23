@@ -200,7 +200,7 @@
       ]
     }
   ],
-  "scope_program_manifest": "agent-support/fixture-agent/promoted-2026-08-21/scope-programs.json",
+  "scope_program_manifest": "agent-support/fixture-agent/2026-08-21/scope-programs.json",
   "size_limits": [
     {
       "limit_id": "jsonl-record",

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "manifest_id": "claude-code-conformance-2026-08-21-candidate",
   "adapter_id": "claude-code",
-  "support_release_id": "claude-code-support-2026-08-21-candidate",
+  "support_release_id": "claude-code-support-2026-08-21",
   "checks": [
     {
       "check_id": "schema-validation",

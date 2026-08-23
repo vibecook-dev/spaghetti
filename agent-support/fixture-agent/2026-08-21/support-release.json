@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "support_release_id": "fixture-agent-support-2026-08-21-promoted",
+  "support_release_id": "fixture-agent-support-2026-08-21",
   "adapter_id": "fixture-agent",
-  "status": "promoted",
+  "version": "2026-08-21",
   "artifact_compatibility": {
     "family": "fixture-agent",
     "platforms": [
@@ -20,24 +20,24 @@
   },
   "references": {
     "ads": {
-      "path": "agent-support/fixture-agent/promoted-2026-08-21/ads.json",
-      "sha256": "sha256:7fb38395b4ec6ad2b5cc166678a134753d4a24352123ce79ac0ed789a8f10713"
+      "path": "agent-support/fixture-agent/2026-08-21/ads.json",
+      "sha256": "sha256:71dbd754e9218769bd5ecccce8b9f776d3512e7b64d0668d01d6db1a7a8ed115"
     },
     "source_declaration": {
-      "path": "agent-support/fixture-agent/promoted-2026-08-21/source-declarations.json",
+      "path": "agent-support/fixture-agent/2026-08-21/source-declarations.json",
       "sha256": "sha256:dfc5c04f0c8aa15a5e28b63a67a5ad7eadc4af8fe20e7fa025edaa35ea63c517"
     },
     "scope_program": {
-      "path": "agent-support/fixture-agent/promoted-2026-08-21/scope-programs.json",
+      "path": "agent-support/fixture-agent/2026-08-21/scope-programs.json",
       "sha256": "sha256:bf2679527dae7562d91bc4628ae5eb0cfed9e77331404386cc2db40bc8d0d082"
     },
     "evidence": {
-      "path": "agent-support/fixture-agent/promoted-2026-08-21/evidence.json",
+      "path": "agent-support/fixture-agent/2026-08-21/evidence.json",
       "sha256": "sha256:1b8cb7c5e3a490dfa37336fe2127a13cd6223c9ee0df1bbd59d990659fa0546a"
     },
     "conformance": {
-      "path": "agent-support/fixture-agent/promoted-2026-08-21/conformance.json",
-      "sha256": "sha256:bbe139aad3daece6ead146d8f8cd45a12dc483c225073bdf26590533845e839b"
+      "path": "agent-support/fixture-agent/2026-08-21/conformance.json",
+      "sha256": "sha256:03bd2d438be17e2bd957070a90c0368edf404411910c53f2a12ca1798f0a506f"
     }
   },
   "versions": {

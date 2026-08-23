@@ -23,7 +23,7 @@ Regenerate a candidate report for review with:
 
 ```sh
 python3 scripts/usage_v2_oracle/oracle.py \
-  agent-support/claude-code/candidate-2026-08-21/fixtures/usage-v2/response-revisions.json
+  agent-support/claude-code/2026-08-21/fixtures/usage-v2/response-revisions.json
 ```
 
 The checked-in report is evidence, not a public runtime query. Promotion still

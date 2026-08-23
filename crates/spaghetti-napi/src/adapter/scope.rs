@@ -920,12 +920,12 @@ mod tests {
             .as_slice(),
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../agent-support/codex/candidate-2026-08-15/scope-programs.json"
+                "/../../agent-support/codex/2026-08-15/scope-programs.json"
             ))
             .as_slice(),
             include_bytes!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
-                "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+                "/../../agent-support/grok/2026-08-15/scope-programs.json"
             ))
             .as_slice(),
         ] {
@@ -939,7 +939,7 @@ mod tests {
     fn promoted_scope_program_requires_a_known_object_root_relation() {
         let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+            "/../../agent-support/grok/2026-08-15/scope-programs.json"
         ));
         let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
         manifest.status = ScopeProgramStatus::Promoted;
@@ -994,7 +994,7 @@ mod tests {
     fn scope_validation_rejects_duplicate_relations_and_sql_without_rows() {
         let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+            "/../../agent-support/grok/2026-08-15/scope-programs.json"
         ));
         let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
         let duplicate = manifest.programs[0].relations[0].clone();
@@ -1023,7 +1023,7 @@ mod tests {
     fn scope_validation_rejects_path_escape_and_platform_absolute_locators() {
         let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+            "/../../agent-support/grok/2026-08-15/scope-programs.json"
         ));
         for locator in ["../summary.json", "/summary.json", "C:/summary.json"] {
             let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
@@ -1036,7 +1036,7 @@ mod tests {
     fn promoted_artifact_relations_require_an_exact_bounded_source_binding() {
         let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+            "/../../agent-support/grok/2026-08-15/scope-programs.json"
         ));
         let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
         manifest.status = ScopeProgramStatus::Promoted;
@@ -1077,7 +1077,7 @@ mod tests {
     fn promoted_dynamic_relations_require_primitive_appropriate_source_bindings() {
         let bytes = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+            "/../../agent-support/grok/2026-08-15/scope-programs.json"
         ));
         let mut manifest = ScopeProgramManifest::from_json(bytes).unwrap();
         manifest.status = ScopeProgramStatus::Promoted;

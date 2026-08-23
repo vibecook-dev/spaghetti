@@ -122,7 +122,7 @@
   "join_rules": [
     { "join_id": "session-sidecars", "inputs": ["session directory", "summary", "chat history", "events", "signals"], "output": "one native session context", "max_fan_out": 5, "ambiguous_behavior": "report_unavailable", "claim_refs": ["grok-source-observed", "grok-identity-open"] }
   ],
-  "scope_program_manifest": "agent-support/grok/candidate-2026-08-15/scope-programs.json",
+  "scope_program_manifest": "agent-support/grok/2026-08-15/scope-programs.json",
   "size_limits": [
     { "limit_id": "jsonl-record", "applies_to": "history, event, and ignored update records", "max_bytes": 4194304, "claim_refs": ["grok-source-observed"] },
     { "limit_id": "jsonl-batch", "applies_to": "history, event, and ignored update batches", "max_bytes": 8388608, "claim_refs": ["grok-source-observed"] },

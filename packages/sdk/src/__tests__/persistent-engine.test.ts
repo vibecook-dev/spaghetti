@@ -23,7 +23,7 @@ const GROK_FIXTURE = fileURLToPath(
   new URL('../../../../crates/spaghetti-napi/fixtures/small-grok/.grok', import.meta.url),
 );
 const TEAM_AFFILIATION_FIXTURE = fileURLToPath(
-  new URL('../../../../agent-support/claude-code/candidate-2026-08-21/fixtures/team-affiliation/', import.meta.url),
+  new URL('../../../../agent-support/claude-code/2026-08-21/fixtures/team-affiliation/', import.meta.url),
 );
 
 function markClaudeVersionFixture(root: string, version = '2.1.223'): void {

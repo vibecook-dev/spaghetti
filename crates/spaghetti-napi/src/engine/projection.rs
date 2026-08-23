@@ -7841,15 +7841,16 @@ mod tests {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(repository.join(
-                "agent-support/claude-code/candidate-2026-08-21/fixtures/usage-v2/response-revisions.json",
+                "agent-support/claude-code/2026-08-21/fixtures/usage-v2/response-revisions.json",
             ))
             .unwrap(),
         )
         .unwrap();
         let oracle: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(repository.join(
-                "agent-support/claude-code/candidate-2026-08-21/reports/usage-v2-oracle-v1.json",
-            ))
+            &std::fs::read_to_string(
+                repository
+                    .join("agent-support/claude-code/2026-08-21/reports/usage-v2-oracle-v1.json"),
+            )
             .unwrap(),
         )
         .unwrap();
