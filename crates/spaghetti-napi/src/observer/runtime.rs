@@ -20,10 +20,10 @@ use crate::adapter::{
 use super::event::{
     ClosedEvent, ObjectCoverage, ObserverBarrier, ObserverErrorEvent, ObserverEvent,
     ObserverFamily, ObserverPhase, OverflowEvent, OverflowReason, ResetEvent, SemanticEvent,
-    SemanticOperation, SourceErrorEvent, SourcePosition,
+    SemanticOperation, SourceErrorEvent, SourcePosition, UnknownEvidenceEvent,
 };
 use super::identity::{ActorAttribution, ActorRef, EventIdBuilder, ScopeIdentity};
-use super::object::{DecodedFact, ObjectReset, ObservedObject};
+use super::object::{DecodedFact, ObjectReset, ObservedObject, UnknownRecord};
 use super::queue::{Admission, Delivery};
 use super::request::ResolvedRequest;
 use super::scope::{
@@ -276,6 +276,9 @@ impl ObserverRuntime {
                 // short of what the source actually holds.
                 self.emit_fact(&key, fact, generation);
             }
+            for unknown in &pass.unknown {
+                self.emit_unknown(&key, unknown);
+            }
             match pass.error {
                 Some(message) => self.record_object_error(&key, message, false),
                 None => {
@@ -323,6 +326,43 @@ impl ObserverRuntime {
                 self.admit(family, event);
             }
         }
+    }
+
+    /// Surface a record the adapter could not interpret. It rides the bounded
+    /// semantic lane because an unreadable log could otherwise flood the small
+    /// control lane and take the whole attachment down with it.
+    fn emit_unknown(&mut self, owner: &ScopeMemberKey, unknown: &UnknownRecord) {
+        let mut builder = EventIdBuilder::new("runtime.unknown-evidence");
+        builder
+            .scope(&self.scope)
+            .component(owner.stream_id.as_bytes())
+            .component(owner.relative_path.to_string_lossy().as_bytes())
+            .u64(unknown.generation)
+            .component(unknown.source_record_id.as_bytes());
+        let event = ObserverEvent::UnknownEvidence(UnknownEvidenceEvent {
+            event_id: builder.finish(),
+            sequence: 0,
+            scope_epoch: self.delivery.epoch(),
+            phase: self.phase,
+            source: SourcePosition {
+                stream_id: owner.stream_id.clone(),
+                object_path: owner.relative_path.to_string_lossy().into_owned(),
+                root_name: owner.root_name.clone(),
+                generation: unknown.generation,
+                byte_start: unknown.byte_start,
+                byte_end: unknown.byte_end,
+                record_digest: unknown
+                    .record_digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            },
+            family_hint: unknown.family_hint.clone(),
+            observed_bytes: unknown.observed_bytes,
+            actor: ActorRef::root(&self.scope, ActorAttribution::ScopeFallback),
+            observed_at: unknown.observed_at,
+        });
+        self.admit_event(event);
     }
 
     /// Deliver retractions for everything one object (or one superseded
@@ -393,11 +433,14 @@ impl ObserverRuntime {
 
     /// Offer one semantic event under the current phase's backpressure rule.
     fn admit(&mut self, family: ObserverFamily, event: SemanticEvent) {
+        self.admit_event(ObserverEvent::semantic(family, event));
+    }
+
+    fn admit_event(&mut self, event: ObserverEvent) {
         if self.replacement_pending {
             // Ordinary delivery is suspended until the replacement epoch opens.
             return;
         }
-        let event = ObserverEvent::semantic(family, event);
         match self.phase {
             // Bootstrap and correction may pause the producer. Queue fullness
             // alone must never manufacture continuity loss.

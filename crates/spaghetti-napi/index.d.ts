@@ -239,6 +239,11 @@ export declare class SpaghettiSessionObserver {
    */
   poll(max?: number | undefined | null): string
   /**
+   * TEMPORARY: object-valued twin of `poll`, kept only long enough to
+   * measure it against the JSON-string path. Removed before the branch ships.
+   */
+  pollValues(max?: number | undefined | null): Array<any>
+  /**
    * Wait up to `timeoutMs` for at least one event, then take up to `max`.
    * Resolves with an empty array on timeout.
    */

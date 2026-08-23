@@ -239,3 +239,49 @@ fn one_unreadable_child_does_not_stop_its_siblings() {
     );
     observer.close();
 }
+
+#[test]
+fn a_sidecar_the_decoder_cannot_map_arrives_as_bounded_evidence() {
+    let fixture = SessionFixture::new();
+    fixture.append(
+        &fixture.transcript(),
+        &[assistant_record("a-1", "resp-1", 5)],
+    );
+    // The root actor's todo sidecar joins the scope through declared evidence.
+    // Its content here is a shape the todo decoder cannot map, which is exactly
+    // the case that must surface rather than disappear.
+    fixture.append_once(
+        &fixture.todo_sidecar(SESSION),
+        &[r#"{"unexpected":"shape"}"#.to_string()],
+    );
+
+    let observer = fixture.open();
+    let events = drain_bootstrap(&observer);
+
+    let unknown = events
+        .iter()
+        .find_map(|event| match event {
+            ObserverEvent::UnknownEvidence(event) => Some(event),
+            _ => None,
+        })
+        .expect("an unmappable in-scope document must surface as bounded evidence");
+    assert!(
+        unknown.observed_bytes > 0,
+        "unknown evidence reports how much was not interpreted"
+    );
+    assert!(
+        !unknown.source.record_digest.is_empty(),
+        "unknown evidence names the record it stands for"
+    );
+    assert!(
+        unknown.source.object_path.contains("todos"),
+        "unknown evidence names the object it came from"
+    );
+    // No native values travel with it.
+    let encoded = serde_json::to_string(unknown).expect("serialize");
+    assert!(
+        !encoded.contains("unexpected"),
+        "bounded evidence must not carry native content"
+    );
+    observer.close();
+}

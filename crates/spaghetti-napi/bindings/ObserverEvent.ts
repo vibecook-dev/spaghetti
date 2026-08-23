@@ -6,6 +6,7 @@ import type { OverflowEvent } from "./OverflowEvent";
 import type { ResetEvent } from "./ResetEvent";
 import type { SemanticEvent } from "./SemanticEvent";
 import type { SourceErrorEvent } from "./SourceErrorEvent";
+import type { UnknownEvidenceEvent } from "./UnknownEvidenceEvent";
 
 /**
  * Everything the observer delivers, on one ordered stream.
@@ -14,4 +15,4 @@ import type { SourceErrorEvent } from "./SourceErrorEvent";
  * [`SemanticEvent`] payload and name their family both in the tag and in
  * `family`, so a consumer can switch on either.
  */
-export type ObserverEvent = { "type": "message" } & SemanticEvent | { "type": "content_block" } & SemanticEvent | { "type": "tool" } & SemanticEvent | { "type": "user_input_request" } & SemanticEvent | { "type": "plan" } & SemanticEvent | { "type": "task" } & SemanticEvent | { "type": "native_marker" } & SemanticEvent | { "type": "effective_state" } & SemanticEvent | { "type": "actor_run" } & SemanticEvent | { "type": "actor_affiliation" } & SemanticEvent | { "type": "usage_v2" } & SemanticEvent | { "type": "bootstrap_complete" } & ObserverBarrier | { "type": "reset" } & ResetEvent | { "type": "overflow" } & OverflowEvent | { "type": "resync_complete" } & ObserverBarrier | { "type": "source_error" } & SourceErrorEvent | { "type": "closed" } & ClosedEvent | { "type": "error" } & ObserverErrorEvent;
+export type ObserverEvent = { "type": "message" } & SemanticEvent | { "type": "content_block" } & SemanticEvent | { "type": "tool" } & SemanticEvent | { "type": "user_input_request" } & SemanticEvent | { "type": "plan" } & SemanticEvent | { "type": "task" } & SemanticEvent | { "type": "native_marker" } & SemanticEvent | { "type": "effective_state" } & SemanticEvent | { "type": "actor_run" } & SemanticEvent | { "type": "actor_affiliation" } & SemanticEvent | { "type": "usage_v2" } & SemanticEvent | { "type": "unknown_evidence" } & UnknownEvidenceEvent | { "type": "bootstrap_complete" } & ObserverBarrier | { "type": "reset" } & ResetEvent | { "type": "overflow" } & OverflowEvent | { "type": "resync_complete" } & ObserverBarrier | { "type": "source_error" } & SourceErrorEvent | { "type": "closed" } & ClosedEvent | { "type": "error" } & ObserverErrorEvent;

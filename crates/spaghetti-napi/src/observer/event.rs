@@ -171,6 +171,32 @@ pub struct SemanticEvent {
     pub value: Option<serde_json::Value>,
 }
 
+/// A native record the adapter did not interpret.
+///
+/// RFC 012D section 15 keeps this as bounded evidence rather than dropping it:
+/// a consumer that sees these knows its coverage has a hole, instead of
+/// silently missing facts. No native values travel here — only how large the
+/// record was and what it hashes to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct UnknownEvidenceEvent {
+    pub event_id: ObserverEventId,
+    #[ts(type = "number")]
+    pub sequence: u64,
+    #[ts(type = "number")]
+    pub scope_epoch: u64,
+    pub phase: ObserverPhase,
+    pub source: SourcePosition,
+    /// The adapter's guess at the family, when it offered one.
+    pub family_hint: Option<String>,
+    /// Size of the record that was not interpreted.
+    #[ts(type = "number")]
+    pub observed_bytes: u64,
+    pub actor: ActorRef,
+    #[ts(type = "number")]
+    pub observed_at: i64,
+}
+
 /// Per-family coverage inside a completion barrier. `entity_count` plus
 /// `digest` make absence actionable: an entity missing from a complete family
 /// is genuinely gone, not merely undelivered.
@@ -338,6 +364,7 @@ pub enum ObserverEvent {
     ActorRun(SemanticEvent),
     ActorAffiliation(SemanticEvent),
     UsageV2(SemanticEvent),
+    UnknownEvidence(UnknownEvidenceEvent),
     BootstrapComplete(ObserverBarrier),
     Reset(ResetEvent),
     Overflow(OverflowEvent),
@@ -379,6 +406,7 @@ impl ObserverEvent {
                 | Self::ActorRun(_)
                 | Self::ActorAffiliation(_)
                 | Self::UsageV2(_)
+                | Self::UnknownEvidence(_)
         )
     }
 
@@ -395,6 +423,7 @@ impl ObserverEvent {
             | Self::ActorRun(event)
             | Self::ActorAffiliation(event)
             | Self::UsageV2(event) => event.sequence,
+            Self::UnknownEvidence(event) => event.sequence,
             Self::BootstrapComplete(event) | Self::ResyncComplete(event) => event.sequence,
             Self::Reset(event) => event.sequence,
             Self::Overflow(event) => event.sequence,
@@ -419,6 +448,7 @@ impl ObserverEvent {
             | Self::ActorRun(event)
             | Self::ActorAffiliation(event)
             | Self::UsageV2(event) => event.event_id,
+            Self::UnknownEvidence(event) => event.event_id,
             Self::BootstrapComplete(event) | Self::ResyncComplete(event) => event.event_id,
             Self::Reset(event) => event.event_id,
             Self::Overflow(event) => event.event_id,
@@ -441,6 +471,7 @@ impl ObserverEvent {
             | Self::ActorRun(event)
             | Self::ActorAffiliation(event)
             | Self::UsageV2(event) => event.sequence = sequence,
+            Self::UnknownEvidence(event) => event.sequence = sequence,
             Self::BootstrapComplete(event) | Self::ResyncComplete(event) => {
                 event.sequence = sequence;
             }
@@ -469,6 +500,7 @@ impl ObserverEvent {
                 .value
                 .as_ref()
                 .map_or(128, |value| estimate_json_bytes(value)),
+            Self::UnknownEvidence(_) => 256,
             _ => 256,
         }
     }

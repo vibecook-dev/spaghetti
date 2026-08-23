@@ -65,6 +65,20 @@ impl SpaghettiSessionObserver {
         encode(&events)
     }
 
+    /// TEMPORARY: object-valued twin of `poll`, kept only long enough to
+    /// measure it against the JSON-string path. Removed before the branch ships.
+    #[napi(js_name = "pollValues")]
+    pub fn poll_values(&self, max: Option<u32>) -> Result<Vec<serde_json::Value>> {
+        self.handle
+            .poll(batch_size(max))
+            .iter()
+            .map(|event| {
+                serde_json::to_value(event)
+                    .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))
+            })
+            .collect()
+    }
+
     /// Wait up to `timeoutMs` for at least one event, then take up to `max`.
     /// Resolves with an empty array on timeout.
     #[napi(js_name = "waitForEvents", ts_return_type = "Promise<string>")]

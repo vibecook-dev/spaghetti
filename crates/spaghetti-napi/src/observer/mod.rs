@@ -26,9 +26,6 @@ mod runtime;
 mod scope;
 mod state;
 
-#[cfg(test)]
-mod tests;
-
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -38,7 +35,7 @@ use crossbeam_channel::Sender;
 pub use event::{
     ClosedEvent, FamilyManifestEntry, ObjectCoverage, ObserverBarrier, ObserverErrorEvent,
     ObserverEvent, ObserverFamily, ObserverPhase, OverflowEvent, OverflowReason, ResetEvent,
-    SemanticEvent, SemanticOperation, SourceErrorEvent, SourcePosition,
+    SemanticEvent, SemanticOperation, SourceErrorEvent, SourcePosition, UnknownEvidenceEvent,
 };
 pub use identity::{ActorAttribution, ActorRef, ObserverEventId};
 pub use request::ObserveSessionRequest;
@@ -146,3 +143,6 @@ impl Drop for ObserverHandle {
         self.close();
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -316,3 +316,36 @@ fn a_repeated_usage_row_adds_nothing_and_a_correction_replaces_it() {
     );
     observer.close();
 }
+
+#[test]
+fn a_record_the_decoder_cannot_interpret_does_not_terminate_the_stream() {
+    let fixture = SessionFixture::new();
+    fixture.append(
+        &fixture.transcript(),
+        &[
+            assistant_record("a-1", "resp-1", 10),
+            // A shape no Claude decoder claims.
+            r#"{"type":"a-kind-from-the-future","uuid":"x-1","sessionId":"01234567-89ab-cdef-0123-456789abcdef","payload":{"unmapped":true}}"#.to_string(),
+            assistant_record("a-2", "resp-2", 20),
+        ],
+    );
+
+    let observer = fixture.open();
+    let events = drain_bootstrap(&observer);
+
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserverEvent::UsageV2(_)))
+            .count(),
+        2,
+        "records on both sides of an uninterpretable line must still decode"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, ObserverEvent::BootstrapComplete(_))),
+        "one uninterpretable line must not stop bootstrap from completing"
+    );
+    observer.close();
+}

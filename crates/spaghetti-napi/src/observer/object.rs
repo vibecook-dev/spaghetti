@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use crate::adapter::{
     AdapterObjectContext, AgentAdapter, DecoderId, DriverSpec, Fact, FactSemanticContext,
-    FactSemanticRevision, RawRetentionPolicy, ScopeJoinUpdate, SourceInstance,
-    SourceObjectDescriptor, StreamId,
+    FactSemanticRevision, RawRetentionPolicy, RecordMappingDisposition, ScopeJoinUpdate,
+    SourceInstance, SourceObjectDescriptor, StreamId,
 };
 use crate::decode_runtime::{
     decode_record, DecodeRuntimeLimits, DecodeRuntimeRequest, DecoderDependenciesDenied,
@@ -59,10 +59,25 @@ pub(crate) struct DecodedFact {
     pub generation: u64,
 }
 
+/// One record the adapter could not interpret, reduced to bounded evidence.
+pub(crate) struct UnknownRecord {
+    pub family_hint: Option<String>,
+    pub observed_bytes: u64,
+    pub source_record_id: crate::adapter::SourceRecordId,
+    pub byte_start: Option<u64>,
+    pub byte_end: Option<u64>,
+    pub record_digest: [u8; 32],
+    pub generation: u64,
+    pub observed_at: i64,
+}
+
 /// Result of one reconciliation pass over one object.
 #[derive(Default)]
 pub(crate) struct ObjectPass {
     pub facts: Vec<DecodedFact>,
+    /// Records the adapter retained as unknown. Dropping these would turn a
+    /// coverage hole into silence.
+    pub unknown: Vec<UnknownRecord>,
     pub joins: Vec<ScopeJoinUpdate>,
     pub reset: Option<ObjectReset>,
     /// Set when the driver reported the object as gone. Facts owned by the
@@ -402,6 +417,22 @@ impl ObservedObject {
                 byte_end,
                 record_digest: *record.payload_hash.as_bytes(),
                 generation: record.generation,
+            });
+        }
+        if let RecordMappingDisposition::RetainedUnknown {
+            family_hint,
+            bounded_evidence,
+        } = &decoded.mapping_disposition
+        {
+            pass.unknown.push(UnknownRecord {
+                family_hint: family_hint.clone(),
+                observed_bytes: bounded_evidence.observed_bytes,
+                source_record_id: bounded_evidence.source_record_id,
+                byte_start,
+                byte_end,
+                record_digest: *record.payload_hash.as_bytes(),
+                generation: record.generation,
+                observed_at: record.observed_at,
             });
         }
         pass.joins.extend(decoded.scope_join_updates);
