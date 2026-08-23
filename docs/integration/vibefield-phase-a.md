@@ -54,12 +54,15 @@ Comparing the version too is deliberate: references minted under different
 contract majors are not comparable, and treating them as equal is exactly the
 identity conflict RFC 012A requires to stay explicit.
 
-> **Encoding trap.** Catalog and history *rows* carry `externalRef` as a string
-> with a `"1:"` prefix; the `entity_key` inside an `ExternalEntityRef` object
-> uses `"v1:"`. Same 32-byte digest, two textual spellings. Pass `row.externalRef`
-> straight back to `resolveCatalogEntity()` — that is what it accepts — but do
-> **not** string-compare it against `entity_key`, and do not build an
-> `ExternalEntityRef` by hand from it.
+> **One reference per entity.** A row's `externalRef` and the `entity_key`
+> inside an `ExternalEntityRef` are the same string for the same entity —
+> `"v1:<base64url 32-byte digest>"`, minted by `CanonicalEntityKey::derive` and
+> spelled by RFC 012A wherever it surfaces. String-compare them, use either as a
+> map key, pass either to `resolveCatalogEntity()`, or build an
+> `ExternalEntityRef` from a persisted row by pairing it with
+> `external_entity_reference_version: 1`. (Before 0.8.0 the catalog spelled the
+> same digest `"1:"`, so those comparisons silently failed; the tests in
+> `packages/sdk/src/__tests__/vibefield.test.ts` now pin the shared spelling.)
 
 ## 2. Native session id when provable, conflicts kept explicit
 

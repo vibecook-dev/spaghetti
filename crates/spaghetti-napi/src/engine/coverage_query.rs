@@ -826,10 +826,7 @@ fn decode_cursor_position(
 }
 
 fn opaque_ref(value: &[u8]) -> String {
-    format!(
-        "{OPAQUE_COVERAGE_REFERENCE_VERSION}:{}",
-        URL_SAFE_NO_PAD.encode(value)
-    )
+    crate::adapter::encode_opaque_reference(value)
 }
 
 fn validate_opaque_ref(value: &str, label: &'static str) -> Result<(), EngineError> {

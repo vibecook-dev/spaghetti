@@ -84,6 +84,7 @@ pub use semantic::{
     EXTERNAL_ENTITY_REFERENCE_VERSION, SEMANTIC_REFERENCE_CONTRACT_VERSION,
     SOURCE_COVERAGE_CONTRACT_VERSION, SOURCE_COVERAGE_SET_CONTRACT_VERSION,
 };
+pub(crate) use semantic::{decode_opaque_reference, encode_opaque_reference};
 pub use support::{
     classify_runtime_support, select_contract_versions, verify_support_release_bundle,
     AdapterSupportBinding, AdapterSupportRegistration, ArtifactCompatibilityDeclaration,

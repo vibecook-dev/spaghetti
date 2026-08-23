@@ -226,14 +226,36 @@ fn contract_digest(domain: &[u8], components: &[&[u8]]) -> [u8; DIGEST_BYTES] {
     *hasher.finalize().as_bytes()
 }
 
+/// Text form of an opaque RFC 012A reference: `v1:<base64url 32-byte digest>`.
+///
+/// Every surface that hands a caller one of these digests spells it this way —
+/// the identity contracts through `serialize_digest` below, and the durable
+/// query packs (catalog, coverage, projection) through this function directly,
+/// because they read raw digest bytes out of SQLite rather than a typed key.
+/// It lives here, next to `REFERENCE_ENCODING_VERSION`, so that the spelling
+/// has one definition: a reference minted by any of them compares equal to a
+/// reference minted by any other, which is the whole point of a
+/// topology-independent identity.
+pub(crate) fn encode_opaque_reference(digest: &[u8]) -> String {
+    format!(
+        "{REFERENCE_ENCODING_VERSION}:{}",
+        URL_SAFE_NO_PAD.encode(digest)
+    )
+}
+
+/// Inverse of [`encode_opaque_reference`]. `None` when the version prefix is
+/// unknown, the payload is not base64url, or the digest is not 32 bytes.
+pub(crate) fn decode_opaque_reference(value: &str) -> Option<[u8; DIGEST_BYTES]> {
+    let payload = value.strip_prefix(REFERENCE_ENCODING_VERSION)?;
+    let payload = payload.strip_prefix(':')?;
+    URL_SAFE_NO_PAD.decode(payload).ok()?.try_into().ok()
+}
+
 fn serialize_digest<S>(bytes: &[u8; DIGEST_BYTES], serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!(
-        "{REFERENCE_ENCODING_VERSION}:{}",
-        URL_SAFE_NO_PAD.encode(bytes)
-    ))
+    serializer.serialize_str(&encode_opaque_reference(bytes))
 }
 
 fn deserialize_digest<'de, D>(deserializer: D) -> Result<[u8; DIGEST_BYTES], D::Error>

@@ -24,7 +24,6 @@ const CURSOR_PREFIX: &str = "catalog_v1_";
 /// Text form of an RFC 012A `ExternalEntityRef`: the encoding version, then
 /// the 32-byte canonical entity digest. Stable across restarts and machines,
 /// which is what VibeField persists.
-const EXTERNAL_REF_ENCODING_VERSION: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogProjectPageRequest {
@@ -710,19 +709,17 @@ fn decode_cursor(value: Option<&str>, watermark: u64) -> Result<Option<Cursor>, 
     }))
 }
 
-/// Text form of a persisted external reference. Shared with the history page
-/// so both surfaces spell the same reference identically.
+/// Text form of a persisted external reference. Shared with the history page so
+/// both surfaces spell the same reference identically — and, since RFC 012A
+/// owns the spelling, identically to `ExternalEntityRef.entity_key` for the
+/// same entity. The digest is the one `CanonicalEntityKey::derive` produced at
+/// discovery; only its text form is built here.
 pub fn encode_external_ref(digest: &[u8]) -> String {
-    format!(
-        "{EXTERNAL_REF_ENCODING_VERSION}:{}",
-        URL_SAFE_NO_PAD.encode(digest)
-    )
+    crate::adapter::encode_opaque_reference(digest)
 }
 
 fn decode_external_ref(value: &str) -> Option<Vec<u8>> {
-    let payload = value.strip_prefix(&format!("{EXTERNAL_REF_ENCODING_VERSION}:"))?;
-    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
-    (decoded.len() == 32).then_some(decoded)
+    crate::adapter::decode_opaque_reference(value).map(|digest| digest.to_vec())
 }
 
 fn validate_limit(limit: u32) -> Result<u32, EngineError> {
