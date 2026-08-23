@@ -3361,17 +3361,12 @@ fn usage_v2_change(
 }
 
 fn opaque_reference(bytes: &[u8]) -> Result<String, EngineError> {
-    use base64::Engine as _;
-
     if bytes.len() != 32 {
         return Err(EngineError::InvalidCommit(
             "opaque RFC 012A reference must contain exactly 32 bytes".to_string(),
         ));
     }
-    Ok(format!(
-        "v1:{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    ))
+    Ok(crate::adapter::encode_opaque_reference(bytes))
 }
 
 fn sqlite_optional_u64(

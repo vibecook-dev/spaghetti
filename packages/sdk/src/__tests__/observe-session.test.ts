@@ -19,6 +19,7 @@ import path from 'node:path';
 import { mkdtempSync, mkdirSync, appendFileSync, writeFileSync, rmSync } from 'node:fs';
 
 import { loadNativeAddon } from '../native.js';
+import type { RuntimeSemanticValue, UsageRevisionV2Fact } from '../index.js';
 import {
   isSemanticEvent,
   observeSession,
@@ -283,6 +284,27 @@ describe('observeSession', { skip: !native }, () => {
 
     assert.equal(observer.status().closed, true);
     assert.equal(drained.at(-1)?.type, 'closed', 'even an immediate abort reports the close');
+  });
+
+  test('a consumer can name the value type a handler takes', async () => {
+    // The point of exporting the per-family types: this handler signature is
+    // written, not derived. Before they were on the barrel a consumer had to
+    // reach for `Extract<NonNullable<SemanticEvent['value']>, …>` because the
+    // names were generated but unreachable from the package entry point.
+    // `value` is nullable because a qualified value may be unknown — the
+    // generated type says so, which is the reason to import it rather than
+    // hand-write an optimistic one.
+    const readUsage = (fact: UsageRevisionV2Fact): number | null => fact.buckets.input_tokens.value;
+
+    const { root, transcript } = fixtureTree();
+    const observer = attach(root, transcript);
+    const events = await collectUntil(observer, (seen) => seen.some((e) => e.type === 'bootstrap_complete'));
+
+    const usage = events.find((event) => event.type === 'usage_v2');
+    assert.ok(usage && isSemanticEvent(usage));
+    const value: RuntimeSemanticValue | null = usage.value;
+    assert.ok(value && 'UsageRevisionV2' in value, 'the usage family carries its own variant');
+    assert.equal(readUsage(value.UsageRevisionV2), 10, 'the fixture response reports its input tokens');
   });
 
   test('an invalid locator fails at attach, not as an event', () => {

@@ -331,12 +331,10 @@ describe('durable identity is deterministic', { skip: !native }, () => {
     const catalog = await engine.listCatalogSessions({ limit: 50 });
     assert.ok(catalog.sessions.length > 0);
     for (const row of catalog.sessions) {
-      // `<encoding-version>:<base64url digest>`. Note this is *not* spelled
-      // the same as RFC 012A's `CanonicalEntityKey`, which prefixes `v1:`;
-      // see the lane report.
+      // The one RFC 012A spelling, shared with `ExternalEntityRef.entity_key`.
       assert.match(
         row.externalRef,
-        /^\d+:[A-Za-z0-9_-]{43}$/,
+        /^v1:[A-Za-z0-9_-]{43}$/,
         'an external reference is an opaque versioned digest, never a path',
       );
     }

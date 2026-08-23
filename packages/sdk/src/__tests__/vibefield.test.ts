@@ -50,6 +50,7 @@ const engines: SpaghettiEngine[] = [];
 /** Real references, minted by the catalog from the committed fixture corpus. */
 let sessionKey: string;
 let projectKey: string;
+let identityEngine: SpaghettiEngine;
 
 after(async () => {
   for (const engine of engines.splice(0)) await engine.dispose();
@@ -76,6 +77,7 @@ before(async () => {
   const projects = await engine.listCatalogProjects({ limit: 5 });
   sessionKey = sessions.sessions[0]!.externalRef;
   projectKey = projects.projects[0]!.externalRef;
+  identityEngine = engine;
 });
 
 describe('VibeField Phase A identity surface', { skip: !native }, () => {
@@ -88,8 +90,8 @@ describe('VibeField Phase A identity surface', { skip: !native }, () => {
 
     // An opaque reference carries its encoding version and never leaks a local
     // path, a database name, or a row id.
-    assert.match(session.entity_key, /^\d+:[A-Za-z0-9_-]{43}$/);
-    assert.match(project.entity_key, /^\d+:[A-Za-z0-9_-]{43}$/);
+    assert.match(session.entity_key, /^v1:[A-Za-z0-9_-]{43}$/);
+    assert.match(project.entity_key, /^v1:[A-Za-z0-9_-]{43}$/);
     assert.notEqual(session.entity_key, project.entity_key, 'a session and its project are two entities');
     assert.equal(isSameEntity(session, project), false);
   });
@@ -109,6 +111,54 @@ describe('VibeField Phase A identity surface', { skip: !native }, () => {
       false,
       'references minted under different contract versions are not the same reference',
     );
+  });
+
+  test('one entity has one reference, whichever surface names it', async () => {
+    // The trap this replaces: the catalog spelled the digest `1:<base64url>`
+    // and RFC 012A spelled the same digest `v1:<base64url>`, so a consumer
+    // string-comparing a persisted `externalRef` against an `entity_key` got a
+    // false negative on identical entities. Both are minted by
+    // `CanonicalEntityKey::derive`; only the text differed. This asserts the
+    // spelling is now shared, and would fail against either older encoding.
+    const catalogSessions = await identityEngine.listCatalogSessions({ limit: 50 });
+    const catalogProjects = await identityEngine.listCatalogProjects({ limit: 50 });
+    const project = catalogProjects.projects[0]!;
+
+    const historyProjects = await identityEngine.listHistoryProjects({ limit: 50 });
+    const historyProject = historyProjects.items.find((row) => row.nativeProjectKey === project.nativeProjectKey);
+    assert.ok(historyProject, 'the same project is on both surfaces');
+    assert.equal(
+      historyProject.externalRef,
+      project.externalRef,
+      'catalog and history name the project with one reference',
+    );
+
+    const historySessions = await identityEngine.listHistorySessions({
+      projectId: project.projectId,
+      limit: 50,
+    });
+    const byNativeId = new Map(catalogSessions.sessions.map((row) => [row.nativeSessionId, row.externalRef]));
+    let compared = 0;
+    for (const row of historySessions.items) {
+      const fromCatalog = byNativeId.get(row.nativeSessionId);
+      if (fromCatalog === undefined) continue;
+      assert.equal(row.externalRef, fromCatalog, 'catalog and history name the session with one reference');
+      compared += 1;
+    }
+    assert.ok(compared > 0, 'at least one session was on both surfaces to compare');
+
+    // A `SessionRef` a consumer builds from a persisted row is the reference,
+    // not a differently-spelled cousin of it.
+    const fromRow: SessionRef = {
+      external_entity_reference_version: REFERENCE_VERSION,
+      entity_key: byNativeId.values().next().value as string,
+    };
+    assert.match(fromRow.entity_key, /^v1:[A-Za-z0-9_-]{43}$/);
+
+    // And it still round-trips through the resolver that accepts it.
+    const resolved = await identityEngine.resolveCatalogEntity(project.externalRef);
+    assert.equal(resolved.kind, 'project');
+    assert.equal(resolved.project?.projectId, project.projectId);
   });
 
   test('native identity is namespaced', () => {

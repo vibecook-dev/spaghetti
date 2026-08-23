@@ -16,6 +16,11 @@ asks Spaghetti for in Phase A, and where each item is in `@vibecook/spaghetti-sd
 Everything below is generated from Rust. There is no hand-written TypeScript
 mirror to drift.
 
+Every generated type on this surface is importable by name from
+`@vibecook/spaghetti-sdk` — the identity contracts, `RuntimeSemanticValue`, and
+each per-family `*Fact` member of it — so a handler signature or a stored field
+can name the shape instead of deriving it.
+
 ## 1. Stable session and project references
 
 ```ts
@@ -54,12 +59,15 @@ Comparing the version too is deliberate: references minted under different
 contract majors are not comparable, and treating them as equal is exactly the
 identity conflict RFC 012A requires to stay explicit.
 
-> **Encoding trap.** Catalog and history *rows* carry `externalRef` as a string
-> with a `"1:"` prefix; the `entity_key` inside an `ExternalEntityRef` object
-> uses `"v1:"`. Same 32-byte digest, two textual spellings. Pass `row.externalRef`
-> straight back to `resolveCatalogEntity()` — that is what it accepts — but do
-> **not** string-compare it against `entity_key`, and do not build an
-> `ExternalEntityRef` by hand from it.
+> **One reference per entity.** A row's `externalRef` and the `entity_key`
+> inside an `ExternalEntityRef` are the same string for the same entity —
+> `"v1:<base64url 32-byte digest>"`, minted by `CanonicalEntityKey::derive` and
+> spelled by RFC 012A wherever it surfaces. String-compare them, use either as a
+> map key, pass either to `resolveCatalogEntity()`, or build an
+> `ExternalEntityRef` from a persisted row by pairing it with
+> `external_entity_reference_version: 1`. (Before 0.8.0 the catalog spelled the
+> same digest `"1:"`, so those comparisons silently failed; the tests in
+> `packages/sdk/src/__tests__/vibefield.test.ts` now pin the shared spelling.)
 
 ## 2. Native session id when provable, conflicts kept explicit
 
@@ -214,11 +222,6 @@ Full detail and the porting table:
   and an orphaned `tool_result` keeps content-block evidence without a guessed
   tool name. Both are recorded in
   [RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §7.
-- **The per-family value types are not nameable from the package entry point.**
-  `SemanticEvent.value` is a typed `RuntimeSemanticValue` and narrowing on
-  `family` narrows it, but the union and its `*Fact` members are not exported
-  and there is no `./generated` subpath. Derive what you need:
-  `type V = NonNullable<SemanticEvent['value']>`.
 - **No identity relations.** Alias, `SameEntity`, `Supersedes`, and `ReplacedBy`
   facts do not exist. A project moved without provable native identity becomes a
   new project. Conflicts are reported, never resolved.
