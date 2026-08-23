@@ -5,14 +5,16 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
 use crate::source::SourceRecord;
 
+use super::disposition::RecordMappingDisposition;
 use super::{
     AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey, CanonicalFactId,
     CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness, DependencyRevision,
-    FactRevisionId, QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality,
-    SemanticRevisionRef, SourceRecordId,
+    FactRevisionId, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue,
+    QualifiedValueQuality, SemanticRevisionRef, SourceRecordId, TimestampQuality,
 };
 
 const FACT_HASH_BYTES: usize = 32;
@@ -188,10 +190,6 @@ impl FactSemanticContext {
         self.object_key.as_ref()
     }
 
-    pub(crate) fn framing_contract_version(&self) -> u32 {
-        self.framing_contract_version
-    }
-
     pub fn source_record_id(&self, record: &SourceRecord) -> Result<SourceRecordId, AdapterError> {
         let logical_position = logical_record_position(record);
         SourceRecordId::derive(
@@ -308,20 +306,6 @@ impl FactProvenance {
         hasher.update(&self.local_fact_ordinal.to_be_bytes());
         FactId(*hasher.finalize().as_bytes())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TimestampQuality {
-    NativeExact,
-    NativeApproximate,
-    FileMetadataFallback,
-    Derived,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QualifiedTimestamp {
-    pub value: String,
-    pub quality: TimestampQuality,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,14 +534,16 @@ pub struct RunFact {
 /// Topology-neutral identity and lineage for one runtime actor. This is the
 /// canonical RFC 012C counterpart to the legacy catalog-local `RunFact` and
 /// deliberately contains no database IDs or adapter-specific actor kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ActorRunRole {
     Root,
     Child,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ActorRunRevisionFact {
     pub actor_run: CanonicalEntityKey,
     pub session: CanonicalEntityKey,
@@ -636,8 +622,9 @@ impl ActorRunRevisionFact {
 
 /// Orthogonal affiliation dimensions. An actor may simultaneously belong to
 /// both a team and a workflow; neither dimension changes response identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ActorAffiliationDimension {
     Team,
     Workflow,
@@ -645,15 +632,17 @@ pub enum ActorAffiliationDimension {
 
 /// Replaceable affiliation state. `Unknown` records explicit ambiguity;
 /// absence of a fact is not interpreted as either membership or removal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ActorAffiliationState {
     Present,
     Removed,
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ActorAffiliationRevisionFact {
     pub affiliation: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -733,8 +722,9 @@ impl ActorAffiliationRevisionFact {
 /// RFC 012C structured user-input request. One correlated lifecycle entity
 /// identified by native tool-use id; questions are typed rather than native
 /// payload fragments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum UserInputKind {
     Choice,
     MultiChoice,
@@ -742,8 +732,9 @@ pub enum UserInputKind {
     Mixed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum UserInputLifecycleState {
     #[serde(alias = "open")]
     Pending,
@@ -752,23 +743,26 @@ pub enum UserInputLifecycleState {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum UserInputOperation {
     Upsert,
     Retract,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(export)]
 pub struct UserInputOption {
     pub label: String,
     pub description: Option<String>,
     pub preview: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(export)]
 pub struct UserInputQuestion {
     pub header: Option<String>,
     pub prompt: String,
@@ -776,7 +770,8 @@ pub struct UserInputQuestion {
     pub multi_select: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct UserInputRequestRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -899,16 +894,18 @@ impl UserInputRequestRevisionFact {
 
 const MAX_MESSAGE_CONTENT_BLOCKS: usize = 32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum MessageRevisionRole {
     User,
     Assistant,
     System,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum TaskLifecycleState {
     Created,
     Updated,
@@ -920,7 +917,8 @@ pub enum TaskLifecycleState {
 
 /// RFC 012C current-generation message. Ordered block keys are the complete
 /// snapshot when completeness is complete; a partial list cannot prove absence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct MessageRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -987,8 +985,9 @@ impl MessageRevisionFact {
 /// cross the common boundary only as typed fields or a digest-bound extension;
 /// arbitrary native JSON remains retention-policy evidence, not semantic
 /// reducer state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(export)]
 pub enum ContentBlockRevisionValue {
     Text {
         text: String,
@@ -999,22 +998,27 @@ pub enum ContentBlockRevisionValue {
     },
     ToolCall {
         tool_name: String,
+        #[ts(as = "Vec<u8>")]
         input_digest: [u8; 32],
     },
     ToolResult {
+        #[ts(as = "Vec<u8>")]
         content_digest: [u8; 32],
         is_error: bool,
     },
     Image {
         media_type: String,
+        #[ts(as = "Vec<u8>")]
         data_hash: [u8; 32],
     },
     Document {
         media_type: String,
+        #[ts(as = "Vec<u8>")]
         data_hash: [u8; 32],
     },
     NativeExtension {
         native_kind: String,
+        #[ts(as = "Vec<u8>")]
         value_digest: [u8; 32],
     },
 }
@@ -1023,8 +1027,9 @@ pub enum ContentBlockRevisionValue {
 /// message log. `message` is the topology-neutral canonical message fact key;
 /// block identity itself is supplied to `FactBatch` by a declared native key
 /// or a deterministic message/ordinal fallback.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(export)]
 pub struct ContentBlockRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -1261,8 +1266,9 @@ fn push_content_block_revision_value(output: &mut Vec<u8>, value: &ContentBlockR
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum NativeCompactionPhase {
     Started,
     Boundary,
@@ -1270,8 +1276,9 @@ pub enum NativeCompactionPhase {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum NativeProgressState {
     Pending,
     Active,
@@ -1281,8 +1288,9 @@ pub enum NativeProgressState {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum NativeQueueOperation {
     Enqueue,
     Dequeue,
@@ -1292,8 +1300,9 @@ pub enum NativeQueueOperation {
 
 /// Closed, typed native marker values. Host assessments deliberately have no
 /// representation here; they belong to a distinct future assessment family.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[ts(export)]
 pub enum NativeRuntimeMarkerValue {
     Compaction {
         phase: NativeCompactionPhase,
@@ -1304,17 +1313,20 @@ pub enum NativeRuntimeMarkerValue {
         state: NativeProgressState,
         completed: Option<u64>,
         total: Option<u64>,
+        #[ts(as = "Option<Vec<u8>>")]
         detail_digest: Option<[u8; 32]>,
     },
     Queue {
         operation: NativeQueueOperation,
         depth: Option<u64>,
+        #[ts(as = "Option<Vec<u8>>")]
         item_digest: Option<[u8; 32]>,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(export)]
 pub struct NativeRuntimeMarkerProvenance {
     pub native_field: String,
     pub normalization_contract_version: u32,
@@ -1325,8 +1337,9 @@ pub struct NativeRuntimeMarkerProvenance {
 /// source-generation loss removes the entity. Quality is intentionally
 /// restricted to exact/native-claimed evidence so a host heuristic cannot be
 /// serialized as a native marker.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
+#[ts(export)]
 pub struct NativeRuntimeMarkerRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -1562,7 +1575,8 @@ fn push_optional_u64(output: &mut Vec<u8>, value: Option<u64>) {
 
 /// RFC 012C task revision. Individual upserts are revisioned entities; a
 /// complete owned-set snapshot may retract members absent from that set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct TaskRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -1647,7 +1661,8 @@ const MAX_PLAN_STEPS: usize = 32;
 /// RFC 012C plan revision. One revisioned entity; a complete ordered step
 /// snapshot replaces prior steps, and a complete owned-set may retract members
 /// absent from that set.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct PlanRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -1737,8 +1752,9 @@ impl PlanRevisionFact {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ToolRevisionKind {
     Call,
     Result,
@@ -1747,7 +1763,8 @@ pub enum ToolRevisionKind {
 /// RFC 012C tool call or result. Calls and results are separate correlated
 /// lifecycle entities; unmatched results are retained, and correlation updates
 /// the relationship without changing either entity key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct ToolRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -1807,8 +1824,9 @@ impl ToolRevisionFact {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum EffectiveStateDimension {
     Model,
     Effort,
@@ -1816,8 +1834,9 @@ pub enum EffectiveStateDimension {
     PermissionMode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum EffectiveStateEvidenceKind {
     ConfiguredIntent,
     ResponseObserved,
@@ -1825,8 +1844,9 @@ pub enum EffectiveStateEvidenceKind {
 }
 
 /// Authority that proves one qualified effective-state value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum EffectiveStateValueAuthority {
     NativeConfiguration,
     NativeResponse,
@@ -1834,7 +1854,8 @@ pub enum EffectiveStateValueAuthority {
 }
 
 /// Bounded native coordinate used to normalize an effective-state value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct EffectiveStateValueProvenance {
     pub native_field: String,
     pub normalization_contract_version: u32,
@@ -1845,7 +1866,8 @@ pub type EffectiveStateQualifiedValue<T> =
 
 /// RFC 012C effective runtime state. One revisioned entity per actor/dimension;
 /// absence is unknown, not an inherited default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct EffectiveStateRevisionFact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
@@ -2538,41 +2560,27 @@ pub struct RunEvidenceFact {
     pub source_time: Option<QualifiedTimestamp>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_creation_tokens: u64,
-    pub cache_read_tokens: u64,
-}
-
-impl TokenUsage {
-    pub fn is_zero(self) -> bool {
-        self.input_tokens == 0
-            && self.output_tokens == 0
-            && self.cache_creation_tokens == 0
-            && self.cache_read_tokens == 0
-    }
-}
-
 /// How a native usage response is identified inside one source object and
 /// generation. The enclosing canonical fact key supplies that scope.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum UsageResponseIdentity {
     NativeMessageId,
     SourceRecordFallback,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum UsageValueAuthority {
     NativeResponse,
     AdapterDerived,
 }
 
 /// Bounded evidence describing how one common value maps to native evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct UsageValueProvenance {
     pub native_field: String,
     pub normalization_contract_version: u32,
@@ -2580,7 +2588,8 @@ pub struct UsageValueProvenance {
 
 pub type UsageQualifiedValue<T> = QualifiedValue<T, UsageValueAuthority, UsageValueProvenance>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct UsageBucketsV2 {
     pub input_tokens: UsageQualifiedValue<u64>,
     pub output_tokens: UsageQualifiedValue<u64>,
@@ -2591,11 +2600,13 @@ pub struct UsageBucketsV2 {
 /// RFC 012C response-level, replaceable usage snapshot. `FactSemanticRevision`
 /// owns its public usage/revision identity; this payload carries the typed
 /// reducer value and stable canonical session/actor attribution.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
 pub struct UsageRevisionV2Fact {
     pub session: CanonicalEntityKey,
     pub actor_run: CanonicalEntityKey,
     #[serde(with = "base64_bytes")]
+    #[ts(as = "String")]
     pub response_key: Vec<u8>,
     pub response_identity: UsageResponseIdentity,
     pub native_message_id: Option<String>,
@@ -2917,44 +2928,6 @@ pub enum Fact {
 pub(crate) const MAX_UNKNOWN_NATIVE_KIND_BYTES: usize = 128;
 pub(crate) const MAX_UNKNOWN_REASON_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_UNKNOWN_RAW_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
-
-/// Value-free RFC 012A evidence retained for an unknown source record
-/// regardless of the selected raw-retention policy. The excerpt is produced
-/// by the common decode boundary and contains no native values.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BoundedNativeEvidence {
-    pub source_record_id: SourceRecordId,
-    pub observed_bytes: u64,
-    pub payload_digest: [u8; 32],
-    pub sanitized_excerpt: Vec<u8>,
-}
-
-/// RFC 012A's topology-independent outcome for one complete source record.
-///
-/// The common decode boundary constructs these values after adapter return.
-/// They live beside `FactBatch` so a durable batch cannot lose or reorder the
-/// record-level classification while append slices are merged for commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RecordMappingDisposition {
-    Mapped {
-        fact_count: u32,
-    },
-    IgnoredKnown {
-        reason_code: String,
-    },
-    RetainedUnknown {
-        family_hint: Option<String>,
-        bounded_evidence: BoundedNativeEvidence,
-    },
-    BufferedIncomplete,
-    Malformed {
-        reason_code: String,
-        bounded_diagnostic: Vec<u8>,
-    },
-    UnsupportedVersion {
-        observed_version: String,
-    },
-}
 
 impl Fact {
     pub fn kind(&self) -> &'static str {
@@ -3356,6 +3329,33 @@ impl FactBatch {
                 stable_native_session_key,
                 declared_native_run_discriminator,
             )
+    }
+
+    /// Canonical identity an object-scoped native fact *will* receive from
+    /// [`Self::push_native_object_scoped_with_revision`]. A dependent fact
+    /// (an RFC 012C content block naming its message) must reference its owner
+    /// by canonical fact identity, so the adapter derives that identity from
+    /// the same inputs rather than reconstructing it from a pushed envelope.
+    pub fn canonical_object_scoped_fact_id(
+        &self,
+        generation: u64,
+        fact_kind: &str,
+        stable_native_fact_key: &[u8],
+    ) -> Result<CanonicalFactId, AdapterError> {
+        let context = self.semantic_context.as_ref().ok_or_else(|| {
+            AdapterError::invalid_contract(
+                "canonical fact derivation requires a bound semantic decode context",
+            )
+        })?;
+        let semantic_key =
+            context.object_scoped_native_fact_key(generation, stable_native_fact_key)?;
+        CanonicalFactId::native(
+            context.adapter_id.as_str(),
+            &context.source_instance_key,
+            fact_kind,
+            &semantic_key,
+        )
+        .map_err(semantic_identity_error)
     }
 
     /// Emit a native fact whose revision is not fully owned by the primary

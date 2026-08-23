@@ -89,19 +89,20 @@ const TRANSCRIPT_STREAM: &str = "chat-history";
 const SUMMARY_STREAM: &str = "session-summaries";
 const EVENTS_STREAM: &str = "session-events";
 const SIGNALS_STREAM: &str = "session-signals";
-const UPDATES_STREAM: &str = "ignored-ui-updates";
+const UPDATES_STREAM: &str = "session-updates";
 
 const MEMBERSHIP_DECODER: &str = "grok-session-membership";
 const TRANSCRIPT_DECODER: &str = "grok-chat-record";
 const SUMMARY_DECODER: &str = "grok-summary";
 const EVENTS_DECODER: &str = "grok-event";
 const SIGNALS_DECODER: &str = "grok-signals";
-const UPDATES_DECODER: &str = "grok-ignored-update";
+const UPDATES_DECODER: &str = "grok-session-update";
 
 const OBJECT_CONTEXT_VERSION: u32 = 1;
 const DECODER_STATE_VERSION: u32 = 1;
 const SUMMARY_MAX_BYTES: usize = 1024 * 1024;
 const SIGNALS_MAX_BYTES: usize = 256 * 1024;
+const MAX_PROMPT_ID_BYTES: usize = 256;
 const EVENT_DEPENDENCY_MAX_BYTES: usize = 8 * 1024 * 1024;
 const SEARCH_TEXT_MAX_UTF16: usize = 2_000;
 
@@ -127,14 +128,14 @@ impl GrokAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Grok adapter id is valid"),
                 display_name: "Grok".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 1,
+                contract_version: 2,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         "grok-support-2026-08-15-candidate",
                         env!("CARGO_PKG_VERSION"),
-                        1,
-                        "sha256:5a6fd2d1adda4dad702b421a18dd0fbe40fec16bc68d7fc99cf65c7b913a2c18",
-                        "sha256:1dbb22fc2da9db80190903b1290679abaad8301d9df1a6e0d3e54dfac6c0e60c",
+                        2,
+                        "sha256:084e76087a1da70b1f985f8673841c47426b9672919ff5e8d39a0603a1010cc6",
+                        "sha256:52a6f4949c76ccdde9c71a8601a1fe654010ba332a0d04fabe5d91777a85c520",
                         "sha256:2da094e844d59bb1d8cabcc6797fe4a0a2ccf61eaba95c31249fa6beedead173",
                     )
                     .expect("static Grok support binding is valid"),
@@ -305,13 +306,13 @@ impl AgentAdapter for GrokAdapter {
                 driver: DriverSpec::AppendDelimited(AppendDelimitedConfig::json_lines()),
                 selector: selector(vec!["**/updates.jsonl"]),
                 decoder: DecoderId::new(UPDATES_DECODER)?,
-                authority: StreamAuthority::IgnoredDerived,
+                authority: StreamAuthority::Canonical,
                 entity_scope: EntityScope::Session,
-                priority: IngestPriority::Maintenance,
+                priority: IngestPriority::Interactive,
                 consistency: ConsistencyPolicy::IncrementalCursor,
                 deletion: DeletionPolicy::MirrorSource,
-                retention: RawRetentionPolicy::None,
-                capabilities: Vec::new(),
+                retention: RawRetentionPolicy::HashOnly,
+                capabilities: usage_capabilities(),
             },
         ];
         for stream in &streams {
@@ -360,8 +361,8 @@ impl AgentAdapter for GrokAdapter {
             ),
             SUMMARY_DECODER => decode_summary(self.adapter_id(), &session, record, output),
             EVENTS_DECODER => decode_event(self.adapter_id(), &session, record, output),
-            SIGNALS_DECODER => decode_signals(&session, record, output),
-            UPDATES_DECODER => Ok(DecodeDisposition::IgnoredKnown),
+            SIGNALS_DECODER => Ok(DecodeDisposition::IgnoredKnown),
+            UPDATES_DECODER => decode_session_update(&session, record, output),
             _ => Err(AdapterError::unknown_decoder(context.decoder)),
         }
     }
@@ -439,10 +440,10 @@ fn grok_capabilities() -> Vec<CapabilityDeclaration> {
         ),
         capability(
             USAGE_INPUT_TOKENS,
-            SupportLevel::Estimated,
-            CapabilityGranularity::Session,
+            SupportLevel::Native,
+            CapabilityGranularity::Message,
             Availability::EventuallyLive,
-            Some("signals.contextTokensUsed is retained at session scope and never fabricated as exact per-message usage"),
+            Some("turn_completed updates carry exact per-prompt token counts; cacheCreationTokens is absent on some turns and stays unknown"),
         ),
         capability(
             SOURCE_LIVE,
@@ -1103,7 +1104,18 @@ fn decode_event(
     Ok(DecodeDisposition::Applied)
 }
 
-fn decode_signals(
+/// One `turn_completed` update is one response contribution.
+///
+/// Grok's session-update stream reports a turn's own token counts when the
+/// turn ends: `params.prompt_id` names the response and `params.update.usage`
+/// carries the counters. That is exact native accounting, so it replaces the
+/// session-scoped `signals.contextTokensUsed` estimate this adapter used to
+/// publish — context occupancy was never per-response usage, only the closest
+/// evidence available before this stream was decoded.
+///
+/// `cacheCreationTokens` is absent on a minority of turns in the native
+/// corpus. RFC 012C section 7.2 makes that bucket unknown, never zero.
+fn decode_session_update(
     context: &GrokSessionContext,
     record: &SourceRecord,
     output: &mut FactBatch,
@@ -1111,28 +1123,39 @@ fn decode_signals(
     if record.state == SourceRecordState::Absent {
         return Ok(DecodeDisposition::IgnoredKnown);
     }
-    let value: Value = match serde_json::from_slice(&record.payload) {
-        Ok(value) => value,
-        Err(_) => return Ok(DecodeDisposition::RetryTransient),
+    let Ok(value) = serde_json::from_slice::<Value>(&record.payload) else {
+        // The stream is a UI transcript; a line this decoder cannot read is
+        // not evidence of anything and is not drift.
+        return Ok(DecodeDisposition::IgnoredKnown);
     };
-    let Some(object) = value.as_object() else {
-        return Ok(DecodeDisposition::RetryTransient);
+    let Some(params) = value.get("params").and_then(Value::as_object) else {
+        return Ok(DecodeDisposition::IgnoredKnown);
     };
-    let context_tokens = object
-        .get("contextTokensUsed")
-        .or_else(|| object.get("context_tokens_used"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    if context_tokens == 0 {
+    let Some(update) = params.get("update").and_then(Value::as_object) else {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    };
+    if update.get("type").and_then(Value::as_str) != Some("turn_completed") {
         return Ok(DecodeDisposition::IgnoredKnown);
     }
-    // Grok publishes no per-response counters. `contextTokensUsed` is the
-    // session's current context occupancy, so it is carried as one replaceable
-    // session-scoped estimate rather than being split across responses it
-    // cannot be attributed to.
-    let mut response_key = Vec::with_capacity(context.session_id.len() + 24);
-    response_key.extend_from_slice(b"grok-session-signals-v1\0");
-    push_key_component(&mut response_key, context.session_id.as_bytes());
+    let Some(usage) = update.get("usage").and_then(Value::as_object) else {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    };
+
+    // `prompt_id` is the native response identity. Without it the turn cannot
+    // be attributed to a response, and a fabricated key would merge unrelated
+    // turns, so the record stays unmapped.
+    let Some(prompt_id) = params
+        .get("prompt_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_PROMPT_ID_BYTES)
+    else {
+        return Ok(DecodeDisposition::IgnoredKnown);
+    };
+
+    // The common contract requires a native response key to *be* the native
+    // id; object and generation scoping comes from the push below.
+    let response_key = prompt_id.as_bytes().to_vec();
 
     let session = output.canonical_entity_key("session", context.session_id.as_bytes())?;
     let actor_run = output.canonical_root_actor_run_key(context.session_id.as_bytes(), None)?;
@@ -1140,14 +1163,22 @@ fn decode_signals(
         session,
         actor_run,
         response_key: response_key.clone(),
-        response_identity: UsageResponseIdentity::SourceRecordFallback,
-        native_message_id: None,
+        response_identity: UsageResponseIdentity::NativeMessageId,
+        native_message_id: Some(prompt_id.to_string()),
         request_id: None,
         buckets: UsageBucketsV2 {
-            input_tokens: grok_estimated_context_tokens(context_tokens),
-            output_tokens: grok_unknown_bucket("signals.output_tokens"),
-            cache_creation_input_tokens: grok_unknown_bucket("signals.cache_creation_tokens"),
-            cache_read_input_tokens: grok_unknown_bucket("signals.cache_read_tokens"),
+            input_tokens: grok_turn_bucket(usage, "inputTokens", "update.usage.input_tokens"),
+            output_tokens: grok_turn_bucket(usage, "outputTokens", "update.usage.output_tokens"),
+            cache_creation_input_tokens: grok_turn_bucket(
+                usage,
+                "cacheCreationTokens",
+                "update.usage.cache_creation_tokens",
+            ),
+            cache_read_input_tokens: grok_turn_bucket(
+                usage,
+                "cachedReadTokens",
+                "update.usage.cached_read_tokens",
+            ),
         },
         model: None,
         effort: None,
@@ -1164,23 +1195,29 @@ fn decode_signals(
     Ok(DecodeDisposition::Applied)
 }
 
-/// Context occupancy is evidence about the session's input side, but it is not
-/// a native per-response counter: it is qualified `Estimated` with partial
-/// completeness so a consumer can never read it as exact accounting.
-fn grok_estimated_context_tokens(value: u64) -> UsageQualifiedValue<u64> {
+/// One native counter, exact when the turn reported it and unknown when it did
+/// not. A missing bucket is never read as zero.
+fn grok_turn_bucket(
+    usage: &serde_json::Map<String, Value>,
+    native_key: &str,
+    native_field: &str,
+) -> UsageQualifiedValue<u64> {
+    let Some(value) = usage.get(native_key).and_then(Value::as_u64) else {
+        return grok_unknown_bucket(native_field);
+    };
     QualifiedValue::from_parts(
         Some(value),
-        QualifiedValueQuality::Estimated,
-        UsageValueAuthority::AdapterDerived,
-        ContractCompleteness::Partial,
+        QualifiedValueQuality::Exact,
+        UsageValueAuthority::NativeResponse,
+        ContractCompleteness::Complete,
         None,
         None,
         UsageValueProvenance {
-            native_field: "signals.context_tokens_used".to_string(),
+            native_field: native_field.to_string(),
             normalization_contract_version: 1,
         },
     )
-    .expect("static Grok usage-v2 estimated value is valid")
+    .expect("Grok turn usage value is within the common bounds")
 }
 
 fn grok_unknown_bucket(native_field: &str) -> UsageQualifiedValue<u64> {
@@ -1707,8 +1744,7 @@ mod tests {
             .iter()
             .any(|stream| matches!(stream.driver, DriverSpec::DirectorySnapshot(_))));
         assert!(streams.iter().any(|stream| {
-            stream.id.as_str() == UPDATES_STREAM
-                && stream.authority == StreamAuthority::IgnoredDerived
+            stream.id.as_str() == UPDATES_STREAM && stream.authority == StreamAuthority::Canonical
         }));
     }
 
@@ -1784,17 +1820,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(timed_messages, 16);
-        let estimated: i64 = connection
+        let exact: i64 = connection
             .query_row(
                 "SELECT COALESCE(SUM(input_tokens), 0) FROM usage_v2_response_contributions",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(estimated, 17_400);
-        // One replaceable session-scoped revision per session with signals,
-        // never one contribution per observed sidecar record.
-        assert_eq!(count("usage_v2_response_contributions"), 4);
+        // 1,250 from the corrected prompt-0001 turn plus 410 from prompt-0002.
+        // The first prompt-0001 turn reported 1,200 and was replaced, not added.
+        assert_eq!(exact, 1_660);
+        // One contribution per native prompt, not one per observed record.
+        assert_eq!(count("usage_v2_response_contributions"), 2);
+        let unknown_cache_creation: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM usage_v2_response_contributions \
+                 WHERE cache_creation_input_tokens IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            unknown_cache_creation, 1,
+            "a turn that reported no cacheCreationTokens leaves that bucket unknown, not zero"
+        );
     }
 
     #[test]
@@ -1990,7 +2039,11 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(usage, 1_234);
+        assert_eq!(
+            usage, 0,
+            "context occupancy is not per-response usage; without a turn_completed \
+             update this session contributes none"
+        );
         let timestamps = connection
             .prepare("SELECT source_time FROM canonical_messages ORDER BY cursor_end")
             .unwrap()

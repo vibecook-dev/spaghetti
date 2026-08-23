@@ -7,8 +7,10 @@
 mod builtin_support;
 mod catalog;
 mod contract;
+mod disposition;
 mod facts;
 mod registry;
+mod runtime_value;
 mod scope;
 mod semantic;
 mod support;
@@ -34,6 +36,8 @@ pub use contract::{
     SourceObjectListRequest, SourceQuery, SourceQueryBounds, SourceRoot, SourceRows,
     SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
+pub(crate) use disposition::{BoundedNativeEvidence, RecordMappingDisposition};
+pub(crate) use facts::MAX_UNKNOWN_RAW_PAYLOAD_BYTES;
 pub use facts::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, ArtifactCapture, ArtifactContentFact,
@@ -48,21 +52,19 @@ pub use facts::{
     MessageFact, MessageRevisionFact, MessageRevisionRole, MessageRole, NativeCompactionPhase,
     NativeProgressState, NativeQueueOperation, NativeRuntimeMarkerProvenance,
     NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PersistedToolResultFact,
-    PlanRevisionFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact,
-    QualifiedTimestamp, RelationStrength, RunEvidenceFact, RunFact, SessionFact,
-    SessionIndexEntrySnapshot, SessionIndexSnapshotFact, TaskCollectionKind, TaskItemSnapshot,
-    TaskLifecycleState, TaskRevisionFact, TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus,
-    TeamInboxMessageSnapshot, TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact,
-    TimestampQuality, ToolRevisionFact, ToolRevisionKind, UsageBucketsV2, UsageQualifiedValue,
-    UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
-    UserInputKind, UserInputLifecycleState, UserInputOperation, UserInputOption, UserInputQuestion,
+    PlanRevisionFact, PlanSnapshotFact, PresenceFact, ProjectMemoryDocumentFact, RelationStrength,
+    RunEvidenceFact, RunFact, SessionFact, SessionIndexEntrySnapshot, SessionIndexSnapshotFact,
+    TaskCollectionKind, TaskItemSnapshot, TaskLifecycleState, TaskRevisionFact,
+    TaskSnapshotCoverage, TaskSnapshotFact, TaskStatus, TeamInboxMessageSnapshot,
+    TeamInboxSnapshotFact, TeamMemberSnapshot, TeamSnapshotFact, ToolRevisionFact,
+    ToolRevisionKind, UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity,
+    UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance, UserInputKind,
+    UserInputLifecycleState, UserInputOperation, UserInputOption, UserInputQuestion,
     UserInputRequestRevisionFact, WorkflowMemberEventFact, WorkflowMemberEventKind,
     WorkflowSnapshotFact, WorkflowStatus,
 };
-pub(crate) use facts::{
-    BoundedNativeEvidence, RecordMappingDisposition, MAX_UNKNOWN_RAW_PAYLOAD_BYTES,
-};
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
+pub use runtime_value::RuntimeSemanticValue;
 pub use scope::{
     ScopeContractError, ScopeDirectoryIdentityAuthority, ScopeJoinEvidence, ScopeJoinIdentityInput,
     ScopeJoinParameterSet, ScopeJoinUpdate, ScopeObservationSourceBinding, ScopeProgramDeclaration,
@@ -76,11 +78,11 @@ pub use semantic::{
     CoverageDeclarationDigest, CoverageDomain, CoverageError, CoverageMembershipRevision,
     CoverageObjectKey, CoveragePosition, CoveragePositionKind, CoveragePositionRef,
     CoverageProvenance, CoverageScope, CoverageSetCompleteness, CoverageStatus, CoverageStreamKey,
-    ExternalEntityRef, FactRevisionId, NativeIdentity, NativeIdentityClaim, QualifiedUnknownReason,
-    QualifiedValue, QualifiedValueQuality, SemanticContractError, SemanticRevisionRef,
-    SourceCoveragePoint, SourceCoverageSet, SourceRecordId, EXTERNAL_ENTITY_REFERENCE_VERSION,
-    SEMANTIC_REFERENCE_CONTRACT_VERSION, SOURCE_COVERAGE_CONTRACT_VERSION,
-    SOURCE_COVERAGE_SET_CONTRACT_VERSION,
+    ExternalEntityRef, FactRevisionId, NativeIdentity, NativeIdentityClaim, QualifiedTimestamp,
+    QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality, SemanticContractError,
+    SemanticRevisionRef, SourceCoveragePoint, SourceCoverageSet, SourceRecordId, TimestampQuality,
+    EXTERNAL_ENTITY_REFERENCE_VERSION, SEMANTIC_REFERENCE_CONTRACT_VERSION,
+    SOURCE_COVERAGE_CONTRACT_VERSION, SOURCE_COVERAGE_SET_CONTRACT_VERSION,
 };
 pub use support::{
     classify_runtime_support, select_contract_versions, verify_support_release_bundle,

@@ -36,6 +36,10 @@ use crate::adapter::{
     WorkflowStatus,
 };
 use crate::claude::message_extractor;
+use crate::claude::runtime_facts::{
+    emit_task_snapshot_runtime_facts, emit_transcript_runtime_facts, runtime_task_items,
+    TranscriptRuntimeRecord, TranscriptRuntimeState,
+};
 use crate::claude::session_metadata;
 use crate::claude::types::content::{
     AssistantContentBlock, ToolResultContent, UserContentBlock, UserMessageContent,
@@ -45,6 +49,12 @@ use crate::source::{
     platform_path_key, AppendDelimitedConfig, IngestPriority, PresenceObjectConfig,
     ReplaceDocumentConfig, SourceDriverError, SourceRecord, SourceRecordState,
 };
+
+mod capabilities;
+mod sidecars;
+
+use capabilities::*;
+use sidecars::*;
 
 const ADAPTER_ID: &str = "claude-code";
 
@@ -132,7 +142,10 @@ const PROJECT_MEMORY_DECODER: &str = "claude-project-memory";
 const PERSISTED_TOOL_RESULT_DECODER: &str = "claude-persisted-tool-result";
 const INTERPRETATION_SETTINGS_DECODER: &str = "claude-interpretation-settings";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
-const TRANSCRIPT_DECODER_STATE_VERSION: u8 = 1;
+/// Bumped to 2 when RFC 012C runtime families were added: the state now
+/// carries tool correlation and effective-state carry-over, so a generation
+/// decoded by version 1 must replay rather than resume.
+const TRANSCRIPT_DECODER_STATE_VERSION: u8 = 2;
 const TRANSCRIPT_DECODER_STATE_BYTES: usize = 67;
 const TRANSCRIPT_STATE_SESSION_DECLARED: u8 = 1 << 0;
 const TRANSCRIPT_STATE_RUN_DECLARED: u8 = 1 << 1;
@@ -196,15 +209,15 @@ impl ClaudeCodeAdapter {
                 id: AdapterId::new(ADAPTER_ID).expect("static Claude adapter id is valid"),
                 display_name: "Claude Code".to_string(),
                 adapter_version: env!("CARGO_PKG_VERSION").to_string(),
-                contract_version: 22,
+                contract_version: 23,
                 support_binding: Some(
                     AdapterSupportBinding::new(
                         "claude-code-support-2026-08-21-candidate",
                         env!("CARGO_PKG_VERSION"),
-                        22,
+                        23,
                         "sha256:d88b3e31bb3b8d7ebe7e3147a30adf774801301f164ccdfa8518545b98cb34ab",
                         "sha256:a1da27b6370c89e6d8bbc8b8fe671ab3cee4544758699729970617b29fd4ae0d",
-                        "sha256:b28608dcf0f0a5d6d55475b121cd4162b592c4f6a5e47e7284d3ba2b2a4434a8",
+                        "sha256:d7f48d920b393ca8fbc6767e3262619955ffa82e5d6ea43909087836d89101ad",
                     )
                     .expect("static Claude support binding is valid"),
                 ),
@@ -235,17 +248,6 @@ impl ClaudeCodeAdapter {
 
     fn adapter_id(&self) -> &AdapterId {
         &self.manifest.id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_test_support(
-        mut self,
-        binding: AdapterSupportBinding,
-        scope_programs: ScopeProgramManifest,
-    ) -> Self {
-        self.manifest.support_binding = Some(binding);
-        self.manifest.scope_programs = Some(scope_programs);
-        self
     }
 }
 
@@ -1017,264 +1019,6 @@ fn append_scope_join(
     Ok(())
 }
 
-fn claude_capabilities() -> Vec<CapabilityDeclaration> {
-    let live_native = |id, granularity| {
-        capability(
-            id,
-            SupportLevel::Native,
-            granularity,
-            Availability::Live,
-            None,
-        )
-    };
-    vec![
-        live_native(HISTORY_SESSIONS, CapabilityGranularity::Session),
-        live_native(HISTORY_MESSAGES, CapabilityGranularity::Message),
-        live_native(HISTORY_CONTENT_BLOCKS, CapabilityGranularity::Message),
-        live_native(HISTORY_TIMESTAMPS, CapabilityGranularity::Message),
-        live_native(HISTORY_MODEL_IDENTITY, CapabilityGranularity::Message),
-        live_native(RUNTIME_SESSION_ACTIVITY, CapabilityGranularity::Run),
-        live_native(RUNTIME_USAGE_V2, CapabilityGranularity::Message),
-        capability(
-            RUNTIME_SUBAGENTS,
-            SupportLevel::Derived,
-            CapabilityGranularity::Run,
-            Availability::Live,
-            Some(
-                "child identity is native; layout lineage remains durable and matching native spawn/metadata tool-use IDs strengthen it explicitly; silence never implies completion",
-            ),
-        ),
-        live_native(RUNTIME_TEAMS, CapabilityGranularity::Team),
-        live_native(RUNTIME_TEAM_INBOX, CapabilityGranularity::Message),
-        capability(
-            RUNTIME_PRESENCE,
-            SupportLevel::Native,
-            CapabilityGranularity::Custom("process_presence".to_string()),
-            Availability::Live,
-            Some(
-                "agent-owned registry presence is durable; host PID liveness and time-based freshness remain transient assessments",
-            ),
-        ),
-        capability(
-            RUNTIME_TASKS,
-            SupportLevel::Native,
-            CapabilityGranularity::Custom("task".to_string()),
-            Availability::Live,
-            Some(
-                "todo files are complete snapshots, numbered task files are item documents, and task status never implies run completion",
-            ),
-        ),
-        capability(
-            RUNTIME_ARTIFACTS,
-            SupportLevel::Native,
-            CapabilityGranularity::Custom("artifact".to_string()),
-            Availability::Live,
-            Some(
-                "file-history metadata and backup blobs are joined by native session and backup name; capture is session-attributed and never implies that a run produced the tracked file",
-            ),
-        ),
-        capability(
-            RUNTIME_WORKFLOWS,
-            SupportLevel::Native,
-            CapabilityGranularity::Custom("workflow".to_string()),
-            Availability::EventuallyLive,
-            Some(
-                "workflow summaries and append journals preserve native workflow/member state; workflow terminal status never implies terminal child-run state",
-            ),
-        ),
-        capability(
-            CONTEXT_PROJECT_MEMORY,
-            SupportLevel::Native,
-            CapabilityGranularity::Custom("memory_document".to_string()),
-            Availability::Live,
-            Some(
-                "project memory is a set of independently replaceable Markdown documents; MEMORY.md is the native index and links do not assert relations",
-            ),
-        ),
-        capability(
-            HISTORY_PERSISTED_TOOL_RESULTS,
-            SupportLevel::Native,
-            CapabilityGranularity::Custom("persisted_tool_result".to_string()),
-            Availability::Live,
-            Some(
-                "immediate UTF-8 tool-results/*.txt documents supplement transcript content; filename stems are native identifiers but do not always denote a model tool call",
-            ),
-        ),
-        capability(
-            CONFIGURATION_INTERPRETATION_SETTINGS,
-            SupportLevel::Native,
-            CapabilityGranularity::Instance,
-            Availability::Live,
-            Some(
-                "global and local root settings are reduced with native scalar precedence and array merging; sensitive values and command bodies are excluded",
-            ),
-        ),
-        live_native(USAGE_INPUT_TOKENS, CapabilityGranularity::Message),
-        live_native(USAGE_OUTPUT_TOKENS, CapabilityGranularity::Message),
-        live_native(USAGE_CACHE_TOKENS, CapabilityGranularity::Message),
-        live_native(SOURCE_LIVE, CapabilityGranularity::Instance),
-        live_native(SOURCE_RECONCILE, CapabilityGranularity::Instance),
-        live_native(SOURCE_RESUME_CURSOR, CapabilityGranularity::Record),
-    ]
-}
-
-fn capability(
-    id: &'static str,
-    level: SupportLevel,
-    granularity: CapabilityGranularity,
-    availability: Availability,
-    notes: Option<&'static str>,
-) -> CapabilityDeclaration {
-    CapabilityDeclaration {
-        id: CapabilityId::new(id).expect("static Claude capability id is valid"),
-        support: CapabilitySupport {
-            level,
-            granularity,
-            availability,
-            notes: notes.map(str::to_owned),
-        },
-    }
-}
-
-fn transcript_capabilities() -> Vec<CapabilityId> {
-    [
-        HISTORY_SESSIONS,
-        HISTORY_MESSAGES,
-        HISTORY_CONTENT_BLOCKS,
-        HISTORY_TIMESTAMPS,
-        HISTORY_MODEL_IDENTITY,
-        RUNTIME_SESSION_ACTIVITY,
-        RUNTIME_USAGE_V2,
-        USAGE_INPUT_TOKENS,
-        USAGE_OUTPUT_TOKENS,
-        USAGE_CACHE_TOKENS,
-        RUNTIME_SUBAGENTS,
-        RUNTIME_ARTIFACTS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn capability_ids(ids: &[&str]) -> Vec<CapabilityId> {
-    ids.iter()
-        .map(|id| CapabilityId::new(*id).expect("static Claude capability id is valid"))
-        .collect()
-}
-
-fn subagent_metadata_capabilities() -> Vec<CapabilityId> {
-    [
-        RUNTIME_SUBAGENTS,
-        RUNTIME_TEAMS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn presence_capabilities() -> Vec<CapabilityId> {
-    [
-        RUNTIME_PRESENCE,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn task_capabilities() -> Vec<CapabilityId> {
-    [
-        RUNTIME_TASKS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn artifact_capabilities() -> Vec<CapabilityId> {
-    [
-        RUNTIME_ARTIFACTS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn workflow_capabilities() -> Vec<CapabilityId> {
-    [
-        RUNTIME_WORKFLOWS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn session_index_capabilities() -> Vec<CapabilityId> {
-    [
-        HISTORY_SESSIONS,
-        HISTORY_TIMESTAMPS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn project_memory_capabilities() -> Vec<CapabilityId> {
-    [
-        CONTEXT_PROJECT_MEMORY,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn persisted_tool_result_capabilities() -> Vec<CapabilityId> {
-    [
-        HISTORY_PERSISTED_TOOL_RESULTS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
-fn interpretation_settings_capabilities() -> Vec<CapabilityId> {
-    [
-        CONFIGURATION_INTERPRETATION_SETTINGS,
-        SOURCE_LIVE,
-        SOURCE_RECONCILE,
-        SOURCE_RESUME_CURSOR,
-    ]
-    .into_iter()
-    .map(|id| CapabilityId::new(id).expect("static Claude stream capability id is valid"))
-    .collect()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ClaudeTranscriptContext {
     project_slug: String,
@@ -1851,6 +1595,9 @@ struct ClaudeTranscriptDecoderState {
     first_prompt_declared: bool,
     cwd_hash: Option<[u8; 32]>,
     git_branch_hash: Option<[u8; 32]>,
+    /// RFC 012C correlation and effective-state carry-over. Bounded, and
+    /// owned by `runtime_facts` so this struct stays a flag record.
+    runtime: TranscriptRuntimeState,
 }
 
 impl ClaudeTranscriptDecoderState {
@@ -1858,7 +1605,7 @@ impl ClaudeTranscriptDecoderState {
         let Some(value) = value else {
             return Ok(Self::default());
         };
-        if value.len() != TRANSCRIPT_DECODER_STATE_BYTES {
+        if value.len() < TRANSCRIPT_DECODER_STATE_BYTES {
             return Err(AdapterError::new(
                 AdapterErrorClass::StreamFatal,
                 "claude_transcript_decoder_state_length",
@@ -1892,6 +1639,7 @@ impl ClaudeTranscriptDecoderState {
             cwd_hash: (present & TRANSCRIPT_STATE_CWD_PRESENT != 0).then_some(cwd_hash),
             git_branch_hash: (present & TRANSCRIPT_STATE_BRANCH_PRESENT != 0)
                 .then_some(git_branch_hash),
+            runtime: TranscriptRuntimeState::decode(&value[TRANSCRIPT_DECODER_STATE_BYTES..])?,
         })
     }
 
@@ -1912,6 +1660,7 @@ impl ClaudeTranscriptDecoderState {
         encoded.extend_from_slice(self.cwd_hash.as_ref().unwrap_or(&[0; 32]));
         encoded.extend_from_slice(self.git_branch_hash.as_ref().unwrap_or(&[0; 32]));
         debug_assert_eq!(encoded.len(), TRANSCRIPT_DECODER_STATE_BYTES);
+        encoded.extend_from_slice(&self.runtime.encode());
         output.set_next_decoder_state(encoded)
     }
 
@@ -1964,1958 +1713,6 @@ fn decoder_context_mismatch() -> AdapterError {
         "claude_decoder_context_mismatch",
         "Claude decoder does not match bootstrapped object kind",
     )
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeSubagentMetadataDocument {
-    agent_type: String,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    team_name: Option<String>,
-    #[serde(default)]
-    spawn_depth: Option<u32>,
-    #[serde(default)]
-    worktree_path: Option<String>,
-    #[serde(default)]
-    tool_use_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeTeamConfigDocument {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    created_at: i64,
-    lead_agent_id: String,
-    lead_session_id: String,
-    members: Vec<ClaudeTeamMemberDocument>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeTeamMemberDocument {
-    agent_id: String,
-    name: String,
-    #[serde(default)]
-    agent_type: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    prompt: Option<String>,
-    #[serde(default)]
-    color: Option<String>,
-    #[serde(default)]
-    plan_mode_required: Option<bool>,
-    joined_at: i64,
-    tmux_pane_id: String,
-    cwd: String,
-    subscriptions: Vec<String>,
-    #[serde(default)]
-    backend_type: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeTeamInboxMessageDocument {
-    from: String,
-    text: String,
-    #[serde(default)]
-    summary: Option<String>,
-    timestamp: String,
-    #[serde(default)]
-    color: Option<String>,
-    read: bool,
-    #[serde(default, rename = "msg_id")]
-    message_id: Option<String>,
-    #[serde(default, rename = "msgV")]
-    message_version: Option<u32>,
-    #[serde(default, rename = "type")]
-    kind: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeActiveSessionDocument {
-    pid: u32,
-    session_id: String,
-    cwd: String,
-    started_at: i64,
-    #[serde(default)]
-    kind: Option<String>,
-    #[serde(default)]
-    entrypoint: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    /// Deliberately decoded but not projected: observed values look like epoch
-    /// milliseconds, but native transition semantics are not fixture-proven.
-    #[serde(default, rename = "nameSince")]
-    _name_since: Option<i64>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    updated_at: Option<i64>,
-    #[serde(default)]
-    status_updated_at: Option<i64>,
-    #[serde(default)]
-    proc_start: Option<String>,
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    peer_protocol: Option<u32>,
-    #[serde(default)]
-    name_source: Option<String>,
-    #[serde(default)]
-    bridge_session_id: Option<String>,
-    #[serde(default)]
-    messaging_socket_path: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeTodoItemDocument {
-    content: String,
-    status: String,
-    #[serde(default)]
-    active_form: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeTaskItemDocument {
-    id: String,
-    subject: String,
-    description: String,
-    #[serde(default)]
-    active_form: Option<String>,
-    #[serde(default)]
-    owner: Option<String>,
-    status: String,
-    #[serde(default)]
-    blocks: Vec<String>,
-    #[serde(default)]
-    blocked_by: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeArtifactCheckpointDocument {
-    message_id: String,
-    timestamp: String,
-    #[serde(default)]
-    tracked_file_backups: BTreeMap<String, ClaudeArtifactBackupDocument>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeArtifactSnapshotDocument {
-    message_id: String,
-    #[serde(default)]
-    is_snapshot_update: bool,
-    snapshot: ClaudeArtifactCheckpointDocument,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeArtifactDeltaDocument {
-    message_id: String,
-    snapshot_message_id: String,
-    #[serde(default)]
-    timestamp: Option<String>,
-    tracking_path: String,
-    backup: ClaudeArtifactBackupDocument,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeArtifactBackupDocument {
-    backup_file_name: Value,
-    version: u64,
-    backup_time: String,
-    #[serde(default)]
-    real_parent_dir: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeWorkflowRunDocument {
-    run_id: String,
-    timestamp: String,
-    task_id: String,
-    script: String,
-    script_path: String,
-    #[serde(default)]
-    args: Option<String>,
-    agent_count: u64,
-    duration_ms: u64,
-    summary: String,
-    workflow_name: String,
-    status: String,
-    start_time: u64,
-    default_model: String,
-    total_tokens: u64,
-    total_tool_calls: u64,
-    #[serde(default)]
-    error: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeWorkflowJournalDocument {
-    #[serde(rename = "type")]
-    kind: String,
-    agent_id: String,
-    key: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeSessionIndexDocument {
-    version: u64,
-    #[serde(default)]
-    original_path: Option<String>,
-    entries: Vec<ClaudeSessionIndexEntryDocument>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaudeSessionIndexEntryDocument {
-    session_id: String,
-    full_path: String,
-    file_mtime: u64,
-    first_prompt: String,
-    #[serde(default)]
-    summary: Option<String>,
-    message_count: u64,
-    created: String,
-    modified: String,
-    git_branch: String,
-    project_path: String,
-    is_sidechain: bool,
-}
-
-fn decode_team_config(
-    adapter_id: &AdapterId,
-    context: &ClaudeTeamConfigContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    let document: ClaudeTeamConfigDocument = match serde_json::from_slice(&record.payload) {
-        Ok(document) => document,
-        Err(error) => {
-            preserve_unknown(
-                record,
-                output,
-                Some("team_config".to_string()),
-                format!("Claude team config is not a supported JSON object: {error}"),
-            )?;
-            return Ok(DecodeDisposition::PreservedUnknown);
-        }
-    };
-    if document.members.len() > TEAM_MEMBER_LIMIT {
-        preserve_unknown(
-            record,
-            output,
-            Some("team_config".to_string()),
-            format!("Claude team config exceeds the {TEAM_MEMBER_LIMIT} member bound"),
-        )?;
-        return Ok(DecodeDisposition::PreservedUnknown);
-    }
-    let Some(name) = nonempty(&document.name) else {
-        return preserve_team_config_contract_loss(record, output, "team name is empty");
-    };
-    let Some(native_lead_agent_id) = nonempty(&document.lead_agent_id) else {
-        return preserve_team_config_contract_loss(record, output, "lead agent id is empty");
-    };
-    let Some(native_lead_session_id) = nonempty(&document.lead_session_id) else {
-        return preserve_team_config_contract_loss(record, output, "lead session id is empty");
-    };
-    let team = EntityKey::native(
-        adapter_id,
-        record.source_instance_id,
-        "team",
-        context.native_team_id.as_bytes(),
-    )?;
-    let mut member_names = BTreeSet::new();
-    let mut members = Vec::with_capacity(document.members.len());
-    for member in document.members {
-        let Some(native_name) = nonempty(&member.name) else {
-            return preserve_team_config_contract_loss(record, output, "member name is empty");
-        };
-        let Some(native_agent_id) = nonempty(&member.agent_id) else {
-            return preserve_team_config_contract_loss(record, output, "member agent id is empty");
-        };
-        if !member_names.insert(native_name.clone()) {
-            return preserve_team_config_contract_loss(
-                record,
-                output,
-                "member names are not unique",
-            );
-        }
-        members.push(TeamMemberSnapshot {
-            member: team_member_key(
-                adapter_id,
-                record.source_instance_id,
-                &context.native_team_id,
-                &native_name,
-            )?,
-            native_agent_id,
-            native_name,
-            agent_type: member.agent_type.as_deref().and_then(nonempty),
-            model: member.model.as_deref().and_then(nonempty),
-            prompt: member.prompt.as_deref().and_then(nonempty),
-            color: member.color.as_deref().and_then(nonempty),
-            plan_mode_required: member.plan_mode_required,
-            joined_at: epoch_millis_timestamp(member.joined_at),
-            tmux_pane_id: member.tmux_pane_id,
-            cwd: member.cwd,
-            subscriptions: member.subscriptions,
-            backend_type: member.backend_type.as_deref().and_then(nonempty),
-        });
-    }
-    let mut lead_member_matches = members
-        .iter()
-        .filter(|member| member.native_agent_id == native_lead_agent_id);
-    let Some(lead_member_snapshot) = lead_member_matches.next() else {
-        return preserve_team_config_contract_loss(
-            record,
-            output,
-            "does not contain its declared lead member",
-        );
-    };
-    if lead_member_matches.next().is_some() {
-        return preserve_team_config_contract_loss(
-            record,
-            output,
-            "contains an ambiguous declared lead member",
-        );
-    }
-    let lead_member = Some(lead_member_snapshot.member.clone());
-    let lead_member_name = Some(lead_member_snapshot.native_name.clone());
-    let created_at = epoch_millis_timestamp(document.created_at);
-    output.push(
-        record,
-        Fact::TeamSnapshot(TeamSnapshotFact {
-            team,
-            native_team_id: context.native_team_id.clone(),
-            name,
-            description: document.description.as_deref().and_then(nonempty),
-            created_at: created_at.clone(),
-            lead_member,
-            native_lead_agent_id: native_lead_agent_id.clone(),
-            lead_session: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "session",
-                native_lead_session_id.as_bytes(),
-            )?,
-            native_lead_session_id: native_lead_session_id.clone(),
-            members,
-        }),
-    )?;
-    emit_team_affiliation(
-        record,
-        output,
-        ClaudeTeamAffiliationActor::Root {
-            native_session_id: &native_lead_session_id,
-        },
-        &context.native_team_id,
-        lead_member_name.as_deref(),
-        Some(created_at),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn preserve_team_config_contract_loss(
-    record: &SourceRecord,
-    output: &mut FactBatch,
-    detail: &str,
-) -> Result<DecodeDisposition, AdapterError> {
-    preserve_unknown(
-        record,
-        output,
-        Some("team_config".to_string()),
-        format!("Claude team config {detail}"),
-    )?;
-    Ok(DecodeDisposition::PreservedUnknown)
-}
-
-fn decode_team_inbox(
-    adapter_id: &AdapterId,
-    context: &ClaudeTeamInboxContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    let documents: Vec<ClaudeTeamInboxMessageDocument> =
-        match serde_json::from_slice(&record.payload) {
-            Ok(documents) => documents,
-            Err(error) => {
-                preserve_unknown(
-                    record,
-                    output,
-                    Some("team_inbox".to_string()),
-                    format!("Claude team inbox is not a supported JSON array: {error}"),
-                )?;
-                return Ok(DecodeDisposition::PreservedUnknown);
-            }
-        };
-    if documents.len() > TEAM_INBOX_MESSAGE_LIMIT {
-        preserve_unknown(
-            record,
-            output,
-            Some("team_inbox".to_string()),
-            format!("Claude team inbox exceeds the {TEAM_INBOX_MESSAGE_LIMIT} message bound"),
-        )?;
-        return Ok(DecodeDisposition::PreservedUnknown);
-    }
-    let team = EntityKey::native(
-        adapter_id,
-        record.source_instance_id,
-        "team",
-        context.native_team_id.as_bytes(),
-    )?;
-    let recipient = team_member_key(
-        adapter_id,
-        record.source_instance_id,
-        &context.native_team_id,
-        &context.native_recipient_name,
-    )?;
-    let mut native_ids = BTreeSet::new();
-    let mut legacy_occurrences = BTreeMap::<[u8; 32], u32>::new();
-    let mut messages = Vec::with_capacity(documents.len());
-    for document in documents {
-        let Some(native_sender_name) = nonempty(&document.from) else {
-            return preserve_team_inbox_contract_loss(record, output, "sender is empty");
-        };
-        let Some(timestamp) = nonempty(&document.timestamp) else {
-            return preserve_team_inbox_contract_loss(record, output, "timestamp is empty");
-        };
-        let native_message_id = document.message_id.as_deref().and_then(nonempty);
-        let mut native_message_key = Vec::new();
-        push_key_component(&mut native_message_key, context.native_team_id.as_bytes());
-        push_key_component(
-            &mut native_message_key,
-            context.native_recipient_name.as_bytes(),
-        );
-        if let Some(message_id) = &native_message_id {
-            if !native_ids.insert(message_id.clone()) {
-                return preserve_team_inbox_contract_loss(
-                    record,
-                    output,
-                    "contains duplicate native message ids",
-                );
-            }
-            push_key_component(&mut native_message_key, b"native-id");
-            push_key_component(&mut native_message_key, message_id.as_bytes());
-        } else {
-            let mut hasher = blake3::Hasher::new();
-            hash_component(&mut hasher, native_sender_name.as_bytes());
-            hash_component(&mut hasher, timestamp.as_bytes());
-            hash_component(&mut hasher, document.text.as_bytes());
-            let digest = *hasher.finalize().as_bytes();
-            let occurrence = legacy_occurrences.entry(digest).or_default();
-            push_key_component(&mut native_message_key, b"legacy-fingerprint");
-            push_key_component(&mut native_message_key, &digest);
-            push_key_component(&mut native_message_key, &occurrence.to_be_bytes());
-            *occurrence = occurrence.saturating_add(1);
-        }
-        messages.push(TeamInboxMessageSnapshot {
-            message: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "team_inbox_message",
-                &native_message_key,
-            )?,
-            sender: team_member_key(
-                adapter_id,
-                record.source_instance_id,
-                &context.native_team_id,
-                &native_sender_name,
-            )?,
-            native_message_id,
-            native_kind: document.kind.as_deref().and_then(nonempty),
-            native_version: document.message_version,
-            native_sender_name,
-            text: document.text,
-            summary: document.summary.as_deref().and_then(nonempty),
-            color: document.color.as_deref().and_then(nonempty),
-            source_time: native_timestamp(&timestamp),
-            read: document.read,
-        });
-    }
-    let mut native_inbox_key = Vec::new();
-    push_key_component(&mut native_inbox_key, context.native_team_id.as_bytes());
-    push_key_component(
-        &mut native_inbox_key,
-        context.native_recipient_name.as_bytes(),
-    );
-    output.push(
-        record,
-        Fact::TeamInboxSnapshot(TeamInboxSnapshotFact {
-            inbox: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "team_inbox",
-                &native_inbox_key,
-            )?,
-            team,
-            recipient,
-            native_team_id: context.native_team_id.clone(),
-            native_recipient_name: context.native_recipient_name.clone(),
-            messages,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn preserve_team_inbox_contract_loss(
-    record: &SourceRecord,
-    output: &mut FactBatch,
-    detail: &str,
-) -> Result<DecodeDisposition, AdapterError> {
-    preserve_unknown(
-        record,
-        output,
-        Some("team_inbox".to_string()),
-        format!("Claude team inbox {detail}"),
-    )?;
-    Ok(DecodeDisposition::PreservedUnknown)
-}
-
-fn decode_active_session(
-    adapter_id: &AdapterId,
-    context: &ClaudeActiveSessionContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-    let document: ClaudeActiveSessionDocument = match serde_json::from_slice(&record.payload) {
-        Ok(document) => document,
-        Err(error) => {
-            preserve_unknown(
-                record,
-                output,
-                Some("active_session".to_string()),
-                format!("Claude active session is not a supported JSON object: {error}"),
-            )?;
-            return Ok(DecodeDisposition::PreservedUnknown);
-        }
-    };
-    if document.pid == 0 || document.pid != context.native_pid {
-        return preserve_active_session_contract_loss(
-            record,
-            output,
-            "payload pid does not match the source file name",
-        );
-    }
-    let Some(native_session_id) = nonempty(&document.session_id) else {
-        return preserve_active_session_contract_loss(record, output, "session id is empty");
-    };
-    let Some(cwd) = nonempty(&document.cwd) else {
-        return preserve_active_session_contract_loss(record, output, "cwd is empty");
-    };
-    if document.started_at < 0
-        || document.updated_at.is_some_and(|value| value < 0)
-        || document.status_updated_at.is_some_and(|value| value < 0)
-    {
-        return preserve_active_session_contract_loss(
-            record,
-            output,
-            "contains a negative epoch-millisecond timestamp",
-        );
-    }
-
-    let native_process_started_at = document.proc_start.as_deref().and_then(nonempty);
-    let mut native_presence_key = Vec::new();
-    push_key_component(&mut native_presence_key, &document.pid.to_be_bytes());
-    push_key_component(&mut native_presence_key, native_session_id.as_bytes());
-    match &native_process_started_at {
-        Some(process_start) => {
-            push_key_component(&mut native_presence_key, b"proc-start");
-            push_key_component(&mut native_presence_key, process_start.as_bytes());
-        }
-        None => {
-            push_key_component(&mut native_presence_key, b"session-start");
-            push_key_component(&mut native_presence_key, &document.started_at.to_be_bytes());
-        }
-    }
-
-    output.push(
-        record,
-        Fact::Presence(PresenceFact {
-            presence: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "presence",
-                &native_presence_key,
-            )?,
-            session: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "session",
-                native_session_id.as_bytes(),
-            )?,
-            run: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "run",
-                native_session_id.as_bytes(),
-            )?,
-            native_session_id,
-            native_pid: document.pid,
-            cwd,
-            started_at: epoch_millis_timestamp(document.started_at),
-            native_kind: document.kind.as_deref().and_then(nonempty),
-            entrypoint: document.entrypoint.as_deref().and_then(nonempty),
-            name: document.name.as_deref().and_then(nonempty),
-            native_status: document.status.as_deref().and_then(nonempty),
-            updated_at: document.updated_at.map(epoch_millis_timestamp),
-            status_updated_at: document.status_updated_at.map(epoch_millis_timestamp),
-            native_process_started_at,
-            version: document.version.as_deref().and_then(nonempty),
-            peer_protocol: document.peer_protocol,
-            name_source: document.name_source.as_deref().and_then(nonempty),
-            bridge_session_id: document.bridge_session_id.as_deref().and_then(nonempty),
-            messaging_socket_path: document.messaging_socket_path.as_deref().and_then(nonempty),
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn preserve_active_session_contract_loss(
-    record: &SourceRecord,
-    output: &mut FactBatch,
-    detail: &str,
-) -> Result<DecodeDisposition, AdapterError> {
-    preserve_unknown(
-        record,
-        output,
-        Some("active_session".to_string()),
-        format!("Claude active session {detail}"),
-    )?;
-    Ok(DecodeDisposition::PreservedUnknown)
-}
-
-fn decode_todo_snapshot(
-    adapter_id: &AdapterId,
-    context: &ClaudeTodoContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    let documents: Vec<ClaudeTodoItemDocument> = match serde_json::from_slice(&record.payload) {
-        Ok(documents) => documents,
-        Err(error) => {
-            preserve_unknown(
-                record,
-                output,
-                Some("todo_snapshot".to_string()),
-                format!("Claude todo snapshot is not a supported JSON array: {error}"),
-            )?;
-            return Ok(DecodeDisposition::PreservedUnknown);
-        }
-    };
-    if documents.len() > TODO_ITEM_LIMIT {
-        return preserve_task_contract_loss(
-            record,
-            output,
-            "todo_snapshot",
-            &format!("exceeds the {TODO_ITEM_LIMIT} item bound"),
-        );
-    }
-
-    let mut native_collection_key = Vec::new();
-    push_key_component(&mut native_collection_key, b"todo");
-    push_key_component(
-        &mut native_collection_key,
-        context.native_session_id.as_bytes(),
-    );
-    push_key_component(
-        &mut native_collection_key,
-        context.native_agent_id.as_bytes(),
-    );
-    let collection = EntityKey::native(
-        adapter_id,
-        record.source_instance_id,
-        "task_collection",
-        &native_collection_key,
-    )?;
-
-    let mut occurrences: BTreeMap<[u8; 32], u32> = BTreeMap::new();
-    let mut items = Vec::with_capacity(documents.len());
-    for document in documents {
-        let Some(subject) = nonempty(&document.content) else {
-            return preserve_task_contract_loss(
-                record,
-                output,
-                "todo_snapshot",
-                "contains an item with empty content",
-            );
-        };
-        let Some(native_status) = nonempty(&document.status) else {
-            return preserve_task_contract_loss(
-                record,
-                output,
-                "todo_snapshot",
-                "contains an item with empty status",
-            );
-        };
-        let digest = *blake3::hash(subject.as_bytes()).as_bytes();
-        let occurrence = occurrences.entry(digest).or_default();
-        let mut native_task_key = native_collection_key.clone();
-        push_key_component(&mut native_task_key, b"content-fingerprint");
-        push_key_component(&mut native_task_key, &digest);
-        push_key_component(&mut native_task_key, &occurrence.to_be_bytes());
-        *occurrence = occurrence.saturating_add(1);
-        items.push(TaskItemSnapshot {
-            task: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "task",
-                &native_task_key,
-            )?,
-            native_task_id: None,
-            subject,
-            description: None,
-            active_form: document.active_form.as_deref().and_then(nonempty),
-            native_owner: None,
-            status: task_status(&native_status),
-            blocks: Vec::new(),
-            blocked_by: Vec::new(),
-        });
-    }
-
-    let session = EntityKey::native(
-        adapter_id,
-        record.source_instance_id,
-        "session",
-        context.native_session_id.as_bytes(),
-    )?;
-    let run = (context.native_agent_id == context.native_session_id)
-        .then(|| {
-            EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "run",
-                context.native_session_id.as_bytes(),
-            )
-        })
-        .transpose()?;
-    output.push(
-        record,
-        Fact::TaskSnapshot(TaskSnapshotFact {
-            collection,
-            session: Some(session),
-            run,
-            team: None,
-            native_collection_id: format!(
-                "{}-agent-{}",
-                context.native_session_id, context.native_agent_id
-            ),
-            native_owner_id: Some(context.native_agent_id.clone()),
-            kind: TaskCollectionKind::TodoList,
-            coverage: TaskSnapshotCoverage::Complete,
-            items,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_task_item(
-    adapter_id: &AdapterId,
-    context: &ClaudeTaskItemContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    let document: ClaudeTaskItemDocument = match serde_json::from_slice(&record.payload) {
-        Ok(document) => document,
-        Err(error) => {
-            preserve_unknown(
-                record,
-                output,
-                Some("task_item".to_string()),
-                format!("Claude task item is not a supported JSON object: {error}"),
-            )?;
-            return Ok(DecodeDisposition::PreservedUnknown);
-        }
-    };
-    if document.id != context.native_task_id {
-        return preserve_task_contract_loss(
-            record,
-            output,
-            "task_item",
-            "payload id does not match the source file name",
-        );
-    }
-    let Some(subject) = nonempty(&document.subject) else {
-        return preserve_task_contract_loss(record, output, "task_item", "subject is empty");
-    };
-    let Some(native_status) = nonempty(&document.status) else {
-        return preserve_task_contract_loss(record, output, "task_item", "status is empty");
-    };
-    if document
-        .blocks
-        .iter()
-        .chain(document.blocked_by.iter())
-        .any(|value| value.trim().is_empty())
-    {
-        return preserve_task_contract_loss(
-            record,
-            output,
-            "task_item",
-            "contains an empty dependency id",
-        );
-    }
-
-    let mut native_collection_key = Vec::new();
-    push_key_component(&mut native_collection_key, b"task-directory");
-    push_key_component(
-        &mut native_collection_key,
-        context.native_collection_id.as_bytes(),
-    );
-    let mut native_task_key = native_collection_key.clone();
-    push_key_component(&mut native_task_key, context.native_task_id.as_bytes());
-    output.push(
-        record,
-        Fact::TaskSnapshot(TaskSnapshotFact {
-            collection: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "task_collection",
-                &native_collection_key,
-            )?,
-            // A Claude task-directory name can be a session id, team name, or
-            // other native scope. Keep it unjoined until another native fact
-            // disambiguates it rather than guessing from its spelling.
-            session: None,
-            run: None,
-            team: None,
-            native_collection_id: context.native_collection_id.clone(),
-            native_owner_id: None,
-            kind: TaskCollectionKind::NativeTaskList,
-            coverage: TaskSnapshotCoverage::ItemDocument,
-            items: vec![TaskItemSnapshot {
-                task: EntityKey::native(
-                    adapter_id,
-                    record.source_instance_id,
-                    "task",
-                    &native_task_key,
-                )?,
-                native_task_id: Some(context.native_task_id.clone()),
-                subject,
-                description: Some(document.description),
-                active_form: document.active_form.as_deref().and_then(nonempty),
-                native_owner: document.owner.as_deref().and_then(nonempty),
-                status: task_status(&native_status),
-                blocks: document.blocks,
-                blocked_by: document.blocked_by,
-            }],
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_plan_document(
-    adapter_id: &AdapterId,
-    context: &ClaudePlanContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    let content = match std::str::from_utf8(&record.payload) {
-        Ok(content) => content.to_string(),
-        Err(error) => {
-            preserve_unknown(
-                record,
-                output,
-                Some("plan_document".to_string()),
-                format!("Claude plan document is not valid UTF-8: {error}"),
-            )?;
-            return Ok(DecodeDisposition::PreservedUnknown);
-        }
-    };
-    let title = first_markdown_heading(&content).unwrap_or_else(|| context.native_plan_id.clone());
-    output.push(
-        record,
-        Fact::PlanSnapshot(PlanSnapshotFact {
-            plan: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "plan",
-                context.native_plan_id.as_bytes(),
-            )?,
-            native_plan_id: context.native_plan_id.clone(),
-            title,
-            size_bytes: record.payload.len() as u64,
-            content,
-            source_time: None,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_artifact_content(
-    adapter_id: &AdapterId,
-    context: &ClaudeArtifactContentContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-    let session = EntityKey::native(
-        adapter_id,
-        record.source_instance_id,
-        "session",
-        context.native_session_id.as_bytes(),
-    )?;
-    let canonical_session =
-        output.canonical_entity_key("session", context.native_session_id.as_bytes())?;
-    let artifact_native_key = artifact_native_key(
-        &context.native_session_id,
-        Some(&context.native_artifact_id),
-        None,
-        context.version,
-        None,
-    );
-    let canonical_artifact = output.canonical_entity_key("artifact", &artifact_native_key)?;
-    output.push_native(
-        record,
-        &artifact_native_key,
-        Fact::ArtifactContent(ArtifactContentFact {
-            artifact: artifact_key(
-                adapter_id,
-                record.source_instance_id,
-                &context.native_session_id,
-                Some(&context.native_artifact_id),
-                None,
-                context.version,
-                None,
-            )?,
-            session,
-            canonical_artifact: Some(canonical_artifact),
-            canonical_session: Some(canonical_session),
-            native_artifact_id: context.native_artifact_id.clone(),
-            native_file_hash: context.native_file_hash.clone(),
-            version: context.version,
-            size_bytes: record.payload.len() as u64,
-            content: record.payload.clone(),
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_workflow_run(
-    adapter_id: &AdapterId,
-    context: &ClaudeWorkflowContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-    let native_snapshot: Value = match serde_json::from_slice(&record.payload) {
-        Ok(value) => value,
-        Err(error) => {
-            return preserve_workflow_contract_loss(
-                record,
-                output,
-                "workflow_run",
-                &format!("is not valid JSON: {error}"),
-            );
-        }
-    };
-    let document: ClaudeWorkflowRunDocument = match serde_json::from_value(native_snapshot.clone())
-    {
-        Ok(document) => document,
-        Err(error) => {
-            return preserve_workflow_contract_loss(
-                record,
-                output,
-                "workflow_run",
-                &format!("is not a supported run document: {error}"),
-            );
-        }
-    };
-    if document.run_id != context.native_workflow_id {
-        return preserve_workflow_contract_loss(
-            record,
-            output,
-            "workflow_run",
-            "payload runId does not match the source file name",
-        );
-    }
-    for (field, value) in [
-        ("taskId", document.task_id.as_str()),
-        ("workflowName", document.workflow_name.as_str()),
-        ("status", document.status.as_str()),
-        ("defaultModel", document.default_model.as_str()),
-        ("script", document.script.as_str()),
-        ("scriptPath", document.script_path.as_str()),
-        ("summary", document.summary.as_str()),
-        ("timestamp", document.timestamp.as_str()),
-    ] {
-        if value.trim().is_empty() {
-            return preserve_workflow_contract_loss(
-                record,
-                output,
-                "workflow_run",
-                &format!("has an empty {field}"),
-            );
-        }
-    }
-    let Ok(start_time) = i64::try_from(document.start_time) else {
-        return preserve_workflow_contract_loss(
-            record,
-            output,
-            "workflow_run",
-            "startTime exceeds the supported epoch-millisecond range",
-        );
-    };
-    let workflow = workflow_key(adapter_id, record.source_instance_id, context)?;
-    output.push(
-        record,
-        Fact::WorkflowSnapshot(WorkflowSnapshotFact {
-            workflow,
-            session: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "session",
-                context.native_session_id.as_bytes(),
-            )?,
-            project: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "project",
-                context.project_slug.as_bytes(),
-            )?,
-            native_workflow_id: document.run_id,
-            native_task_id: document.task_id,
-            name: document.workflow_name,
-            native_status: document.status.clone(),
-            status: workflow_status(&document.status),
-            default_model: document.default_model,
-            script: document.script,
-            script_path: document.script_path,
-            args: document.args,
-            summary: document.summary,
-            error: document.error,
-            started_at: epoch_millis_timestamp(start_time),
-            finished_at: native_timestamp(&document.timestamp),
-            duration_ms: document.duration_ms,
-            agent_count: document.agent_count,
-            total_tokens: document.total_tokens,
-            total_tool_calls: document.total_tool_calls,
-            native_snapshot,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_workflow_journal(
-    adapter_id: &AdapterId,
-    context: &ClaudeWorkflowContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-    let value: Value = match serde_json::from_slice(&record.payload) {
-        Ok(value) => value,
-        Err(error) => {
-            return preserve_workflow_contract_loss(
-                record,
-                output,
-                "workflow_journal",
-                &format!("record is not valid JSON: {error}"),
-            );
-        }
-    };
-    let document: ClaudeWorkflowJournalDocument = match serde_json::from_value(value.clone()) {
-        Ok(document) => document,
-        Err(error) => {
-            return preserve_workflow_contract_loss(
-                record,
-                output,
-                "workflow_journal",
-                &format!("record is not supported: {error}"),
-            );
-        }
-    };
-    let Some(native_agent_id) = nonempty(&document.agent_id) else {
-        return preserve_workflow_contract_loss(
-            record,
-            output,
-            "workflow_journal",
-            "record has an empty agentId",
-        );
-    };
-    let Some(native_event_key) = nonempty(&document.key) else {
-        return preserve_workflow_contract_loss(
-            record,
-            output,
-            "workflow_journal",
-            "record has an empty key",
-        );
-    };
-    let (kind, result) = match document.kind.as_str() {
-        "started" if value.get("result").is_none() => (WorkflowMemberEventKind::Started, None),
-        "result" => {
-            let Some(result) = value.get("result").cloned() else {
-                return preserve_workflow_contract_loss(
-                    record,
-                    output,
-                    "workflow_journal",
-                    "result record is missing its result value",
-                );
-            };
-            (WorkflowMemberEventKind::Result, Some(result))
-        }
-        "started" => {
-            return preserve_workflow_contract_loss(
-                record,
-                output,
-                "workflow_journal",
-                "started record unexpectedly contains a result value",
-            );
-        }
-        _ => {
-            return preserve_workflow_contract_loss(
-                record,
-                output,
-                "workflow_journal",
-                "record has an unsupported event type",
-            );
-        }
-    };
-
-    let workflow = workflow_key(adapter_id, record.source_instance_id, context)?;
-    let mut member_native_key = workflow_native_key(context);
-    push_key_component(&mut member_native_key, native_agent_id.as_bytes());
-    let child_run_native_key = format!(
-        "{}\0{}\0{}",
-        context.native_session_id, context.native_workflow_id, native_agent_id
-    );
-    let canonical_session =
-        output.canonical_entity_key("session", context.native_session_id.as_bytes())?;
-    let canonical_actor_run =
-        output.canonical_entity_key("run", child_run_native_key.as_bytes())?;
-    let canonical_workflow =
-        output.canonical_entity_key("workflow", &workflow_native_key(context))?;
-    let canonical_member = output.canonical_entity_key("workflow_member", &member_native_key)?;
-    let mut affiliation_native_key = Vec::new();
-    push_key_component(&mut affiliation_native_key, b"workflow");
-    push_key_component(&mut affiliation_native_key, child_run_native_key.as_bytes());
-    push_key_component(&mut affiliation_native_key, &workflow_native_key(context));
-    let canonical_affiliation =
-        output.canonical_entity_key("actor_affiliation", &affiliation_native_key)?;
-    output.push(
-        record,
-        Fact::WorkflowMemberEvent(WorkflowMemberEventFact {
-            workflow,
-            member: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "workflow_member",
-                &member_native_key,
-            )?,
-            child_run: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "run",
-                child_run_native_key.as_bytes(),
-            )?,
-            session: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "session",
-                context.native_session_id.as_bytes(),
-            )?,
-            project: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "project",
-                context.project_slug.as_bytes(),
-            )?,
-            native_workflow_id: context.native_workflow_id.clone(),
-            native_agent_id: native_agent_id.clone(),
-            native_event_key,
-            kind,
-            result,
-        }),
-    )?;
-    output.push_native(
-        record,
-        &affiliation_native_key,
-        Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
-            affiliation: canonical_affiliation,
-            actor_run: canonical_actor_run,
-            session: canonical_session,
-            dimension: ActorAffiliationDimension::Workflow,
-            target: canonical_workflow,
-            member: Some(canonical_member),
-            native_target_id: Some(context.native_workflow_id.clone()),
-            native_member_id: Some(native_agent_id),
-            state: ActorAffiliationState::Present,
-            effective_at: None,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_session_index(
-    adapter_id: &AdapterId,
-    context: &ClaudeSessionIndexContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-    let native_snapshot: Value = match serde_json::from_slice(&record.payload) {
-        Ok(value) => value,
-        Err(error) => {
-            return preserve_session_index_contract_loss(
-                record,
-                output,
-                &format!("is not valid JSON: {error}"),
-            );
-        }
-    };
-    let document: ClaudeSessionIndexDocument = match serde_json::from_value(native_snapshot.clone())
-    {
-        Ok(document) => document,
-        Err(error) => {
-            return preserve_session_index_contract_loss(
-                record,
-                output,
-                &format!("is not a supported document: {error}"),
-            );
-        }
-    };
-    if document.version != 1 {
-        return preserve_session_index_contract_loss(
-            record,
-            output,
-            "has an unsupported native version",
-        );
-    }
-    if document.entries.len() > SESSION_INDEX_ENTRY_LIMIT {
-        return preserve_session_index_contract_loss(
-            record,
-            output,
-            &format!("exceeds the {SESSION_INDEX_ENTRY_LIMIT} entry bound"),
-        );
-    }
-    if document
-        .original_path
-        .as_deref()
-        .is_some_and(|path| path.trim().is_empty())
-    {
-        return preserve_session_index_contract_loss(record, output, "has an empty originalPath");
-    }
-
-    let mut session_ids = BTreeSet::new();
-    let mut entries = Vec::with_capacity(document.entries.len());
-    for entry in document.entries {
-        if !is_uuid(&entry.session_id) {
-            return preserve_session_index_contract_loss(
-                record,
-                output,
-                "contains a non-UUID sessionId",
-            );
-        }
-        if !session_ids.insert(entry.session_id.clone()) {
-            return preserve_session_index_contract_loss(
-                record,
-                output,
-                "contains duplicate sessionId entries",
-            );
-        }
-        for (field, value) in [
-            ("fullPath", entry.full_path.as_str()),
-            ("firstPrompt", entry.first_prompt.as_str()),
-            ("created", entry.created.as_str()),
-            ("modified", entry.modified.as_str()),
-            ("projectPath", entry.project_path.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return preserve_session_index_contract_loss(
-                    record,
-                    output,
-                    &format!("contains an entry with empty {field}"),
-                );
-            }
-        }
-        entries.push(SessionIndexEntrySnapshot {
-            session: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "session",
-                entry.session_id.as_bytes(),
-            )?,
-            native_session_id: entry.session_id,
-            full_path: entry.full_path,
-            file_mtime_ms: entry.file_mtime,
-            first_prompt: entry.first_prompt,
-            summary: entry.summary,
-            message_count: entry.message_count,
-            created_at: native_timestamp(&entry.created),
-            modified_at: native_timestamp(&entry.modified),
-            git_branch: entry.git_branch,
-            project_path: entry.project_path,
-            is_sidechain: entry.is_sidechain,
-        });
-    }
-
-    output.push(
-        record,
-        Fact::SessionIndexSnapshot(SessionIndexSnapshotFact {
-            project: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "project",
-                context.project_slug.as_bytes(),
-            )?,
-            native_project_key: context.project_slug.clone(),
-            native_version: document.version,
-            original_path: document.original_path,
-            entries,
-            native_snapshot,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_project_memory_document(
-    adapter_id: &AdapterId,
-    context: &ClaudeProjectMemoryContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-    let content = match std::str::from_utf8(&record.payload) {
-        Ok(content) => content.to_string(),
-        Err(error) => {
-            preserve_unknown(
-                record,
-                output,
-                Some("project_memory_document".to_string()),
-                format!("Claude project memory document is not valid UTF-8: {error}"),
-            )?;
-            return Ok(DecodeDisposition::PreservedUnknown);
-        }
-    };
-    let file_name = context
-        .native_document_path
-        .strip_prefix("memory/")
-        .expect("validated project memory context");
-    let fallback_title = file_name
-        .strip_suffix(".md")
-        .expect("validated project memory Markdown path");
-    let title = first_markdown_heading(&content).unwrap_or_else(|| fallback_title.to_string());
-    let mut document_native_key = Vec::new();
-    push_key_component(&mut document_native_key, context.project_slug.as_bytes());
-    push_key_component(
-        &mut document_native_key,
-        context.native_document_path.as_bytes(),
-    );
-    output.push(
-        record,
-        Fact::ProjectMemoryDocument(ProjectMemoryDocumentFact {
-            document: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "project_memory_document",
-                &document_native_key,
-            )?,
-            project: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "project",
-                context.project_slug.as_bytes(),
-            )?,
-            native_project_key: context.project_slug.clone(),
-            native_document_path: context.native_document_path.clone(),
-            title,
-            content,
-            size_bytes: record.payload.len() as u64,
-            is_index: context.is_index,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_persisted_tool_result(
-    adapter_id: &AdapterId,
-    context: &ClaudePersistedToolResultContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-    let content = match std::str::from_utf8(&record.payload) {
-        Ok(content) => content.to_string(),
-        Err(error) => {
-            preserve_unknown(
-                record,
-                output,
-                Some("persisted_tool_result".to_string()),
-                format!("Claude persisted tool result is not valid UTF-8: {error}"),
-            )?;
-            return Ok(DecodeDisposition::PreservedUnknown);
-        }
-    };
-    let mut result_native_key = Vec::new();
-    push_key_component(&mut result_native_key, context.native_session_id.as_bytes());
-    push_key_component(
-        &mut result_native_key,
-        context.native_tool_use_id.as_bytes(),
-    );
-    output.push(
-        record,
-        Fact::PersistedToolResult(PersistedToolResultFact {
-            result: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "persisted_tool_result",
-                &result_native_key,
-            )?,
-            session: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "session",
-                context.native_session_id.as_bytes(),
-            )?,
-            project: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "project",
-                context.project_slug.as_bytes(),
-            )?,
-            native_project_key: context.project_slug.clone(),
-            native_session_id: context.native_session_id.clone(),
-            native_tool_use_id: context.native_tool_use_id.clone(),
-            native_document_path: context.native_document_path.clone(),
-            content,
-            size_bytes: record.payload.len() as u64,
-        }),
-    )?;
-    Ok(DecodeDisposition::Applied)
-}
-
-fn decode_interpretation_settings(
-    adapter_id: &AdapterId,
-    context: &ClaudeInterpretationSettingsContext,
-    record: &SourceRecord,
-    output: &mut FactBatch,
-) -> Result<DecodeDisposition, AdapterError> {
-    if record.state == SourceRecordState::Absent {
-        return Ok(DecodeDisposition::IgnoredKnown);
-    }
-
-    let decoded = decode_interpretation_settings_snapshot(&record.payload);
-    let (document_status, settings, error_code, disposition) = match decoded {
-        Ok(settings) => (
-            InterpretationSettingsDocumentStatus::Valid,
-            Some(settings),
-            None,
-            DecodeDisposition::Applied,
-        ),
-        Err(failure) => {
-            output.push_diagnostic(AdapterDiagnostic {
-                class: AdapterErrorClass::RecordPermanent,
-                code: failure.code.to_string(),
-                message: format!(
-                    "Claude {} could not be interpreted: {}",
-                    context.native_document_path, failure.message
-                ),
-            })?;
-            (
-                InterpretationSettingsDocumentStatus::Invalid,
-                None,
-                Some(failure.code.to_string()),
-                DecodeDisposition::PreservedUnknown,
-            )
-        }
-    };
-
-    output.push(
-        record,
-        Fact::InterpretationSettings(InterpretationSettingsFact {
-            document: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "interpretation_settings_document",
-                context.native_document_path.as_bytes(),
-            )?,
-            scope: EntityKey::native(
-                adapter_id,
-                record.source_instance_id,
-                "interpretation_settings_scope",
-                b"root",
-            )?,
-            layer: context.layer,
-            native_document_path: context.native_document_path.clone(),
-            document_status,
-            settings,
-            error_code,
-            size_bytes: record.payload.len() as u64,
-        }),
-    )?;
-    Ok(disposition)
-}
-
-#[derive(Debug)]
-struct InterpretationSettingsDecodeFailure {
-    code: &'static str,
-    message: String,
-}
-
-impl InterpretationSettingsDecodeFailure {
-    fn shape(message: impl Into<String>) -> Self {
-        Self {
-            code: "claude_settings_invalid_shape",
-            message: message.into(),
-        }
-    }
-
-    fn bounds(message: impl Into<String>) -> Self {
-        Self {
-            code: "claude_settings_bounds",
-            message: message.into(),
-        }
-    }
-}
-
-fn decode_interpretation_settings_snapshot(
-    payload: &[u8],
-) -> Result<InterpretationSettingsSnapshot, InterpretationSettingsDecodeFailure> {
-    let value: Value =
-        serde_json::from_slice(payload).map_err(|error| InterpretationSettingsDecodeFailure {
-            code: "claude_settings_invalid_json",
-            message: format!(
-                "invalid JSON at line {}, column {}",
-                error.line(),
-                error.column()
-            ),
-        })?;
-    let object = value.as_object().ok_or_else(|| {
-        InterpretationSettingsDecodeFailure::shape("document root must be an object")
-    })?;
-
-    let permissions = match object.get("permissions") {
-        None => None,
-        Some(Value::Object(permissions)) => Some(permissions),
-        Some(_) => {
-            return Err(InterpretationSettingsDecodeFailure::shape(
-                "permissions must be an object",
-            ));
-        }
-    };
-
-    Ok(InterpretationSettingsSnapshot {
-        agent: optional_settings_string(object, "agent", "agent")?,
-        model: optional_settings_string(object, "model", "model")?,
-        effort_level: optional_settings_string(object, "effortLevel", "effortLevel")?,
-        plans_directory: optional_settings_string(object, "plansDirectory", "plansDirectory")?,
-        always_thinking_enabled: optional_settings_bool(
-            object,
-            "alwaysThinkingEnabled",
-            "alwaysThinkingEnabled",
-        )?,
-        auto_compact_enabled: optional_settings_bool(
-            object,
-            "autoCompactEnabled",
-            "autoCompactEnabled",
-        )?,
-        skip_auto_permission_prompt: optional_settings_bool(
-            object,
-            "skipAutoPermissionPrompt",
-            "skipAutoPermissionPrompt",
-        )?,
-        permission_default_mode: optional_nested_settings_string(
-            permissions,
-            "defaultMode",
-            "permissions.defaultMode",
-        )?,
-        disable_bypass_permissions_mode: optional_nested_settings_string(
-            permissions,
-            "disableBypassPermissionsMode",
-            "permissions.disableBypassPermissionsMode",
-        )?,
-        disable_auto_mode: optional_nested_settings_string(
-            permissions,
-            "disableAutoMode",
-            "permissions.disableAutoMode",
-        )?,
-        permission_allow: optional_nested_settings_string_array(
-            permissions,
-            "allow",
-            "permissions.allow",
-        )?,
-        permission_ask: optional_nested_settings_string_array(
-            permissions,
-            "ask",
-            "permissions.ask",
-        )?,
-        permission_deny: optional_nested_settings_string_array(
-            permissions,
-            "deny",
-            "permissions.deny",
-        )?,
-        enabled_plugins: optional_settings_bool_map(object, "enabledPlugins")?,
-        hook_events: optional_hook_event_summaries(object)?,
-    })
-}
-
-fn optional_settings_string(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-    field: &str,
-) -> Result<Option<String>, InterpretationSettingsDecodeFailure> {
-    match object.get(key) {
-        None => Ok(None),
-        Some(Value::String(value)) => {
-            validate_settings_string(value, field)?;
-            Ok(Some(value.clone()))
-        }
-        Some(_) => Err(InterpretationSettingsDecodeFailure::shape(format!(
-            "{field} must be a string"
-        ))),
-    }
-}
-
-fn optional_nested_settings_string(
-    object: Option<&serde_json::Map<String, Value>>,
-    key: &str,
-    field: &str,
-) -> Result<Option<String>, InterpretationSettingsDecodeFailure> {
-    match object {
-        Some(object) => optional_settings_string(object, key, field),
-        None => Ok(None),
-    }
-}
-
-fn optional_settings_bool(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-    field: &str,
-) -> Result<Option<bool>, InterpretationSettingsDecodeFailure> {
-    match object.get(key) {
-        None => Ok(None),
-        Some(Value::Bool(value)) => Ok(Some(*value)),
-        Some(_) => Err(InterpretationSettingsDecodeFailure::shape(format!(
-            "{field} must be a boolean"
-        ))),
-    }
-}
-
-fn optional_nested_settings_string_array(
-    object: Option<&serde_json::Map<String, Value>>,
-    key: &str,
-    field: &str,
-) -> Result<Option<Vec<String>>, InterpretationSettingsDecodeFailure> {
-    let Some(object) = object else {
-        return Ok(None);
-    };
-    let Some(value) = object.get(key) else {
-        return Ok(None);
-    };
-    let Value::Array(values) = value else {
-        return Err(InterpretationSettingsDecodeFailure::shape(format!(
-            "{field} must be an array"
-        )));
-    };
-    if values.len() > SETTINGS_COLLECTION_LIMIT {
-        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
-            "{field} exceeds {SETTINGS_COLLECTION_LIMIT} entries"
-        )));
-    }
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let Value::String(value) = value else {
-                return Err(InterpretationSettingsDecodeFailure::shape(format!(
-                    "{field}[{index}] must be a string"
-                )));
-            };
-            validate_settings_string(value, field)?;
-            Ok(value.clone())
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
-}
-
-fn optional_settings_bool_map(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<Option<BTreeMap<String, bool>>, InterpretationSettingsDecodeFailure> {
-    let Some(value) = object.get(key) else {
-        return Ok(None);
-    };
-    let Value::Object(values) = value else {
-        return Err(InterpretationSettingsDecodeFailure::shape(
-            "enabledPlugins must be an object",
-        ));
-    };
-    if values.len() > SETTINGS_COLLECTION_LIMIT {
-        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
-            "enabledPlugins exceeds {SETTINGS_COLLECTION_LIMIT} entries"
-        )));
-    }
-    values
-        .iter()
-        .map(|(plugin, enabled)| {
-            validate_settings_string(plugin, "enabledPlugins key")?;
-            let Value::Bool(enabled) = enabled else {
-                return Err(InterpretationSettingsDecodeFailure::shape(format!(
-                    "enabledPlugins.{plugin} must be a boolean"
-                )));
-            };
-            Ok((plugin.clone(), *enabled))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()
-        .map(Some)
-}
-
-fn optional_hook_event_summaries(
-    object: &serde_json::Map<String, Value>,
-) -> Result<Option<BTreeMap<String, HookEventSummary>>, InterpretationSettingsDecodeFailure> {
-    let Some(value) = object.get("hooks") else {
-        return Ok(None);
-    };
-    let Value::Object(events) = value else {
-        return Err(InterpretationSettingsDecodeFailure::shape(
-            "hooks must be an object",
-        ));
-    };
-    if events.len() > SETTINGS_COLLECTION_LIMIT {
-        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
-            "hooks exceeds {SETTINGS_COLLECTION_LIMIT} events"
-        )));
-    }
-    let mut summaries = BTreeMap::new();
-    for (event, value) in events {
-        validate_settings_string(event, "hooks event")?;
-        let Value::Array(matchers) = value else {
-            return Err(InterpretationSettingsDecodeFailure::shape(format!(
-                "hooks.{event} must be an array"
-            )));
-        };
-        if matchers.len() > SETTINGS_COLLECTION_LIMIT {
-            return Err(InterpretationSettingsDecodeFailure::bounds(format!(
-                "hooks.{event} exceeds {SETTINGS_COLLECTION_LIMIT} matchers"
-            )));
-        }
-        let mut hook_count = 0usize;
-        for (index, matcher) in matchers.iter().enumerate() {
-            let Value::Object(matcher) = matcher else {
-                return Err(InterpretationSettingsDecodeFailure::shape(format!(
-                    "hooks.{event}[{index}] must be an object"
-                )));
-            };
-            let Some(Value::Array(hooks)) = matcher.get("hooks") else {
-                return Err(InterpretationSettingsDecodeFailure::shape(format!(
-                    "hooks.{event}[{index}].hooks must be an array"
-                )));
-            };
-            hook_count = hook_count.checked_add(hooks.len()).ok_or_else(|| {
-                InterpretationSettingsDecodeFailure::bounds(format!(
-                    "hooks.{event} hook count exceeds platform limits"
-                ))
-            })?;
-            if hook_count > SETTINGS_COLLECTION_LIMIT {
-                return Err(InterpretationSettingsDecodeFailure::bounds(format!(
-                    "hooks.{event} exceeds {SETTINGS_COLLECTION_LIMIT} hooks"
-                )));
-            }
-        }
-        summaries.insert(
-            event.clone(),
-            HookEventSummary {
-                declared_matcher_count: matchers.len() as u64,
-                declared_hook_count: hook_count as u64,
-            },
-        );
-    }
-    Ok(Some(summaries))
-}
-
-fn validate_settings_string(
-    value: &str,
-    field: &str,
-) -> Result<(), InterpretationSettingsDecodeFailure> {
-    if value.len() > SETTINGS_STRING_MAX_BYTES {
-        return Err(InterpretationSettingsDecodeFailure::bounds(format!(
-            "{field} exceeds {SETTINGS_STRING_MAX_BYTES} bytes"
-        )));
-    }
-    Ok(())
-}
-
-fn preserve_session_index_contract_loss(
-    record: &SourceRecord,
-    output: &mut FactBatch,
-    detail: &str,
-) -> Result<DecodeDisposition, AdapterError> {
-    preserve_unknown(
-        record,
-        output,
-        Some("session_index".to_string()),
-        format!("Claude session index {detail}"),
-    )?;
-    Ok(DecodeDisposition::PreservedUnknown)
-}
-
-fn preserve_workflow_contract_loss(
-    record: &SourceRecord,
-    output: &mut FactBatch,
-    native_kind: &str,
-    detail: &str,
-) -> Result<DecodeDisposition, AdapterError> {
-    preserve_unknown(
-        record,
-        output,
-        Some(native_kind.to_string()),
-        format!("Claude {native_kind} {detail}"),
-    )?;
-    Ok(DecodeDisposition::PreservedUnknown)
-}
-
-fn preserve_task_contract_loss(
-    record: &SourceRecord,
-    output: &mut FactBatch,
-    native_kind: &str,
-    detail: &str,
-) -> Result<DecodeDisposition, AdapterError> {
-    preserve_unknown(
-        record,
-        output,
-        Some(native_kind.to_string()),
-        format!("Claude {native_kind} {detail}"),
-    )?;
-    Ok(DecodeDisposition::PreservedUnknown)
-}
-
-fn task_status(native_status: &str) -> TaskStatus {
-    match native_status {
-        "pending" => TaskStatus::Pending,
-        "in_progress" => TaskStatus::InProgress,
-        "completed" => TaskStatus::Completed,
-        other => TaskStatus::Other(other.to_string()),
-    }
-}
-
-fn first_markdown_heading(content: &str) -> Option<String> {
-    content.lines().find_map(|line| {
-        let rest = line.strip_prefix('#')?;
-        let first = rest.chars().next()?;
-        if !first.is_whitespace() {
-            return None;
-        }
-        nonempty(rest.trim_start_matches(char::is_whitespace))
-    })
-}
-
-fn team_member_key(
-    adapter_id: &AdapterId,
-    source_instance_id: u64,
-    native_team_id: &str,
-    native_member_name: &str,
-) -> Result<EntityKey, AdapterError> {
-    let native_key = team_member_native_key(native_team_id, native_member_name);
-    EntityKey::native(adapter_id, source_instance_id, "team_member", &native_key)
-}
-
-fn team_member_native_key(native_team_id: &str, native_member_name: &str) -> Vec<u8> {
-    let mut native_key = Vec::new();
-    push_key_component(&mut native_key, native_team_id.as_bytes());
-    push_key_component(&mut native_key, native_member_name.as_bytes());
-    native_key
-}
-
-enum ClaudeTeamAffiliationActor<'a> {
-    Root {
-        native_session_id: &'a str,
-    },
-    Child {
-        native_session_id: &'a str,
-        run_native_key: &'a str,
-    },
-}
-
-fn emit_team_affiliation(
-    record: &SourceRecord,
-    output: &mut FactBatch,
-    actor: ClaudeTeamAffiliationActor<'_>,
-    native_team_id: &str,
-    native_member_name: Option<&str>,
-    effective_at: Option<QualifiedTimestamp>,
-) -> Result<(), AdapterError> {
-    let (native_session_id, run_native_key, actor_run) = match actor {
-        ClaudeTeamAffiliationActor::Root { native_session_id } => (
-            native_session_id,
-            native_session_id,
-            output.canonical_root_actor_run_key(native_session_id.as_bytes(), None)?,
-        ),
-        ClaudeTeamAffiliationActor::Child {
-            native_session_id,
-            run_native_key,
-        } => (
-            native_session_id,
-            run_native_key,
-            output.canonical_entity_key("run", run_native_key.as_bytes())?,
-        ),
-    };
-    let mut affiliation_native_key = Vec::new();
-    push_key_component(&mut affiliation_native_key, b"team");
-    push_key_component(&mut affiliation_native_key, run_native_key.as_bytes());
-    push_key_component(&mut affiliation_native_key, native_team_id.as_bytes());
-    let member = native_member_name
-        .map(|name| {
-            output
-                .canonical_entity_key("team_member", &team_member_native_key(native_team_id, name))
-        })
-        .transpose()?;
-    output.push_native(
-        record,
-        &affiliation_native_key,
-        Fact::ActorAffiliationRevision(ActorAffiliationRevisionFact {
-            affiliation: output
-                .canonical_entity_key("actor_affiliation", &affiliation_native_key)?,
-            actor_run,
-            session: output.canonical_entity_key("session", native_session_id.as_bytes())?,
-            dimension: ActorAffiliationDimension::Team,
-            target: output.canonical_entity_key("team", native_team_id.as_bytes())?,
-            member,
-            native_target_id: Some(native_team_id.to_string()),
-            native_member_id: native_member_name.map(str::to_string),
-            state: ActorAffiliationState::Present,
-            effective_at,
-        }),
-    )?;
-    Ok(())
-}
-
-fn epoch_millis_timestamp(value: i64) -> QualifiedTimestamp {
-    QualifiedTimestamp {
-        value: crate::core::timefmt::epoch_ms_to_iso8601(value as f64),
-        quality: TimestampQuality::NativeExact,
-    }
-}
-
-fn hash_component(hasher: &mut blake3::Hasher, value: &[u8]) {
-    hasher.update(&(value.len() as u64).to_be_bytes());
-    hasher.update(value);
 }
 
 fn decode_subagent_metadata(
@@ -4027,14 +1824,10 @@ fn decode_transcript_record(
             return Ok(DecodeDisposition::PreservedUnknown);
         }
     };
-    let projection = message_extractor::project_jsonl_line(raw).map_err(|error| {
-        AdapterError::new(
-            AdapterErrorClass::RecordPermanent,
-            "claude_projection",
-            error.to_string(),
-        )
-    })?;
+    // One loose parse and one typed parse per record, shared by the projection
+    // and every fact family below. Each of these used to be done twice.
     let typed = serde_json::from_str::<SessionMessage>(raw);
+    let projection = message_extractor::project_parsed_line(&value, &typed);
 
     let session = EntityKey::native(
         adapter_id,
@@ -4207,6 +2000,21 @@ fn decode_transcript_record(
         _ => projection.msg_type.clone(),
     };
     let spawn_descriptors = delegation_spawn_descriptors(&content);
+    emit_transcript_runtime_facts(
+        record,
+        &TranscriptRuntimeRecord {
+            session: &output.canonical_entity_key("session", context.session_id.as_bytes())?,
+            actor_run: &canonical_transcript_actor_run(output, context)?,
+            record_type: projection.msg_type.as_str(),
+            record_uuid: native_message_id.as_deref(),
+            role: &role,
+            content: &content,
+            model: model.as_deref(),
+            raw: &value,
+        },
+        &mut state.runtime,
+        output,
+    )?;
     output.push(
         record,
         Fact::Message(MessageFact {
@@ -4430,6 +2238,26 @@ fn canonical_transcript_actor_run(
         output.canonical_entity_key("run", context.run_native_key().as_bytes())
     } else {
         output.canonical_root_actor_run_key(context.session_id.as_bytes(), None)
+    }
+}
+
+/// Actor that owns a `todos/<session>-agent-<agent>.json` document.
+///
+/// The file name names its owner: an agent equal to the session is the root
+/// actor, and any other agent is a plain (non-workflow) subagent, which is the
+/// same derivation `run_native_key` uses for that shape.
+fn canonical_todo_actor_run(
+    output: &FactBatch,
+    context: &ClaudeTodoContext,
+) -> Result<crate::adapter::CanonicalEntityKey, AdapterError> {
+    if context.native_agent_id == context.native_session_id {
+        output.canonical_root_actor_run_key(context.native_session_id.as_bytes(), None)
+    } else {
+        let native_key = format!(
+            "{}\0\0{}",
+            context.native_session_id, context.native_agent_id
+        );
+        output.canonical_entity_key("run", native_key.as_bytes())
     }
 }
 
@@ -5315,7 +3143,7 @@ mod tests {
             std::fs::canonicalize(root.path()).unwrap().join("sessions")
         );
         assert_eq!(streams.len(), 16);
-        assert_eq!(adapter.manifest().contract_version, 22);
+        assert_eq!(adapter.manifest().contract_version, 23);
         assert!(adapter
             .manifest()
             .source_schema_versions
@@ -5875,7 +3703,9 @@ mod tests {
         );
         let candidate_scope = manifest.scope_programs.as_ref().unwrap();
         assert_eq!(candidate_scope.status, ScopeProgramStatus::Candidate);
-        assert!(candidate_scope.program("observe-root-transcript").is_some());
+        assert!(candidate_scope
+            .program("observe-root-session-and-descendants")
+            .is_some());
         let scope = ScopeProgramManifest::from_json(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../agent-support/claude-code/candidate-2026-08-15/scope-programs.json"
@@ -7077,7 +4907,14 @@ mod tests {
               {"content":"Run parity","status":"future_native_status"}
             ]"#,
         );
-        let mut batch = FactBatch::new(4, 4).unwrap();
+        // The todo document now also proves RFC 012C tasks, which are canonical
+        // facts and therefore need a bound semantic context.
+        let mut batch = semantic_batch(
+            TODO_STREAM,
+            &format!("todos/{SESSION}-agent-{SESSION}.json"),
+            16,
+            4,
+        );
         let disposition = adapter
             .decode(
                 DecodeContext {
@@ -7111,7 +4948,12 @@ mod tests {
         let changed = document_record(
             br#"[{"content":"Add task projection","status":"completed","activeForm":"Adding task projection"}]"#,
         );
-        let mut changed_batch = FactBatch::new(4, 4).unwrap();
+        let mut changed_batch = semantic_batch(
+            TODO_STREAM,
+            &format!("todos/{SESSION}-agent-{SESSION}.json"),
+            16,
+            4,
+        );
         adapter
             .decode(
                 DecodeContext {
@@ -7295,7 +5137,7 @@ mod tests {
               "ownerOrganizationUuid":"fixture-organization"
             }"#,
         );
-        let mut batch = semantic_transcript_batch(8, 4);
+        let mut batch = semantic_transcript_batch(32, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -7340,7 +5182,7 @@ mod tests {
               "ownerOrganizationUuid":"example-organization"
             }"#,
         );
-        let mut changed_owner_batch = semantic_transcript_batch(8, 4);
+        let mut changed_owner_batch = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -7400,7 +5242,7 @@ mod tests {
               }
             }"#,
         );
-        let mut batch = semantic_transcript_batch(16, 8);
+        let mut batch = semantic_transcript_batch(48, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -7493,7 +5335,7 @@ mod tests {
         topology_replay.stream_id = 80;
         topology_replay.object_id = 90;
         topology_replay.observed_at = 100;
-        let mut replay_batch = semantic_transcript_batch(16, 8);
+        let mut replay_batch = semantic_transcript_batch(48, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -7539,7 +5381,7 @@ mod tests {
               }
             }"#,
         );
-        let mut delta_batch = semantic_transcript_batch(16, 8);
+        let mut delta_batch = semantic_transcript_batch(48, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -7604,7 +5446,7 @@ mod tests {
               }
             }"#,
         );
-        let mut batch = semantic_transcript_batch(16, 8);
+        let mut batch = semantic_transcript_batch(48, 8);
         assert_eq!(
             adapter
                 .decode(
@@ -7649,7 +5491,7 @@ mod tests {
               }
             }"#,
         );
-        let mut missing_batch = semantic_transcript_batch(16, 8);
+        let mut missing_batch = semantic_transcript_batch(48, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -8635,7 +6477,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = semantic_transcript_batch(8, 4);
+        let mut batch = semantic_transcript_batch(32, 8);
         let disposition = adapter
             .decode(
                 DecodeContext {
@@ -8648,7 +6490,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(disposition, DecodeDisposition::Applied);
-        assert_eq!(batch.facts().len(), 6);
+        // The six RFC 011 facts, plus the RFC 012C families this record
+        // proves: a message, its content blocks, the tool call, and the
+        // response model.
+        assert_eq!(batch.facts().len(), 11);
         let message = fact_values(&batch)
             .find_map(|fact| match fact {
                 Fact::Message(message) => Some(message),
@@ -8722,7 +6567,7 @@ mod tests {
         };
         let decode = |payload: Vec<u8>, start: u64| {
             let record = record_at(&payload, start);
-            let mut batch = semantic_transcript_batch(8, 4);
+            let mut batch = semantic_transcript_batch(32, 8);
             adapter
                 .decode(
                     DecodeContext {
@@ -8886,7 +6731,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut first = semantic_transcript_batch(8, 4);
+        let mut first = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -8902,7 +6747,10 @@ mod tests {
         assert!(fact_values(&first).any(|fact| matches!(fact, Fact::Run(_))));
         assert!(fact_values(&first).any(|fact| matches!(fact, Fact::ActorRunRevision(_))));
         let first_state = first.next_decoder_state().unwrap().to_vec();
-        assert_eq!(first_state.len(), TRANSCRIPT_DECODER_STATE_BYTES);
+        // The flag record is followed by the bounded RFC 012C runtime tail
+        // (effective state, and correlation for unresolved tool calls).
+        assert!(first_state.len() >= TRANSCRIPT_DECODER_STATE_BYTES);
+        assert_eq!(first_state[0], TRANSCRIPT_DECODER_STATE_VERSION);
 
         let prompt_record = record(
             format!(
@@ -8910,7 +6758,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut prompt = semantic_transcript_batch(8, 4);
+        let mut prompt = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -8938,7 +6786,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut later = semantic_transcript_batch(8, 4);
+        let mut later = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -9019,7 +6867,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = semantic_transcript_batch(9, 4);
+        let mut batch = semantic_transcript_batch(32, 8);
         adapter
             .decode(
                 DecodeContext {
@@ -9135,7 +6983,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        let mut batch = semantic_batch(SUBAGENT_STREAM, &relative, 9, 4);
+        let mut batch = semantic_batch(SUBAGENT_STREAM, &relative, 32, 8);
         adapter
             .decode(
                 DecodeContext {

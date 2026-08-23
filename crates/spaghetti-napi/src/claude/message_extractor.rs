@@ -52,7 +52,20 @@ pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::E
     // `msg as Record<string, unknown>`), so we don't reverse-engineer
     // serde tag renames for `msg_type`.
     let value: Value = serde_json::from_str(line)?;
+    let typed = serde_json::from_str::<SessionMessage>(line);
+    Ok(project_parsed_line(&value, &typed))
+}
 
+/// The same projection for a caller that has already parsed the line.
+///
+/// The adapter's decode path needs both the loose `Value` and the typed
+/// message anyway. Re-parsing the line here made every transcript record cost
+/// four full JSON parses instead of two; the projection itself is unchanged,
+/// which is what keeps RFC 012A's identical-decode-result law true.
+pub fn project_parsed_line(
+    value: &Value,
+    typed: &Result<SessionMessage, serde_json::Error>,
+) -> MessageProjection {
     let msg_type = value
         .get("type")
         .and_then(Value::as_str)
@@ -66,16 +79,16 @@ pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::E
 
     let (input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens) =
         if msg_type == "assistant" {
-            extract_tokens(&value)
+            extract_tokens(value)
         } else {
             (0, 0, 0, 0)
         };
 
     // Typed parse for FTS; failure → still emit the row with no fts blob, but
     // say so when the blob should not have been empty.
-    let (fts_text, lost_fts_text) = match serde_json::from_str::<SessionMessage>(line) {
+    let (fts_text, lost_fts_text) = match typed {
         Ok(msg) => {
-            let s = fts_text::extract_message_text(&msg);
+            let s = fts_text::extract_message_text(msg);
             (if s.is_empty() { None } else { Some(s) }, None)
         }
         Err(e) if fts_text::type_contributes_text(&msg_type) => {
@@ -84,7 +97,7 @@ pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::E
         Err(_) => (None, None),
     };
 
-    Ok(MessageProjection {
+    MessageProjection {
         msg_type,
         uuid,
         timestamp,
@@ -94,7 +107,7 @@ pub fn project_jsonl_line(line: &str) -> Result<MessageProjection, serde_json::E
         cache_read_tokens,
         fts_text,
         lost_fts_text,
-    })
+    }
 }
 
 fn extract_tokens(value: &Value) -> (u64, u64, u64, u64) {

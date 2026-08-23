@@ -97,16 +97,16 @@
       "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
     },
     {
-      "family_id": "ui-update",
+      "family_id": "session-update",
       "source_schema_versions": ["grok-ui-updates-jsonl-unversioned"],
-      "stream_ids": ["ignored-ui-updates"],
+      "stream_ids": ["session-updates"],
       "native_shapes": ["<session>/updates.jsonl"],
       "framing": "json_lines",
       "lifecycle": ["append", "partial_write", "truncate", "rotate", "delete", "recreate"],
-      "identity_inputs": ["session directory", "record generation and cursor"],
-      "disposition": "ignored_known",
+      "identity_inputs": ["session directory", "params.prompt_id"],
+      "disposition": "mapped",
       "timestamp_quality": "mixed",
-      "missing_vs_zero": "not_applicable",
+      "missing_vs_zero": "distinct",
       "unknown_field_policy": "measure_only",
       "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
     }

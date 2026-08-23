@@ -42,11 +42,11 @@
       "disposition_ownership": ["native-family:session-signal"], "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
     },
     {
-      "stream_id": "ignored-ui-updates", "family_id": "ui-update", "root_id": "sessions", "relative_patterns": ["**/updates.jsonl"],
-      "primitive": "AppendDelimited", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-ignored-update", "authority": "ignored_derived",
+      "stream_id": "session-updates", "family_id": "session-update", "root_id": "sessions", "relative_patterns": ["**/updates.jsonl"],
+      "primitive": "AppendDelimited", "topologies": ["durable"], "implementation_state": "existing", "decoder_id": "grok-session-update", "authority": "canonical",
       "bounds": { "max_record_bytes": 4194304, "max_batch_bytes": 8388608, "max_records_per_batch": 1024, "max_entries": 250000, "max_depth": 64 },
       "lifecycle": ["append", "partial_write", "truncate", "identity_change", "delete", "recreate"], "overlap_strategy": "full_only", "safe_decoder_state_boundary": "stateless_record",
-      "disposition_ownership": ["native-family:ui-update"], "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
+      "disposition_ownership": ["native-family:session-update"], "claim_refs": ["grok-source-observed", "grok-semantic-fixtures-open"]
     }
   ],
   "claim_refs": ["grok-source-observed", "grok-identity-open", "grok-semantic-fixtures-open"]
