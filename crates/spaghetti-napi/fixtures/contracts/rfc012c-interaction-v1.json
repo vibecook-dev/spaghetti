@@ -15,7 +15,7 @@
     "semantic_revision_key_hex": "cd314f5ebac13ecbbb0c5ba8d0482aab8f23cb74ea54a38704b01b76c322bcd4",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:NXq7ncmguO147xma9fRJ6_9fwPRLA9OISP0_lAv8VC0"
+      "fact_revision_id": "v1:7WMdp_w9Eg9f-1pGLnrHVKzvsAtLej2uCDzpRQhgaps"
     },
     "state": "pending"
   },
@@ -26,7 +26,7 @@
     "semantic_revision_key_hex": "3a02cac478b4327ea6bcac4655b92b79ecb225e5e513cf71d76a7948ac9c5327",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:5UNEOVQvWV1ShPPnZJOW2Q9slTbbqBWXC9o5KRlGlZc"
+      "fact_revision_id": "v1:tHz-wl2G2UYXQg9PsaxzfVN3-Gz6cG9CjswkMacwwD0"
     },
     "state": "resolved"
   },
@@ -37,7 +37,7 @@
     "semantic_revision_key_hex": "e377d0c4c969a1839bb9d81705189e14f800b75067b93c6cbe9c8a37133c39ca",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:YCuWp-F1I8WjtNe1MjxwsCqfWGfwnvjvx6IM4KDA8H4"
+      "fact_revision_id": "v1:6lXI4uziT683mphn82bgG9palubzhFYy2xCIkaEjDh4"
     },
     "state": "failed"
   },
@@ -48,7 +48,7 @@
     "semantic_revision_key_hex": "981b25821029d3fe8ed0b55890f5916b19cb8ede58fa17612c6dd2f2797f843d",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:ZFymeCDgzwxS89ep_irYFc3X04ugJgHE26Q6BLDumXg"
+      "fact_revision_id": "v1:8l-PzmlAnqrUiuhRKs6LsRrsbqK5CWkpfIKWukU2MQo"
     },
     "state": "cancelled"
   },
@@ -59,7 +59,7 @@
     "semantic_revision_key_hex": "9416dffed27523656daf90ae0cfd9aea21cd5e27e6d807d1cdbe8d2ab2edeaff",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:YCCkid1irtqjZoCFmq9_8np3BCgRYK2HD4D8Uv45hrI"
+      "fact_revision_id": "v1:t_HWYFuk_3L_NWDcvQl86JQpWtprd4bDL-jh_VcUjog"
     },
     "state": "pending"
   },
@@ -70,7 +70,7 @@
     "semantic_revision_key_hex": "dfc62f9194ce6b724f11d65561569ac162995532f24cd73c93f190c27b9e2f69",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:RkPnhZaGp_gQMl-CkCxhtlM7t_Ce1DWLcv9v9xlHSEo"
+      "fact_revision_id": "v1:suOF_nN_mjtfk-oONafnox_J_a2O65QAMZE2zISS3go"
     },
     "state": "pending"
   },

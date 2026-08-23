@@ -17,7 +17,7 @@
     "semantic_revision_key_hex": "be9e689f75df549fd9af2ecf2bdc0862adb2f49584607e45f733607dc690fde8",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:XNZUWTDi8RdL0WVYlBR6bc_-fM9-nAeEC0qTCg551ts"
+      "fact_revision_id": "v1:n5hvf26u1nDoOZcp69Zvz_wXbrt2655tWI1K7vZpwA4"
     },
     "value": {
       "value": "claude-sonnet",
@@ -37,7 +37,7 @@
     "semantic_revision_key_hex": "5b0dc5cd81f88df413b52cb3c83985dc49456078256b68586b85d21556523d39",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:cykGUlInYgpGJCpzVnRku2Hs2WBwgQ2Wy-AiGlnVDmk"
+      "fact_revision_id": "v1:UJbVE8drrKX9mWn3leNnu8ZDGPSDaAcYUnTbYUbFlwI"
     },
     "value": {
       "value": "claude-sonnet",
@@ -58,7 +58,7 @@
     "semantic_revision_key_hex": "6b9726e36ff7627f90385b5fd8257a698ad00d2d1a5aee3b4e5bd205e88b09e9",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:ob3Kl_bBD1QVWfnnBAvEsLhWT1BzQjZ-F55Mvgxoc2k"
+      "fact_revision_id": "v1:SjNxYhBJHMzAKyqCSfTQWrqwdVJSMrGfBpZK6Umojfk"
     },
     "value": {
       "value": "claude-sonnet",

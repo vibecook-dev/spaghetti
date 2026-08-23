@@ -38,7 +38,7 @@ pub use contract::{
     SourceSnapshot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
 };
 pub(crate) use disposition::{BoundedNativeEvidence, RecordMappingDisposition};
-pub(crate) use facts::MAX_UNKNOWN_RAW_PAYLOAD_BYTES;
+pub(crate) use facts::{object_scoped_native_revision_key, MAX_UNKNOWN_RAW_PAYLOAD_BYTES};
 pub use facts::{
     ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
     ActorRunRevisionFact, ActorRunRole, ArtifactCapture, ArtifactContentFact,
