@@ -3459,9 +3459,25 @@ fn apply_usage_v2_facts(
                   AND excluded.response_identity = usage_v2_response_contributions.response_identity
                   AND excluded.native_message_id IS usage_v2_response_contributions.native_message_id
                   AND excluded.source_object_id = usage_v2_response_contributions.source_object_id
-                  AND excluded.source_generation = usage_v2_response_contributions.source_generation
-                  AND excluded.cursor_end > usage_v2_response_contributions.cursor_end
                   AND excluded.fact_revision_id <> usage_v2_response_contributions.fact_revision_id
+                  -- Source-revision order. An append stream advances the framed
+                  -- cursor monotonically, so within one generation the cursor
+                  -- is the authority. A replace document instead carries a
+                  -- content-digest cursor, which has no order at all, so its
+                  -- only evidence of a newer revision is a later commit. Both
+                  -- are safe together: records inside one commit are decoded in
+                  -- cursor order, and a backwards jump within a generation
+                  -- cannot cross a commit boundary.
+                  AND (
+                        excluded.source_generation > usage_v2_response_contributions.source_generation
+                     OR (
+                            excluded.source_generation = usage_v2_response_contributions.source_generation
+                        AND (
+                              excluded.cursor_end > usage_v2_response_contributions.cursor_end
+                           OR excluded.last_commit_seq > usage_v2_response_contributions.last_commit_seq
+                            )
+                        )
+                  )
             "#,
             params![
                 semantic.fact_id.as_bytes().as_slice(),
@@ -3523,7 +3539,7 @@ fn apply_usage_v2_facts(
                 continue;
             }
             return Err(EngineError::InvalidCommit(
-                "usage-v2 revision conflicts with its stable contribution identity or arrived behind the accepted source cursor".to_string(),
+                "usage-v2 revision conflicts with its stable contribution identity or arrived behind the accepted source revision".to_string(),
             ));
         }
         if affected != 1 {

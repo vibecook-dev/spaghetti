@@ -13,12 +13,14 @@ use crate::adapter::{
     AdapterDiagnostic, AdapterError, AdapterErrorClass, AdapterId, AdapterManifest,
     AdapterObjectContext, AdapterSupportBinding, AgentAdapter, Availability, CapabilityDeclaration,
     CapabilityGranularity, CapabilityId, CapabilitySupport, ConsistencyPolicy, ContentBlock,
-    DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec,
-    EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact,
-    MessageRole, ObjectSelector, QualifiedTimestamp, RawRetentionPolicy, RunEvidenceFact, RunFact,
-    ScopeProgramManifest, SessionFact, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
-    TimestampQuality, TokenUsage, UsageAccounting, UsageFact, UsageScope, ValueQuality,
+    ContractCompleteness, DecodeContext, DecodeDisposition, DecoderId, DeletionPolicy,
+    DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind, EvidenceStrength, Fact,
+    FactBatch, MessageFact, MessageRole, ObjectSelector, QualifiedTimestamp,
+    QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality, RawRetentionPolicy,
+    RunEvidenceFact, RunFact, ScopeProgramManifest, SessionFact, SourceInstance, SourceInstanceKey,
+    SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
+    SupportLevel, TimestampQuality, UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity,
+    UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
 };
 use crate::source::{
     platform_path_key, AppendDelimitedConfig, IngestPriority, SourceRecord, SourceRecordState,
@@ -80,7 +82,7 @@ const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
 const ROLLOUT_STREAM: &str = "rollout-sessions";
 const ROLLOUT_DECODER: &str = "codex-rollout-record";
 const OBJECT_CONTEXT_VERSION: u32 = 1;
-const DECODER_STATE_VERSION: u32 = 1;
+const DECODER_STATE_VERSION: u32 = 2;
 const SEARCH_TEXT_MAX_UTF16: usize = 2_000;
 
 const HISTORY_SESSIONS: &str = "history.sessions";
@@ -89,6 +91,7 @@ const HISTORY_CONTENT_BLOCKS: &str = "history.content_blocks";
 const HISTORY_TIMESTAMPS: &str = "history.timestamps";
 const HISTORY_MODEL_IDENTITY: &str = "history.model_identity";
 const RUNTIME_SESSION_ACTIVITY: &str = "runtime.session_activity";
+const RUNTIME_USAGE_V2: &str = "runtime.usage-v2";
 const USAGE_INPUT_TOKENS: &str = "usage.input_tokens";
 const USAGE_OUTPUT_TOKENS: &str = "usage.output_tokens";
 const USAGE_CACHE_TOKENS: &str = "usage.cache_tokens";
@@ -283,12 +286,21 @@ fn codex_capabilities() -> Vec<CapabilityDeclaration> {
             Some("native record activity is durable; silence does not imply completion"),
         ),
         native(
+            RUNTIME_USAGE_V2,
+            CapabilityGranularity::Turn,
+            Some("token_count attributes one replaceable response revision to the preceding assistant message"),
+        ),
+        native(
             USAGE_INPUT_TOKENS,
             CapabilityGranularity::Turn,
-            Some("last_token_usage is a replaceable native turn snapshot; total-only records remain session-scoped cumulative counters"),
+            Some("native input_tokens includes cached_input_tokens, so the non-cache common bucket is derived by subtraction"),
         ),
         native(USAGE_OUTPUT_TOKENS, CapabilityGranularity::Turn, None),
-        native(USAGE_CACHE_TOKENS, CapabilityGranularity::Turn, None),
+        native(
+            USAGE_CACHE_TOKENS,
+            CapabilityGranularity::Turn,
+            Some("cache reads are native; cache creation is unknown unless cache_write_input_tokens is present"),
+        ),
         native(SOURCE_LIVE, CapabilityGranularity::Instance, None),
         native(SOURCE_RECONCILE, CapabilityGranularity::Instance, None),
         native(SOURCE_RESUME_CURSOR, CapabilityGranularity::Record, None),
@@ -303,6 +315,7 @@ fn rollout_capabilities() -> Vec<CapabilityId> {
         HISTORY_TIMESTAMPS,
         HISTORY_MODEL_IDENTITY,
         RUNTIME_SESSION_ACTIVITY,
+        RUNTIME_USAGE_V2,
         USAGE_INPUT_TOKENS,
         USAGE_OUTPUT_TOKENS,
         USAGE_CACHE_TOKENS,
@@ -354,6 +367,80 @@ struct CodexDecoderState {
     first_prompt: Option<String>,
     model: Option<String>,
     last_assistant: Option<EntityKey>,
+    /// Newest `info.total_token_usage` counters seen in this generation. Codex
+    /// reports these cumulatively for the whole session.
+    cumulative_total: Option<CodexUsageCounters>,
+    /// The cumulative counters as of the moment `last_assistant` became
+    /// current. The difference against `cumulative_total` is this response's
+    /// derived share when the record carries no `last_token_usage`.
+    cumulative_at_response_start: Option<CodexUsageCounters>,
+}
+
+/// Native Codex token counters exactly as the rollout presents them.
+///
+/// `input_tokens` is inclusive of `cached_input_tokens` and `output_tokens` is
+/// inclusive of `reasoning_output_tokens`: on the production corpus
+/// `total_tokens == input_tokens + output_tokens` holds for every
+/// `total_token_usage` row, so the common non-cache input bucket has to be
+/// derived by subtraction rather than relabeled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct CodexUsageCounters {
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    cache_write_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+impl CodexUsageCounters {
+    fn parse(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let counter = |key: &str| object.get(key).and_then(Value::as_u64);
+        let counters = Self {
+            input_tokens: counter("input_tokens"),
+            cached_input_tokens: counter("cached_input_tokens"),
+            cache_write_input_tokens: counter("cache_write_input_tokens"),
+            output_tokens: counter("output_tokens"),
+        };
+        (counters != Self::default()).then_some(counters)
+    }
+
+    /// The non-cache input share. Unknown unless both native counters are
+    /// present, because an inclusive aggregate cannot be relabeled as the
+    /// exact non-cache bucket.
+    fn non_cache_input(&self) -> Option<u64> {
+        self.input_tokens?.checked_sub(self.cached_input_tokens?)
+    }
+
+    /// Counters accumulated since `baseline`. A counter that moved backwards is
+    /// a session-level reset, so the new reading becomes the whole share.
+    fn since(&self, baseline: Option<Self>) -> Self {
+        let Some(baseline) = baseline else {
+            return *self;
+        };
+        let delta = |current: Option<u64>, previous: Option<u64>| match (current, previous) {
+            (Some(current), Some(previous)) => Some(current.saturating_sub(previous)),
+            (current, _) => current,
+        };
+        let reset = [
+            (self.input_tokens, baseline.input_tokens),
+            (self.output_tokens, baseline.output_tokens),
+            (self.cached_input_tokens, baseline.cached_input_tokens),
+        ]
+        .into_iter()
+        .any(|(current, previous)| matches!((current, previous), (Some(a), Some(b)) if a < b));
+        if reset {
+            return *self;
+        }
+        Self {
+            input_tokens: delta(self.input_tokens, baseline.input_tokens),
+            cached_input_tokens: delta(self.cached_input_tokens, baseline.cached_input_tokens),
+            cache_write_input_tokens: delta(
+                self.cache_write_input_tokens,
+                baseline.cache_write_input_tokens,
+            ),
+            output_tokens: delta(self.output_tokens, baseline.output_tokens),
+        }
+    }
 }
 
 impl CodexDecoderState {
@@ -750,6 +837,7 @@ fn decode_response_item(
     )?;
     if role == MessageRole::Assistant && payload_kind == "message" {
         state.last_assistant = Some(message);
+        state.cumulative_at_response_start = state.cumulative_total;
     }
     state.store(output)?;
     Ok(DecodeDisposition::Applied)
@@ -837,40 +925,24 @@ fn decode_token_count(
         state.store(output)?;
         return Ok(DecodeDisposition::IgnoredKnown);
     };
-    let last = info.get("last_token_usage").and_then(parse_usage);
-    let total = info.get("total_token_usage").and_then(parse_usage);
-    let (session, _, run) = entity_keys(adapter_id, record.source_instance_id, state)?;
-    let usage = if let (Some(values), Some(subject)) = (last, state.last_assistant.clone()) {
-        Some(UsageFact {
-            subject,
-            session: session.clone(),
-            scope: UsageScope::Turn,
-            // Native "last" values are a current snapshot of the preceding
-            // turn. Multiple token_count records for one turn replace rather
-            // than sum, matching the source's correction semantics.
-            accounting: UsageAccounting::Snapshot,
-            quality: ValueQuality::NativeExact,
-            values,
-            model: state.model.clone(),
-            source_time: source_time.clone(),
-        })
-    } else {
-        total.map(|values| UsageFact {
-            subject: session.clone(),
-            session: session.clone(),
-            scope: UsageScope::Session,
-            accounting: UsageAccounting::Cumulative,
-            quality: ValueQuality::NativeExact,
-            values,
-            model: state.model.clone(),
-            source_time: source_time.clone(),
-        })
-    };
-    let Some(usage) = usage else {
-        state.store(output)?;
-        return Ok(DecodeDisposition::IgnoredKnown);
-    };
-    output.push(record, Fact::Usage(usage))?;
+    let total = info
+        .get("total_token_usage")
+        .and_then(CodexUsageCounters::parse);
+    if let Some(total) = total {
+        state.cumulative_total = Some(total);
+    }
+    let (_, _, run) = entity_keys(adapter_id, record.source_instance_id, state)?;
+
+    let emitted = codex_usage_v2_fact(info, state, source_time.clone(), output)?;
+    if let Some((semantic_key, fact)) = emitted {
+        let semantic_revision_key = fact.semantic_revision_key()?;
+        output.push_native_object_scoped_with_revision(
+            record,
+            &semantic_key,
+            &semantic_revision_key,
+            Fact::UsageRevisionV2(fact),
+        )?;
+    }
     output.push(
         record,
         Fact::RunEvidence(RunEvidenceFact {
@@ -883,6 +955,194 @@ fn decode_token_count(
     )?;
     state.store(output)?;
     Ok(DecodeDisposition::Applied)
+}
+
+/// Reduce one `token_count` record to at most one RFC 012C response revision.
+///
+/// `last_token_usage` is the preceding assistant response's own snapshot, so it
+/// is attributed to that response directly and replaces any earlier snapshot
+/// for it. When a rollout reports only cumulative `total_token_usage`, the
+/// response's share is derived from the movement since that response began;
+/// successive records for one response therefore replace with the accumulated
+/// share rather than adding a second contribution.
+fn codex_usage_v2_fact(
+    info: &Map<String, Value>,
+    state: &CodexDecoderState,
+    source_time: Option<QualifiedTimestamp>,
+    output: &mut FactBatch,
+) -> Result<Option<(Vec<u8>, UsageRevisionV2Fact)>, AdapterError> {
+    let Some(response) = state.last_assistant.clone() else {
+        // No response has been observed yet, so nothing can carry these
+        // counters. Fabricating a session-scoped response would double count
+        // against the per-response contributions that follow.
+        if info.contains_key("total_token_usage") || info.contains_key("last_token_usage") {
+            output.push_scoped_diagnostic(
+                AdapterDiagnostic {
+                    class: AdapterErrorClass::RecordPermanent,
+                    code: "codex_usage_v2_unattributed".to_string(),
+                    message: "Codex token_count arrived before any assistant response".to_string(),
+                },
+                capability_ids(&[RUNTIME_USAGE_V2]),
+            )?;
+        }
+        return Ok(None);
+    };
+
+    let (counters, native_root, derived) = match info
+        .get("last_token_usage")
+        .and_then(CodexUsageCounters::parse)
+    {
+        Some(counters) => (counters, "info.last_token_usage", false),
+        None => match state.cumulative_total {
+            Some(total) => (
+                total.since(state.cumulative_at_response_start),
+                "info.total_token_usage",
+                true,
+            ),
+            None => return Ok(None),
+        },
+    };
+
+    let mut semantic_key = Vec::with_capacity(response.as_bytes().len() + 24);
+    semantic_key.extend_from_slice(b"codex-response-v1\0");
+    push_key_component(&mut semantic_key, response.as_bytes());
+
+    let session = output.canonical_entity_key("session", state.session_id.as_bytes())?;
+    let actor_run = output.canonical_root_actor_run_key(state.session_id.as_bytes(), None)?;
+    let fact = UsageRevisionV2Fact {
+        session,
+        actor_run,
+        response_key: semantic_key.clone(),
+        // Codex has no native per-response identifier on the counter record;
+        // the preceding assistant message is this adapter's documented,
+        // fixture-tested deterministic fallback.
+        response_identity: UsageResponseIdentity::SourceRecordFallback,
+        native_message_id: None,
+        request_id: None,
+        buckets: codex_usage_buckets(counters, native_root, derived),
+        model: state
+            .model
+            .clone()
+            .map(|model| codex_usage_text(model, "turn_context.model")),
+        effort: None,
+        source_time,
+    };
+    fact.validate()?;
+    Ok(Some((semantic_key, fact)))
+}
+
+fn codex_usage_buckets(
+    counters: CodexUsageCounters,
+    native_root: &str,
+    derived: bool,
+) -> UsageBucketsV2 {
+    // The non-cache input split is always a subtraction, so it is derived even
+    // when both native counters are exact.
+    let input_field = format!("{native_root}.input_tokens-cached_input_tokens");
+    let input_tokens = match counters.non_cache_input() {
+        Some(value) => codex_usage_number(value, &input_field, QualifiedValueQuality::Derived),
+        None if counters.input_tokens.is_some() && counters.cached_input_tokens.is_some() => {
+            // More cached input than input: the native counters contradict each
+            // other and the split cannot be proven either way.
+            codex_usage_unknown(&input_field, QualifiedUnknownReason::Ambiguous)
+        }
+        None => codex_usage_unknown(&input_field, QualifiedUnknownReason::Missing),
+    };
+    let counter_quality = if derived {
+        QualifiedValueQuality::Derived
+    } else {
+        QualifiedValueQuality::Exact
+    };
+    let bucket = |value: Option<u64>, field: &str| match value {
+        Some(value) => codex_usage_number(value, field, counter_quality),
+        None => codex_usage_unknown(field, QualifiedUnknownReason::Missing),
+    };
+    UsageBucketsV2 {
+        input_tokens,
+        output_tokens: bucket(
+            counters.output_tokens,
+            &format!("{native_root}.output_tokens"),
+        ),
+        cache_creation_input_tokens: bucket(
+            counters.cache_write_input_tokens,
+            &format!("{native_root}.cache_write_input_tokens"),
+        ),
+        cache_read_input_tokens: bucket(
+            counters.cached_input_tokens,
+            &format!("{native_root}.cached_input_tokens"),
+        ),
+    }
+}
+
+fn codex_usage_number(
+    value: u64,
+    native_field: &str,
+    quality: QualifiedValueQuality,
+) -> UsageQualifiedValue<u64> {
+    let (authority, completeness) = match quality {
+        QualifiedValueQuality::Exact => (
+            UsageValueAuthority::NativeResponse,
+            ContractCompleteness::Complete,
+        ),
+        _ => (
+            UsageValueAuthority::AdapterDerived,
+            ContractCompleteness::Partial,
+        ),
+    };
+    QualifiedValue::from_parts(
+        Some(value),
+        quality,
+        authority,
+        completeness,
+        None,
+        None,
+        UsageValueProvenance {
+            native_field: native_field.to_string(),
+            normalization_contract_version: 1,
+        },
+    )
+    .expect("static Codex usage-v2 qualified value is valid")
+}
+
+fn codex_usage_unknown(
+    native_field: &str,
+    reason: QualifiedUnknownReason,
+) -> UsageQualifiedValue<u64> {
+    QualifiedValue::from_parts(
+        None,
+        QualifiedValueQuality::Unknown,
+        UsageValueAuthority::NativeResponse,
+        ContractCompleteness::Unknown,
+        Some(reason),
+        None,
+        UsageValueProvenance {
+            native_field: native_field.to_string(),
+            normalization_contract_version: 1,
+        },
+    )
+    .expect("static Codex usage-v2 unknown value is valid")
+}
+
+fn codex_usage_text(value: String, native_field: &str) -> UsageQualifiedValue<String> {
+    QualifiedValue::from_parts(
+        Some(value),
+        QualifiedValueQuality::Exact,
+        UsageValueAuthority::NativeResponse,
+        ContractCompleteness::Complete,
+        None,
+        None,
+        UsageValueProvenance {
+            native_field: native_field.to_string(),
+            normalization_contract_version: 1,
+        },
+    )
+    .expect("static Codex usage-v2 text value is valid")
+}
+
+fn capability_ids(ids: &[&str]) -> Vec<CapabilityId> {
+    ids.iter()
+        .map(|id| CapabilityId::new(*id).expect("static Codex capability id is valid"))
+        .collect()
 }
 
 fn session_fact(state: &CodexDecoderState, session: EntityKey, project: EntityKey) -> SessionFact {
@@ -1118,17 +1378,6 @@ fn tool_input(payload: &Map<String, Value>) -> Value {
     }
 }
 
-fn parse_usage(value: &Value) -> Option<TokenUsage> {
-    let object = value.as_object()?;
-    let number = |key: &str| object.get(key).and_then(Value::as_u64).unwrap_or(0);
-    Some(TokenUsage {
-        input_tokens: number("input_tokens"),
-        output_tokens: number("output_tokens").saturating_add(number("reasoning_output_tokens")),
-        cache_creation_tokens: 0,
-        cache_read_tokens: number("cached_input_tokens"),
-    })
-}
-
 fn is_tool_result(kind: &str) -> bool {
     kind.ends_with("_call_output") || kind == "tool_search_output"
 }
@@ -1323,7 +1572,20 @@ mod tests {
         let mut state = None;
         let mut facts = Vec::new();
         for record in records(lines) {
-            let mut batch = FactBatch::new(16, 4).unwrap();
+            let mut batch = FactBatch::new_with_semantic_context(
+                16,
+                4,
+                crate::adapter::FactSemanticContext::new(
+                    &AdapterId::new(ADAPTER_ID).unwrap(),
+                    1,
+                    b"fixture-root",
+                    ROLLOUT_STREAM.as_bytes(),
+                    b"sessions/rollout.jsonl",
+                    1,
+                )
+                .unwrap(),
+            )
+            .unwrap();
             adapter
                 .decode(
                     DecodeContext {
@@ -1379,36 +1641,115 @@ mod tests {
                 .count(),
             4
         );
-        let usage = facts
-            .iter()
-            .find_map(|fact| match fact {
-                Fact::Usage(usage) => Some(usage),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(usage.accounting, UsageAccounting::Snapshot);
-        assert_eq!(usage.scope, UsageScope::Turn);
-        assert_eq!(usage.values.input_tokens, 10);
-        assert_eq!(usage.values.output_tokens, 7);
-        assert_eq!(usage.values.cache_read_tokens, 2);
+        let usage = only_usage(&facts);
+        // Native `input_tokens` is inclusive of `cached_input_tokens`, so the
+        // common non-cache bucket is the derived difference, not the aggregate.
+        assert_eq!(usage.buckets.input_tokens.value, Some(8));
+        assert_eq!(
+            usage.buckets.input_tokens.quality,
+            QualifiedValueQuality::Derived
+        );
+        // `reasoning_output_tokens` is already inside `output_tokens`; adding
+        // the two would count reasoning twice.
+        assert_eq!(usage.buckets.output_tokens.value, Some(3));
+        assert_eq!(
+            usage.buckets.output_tokens.quality,
+            QualifiedValueQuality::Exact
+        );
+        assert_eq!(usage.buckets.cache_read_input_tokens.value, Some(2));
+        assert_eq!(usage.buckets.cache_creation_input_tokens.value, None);
+        assert_eq!(
+            usage.buckets.cache_creation_input_tokens.quality,
+            QualifiedValueQuality::Unknown
+        );
     }
 
     #[test]
-    fn total_only_usage_remains_session_scoped_cumulative() {
+    fn cache_write_counters_fill_the_cache_creation_bucket_exactly() {
         let facts = decode_sequence(&[
             r#"{"type":"session_meta","payload":{"id":"s1","cwd":"/tmp/project"}}"#,
-            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":25}}}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":90,"cached_input_tokens":40,"cache_write_input_tokens":7,"output_tokens":5,"reasoning_output_tokens":1}}}}"#,
         ]);
-        let usage = facts
+        let usage = only_usage(&facts);
+        assert_eq!(usage.buckets.cache_creation_input_tokens.value, Some(7));
+        assert_eq!(
+            usage.buckets.cache_creation_input_tokens.quality,
+            QualifiedValueQuality::Exact
+        );
+        assert_eq!(usage.buckets.input_tokens.value, Some(50));
+    }
+
+    #[test]
+    fn repeated_counts_for_one_response_replace_instead_of_adding() {
+        let facts = decode_sequence(&[
+            r#"{"type":"session_meta","payload":{"id":"s1","cwd":"/tmp/project"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":3}}}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":18,"cached_input_tokens":0,"output_tokens":9}}}}"#,
+        ]);
+        let revisions: Vec<_> = facts
             .iter()
-            .find_map(|fact| match fact {
-                Fact::Usage(usage) => Some(usage),
+            .filter_map(|fact| match fact {
+                Fact::UsageRevisionV2(usage) => Some(usage),
                 _ => None,
             })
-            .unwrap();
-        assert_eq!(usage.accounting, UsageAccounting::Cumulative);
-        assert_eq!(usage.scope, UsageScope::Session);
-        assert_eq!(usage.subject, usage.session);
+            .collect();
+        assert_eq!(revisions.len(), 2);
+        // Two revisions of one response: same response key, latest value wins.
+        assert_eq!(revisions[0].response_key, revisions[1].response_key);
+        assert_eq!(revisions[1].buckets.output_tokens.value, Some(9));
+    }
+
+    #[test]
+    fn total_only_rollouts_derive_each_response_share_without_double_counting() {
+        let facts = decode_sequence(&[
+            r#"{"type":"session_meta","payload":{"id":"s1","cwd":"/tmp/project"}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"one"}]}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":25}}}}"#,
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"two"}]}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":180,"cached_input_tokens":0,"output_tokens":40}}}}"#,
+        ]);
+        let revisions: Vec<_> = facts
+            .iter()
+            .filter_map(|fact| match fact {
+                Fact::UsageRevisionV2(usage) => Some(usage),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(revisions.len(), 2);
+        assert_ne!(revisions[0].response_key, revisions[1].response_key);
+        assert_eq!(revisions[0].buckets.input_tokens.value, Some(100));
+        assert_eq!(revisions[0].buckets.output_tokens.value, Some(25));
+        // The second response carries only the movement since the first, so the
+        // session total stays the native cumulative total rather than doubling.
+        assert_eq!(revisions[1].buckets.input_tokens.value, Some(80));
+        assert_eq!(revisions[1].buckets.output_tokens.value, Some(15));
+        assert_eq!(
+            revisions[1].buckets.output_tokens.quality,
+            QualifiedValueQuality::Derived
+        );
+    }
+
+    #[test]
+    fn counters_without_a_response_are_not_fabricated_into_one() {
+        let facts = decode_sequence(&[
+            r#"{"type":"session_meta","payload":{"id":"s1","cwd":"/tmp/project"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":25}}}}"#,
+        ]);
+        assert!(!facts
+            .iter()
+            .any(|fact| matches!(fact, Fact::UsageRevisionV2(_))));
+    }
+
+    fn only_usage(facts: &[Fact]) -> &UsageRevisionV2Fact {
+        facts
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::UsageRevisionV2(usage) => Some(usage),
+                _ => None,
+            })
+            .expect("one usage-v2 revision")
     }
 
     #[test]
@@ -1498,21 +1839,24 @@ mod tests {
         let totals: (i64, i64, i64, i64) = connection
             .query_row(
                 r#"
-                SELECT SUM(exact_input_tokens), SUM(exact_output_tokens),
-                       SUM(exact_cache_creation_tokens), SUM(exact_cache_read_tokens)
-                FROM usage_totals
+                SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                       COALESCE(SUM(cache_creation_input_tokens), 0),
+                       COALESCE(SUM(cache_read_input_tokens), 0)
+                FROM usage_v2_response_contributions
                 "#,
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(totals, (1_205, 480, 0, 0));
+        // One contribution per attributed response, not one per counter record:
+        // the repeated `token_count` rows replace their response's revision.
+        assert_eq!(count("usage_v2_response_contributions"), 8);
         let repeated_turn_rows: i64 = connection
             .query_row(
                 r#"
-                SELECT COUNT(*) FROM usage_contributions
-                WHERE accounting = 'snapshot' AND input_tokens = 45
-                  AND output_tokens = 15
+                SELECT COUNT(*) FROM usage_v2_response_contributions
+                WHERE input_tokens = 45 AND output_tokens = 15
                 "#,
                 [],
                 |row| row.get(0),
