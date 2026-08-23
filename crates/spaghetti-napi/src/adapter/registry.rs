@@ -406,11 +406,11 @@ pub(crate) mod tests {
         DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityScope,
         ExternalEntityRef, Fact, FactBatch, FactRevisionId, FactSemanticContext,
         NativeArtifactProbe, NativeIdentity, NativeIdentityClaim, ObjectSelector, QualifiedValue,
-        QualifiedValueQuality, RawRetentionPolicy, ScopeJoinEvidence, ScopeJoinIdentityInput,
-        ScopeJoinParameterSet, ScopeJoinUpdate, ScopeRelationPrimitive, SemanticRevisionRef,
-        Sha256Digest, SourceAccess, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
-        SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec,
-        SupportBundleDocument,
+        QualifiedValueQuality, RawRetentionPolicy, ScopeDirectoryIdentityAuthority,
+        ScopeJoinEvidence, ScopeJoinIdentityInput, ScopeJoinParameterSet, ScopeJoinUpdate,
+        ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess, SourceInstance,
+        SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot, StreamAuthority,
+        StreamId, StreamSpec, SupportBundleDocument,
     };
     use crate::claude::ClaudeCodeAdapter;
     use crate::observation_contract::unknown_wire::{
@@ -737,7 +737,7 @@ pub(crate) mod tests {
             "access_root":"projects",
             "locator":"{project-key}/{native-session-id}/subagents",
             "identity_inputs":["project-key","native-session-id"],
-            "directory_identity_authority":"configured_root",
+            "directory_identity_authority":"scope_join",
             "bounds":{"max_fan_out":4,"max_depth":5,"max_objects":4,"max_bytes":8388608,"max_rows":0},
             "observation_binding":{"stream_id":"subagent-transcripts","source_pattern":"*/*/subagents/**/agent-*.jsonl","relative_selector":"**/agent-*.jsonl"},
             "unavailable_behavior":"skip_optional",
@@ -1170,16 +1170,20 @@ pub(crate) mod tests {
     ) -> AdapterRegistry {
         let (catalog, binding, scope_programs) =
             promoted_fixture_catalog_with_scope(scope_document);
+        let adapter = EmptyAdapter::new("fixture")
+            .with_support(binding, scope_programs)
+            .with_streams(vec![
+                fixture_root_runtime_stream(),
+                fixture_descendant_runtime_stream(),
+            ])
+            .with_configured_root_discovery(discover_calls);
+        let adapter = if scope_document == JOIN_DERIVED_DYNAMIC_SCOPE_DOCUMENT {
+            adapter.with_stateful_decode()
+        } else {
+            adapter
+        };
         AdapterRegistryBuilder::new()
-            .register(
-                EmptyAdapter::new("fixture")
-                    .with_support(binding, scope_programs)
-                    .with_streams(vec![
-                        fixture_root_runtime_stream(),
-                        fixture_descendant_runtime_stream(),
-                    ])
-                    .with_configured_root_discovery(discover_calls),
-            )
+            .register(adapter)
             .register_native_support_probe("fixture", move |_| {
                 probe_calls.fetch_add(1, Ordering::AcqRel);
                 Ok(NativeArtifactProbe {
@@ -1348,10 +1352,6 @@ pub(crate) mod tests {
                 (
                     "native-session-id".to_string(),
                     Arc::<[u8]>::from(native_session_id.as_bytes()),
-                ),
-                (
-                    "project-key".to_string(),
-                    Arc::<[u8]>::from(b"project".as_slice()),
                 ),
                 (
                     "transcript-locator".to_string(),
@@ -2341,7 +2341,10 @@ pub(crate) mod tests {
             if record.payload == b"retry" {
                 return Ok(DecodeDisposition::RetryTransient);
             }
-            if record.payload == b"fixture-related-join" {
+            if matches!(
+                record.payload.as_slice(),
+                b"fixture-related-join" | b"fixture-related-join-two"
+            ) {
                 let actor = ActorRunRevisionFact {
                     actor_run: output.canonical_root_actor_run_key(b"fixture-session", None)?,
                     session: output.canonical_entity_key("session", b"fixture-session")?,
@@ -2412,7 +2415,10 @@ pub(crate) mod tests {
             record: &SourceRecord,
             decoded: &FactBatch,
         ) -> Result<Vec<ScopeJoinUpdate>, AdapterError> {
-            if record.payload != b"fixture-related-join" {
+            if !matches!(
+                record.payload.as_slice(),
+                b"fixture-related-join" | b"fixture-related-join-two"
+            ) {
                 return Ok(Vec::new());
             }
             let semantic = decoded
@@ -2420,19 +2426,51 @@ pub(crate) mod tests {
                 .first()
                 .and_then(|fact| fact.semantic_revision)
                 .ok_or_else(|| AdapterError::invalid_contract("fixture join evidence missing"))?;
-            let parameter = ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
-                "team-name",
-                b"private-team-coordinate".to_vec(),
-            )
-            .map_err(|_| AdapterError::invalid_contract("fixture join input is invalid"))?])
-            .map_err(|_| AdapterError::invalid_contract("fixture join parameter is invalid"))?;
+            let join_directory = self
+                .manifest
+                .scope_programs
+                .as_ref()
+                .and_then(|scope| scope.relation("descendant-objects"))
+                .is_some_and(|relation| {
+                    relation.directory_identity_authority
+                        == Some(ScopeDirectoryIdentityAuthority::ScopeJoin)
+                });
+            let (relation_id, input_name, input_value) = if join_directory {
+                (
+                    "descendant-objects",
+                    "child-id",
+                    b"private-child".as_slice(),
+                )
+            } else {
+                (
+                    "team-config-from-evidence",
+                    "team-name",
+                    b"private-team-coordinate".as_slice(),
+                )
+            };
+            let parameter = |value: &[u8]| {
+                ScopeJoinParameterSet::new(vec![ScopeJoinIdentityInput::new(
+                    input_name,
+                    value.to_vec(),
+                )
+                .map_err(|_| AdapterError::invalid_contract("fixture join input is invalid"))?])
+                .map_err(|_| AdapterError::invalid_contract("fixture join parameter is invalid"))
+            };
+            let parameters = if join_directory && record.payload == b"fixture-related-join-two" {
+                vec![
+                    parameter(b"private-child-a")?,
+                    parameter(b"private-child-b")?,
+                ]
+            } else {
+                vec![parameter(input_value)?]
+            };
             ScopeJoinUpdate::new(
-                "team-config-from-evidence",
+                relation_id,
                 vec![ScopeJoinEvidence::new(
                     semantic.fact_id,
                     semantic.semantic_revision_ref,
                 )],
-                vec![parameter],
+                parameters,
             )
             .map(|update| vec![update])
             .map_err(|_| AdapterError::invalid_contract("fixture scope join is invalid"))
@@ -2937,13 +2975,12 @@ pub(crate) mod tests {
             ScopedObjectRead::Available { .. }
         ));
         drop(pass);
-        let (host, objects, bindings, directory_bindings, related_relation_bindings) =
-            prepared_runtime.into_parts();
-        assert_eq!(objects.len(), 1);
-        assert_eq!(bindings.len(), 1);
-        assert!(directory_bindings.is_empty());
-        assert!(related_relation_bindings.is_empty());
-        drop(host);
+        assert_eq!(prepared_runtime.objects().len(), 1);
+        assert_eq!(prepared_runtime.bindings().len(), 1);
+        assert!(prepared_runtime.directory_bindings().is_empty());
+        assert!(prepared_runtime.scope_join_directory_bindings().is_empty());
+        assert!(prepared_runtime.related_relation_bindings().is_empty());
+        drop(prepared_runtime);
     }
 
     #[test]
@@ -3256,7 +3293,7 @@ pub(crate) mod tests {
                 break;
             }
         }
-        let bootstrap = bootstrap.expect("related membership must enter bootstrap coverage");
+        let bootstrap = bootstrap.expect("dynamic membership must enter bootstrap coverage");
         assert_eq!(bootstrap.scope_coverage.relations().len(), 2);
         let decode = bootstrap
             .source_coverage
@@ -3266,7 +3303,7 @@ pub(crate) mod tests {
         assert_eq!(
             decode.points.len() + decode.explicit_absence_or_deletion.len(),
             3,
-            "root, related membership, and joined object must all be complete"
+            "root, dynamic membership, and joined object must all be complete"
         );
 
         std::fs::write(&related_path, b"corrected-related-document").unwrap();
@@ -3380,15 +3417,9 @@ pub(crate) mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(
-            attachment
-                .relation_identity_inputs("descendant-transcripts")
-                .unwrap()
-                .iter()
-                .map(|input| input.name())
-                .collect::<Vec<_>>(),
-            vec!["project-key", "native-session-id"]
-        );
+        assert!(attachment
+            .relation_identity_inputs("descendant-transcripts")
+            .is_none());
         assert_eq!(
             attachment
                 .related_relation_bindings()
@@ -3399,7 +3430,8 @@ pub(crate) mod tests {
 
         let prepared = attachment.prepare_append_runtime(32, 16).unwrap();
         assert_eq!(prepared.objects().len(), 1);
-        assert_eq!(prepared.directory_bindings().len(), 1);
+        assert!(prepared.directory_bindings().is_empty());
+        assert_eq!(prepared.scope_join_directory_bindings().len(), 1);
         assert_eq!(prepared.related_relation_bindings().len(), 1);
         assert_eq!(prepared.required_coverage_objects(), 11);
         let callback_slot = Arc::new(std::sync::Mutex::new(None));
@@ -3571,8 +3603,8 @@ pub(crate) mod tests {
             panic!("real Claude configured owner must close structurally");
         };
         assert_eq!(owners.source().binding_count(), 1);
-        assert_eq!(owners.source().directory_binding_count(), 1);
-        assert_eq!(owners.source().replacement_extension_relation_count(), 1);
+        assert_eq!(owners.source().directory_binding_count(), 0);
+        assert_eq!(owners.source().replacement_extension_relation_count(), 2);
         assert!(close.wait_async().await.complete);
         assert!(runtime.next_event().await.unwrap().is_none());
         assert_eq!(probe_calls.load(Ordering::Acquire), 1);
@@ -3998,7 +4030,7 @@ pub(crate) mod tests {
         let membership_pass_id = authority.access_pass_id();
         assert!(membership_pass_id > 0);
         let membership =
-            ScopedRelationMembershipObservation::from_related_membership(authority).unwrap();
+            ScopedRelationMembershipObservation::from_dynamic_membership(authority).unwrap();
         let mut admission = ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
             max_data_events: 8,
             max_retained_native_bytes: 8_192,
@@ -4007,7 +4039,7 @@ pub(crate) mod tests {
         })
         .unwrap();
         admission
-            .record_related_relation_membership(
+            .record_dynamic_relation_membership(
                 prepared.host(),
                 ScopedAppendDeliveryPhase::Correction,
                 membership,
@@ -4043,7 +4075,7 @@ pub(crate) mod tests {
         let foreign_authority = foreign_memberships.pop().unwrap();
         let foreign_membership_source = foreign_authority.source().clone();
         let foreign_membership =
-            ScopedRelationMembershipObservation::from_related_membership(foreign_authority)
+            ScopedRelationMembershipObservation::from_dynamic_membership(foreign_authority)
                 .unwrap();
         let mut foreign_admission =
             ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
@@ -4054,7 +4086,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert_eq!(
-            foreign_admission.record_related_relation_membership(
+            foreign_admission.record_dynamic_relation_membership(
                 prepared.host(),
                 ScopedAppendDeliveryPhase::Correction,
                 foreign_membership,
@@ -4078,7 +4110,7 @@ pub(crate) mod tests {
         let membership_source = authority.source().clone();
         let related_pass_id = authority.access_pass_id();
         let membership =
-            ScopedRelationMembershipObservation::from_related_membership(authority).unwrap();
+            ScopedRelationMembershipObservation::from_dynamic_membership(authority).unwrap();
         let mut related_admission =
             ScopedObservationAdmissionLane::new(ScopedObservationQueueLimits {
                 max_data_events: 8,
@@ -4093,7 +4125,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         related_admission
-            .record_related_relation_membership(
+            .record_dynamic_relation_membership(
                 prepared.host(),
                 ScopedAppendDeliveryPhase::Bootstrap,
                 membership,
@@ -4189,10 +4221,10 @@ pub(crate) mod tests {
         assert_eq!(authority.member_sources().next(), Some(&member_source));
         let corrected_pass_id = authority.access_pass_id();
         related_admission
-            .record_related_relation_membership(
+            .record_dynamic_relation_membership(
                 prepared.host(),
                 ScopedAppendDeliveryPhase::Correction,
-                ScopedRelationMembershipObservation::from_related_membership(authority).unwrap(),
+                ScopedRelationMembershipObservation::from_dynamic_membership(authority).unwrap(),
             )
             .unwrap();
         let receipt = related_admission
@@ -4235,10 +4267,10 @@ pub(crate) mod tests {
         assert_eq!(authority.member_sources().next(), Some(&member_source));
         let removed_pass_id = authority.access_pass_id();
         related_admission
-            .record_related_relation_membership(
+            .record_dynamic_relation_membership(
                 prepared.host(),
                 ScopedAppendDeliveryPhase::Correction,
-                ScopedRelationMembershipObservation::from_related_membership(authority).unwrap(),
+                ScopedRelationMembershipObservation::from_dynamic_membership(authority).unwrap(),
             )
             .unwrap();
         let receipt = related_admission
@@ -4351,10 +4383,10 @@ pub(crate) mod tests {
             })
             .unwrap();
             admission
-                .record_related_relation_membership(
+                .record_dynamic_relation_membership(
                     prepared.host(),
                     ScopedAppendDeliveryPhase::Bootstrap,
-                    ScopedRelationMembershipObservation::from_related_membership(authority)
+                    ScopedRelationMembershipObservation::from_dynamic_membership(authority)
                         .unwrap(),
                 )
                 .unwrap();
@@ -5105,10 +5137,42 @@ pub(crate) mod tests {
         assert!(attachment
             .relation_identity_inputs("descendant-objects")
             .is_none());
-        let runtime_error = attachment.prepare_append_runtime(16, 16).unwrap_err();
-        assert!(runtime_error
-            .to_string()
-            .contains("configured scoped runtime stream is not supported"));
+        let prepared = attachment.prepare_append_runtime(16, 16).unwrap();
+        assert!(prepared.directory_bindings().is_empty());
+        assert_eq!(prepared.scope_join_directory_bindings().len(), 1);
+        let directory = &prepared.scope_join_directory_bindings()[0];
+        assert_eq!(directory.relation_id(), "descendant-objects");
+        assert_eq!(
+            directory.identity_input_names().collect::<Vec<_>>(),
+            vec!["child-id"]
+        );
+        assert_eq!(directory.bounds().max_objects, 8);
+        assert_eq!(prepared.required_coverage_objects(), 10);
+        let pass = prepared.host().begin_pass().unwrap();
+        let untrusted_join = [ScopeIdentityInput {
+            name: "child-id",
+            value: b"private-child",
+        }];
+        assert!(matches!(
+            prepared.host().scan_directory_relation_membership(
+                &pass,
+                "descendant-objects",
+                &untrusted_join,
+                AccessPhase::Initial,
+                None,
+            ),
+            Err(ScopedObservationAccessError::InvalidGrant(_))
+        ));
+        let report = pass.finish();
+        assert_eq!(
+            report
+                .relations()
+                .iter()
+                .find(|relation| relation.relation_id == "descendant-objects")
+                .unwrap()
+                .attempts,
+            0
+        );
 
         let injected_identity = ScopedConfiguredRootIdentity::new(
             b"fixture-session".as_slice(),
@@ -5135,6 +5199,171 @@ pub(crate) mod tests {
         let rendered = error.to_string();
         assert!(!rendered.contains("private-child"));
         assert_eq!(probe_calls.load(Ordering::Acquire), 2);
+        assert_eq!(discover_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn configured_scope_join_directory_reaches_bootstrap_fixed_point() {
+        let probe_calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::new(AtomicUsize::new(0));
+        let registry = configured_dynamic_directory_registry_with_scope(
+            JOIN_DERIVED_DYNAMIC_SCOPE_DOCUMENT,
+            Arc::clone(&probe_calls),
+            Arc::clone(&discover_calls),
+        );
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("configured-join-bootstrap-private-root");
+        let children_a = root.join("sessions/private-child-a/children");
+        let children_b = root.join("sessions/private-child-b/children");
+        std::fs::create_dir_all(&children_a).unwrap();
+        std::fs::create_dir_all(&children_b).unwrap();
+        std::fs::write(
+            root.join("sessions/session.jsonl"),
+            b"fixture-related-join-two\n",
+        )
+        .unwrap();
+        std::fs::write(children_a.join("child-a.jsonl"), b"fixture-child-a\n").unwrap();
+        std::fs::write(children_b.join("child-b.jsonl"), b"fixture-child-b\n").unwrap();
+
+        let attachment = prepare_configured_scoped_observation_attachment(
+            &registry,
+            configured_attachment_request(vec![root], PathBuf::from("sessions/session.jsonl")),
+        )
+        .unwrap()
+        .unwrap();
+        let prepared = attachment.prepare_append_runtime(16, 16).unwrap();
+        assert!(prepared.directory_bindings().is_empty());
+        assert_eq!(prepared.scope_join_directory_bindings().len(), 1);
+
+        let callback_slot = Arc::new(std::sync::Mutex::new(None));
+        let registrations = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let opened = prepared
+            .open_with_watcher_factory(ConfiguredScopedObservationRuntimeOptions::default(), {
+                let callback_slot = Arc::clone(&callback_slot);
+                let registrations = Arc::clone(&registrations);
+                let drops = Arc::clone(&drops);
+                move |callback| {
+                    Ok(Box::new(ControlledScopedWatchBackend {
+                        callback: Some(callback),
+                        callback_slot,
+                        registrations,
+                        drops,
+                    }))
+                }
+            })
+            .unwrap();
+        let (mut runtime, handle, supervisor) = opened.into_parts();
+        let mut supervisor_task = tokio::spawn(supervisor.run_until_stopped());
+        let mut bootstrap = None;
+        for _ in 0..16 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("join-derived configured supervisor stopped before bootstrap: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            if let ScopedObservationEvent::ObserverBootstrapComplete { barrier } =
+                &yielded.envelope.event
+            {
+                bootstrap = Some(Arc::clone(barrier));
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if bootstrap.is_some() {
+                break;
+            }
+        }
+        let bootstrap = bootstrap.expect("join-derived membership must complete before Ready");
+        assert_eq!(bootstrap.scope_coverage.relations().len(), 2);
+        let decode = bootstrap
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            decode.points.len() + decode.explicit_absence_or_deletion.len(),
+            4,
+            "root decode, aggregate membership, and both joined directory children must share one barrier"
+        );
+        let rendered = format!("{bootstrap:?}");
+        for private in [
+            "private-child-a",
+            "private-child-b",
+            "child-a.jsonl",
+            "child-b.jsonl",
+            "configured-join-bootstrap-private-root",
+        ] {
+            assert!(!rendered.contains(private));
+        }
+
+        std::fs::write(
+            children_a.join("child-a.jsonl"),
+            b"fixture-child-replaced\n",
+        )
+        .unwrap();
+        let resync_task = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.resync_applied_at(50).await }
+        });
+        let mut replacement = None;
+        for _ in 0..32 {
+            let yielded = tokio::select! {
+                stopped = &mut supervisor_task => {
+                    panic!("join-derived configured supervisor stopped during replacement: {:?}", stopped.unwrap());
+                }
+                yielded = runtime.next_event() => yielded.unwrap().unwrap(),
+            };
+            if let ScopedObservationEvent::ObserverResyncComplete { barrier } =
+                &yielded.envelope.event
+            {
+                replacement = Some(Arc::clone(barrier));
+            }
+            runtime
+                .acknowledge_applied(yielded.application_receipt())
+                .unwrap();
+            if replacement.is_some() {
+                break;
+            }
+        }
+        let replacement = replacement.expect("join-derived replacement must reach fixed point");
+        assert_eq!(replacement.scope_epoch, 2);
+        assert_ne!(
+            replacement.coverage_snapshot_digest,
+            bootstrap.snapshot_digest
+        );
+        assert_eq!(replacement.scope_coverage.relations().len(), 2);
+        let replacement_decode = replacement
+            .source_coverage
+            .iter()
+            .find(|coverage| coverage.coverage_domain == CoverageDomain::Decode)
+            .unwrap();
+        assert_eq!(
+            replacement_decode.points.len() + replacement_decode.explicit_absence_or_deletion.len(),
+            4
+        );
+        assert!(matches!(
+            resync_task.await.unwrap().unwrap(),
+            ScopedObservationResyncResolution::Ready(resolved)
+                if Arc::ptr_eq(&resolved, &replacement)
+        ));
+
+        let close = handle.request_close();
+        let stopped = tokio::time::timeout(Duration::from_secs(2), supervisor_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let ConfiguredScopedObservationSupervisorRunResult::Stopped(owners) = stopped else {
+            panic!("join-derived configured owner must close structurally");
+        };
+        assert_eq!(owners.source().binding_count(), 1);
+        assert_eq!(owners.source().directory_binding_count(), 0);
+        assert!(close.wait_async().await.complete);
+        assert!(runtime.next_event().await.unwrap().is_none());
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(callback_slot.lock().unwrap().is_none());
+        assert_eq!(probe_calls.load(Ordering::Acquire), 1);
         assert_eq!(discover_calls.load(Ordering::Acquire), 1);
     }
 

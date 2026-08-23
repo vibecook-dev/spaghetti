@@ -1431,13 +1431,14 @@ impl ScopedObservationDirectoryListing {
         input.observe_retained(origin, decoder_state)
     }
 
-    pub(super) fn finalize_for_membership(
+    fn finalize_member_map(
         &mut self,
-    ) -> Option<BTreeSet<ScopedSourceObjectIdentity>> {
+    ) -> Option<BTreeMap<AccessObjectToken, ScopedSourceObjectIdentity>> {
         if !self.member_reads_complete() || !self.membership_revalidated {
             return None;
         }
         let mut sources = BTreeSet::new();
+        let mut members = BTreeMap::new();
         for identity in &self.completed_members {
             let expected_source =
                 ScopedSourceObjectIdentity::from_semantic_context(&identity.semantic_context)
@@ -1450,6 +1451,9 @@ impl ScopedObservationDirectoryListing {
                 || identity.source.adapter_id != self.identity.source.adapter_id
                 || identity.source.source_instance_key != self.identity.source.source_instance_key
                 || !sources.insert(identity.source.clone())
+                || members
+                    .insert(identity.object_token, identity.source.clone())
+                    .is_some()
             {
                 return None;
             }
@@ -1458,7 +1462,64 @@ impl ScopedObservationDirectoryListing {
         self.root = PathBuf::new();
         self.members.clear();
         self.next_member_read = 0;
-        Some(sources)
+        Some(members)
+    }
+
+    pub(super) fn finalize_for_membership(
+        &mut self,
+    ) -> Option<BTreeSet<ScopedSourceObjectIdentity>> {
+        self.finalize_member_map()
+            .map(|members| members.into_values().collect())
+    }
+
+    /// Finalize a listing for an evidence-derived aggregate while preserving
+    /// each common access-budget token. The token map is crate-private and
+    /// cannot authorize another read; it only binds the aggregate membership
+    /// authority to the exact children selected by these listing proofs.
+    pub(super) fn finalize_for_composed_membership(
+        &mut self,
+    ) -> Option<BTreeMap<AccessObjectToken, ScopedSourceObjectIdentity>> {
+        self.finalize_member_map()
+    }
+
+    pub(crate) fn root_object_token(&self) -> AccessObjectToken {
+        self.identity.root_object_token
+    }
+
+    pub(super) fn matches_attachment(
+        &self,
+        authority: &Arc<ScopedObservationAttachmentAuthority>,
+    ) -> bool {
+        Arc::ptr_eq(&self.identity.attachment_authority, authority)
+    }
+
+    /// Clone only the path-free, already-finalized checkpoint retained for a
+    /// later correction pass. Live read authority or native locator material
+    /// can never cross this seam.
+    pub(crate) fn clone_finalized_for_revalidation(&self) -> Option<Self> {
+        if self.read_authority.is_some()
+            || !self.root.as_os_str().is_empty()
+            || !self.members.is_empty()
+            || self.next_member_read != 0
+            || self.member_read_failed
+            || !self.membership_revalidated
+        {
+            return None;
+        }
+        Some(Self {
+            identity: self.identity.clone(),
+            checkpoint: self.checkpoint.clone(),
+            changes: self.changes.clone(),
+            root_moved: self.root_moved,
+            accounted_entries: self.accounted_entries.clone(),
+            read_authority: None,
+            root: PathBuf::new(),
+            members: Vec::new(),
+            completed_members: self.completed_members.clone(),
+            next_member_read: 0,
+            member_read_failed: false,
+            membership_revalidated: true,
+        })
     }
 
     /// Read the next selected member in canonical checkpoint order. No caller
@@ -2385,6 +2446,15 @@ impl ScopedObservationDirectoryMemberObserveFailure {
 }
 
 impl ScopedObservationDirectoryMemberLifecycle {
+    pub(crate) fn object_token(&self) -> AccessObjectToken {
+        match self {
+            Self::Present(snapshot) => snapshot.binding.identity().object_token,
+            Self::Absent { binding, .. } | Self::Oversized { binding } => {
+                binding.identity().object_token
+            }
+        }
+    }
+
     pub(crate) fn source(&self) -> &ScopedSourceObjectIdentity {
         match self {
             Self::Present(snapshot) => snapshot.binding.identity().source(),

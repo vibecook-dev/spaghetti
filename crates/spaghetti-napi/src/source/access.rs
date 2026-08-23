@@ -16,9 +16,10 @@ use sha2::{Digest, Sha256};
 use crate::adapter::{
     AgentAdapter, AuthorizedObservationSourceAuthority, AuthorizedObservationSourceContract,
     AuthorizedObservationSourceDriver, AuthorizedScopeProgram, ConsistencyPolicy, DeletionPolicy,
-    DriverSpec, ScopeObservationSourceBinding, ScopeProgramManifest, ScopeProgramStatus,
-    ScopeRelationBounds, ScopeRelationDeclaration, ScopeRelationPrimitive,
-    ScopeUnavailableBehavior, SourceInstance, SourceInstanceKey, StreamAuthority, StreamSpec,
+    DriverSpec, ScopeDirectoryIdentityAuthority, ScopeObservationSourceBinding,
+    ScopeProgramManifest, ScopeProgramStatus, ScopeRelationBounds, ScopeRelationDeclaration,
+    ScopeRelationPrimitive, ScopeUnavailableBehavior, SourceInstance, SourceInstanceKey,
+    StreamAuthority, StreamSpec,
 };
 
 use super::selector::GlobPattern;
@@ -2706,6 +2707,8 @@ mod tests {
             .unwrap();
         relation.relation_id = "descendant-transcripts".to_owned();
         relation.primitive = ScopeRelationPrimitive::ChildDirectoryByNativeId;
+        relation.directory_identity_authority =
+            Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot);
         relation.locator = locator.to_owned();
         relation.identity_inputs = vec!["project-key".to_owned(), "native-session-id".to_owned()];
         relation.bounds.max_fan_out = 2;

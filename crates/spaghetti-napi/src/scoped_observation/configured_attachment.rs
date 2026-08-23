@@ -40,12 +40,12 @@ use super::{
     ScopedObservationAsyncRuntime, ScopedObservationAsyncStoppedOwners,
     ScopedObservationAttachmentAuthority, ScopedObservationAutomaticResyncError,
     ScopedObservationConsumerOfferError, ScopedObservationDeliveryLimits,
-    ScopedObservationDirectoryPassBinding, ScopedObservationNativeWatchBackend,
-    ScopedObservationNativeWatchCallback, ScopedObservationNativeWatcher,
-    ScopedObservationNativeWatcherRecoveryPolicy, ScopedObservationOpenDrainError,
-    ScopedObservationOwnedIdentityInput, ScopedObservationProjectionLimits,
-    ScopedObservationProjectionSink, ScopedObservationQueueLimits,
-    ScopedObservationRelatedMembershipAuthority, ScopedObservationRelatedObjectObservation,
+    ScopedObservationDirectoryPassBinding, ScopedObservationDynamicMembershipAuthority,
+    ScopedObservationNativeWatchBackend, ScopedObservationNativeWatchCallback,
+    ScopedObservationNativeWatcher, ScopedObservationNativeWatcherRecoveryPolicy,
+    ScopedObservationOpenDrainError, ScopedObservationOwnedIdentityInput,
+    ScopedObservationProjectionLimits, ScopedObservationProjectionSink,
+    ScopedObservationQueueLimits, ScopedObservationRelatedObjectObservation,
     ScopedObservationRelatedObjectState, ScopedObservationReplacementExtension,
     ScopedObservationScopeJoinSnapshot, ScopedObservationScopeReplacementStage,
     ScopedObservationSourceOwnerRetryPolicy, ScopedObservationStartupError,
@@ -61,6 +61,7 @@ const MAX_CONFIGURED_ROOT_KEY_BYTES: usize = 32 * 1024;
 const MAX_CONFIGURED_ROOT_KEY_BYTES_TOTAL: usize = 256 * 1024;
 const MAX_RELATION_IDENTITY_INPUTS: usize = 32;
 const MAX_KNOWN_OBJECTS: usize = 64;
+const MAX_CONFIGURED_RECONCILIATION_PASSES: usize = 4_096;
 
 /// Pre-discovery identity supplied by the trusted host. Values remain private
 /// and are converted to declaration-ordered inputs only after a promoted
@@ -373,6 +374,7 @@ pub(crate) struct PreparedConfiguredAppendRuntime {
     objects: Vec<ScopedKnownAppendObject>,
     bindings: Vec<ScopedObservationAppendPassBinding>,
     directory_bindings: Vec<PreparedScopedDirectoryRelationBinding>,
+    scope_join_directory_bindings: Vec<PreparedScopedJoinDirectoryRelationBinding>,
     related_relation_bindings: Vec<PreparedScopedRelatedRelationBinding>,
     required_coverage_objects: usize,
 }
@@ -436,6 +438,121 @@ impl std::fmt::Debug for PreparedScopedDirectoryRelationBinding {
             .field("bounds", &self.bounds)
             .finish_non_exhaustive()
     }
+}
+
+/// Declaration-owned shape for a child directory whose locator coordinates
+/// must be derived from retained adapter join evidence. Unlike a configured
+/// directory binding, this value carries names and bounds only; it cannot
+/// render or reserve a native root by itself.
+#[derive(Clone)]
+pub(crate) struct PreparedScopedJoinDirectoryRelationBinding {
+    relation_id: String,
+    identity_input_names: Vec<String>,
+    bounds: ScopeRelationBounds,
+}
+
+impl PreparedScopedJoinDirectoryRelationBinding {
+    pub(crate) fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    pub(crate) fn identity_input_names(&self) -> impl Iterator<Item = &str> {
+        self.identity_input_names.iter().map(String::as_str)
+    }
+
+    pub(crate) fn bounds(&self) -> ScopeRelationBounds {
+        self.bounds
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedJoinDirectoryRelationBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedJoinDirectoryRelationBinding")
+            .field("relation_id", &self.relation_id)
+            .field("identity_input_names", &self.identity_input_names)
+            .field("bounds", &self.bounds)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+struct PreparedScopedJoinDirectorySourceBinding {
+    relation_id: String,
+    parameter: ScopeJoinParameterSet,
+    evidence_groups: Vec<Vec<ScopeJoinEvidence>>,
+    bounds: ScopeRelationBounds,
+}
+
+impl PreparedScopedJoinDirectorySourceBinding {
+    fn relation_id(&self) -> &str {
+        &self.relation_id
+    }
+
+    fn owner_binding(
+        &self,
+    ) -> Result<ScopedObservationDirectoryPassBinding, ConfiguredScopedObservationRuntimeError>
+    {
+        let inputs = self
+            .parameter
+            .identity_inputs()
+            .iter()
+            .map(|input| {
+                ScopedObservationOwnedIdentityInput::new(input.name(), input.value().to_vec())
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        ScopedObservationDirectoryPassBinding::new(self.relation_id.clone(), inputs)
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
+    }
+}
+
+impl std::fmt::Debug for PreparedScopedJoinDirectorySourceBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedScopedJoinDirectorySourceBinding")
+            .field("relation_id", &self.relation_id)
+            .field(
+                "identity_input_names",
+                &self
+                    .parameter
+                    .identity_inputs()
+                    .iter()
+                    .map(|input| input.name())
+                    .collect::<Vec<_>>(),
+            )
+            .field("evidence_group_count", &self.evidence_groups.len())
+            .field("bounds", &self.bounds)
+            .finish_non_exhaustive()
+    }
+}
+
+struct PreparedScopedJoinDirectoryPlan {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    declared_relation_ids: BTreeSet<String>,
+    sources: Vec<PreparedScopedJoinDirectorySourceBinding>,
+    snapshot_retained_bytes: usize,
+}
+
+struct PreparedScopedJoinDirectoryRetainedRoot {
+    binding: PreparedScopedJoinDirectorySourceBinding,
+    listing: super::ScopedObservationDirectoryListing,
+    members: BTreeMap<AccessObjectToken, super::ScopedSourceObjectIdentity>,
+}
+
+struct PreparedScopedJoinDirectoryState {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    declared_relation_ids: BTreeSet<String>,
+    roots: BTreeMap<AccessObjectToken, PreparedScopedJoinDirectoryRetainedRoot>,
+    snapshot_retained_bytes: usize,
+}
+
+struct PreparedScopedJoinDirectoryBatch {
+    memberships: Vec<ScopedObservationDynamicMembershipAuthority>,
+    members: Vec<super::ScopedObservationDirectoryMemberLifecycle>,
+    retired_roots: Vec<AccessObjectToken>,
+    retired_members: Vec<super::ScopedSourceObjectIdentity>,
+    next_state: PreparedScopedJoinDirectoryState,
 }
 
 /// Declaration-owned shape for one evidence-derived exact-object relation.
@@ -582,6 +699,105 @@ impl std::fmt::Debug for PreparedScopedRelatedReconciliationPlan {
             .field("snapshot_retained_bytes", &self.snapshot_retained_bytes)
             .finish_non_exhaustive()
     }
+}
+
+fn prepared_scope_join_directory_source_order(
+    left: &PreparedScopedJoinDirectorySourceBinding,
+    right: &PreparedScopedJoinDirectorySourceBinding,
+) -> std::cmp::Ordering {
+    left.relation_id.cmp(&right.relation_id).then_with(|| {
+        left.parameter
+            .identity_inputs()
+            .iter()
+            .map(|input| (input.name(), input.value()))
+            .cmp(
+                right
+                    .parameter
+                    .identity_inputs()
+                    .iter()
+                    .map(|input| (input.name(), input.value())),
+            )
+    })
+}
+
+fn prepared_scope_join_directory_source_matches_definition(
+    source: &PreparedScopedJoinDirectorySourceBinding,
+    definition: &PreparedScopedJoinDirectoryRelationBinding,
+) -> bool {
+    source.relation_id == definition.relation_id
+        && source.bounds == definition.bounds
+        && source.parameter.identity_inputs().len() == definition.identity_input_names.len()
+        && source
+            .parameter
+            .identity_inputs()
+            .iter()
+            .zip(&definition.identity_input_names)
+            .all(|(actual, expected)| actual.name() == expected)
+        && !source.evidence_groups.is_empty()
+}
+
+fn prepared_scope_join_directory_source_token(
+    source: &PreparedScopedJoinDirectorySourceBinding,
+) -> Result<AccessObjectToken, ConfiguredScopedObservationRuntimeError> {
+    let mut components = Vec::with_capacity(source.parameter.identity_inputs().len() * 2);
+    for input in source.parameter.identity_inputs() {
+        components.push(input.name().as_bytes());
+        components.push(input.value());
+    }
+    AccessObjectToken::derive(source.relation_id(), &components)
+        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
+}
+
+fn prepared_scope_join_directory_membership_revision(
+    relation_id: &str,
+    roots: &BTreeMap<AccessObjectToken, PreparedScopedJoinDirectoryRetainedRoot>,
+) -> Revision {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"spaghetti/rfc012d/scope-join-directory-membership-revision/v1\0");
+    hash_related_membership_component(&mut hasher, relation_id.as_bytes());
+    let relation_roots = roots
+        .iter()
+        .filter(|(_, root)| root.binding.relation_id() == relation_id)
+        .collect::<Vec<_>>();
+    hasher.update(&(relation_roots.len() as u64).to_be_bytes());
+    for (root_token, retained) in relation_roots {
+        hash_related_membership_component(&mut hasher, root_token.as_bytes());
+        let checkpoint = retained.listing.checkpoint();
+        hasher.update(&checkpoint.generation.to_be_bytes());
+        hash_related_membership_component(&mut hasher, checkpoint.revision.as_bytes());
+        hash_related_membership_component(
+            &mut hasher,
+            retained.listing.source().stream_key.as_bytes(),
+        );
+        hash_related_membership_component(
+            &mut hasher,
+            retained.listing.source().object_key.as_bytes(),
+        );
+        hasher.update(&(retained.binding.evidence_groups.len() as u64).to_be_bytes());
+        for group in &retained.binding.evidence_groups {
+            hasher.update(&(group.len() as u64).to_be_bytes());
+            for evidence in group {
+                hash_related_membership_component(&mut hasher, evidence.fact_id().as_bytes());
+                let semantic_revision_ref = evidence.semantic_revision_ref();
+                hasher.update(
+                    &semantic_revision_ref
+                        .semantic_reference_contract_version
+                        .to_be_bytes(),
+                );
+                hash_related_membership_component(
+                    &mut hasher,
+                    semantic_revision_ref.fact_revision_id.as_bytes(),
+                );
+            }
+        }
+        hasher.update(&(retained.members.len() as u64).to_be_bytes());
+        for (member_token, source) in &retained.members {
+            hash_related_membership_component(&mut hasher, member_token.as_bytes());
+            hash_related_membership_component(&mut hasher, source.stream_key.as_bytes());
+            hash_related_membership_component(&mut hasher, source.object_key.as_bytes());
+        }
+    }
+    Revision::from_bytes(*hasher.finalize().as_bytes())
 }
 
 fn prepared_related_source_order(
@@ -790,7 +1006,7 @@ impl std::fmt::Debug for PreparedScopedRelatedObservedSource {
 /// state changes unless this whole value is returned.
 pub(crate) struct PreparedScopedRelatedReconciliationBatch {
     observations: Vec<PreparedScopedRelatedObservedSource>,
-    memberships: Vec<ScopedObservationRelatedMembershipAuthority>,
+    memberships: Vec<ScopedObservationDynamicMembershipAuthority>,
     retired_sources: Vec<PreparedScopedRelatedRetainedSource>,
     next_state: PreparedScopedRelatedReconciliationState,
 }
@@ -804,7 +1020,7 @@ impl PreparedScopedRelatedReconciliationBatch {
         &self.retired_sources
     }
 
-    pub(crate) fn memberships(&self) -> &[ScopedObservationRelatedMembershipAuthority] {
+    pub(crate) fn memberships(&self) -> &[ScopedObservationDynamicMembershipAuthority] {
         &self.memberships
     }
 
@@ -816,7 +1032,7 @@ impl PreparedScopedRelatedReconciliationBatch {
         self,
     ) -> (
         Vec<PreparedScopedRelatedObservedSource>,
-        Vec<ScopedObservationRelatedMembershipAuthority>,
+        Vec<ScopedObservationDynamicMembershipAuthority>,
         Vec<PreparedScopedRelatedRetainedSource>,
         PreparedScopedRelatedReconciliationState,
     ) {
@@ -897,7 +1113,7 @@ impl ConfiguredScopedObservationRuntimeOptions {
             || self.startup_reconcile_hint_limit == 0
             || self.startup_reconcile_hint_limit > 4_096
             || self.max_startup_reconcile_passes == 0
-            || self.max_startup_reconcile_passes > 4_096
+            || self.max_startup_reconcile_passes > MAX_CONFIGURED_RECONCILIATION_PASSES
         {
             return Err(ConfiguredScopedObservationRuntimeError::InvalidOptions);
         }
@@ -979,7 +1195,8 @@ pub(crate) struct ConfiguredScopedObservationSupervisor {
     objects: Vec<ScopedKnownAppendObject>,
     bindings: Vec<ScopedObservationAppendPassBinding>,
     directory_bindings: Vec<PreparedScopedDirectoryRelationBinding>,
-    related_replacement: Option<ConfiguredScopedRelatedReplacementExtension>,
+    dynamic_replacement: Option<ConfiguredScopedDynamicReplacementExtension>,
+    scope_join_directory_state: Option<PreparedScopedJoinDirectoryState>,
     related_state: Option<PreparedScopedRelatedReconciliationState>,
     admission: ScopedObservationAdmissionLane,
     projection: ScopedObservationProjectionSink,
@@ -1016,7 +1233,7 @@ impl std::fmt::Debug for ConfiguredScopedObservationSupervisor {
             .field(
                 "related_relation_ids",
                 &self
-                    .related_replacement
+                    .dynamic_replacement
                     .as_ref()
                     .map_or(&[][..], |replacement| replacement.relation_ids()),
             )
@@ -1063,17 +1280,410 @@ impl PreparedConfiguredAppendRuntime {
         &self.directory_bindings
     }
 
+    pub(crate) fn scope_join_directory_bindings(
+        &self,
+    ) -> &[PreparedScopedJoinDirectoryRelationBinding] {
+        &self.scope_join_directory_bindings
+    }
+
     pub(crate) fn related_relation_bindings(&self) -> &[PreparedScopedRelatedRelationBinding] {
         &self.related_relation_bindings
     }
 }
 
-trait PreparedScopedRelatedRuntimeContext {
-    fn related_host(&self) -> &ScopedObservationAccessHost;
+trait PreparedScopedDynamicRuntimeContext {
+    fn dynamic_host(&self) -> &ScopedObservationAccessHost;
 
-    fn related_directory_bindings(&self) -> &[PreparedScopedDirectoryRelationBinding];
+    fn configured_directory_bindings(&self) -> &[PreparedScopedDirectoryRelationBinding];
+
+    fn prepared_scope_join_directory_bindings(
+        &self,
+    ) -> &[PreparedScopedJoinDirectoryRelationBinding];
 
     fn prepared_related_relation_bindings(&self) -> &[PreparedScopedRelatedRelationBinding];
+
+    /// Match retained adapter evidence to every declared scope-join directory
+    /// without rendering a locator or reserving access. Equal coordinates
+    /// from independent owner groups collapse to one scan while preserving
+    /// every group in the membership revision.
+    fn plan_scope_join_directories_inner(
+        &self,
+        snapshot: &ScopedObservationScopeJoinSnapshot,
+    ) -> Result<PreparedScopedJoinDirectoryPlan, ConfiguredScopedObservationRuntimeError> {
+        struct Candidate<'snapshot> {
+            definition: &'snapshot PreparedScopedJoinDirectoryRelationBinding,
+            parameter: &'snapshot ScopeJoinParameterSet,
+            evidence: &'snapshot [ScopeJoinEvidence],
+        }
+
+        let host = self.dynamic_host();
+        let definitions = self
+            .prepared_scope_join_directory_bindings()
+            .iter()
+            .map(|binding| (binding.relation_id.as_str(), binding))
+            .collect::<BTreeMap<_, _>>();
+        let declared_relation_ids = definitions
+            .keys()
+            .map(|relation_id| (*relation_id).to_string())
+            .collect::<BTreeSet<_>>();
+        let configured_directories = self
+            .configured_directory_bindings()
+            .iter()
+            .map(|binding| (binding.relation_id.as_str(), binding))
+            .collect::<BTreeMap<_, _>>();
+        let related_relation_ids = self
+            .prepared_related_relation_bindings()
+            .iter()
+            .map(|binding| binding.relation_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let mut candidates = Vec::new();
+        for entry in snapshot.entries() {
+            let Some(definition) = definitions.get(entry.relation_id()).copied() else {
+                if related_relation_ids.contains(entry.relation_id()) {
+                    continue;
+                }
+                let Some(configured) = configured_directories.get(entry.relation_id()).copied()
+                else {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                };
+                if entry.parameters().iter().any(|parameter| {
+                    parameter.identity_inputs().len() != configured.identity_inputs.len()
+                        || parameter
+                            .identity_inputs()
+                            .iter()
+                            .zip(&configured.identity_inputs)
+                            .any(|(actual, expected)| {
+                                actual.name() != expected.name || actual.value() != expected.value
+                            })
+                }) {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+                continue;
+            };
+            let max_fan_out = usize::try_from(definition.bounds.max_fan_out)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            if entry.parameters().len() > max_fan_out {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            for parameter in entry.parameters() {
+                if parameter.identity_inputs().len() != definition.identity_input_names.len()
+                    || parameter
+                        .identity_inputs()
+                        .iter()
+                        .zip(&definition.identity_input_names)
+                        .any(|(actual, expected)| actual.name() != expected)
+                {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+                candidates.push(Candidate {
+                    definition,
+                    parameter,
+                    evidence: entry.evidence(),
+                });
+            }
+        }
+        candidates.sort_by(|left, right| {
+            left.definition
+                .relation_id
+                .cmp(&right.definition.relation_id)
+                .then_with(|| {
+                    left.parameter
+                        .identity_inputs()
+                        .iter()
+                        .map(|input| (input.name(), input.value()))
+                        .cmp(
+                            right
+                                .parameter
+                                .identity_inputs()
+                                .iter()
+                                .map(|input| (input.name(), input.value())),
+                        )
+                })
+        });
+
+        let mut relation_root_counts = BTreeMap::<&str, usize>::new();
+        let mut sources = Vec::<PreparedScopedJoinDirectorySourceBinding>::new();
+        for candidate in candidates {
+            if let Some(existing) = sources.last_mut().filter(|source| {
+                source.relation_id == candidate.definition.relation_id
+                    && source.parameter == *candidate.parameter
+            }) {
+                existing.evidence_groups.push(candidate.evidence.to_vec());
+                continue;
+            }
+            let root_count = relation_root_counts
+                .entry(candidate.definition.relation_id.as_str())
+                .or_default();
+            *root_count = root_count
+                .checked_add(1)
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            let max_fan_out = usize::try_from(candidate.definition.bounds.max_fan_out)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            if *root_count > max_fan_out {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            sources.push(PreparedScopedJoinDirectorySourceBinding {
+                relation_id: candidate.definition.relation_id.clone(),
+                parameter: candidate.parameter.clone(),
+                evidence_groups: vec![candidate.evidence.to_vec()],
+                bounds: candidate.definition.bounds,
+            });
+        }
+        Ok(PreparedScopedJoinDirectoryPlan {
+            attachment_authority: Arc::clone(&host.attachment_authority),
+            declared_relation_ids,
+            sources,
+            snapshot_retained_bytes: snapshot.retained_bytes(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_scope_join_directories_inner(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        plan: PreparedScopedJoinDirectoryPlan,
+        previous: Option<&PreparedScopedJoinDirectoryState>,
+        prior_admission: &ScopedObservationAdmissionLane,
+        phase: AccessPhase,
+        refresh_retained: bool,
+        observed_at: i64,
+    ) -> Result<PreparedScopedJoinDirectoryBatch, ConfiguredScopedObservationRuntimeError> {
+        let host = self.dynamic_host();
+        if pass.pass_id() == 0
+            || !Arc::ptr_eq(&host.state, &pass.state)
+            || !Arc::ptr_eq(&host.attachment_authority, &pass.attachment_authority)
+            || host.root_identity != pass.root_identity
+            || !Arc::ptr_eq(&host.attachment_authority, &plan.attachment_authority)
+            || (refresh_retained && (phase != AccessPhase::Revalidation || previous.is_none()))
+        {
+            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+        }
+        let definitions = self
+            .prepared_scope_join_directory_bindings()
+            .iter()
+            .map(|binding| (binding.relation_id.as_str(), binding))
+            .collect::<BTreeMap<_, _>>();
+        let configured_relation_ids = definitions
+            .keys()
+            .map(|relation_id| (*relation_id).to_string())
+            .collect::<BTreeSet<_>>();
+        if configured_relation_ids != plan.declared_relation_ids {
+            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+        }
+
+        let mut planned_tokens = Vec::with_capacity(plan.sources.len());
+        let mut relation_root_counts = BTreeMap::<&str, usize>::new();
+        for (index, source) in plan.sources.iter().enumerate() {
+            let Some(definition) = definitions.get(source.relation_id()).copied() else {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            };
+            if !prepared_scope_join_directory_source_matches_definition(source, definition)
+                || source.evidence_groups.iter().any(|group| {
+                    group.is_empty()
+                        || group
+                            .windows(2)
+                            .any(|pair| pair[0].fact_id() >= pair[1].fact_id())
+                })
+                || index > 0
+                    && prepared_scope_join_directory_source_order(&plan.sources[index - 1], source)
+                        != std::cmp::Ordering::Less
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            let root_count = relation_root_counts
+                .entry(source.relation_id())
+                .or_default();
+            *root_count = root_count
+                .checked_add(1)
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            let max_fan_out = usize::try_from(definition.bounds.max_fan_out)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            if *root_count > max_fan_out {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            let token = prepared_scope_join_directory_source_token(source)?;
+            if planned_tokens.contains(&token) {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            planned_tokens.push(token);
+        }
+
+        if let Some(previous) = previous {
+            if !Arc::ptr_eq(&host.attachment_authority, &previous.attachment_authority)
+                || previous.declared_relation_ids != configured_relation_ids
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            for (token, retained) in &previous.roots {
+                let Some(definition) = definitions.get(retained.binding.relation_id()).copied()
+                else {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                };
+                if *token != prepared_scope_join_directory_source_token(&retained.binding)?
+                    || *token != retained.listing.root_object_token()
+                    || retained.listing.relation_id() != retained.binding.relation_id()
+                    || !retained
+                        .listing
+                        .matches_attachment(&host.attachment_authority)
+                    || retained
+                        .listing
+                        .clone_finalized_for_revalidation()
+                        .is_none()
+                    || !prepared_scope_join_directory_source_matches_definition(
+                        &retained.binding,
+                        definition,
+                    )
+                    || retained.members.iter().any(|(member_token, source)| {
+                        *member_token == *token
+                            || !super::source_belongs_to_root(source, &host.root_identity)
+                    })
+                {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+            }
+        }
+
+        let mut next_roots = BTreeMap::new();
+        let mut member_lifecycles = Vec::new();
+        for (index, (source, expected_token)) in
+            plan.sources.into_iter().zip(planned_tokens).enumerate()
+        {
+            let prior = previous.and_then(|state| state.roots.get(&expected_token));
+            if let Some(prior) = prior.filter(|_| !refresh_retained) {
+                if prior.binding.relation_id != source.relation_id
+                    || prior.binding.parameter != source.parameter
+                {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+                let listing = prior
+                    .listing
+                    .clone_finalized_for_revalidation()
+                    .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+                next_roots.insert(
+                    expected_token,
+                    PreparedScopedJoinDirectoryRetainedRoot {
+                        binding: source,
+                        listing,
+                        members: prior.members.clone(),
+                    },
+                );
+                continue;
+            }
+
+            let owner_binding = host
+                .bind_scope_join_directory_pass(pass, source.owner_binding()?)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            let relation_ordinal = u64::try_from(index)
+                .ok()
+                .and_then(|index| index.checked_add(1))
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourcePass)?;
+            let super::ScopedObservationDirectoryListingSnapshotBatch {
+                mut listing,
+                members,
+            } = super::scoped_read_scope_join_directory_relation_listing_snapshot(
+                host,
+                pass,
+                &owner_binding,
+                super::ScopedObservationDirectorySnapshotRequest {
+                    previous: prior.map(|prior| &prior.listing),
+                    prior_admission,
+                    phase,
+                    relation_ordinal,
+                    observed_at,
+                },
+            )
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+            if listing.root_object_token() != expected_token
+                || listing.relation_id() != source.relation_id()
+                || !listing.matches_attachment(&host.attachment_authority)
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            let member_map = listing
+                .finalize_for_composed_membership()
+                .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
+            if members.len() != member_map.len()
+                || members.iter().any(|member| {
+                    member.relation_id() != source.relation_id()
+                        || member_map.get(&member.object_token()) != Some(member.source())
+                })
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+            member_lifecycles.extend(members);
+            if next_roots
+                .insert(
+                    expected_token,
+                    PreparedScopedJoinDirectoryRetainedRoot {
+                        binding: source,
+                        listing,
+                        members: member_map,
+                    },
+                )
+                .is_some()
+            {
+                return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+            }
+        }
+
+        let retired_roots = previous
+            .into_iter()
+            .flat_map(|state| state.roots.keys())
+            .filter(|token| !next_roots.contains_key(*token))
+            .copied()
+            .collect::<Vec<_>>();
+        let mut retired_members = Vec::new();
+        if let Some(previous) = previous {
+            for (token, retained) in &previous.roots {
+                let next = next_roots.get(token);
+                retired_members.extend(
+                    retained
+                        .members
+                        .iter()
+                        .filter(|(member_token, _)| {
+                            next.is_none_or(|next| !next.members.contains_key(*member_token))
+                        })
+                        .map(|(_, source)| source.clone()),
+                );
+            }
+        }
+
+        let memberships = configured_relation_ids
+            .iter()
+            .map(|relation_id| {
+                let mut members = BTreeMap::new();
+                let mut unique_sources = BTreeSet::new();
+                for retained in next_roots
+                    .values()
+                    .filter(|root| root.binding.relation_id() == relation_id)
+                {
+                    for (token, source) in &retained.members {
+                        if members.insert(*token, source.clone()).is_some()
+                            || !unique_sources.insert(source.clone())
+                        {
+                            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                        }
+                    }
+                }
+                let revision =
+                    prepared_scope_join_directory_membership_revision(relation_id, &next_roots);
+                host.bind_dynamic_relation_membership(pass, relation_id, revision, members)
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PreparedScopedJoinDirectoryBatch {
+            memberships,
+            members: member_lifecycles,
+            retired_roots,
+            retired_members,
+            next_state: PreparedScopedJoinDirectoryState {
+                attachment_authority: Arc::clone(&plan.attachment_authority),
+                declared_relation_ids: plan.declared_relation_ids,
+                roots: next_roots,
+                snapshot_retained_bytes: plan.snapshot_retained_bytes,
+            },
+        })
+    }
 
     /// Match a committed reducer snapshot to the exact related relations in
     /// this attachment. This performs no locator rendering and creates no
@@ -1090,7 +1700,7 @@ trait PreparedScopedRelatedRuntimeContext {
             evidence: &'snapshot [ScopeJoinEvidence],
         }
 
-        let host = self.related_host();
+        let host = self.dynamic_host();
         let definitions = self
             .prepared_related_relation_bindings()
             .iter()
@@ -1101,13 +1711,21 @@ trait PreparedScopedRelatedRuntimeContext {
             .map(|relation_id| (*relation_id).to_string())
             .collect::<BTreeSet<_>>();
         let directory_definitions = self
-            .related_directory_bindings()
+            .configured_directory_bindings()
             .iter()
             .map(|binding| (binding.relation_id.as_str(), binding))
             .collect::<BTreeMap<_, _>>();
+        let scope_join_directory_ids = self
+            .prepared_scope_join_directory_bindings()
+            .iter()
+            .map(|binding| binding.relation_id.as_str())
+            .collect::<BTreeSet<_>>();
         let mut candidates = Vec::new();
         for entry in snapshot.entries() {
             let Some(definition) = definitions.get(entry.relation_id()).copied() else {
+                if scope_join_directory_ids.contains(entry.relation_id()) {
+                    continue;
+                }
                 // A configured directory can carry corroborating adapter join
                 // evidence, but it cannot replace the already-bound root
                 // coordinate. Anything else is undeclared or the wrong
@@ -1187,9 +1805,9 @@ trait PreparedScopedRelatedRuntimeContext {
             *source_count = source_count
                 .checked_add(1)
                 .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
-            let max_objects = usize::try_from(candidate.definition.bounds.max_objects)
+            let max_sources = usize::try_from(candidate.definition.bounds.max_fan_out)
                 .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
-            if *source_count > max_objects {
+            if *source_count > max_sources {
                 return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
             }
             sources.push(PreparedScopedRelatedSourceBinding {
@@ -1220,16 +1838,17 @@ trait PreparedScopedRelatedRuntimeContext {
         plan: PreparedScopedRelatedReconciliationPlan,
         previous: Option<&PreparedScopedRelatedReconciliationState>,
         phase: AccessPhase,
+        refresh_retained: bool,
         observed_at: i64,
     ) -> Result<PreparedScopedRelatedReconciliationBatch, ConfiguredScopedObservationRuntimeError>
     {
-        let host = self.related_host();
+        let host = self.dynamic_host();
         if pass.pass_id() == 0
             || !Arc::ptr_eq(&host.state, &pass.state)
             || !Arc::ptr_eq(&host.attachment_authority, &pass.attachment_authority)
             || host.root_identity != pass.root_identity
             || !Arc::ptr_eq(&host.attachment_authority, &plan.attachment_authority)
-            || (phase == AccessPhase::Initial && previous.is_some())
+            || (refresh_retained && (phase != AccessPhase::Revalidation || previous.is_none()))
         {
             return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
         }
@@ -1272,9 +1891,9 @@ trait PreparedScopedRelatedRuntimeContext {
             *source_count = source_count
                 .checked_add(1)
                 .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
-            let max_objects = usize::try_from(definition.bounds.max_objects)
+            let max_sources = usize::try_from(definition.bounds.max_fan_out)
                 .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)?;
-            if *source_count > max_objects {
+            if *source_count > max_sources {
                 return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
             }
             let token = prepared_related_source_token(source)?;
@@ -1328,6 +1947,27 @@ trait PreparedScopedRelatedRuntimeContext {
         for (index, (source, expected_token)) in
             plan.sources.into_iter().zip(planned_tokens).enumerate()
         {
+            let prior = previous.and_then(|state| state.sources.get(&expected_token));
+            if let Some(prior) = prior.filter(|_| !refresh_retained) {
+                if prior.binding.relation_id != source.relation_id
+                    || prior.binding.parameter != source.parameter
+                {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+                if next_sources
+                    .insert(
+                        expected_token,
+                        PreparedScopedRelatedRetainedSource {
+                            binding: source,
+                            state: prior.state.clone(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+                }
+                continue;
+            }
             let identity_inputs = source.borrowed_identity_inputs();
             let reservation = pass
                 .reserve_observation_runtime_source(ScopeAccessRequest {
@@ -1362,7 +2002,7 @@ trait PreparedScopedRelatedRuntimeContext {
                 source_timestamp_hint: None,
                 media_type: media_type.clone(),
             };
-            let observation = match previous.and_then(|state| state.sources.get(&actual_token)) {
+            let observation = match prior {
                 Some(retained) => {
                     if retained.binding.relation_id != source.relation_id
                         || retained.binding.parameter != source.parameter
@@ -1419,7 +2059,7 @@ trait PreparedScopedRelatedRuntimeContext {
                     .map(|(token, retained)| (*token, retained.state.source().clone()))
                     .collect::<BTreeMap<_, _>>();
                 let revision = prepared_related_membership_revision(relation_id, &next_sources);
-                host.bind_related_relation_membership(pass, relation_id, revision, members)
+                host.bind_dynamic_relation_membership(pass, relation_id, revision, members)
                     .map_err(|_| ConfiguredScopedObservationRuntimeError::SourceBinding)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1443,13 +2083,19 @@ trait PreparedScopedRelatedRuntimeContext {
     }
 }
 
-impl PreparedScopedRelatedRuntimeContext for PreparedConfiguredAppendRuntime {
-    fn related_host(&self) -> &ScopedObservationAccessHost {
+impl PreparedScopedDynamicRuntimeContext for PreparedConfiguredAppendRuntime {
+    fn dynamic_host(&self) -> &ScopedObservationAccessHost {
         &self.host
     }
 
-    fn related_directory_bindings(&self) -> &[PreparedScopedDirectoryRelationBinding] {
+    fn configured_directory_bindings(&self) -> &[PreparedScopedDirectoryRelationBinding] {
         &self.directory_bindings
+    }
+
+    fn prepared_scope_join_directory_bindings(
+        &self,
+    ) -> &[PreparedScopedJoinDirectoryRelationBinding] {
+        &self.scope_join_directory_bindings
     }
 
     fn prepared_related_relation_bindings(&self) -> &[PreparedScopedRelatedRelationBinding] {
@@ -1457,25 +2103,44 @@ impl PreparedScopedRelatedRuntimeContext for PreparedConfiguredAppendRuntime {
     }
 }
 
-struct ConfiguredScopedRelatedReplacementExtension {
+struct ConfiguredScopedDynamicReplacementExtension {
     handle: ScopedObservationAsyncHandle,
     directory_bindings: Vec<PreparedScopedDirectoryRelationBinding>,
+    scope_join_directory_bindings: Vec<PreparedScopedJoinDirectoryRelationBinding>,
     relation_bindings: Vec<PreparedScopedRelatedRelationBinding>,
     relation_ids: Vec<String>,
+    max_reconciliation_rounds: usize,
 }
 
-impl ConfiguredScopedRelatedReplacementExtension {
+impl ConfiguredScopedDynamicReplacementExtension {
     fn new(
         handle: ScopedObservationAsyncHandle,
         directory_bindings: Vec<PreparedScopedDirectoryRelationBinding>,
+        mut scope_join_directory_bindings: Vec<PreparedScopedJoinDirectoryRelationBinding>,
         mut relation_bindings: Vec<PreparedScopedRelatedRelationBinding>,
+        max_reconciliation_rounds: usize,
     ) -> Result<Self, ConfiguredScopedObservationRuntimeError> {
+        scope_join_directory_bindings
+            .sort_by(|left, right| left.relation_id.cmp(&right.relation_id));
         relation_bindings.sort_by(|left, right| left.relation_id.cmp(&right.relation_id));
-        let relation_ids = relation_bindings
+        let mut relation_ids = scope_join_directory_bindings
             .iter()
             .map(|binding| binding.relation_id.clone())
+            .chain(
+                relation_bindings
+                    .iter()
+                    .map(|binding| binding.relation_id.clone()),
+            )
             .collect::<Vec<_>>();
+        relation_ids.sort();
+        let expected_relation_count = scope_join_directory_bindings
+            .len()
+            .checked_add(relation_bindings.len())
+            .ok_or(ConfiguredScopedObservationRuntimeError::SourceBinding)?;
         if relation_ids.is_empty()
+            || relation_ids.len() != expected_relation_count
+            || max_reconciliation_rounds == 0
+            || max_reconciliation_rounds > MAX_CONFIGURED_RECONCILIATION_PASSES
             || relation_ids
                 .windows(2)
                 .any(|pair| pair[0].as_str() >= pair[1].as_str())
@@ -1485,8 +2150,10 @@ impl ConfiguredScopedRelatedReplacementExtension {
         Ok(Self {
             handle,
             directory_bindings,
+            scope_join_directory_bindings,
             relation_bindings,
             relation_ids,
+            max_reconciliation_rounds,
         })
     }
 
@@ -1495,13 +2162,14 @@ impl ConfiguredScopedRelatedReplacementExtension {
         pass: &ScopedObservationAccessPass,
         stage: &mut ScopedObservationScopeReplacementStage,
         batch: PreparedScopedRelatedReconciliationBatch,
-    ) -> Result<(), ScopedObservationAutomaticResyncError> {
-        let (observations, memberships, retired_sources, _next_state) = batch.into_parts();
+    ) -> Result<PreparedScopedRelatedReconciliationState, ScopedObservationAutomaticResyncError>
+    {
+        let (observations, memberships, retired_sources, next_state) = batch.into_parts();
         if !retired_sources.is_empty() {
             return Err(ScopedObservationAutomaticResyncError::SourceAccess);
         }
         for authority in memberships {
-            let membership = ScopedRelationMembershipObservation::from_related_membership(
+            let membership = ScopedRelationMembershipObservation::from_dynamic_membership(
                 authority,
             )
             .map_err(|_| {
@@ -1511,7 +2179,7 @@ impl ConfiguredScopedRelatedReplacementExtension {
             })?;
             stage
                 .admission
-                .record_related_relation_membership(
+                .record_dynamic_relation_membership(
                     self.handle.host(),
                     ScopedAppendDeliveryPhase::Correction,
                     membership,
@@ -1533,17 +2201,74 @@ impl ConfiguredScopedRelatedReplacementExtension {
                 })?;
             configured_reduce_replacement_pending(&self.handle, stage)?;
         }
-        Ok(())
+        Ok(next_state)
+    }
+
+    fn admit_directory_replacement_batch(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        stage: &mut ScopedObservationScopeReplacementStage,
+        batch: PreparedScopedJoinDirectoryBatch,
+    ) -> Result<PreparedScopedJoinDirectoryState, ScopedObservationAutomaticResyncError> {
+        let PreparedScopedJoinDirectoryBatch {
+            memberships,
+            members,
+            retired_roots,
+            retired_members,
+            next_state,
+        } = batch;
+        if !retired_roots.is_empty() || !retired_members.is_empty() {
+            return Err(ScopedObservationAutomaticResyncError::SourceAccess);
+        }
+        for authority in memberships {
+            let membership = ScopedRelationMembershipObservation::from_dynamic_membership(
+                authority,
+            )
+            .map_err(|_| {
+                ScopedObservationAutomaticResyncError::Admission(
+                    super::ScopedAdmissionError::InvalidCoverage,
+                )
+            })?;
+            stage
+                .admission
+                .record_dynamic_relation_membership(
+                    self.handle.host(),
+                    ScopedAppendDeliveryPhase::Correction,
+                    membership,
+                )
+                .map_err(ScopedObservationAutomaticResyncError::Admission)?;
+            configured_reduce_replacement_pending(&self.handle, stage)?;
+        }
+        for lifecycle in members {
+            stage
+                .admission
+                .admit_directory_member(
+                    pass.pass_id(),
+                    ScopedAppendDeliveryPhase::Correction,
+                    lifecycle,
+                )
+                .map_err(|failure| {
+                    ScopedObservationAutomaticResyncError::Admission(failure.error)
+                })?;
+            configured_reduce_replacement_pending(&self.handle, stage)?;
+        }
+        Ok(next_state)
     }
 }
 
-impl PreparedScopedRelatedRuntimeContext for ConfiguredScopedRelatedReplacementExtension {
-    fn related_host(&self) -> &ScopedObservationAccessHost {
+impl PreparedScopedDynamicRuntimeContext for ConfiguredScopedDynamicReplacementExtension {
+    fn dynamic_host(&self) -> &ScopedObservationAccessHost {
         self.handle.host()
     }
 
-    fn related_directory_bindings(&self) -> &[PreparedScopedDirectoryRelationBinding] {
+    fn configured_directory_bindings(&self) -> &[PreparedScopedDirectoryRelationBinding] {
         &self.directory_bindings
+    }
+
+    fn prepared_scope_join_directory_bindings(
+        &self,
+    ) -> &[PreparedScopedJoinDirectoryRelationBinding] {
+        &self.scope_join_directory_bindings
     }
 
     fn prepared_related_relation_bindings(&self) -> &[PreparedScopedRelatedRelationBinding] {
@@ -1551,7 +2276,7 @@ impl PreparedScopedRelatedRuntimeContext for ConfiguredScopedRelatedReplacementE
     }
 }
 
-impl ScopedObservationReplacementExtension for ConfiguredScopedRelatedReplacementExtension {
+impl ScopedObservationReplacementExtension for ConfiguredScopedDynamicReplacementExtension {
     fn relation_ids(&self) -> &[String] {
         &self.relation_ids
     }
@@ -1566,18 +2291,61 @@ impl ScopedObservationReplacementExtension for ConfiguredScopedRelatedReplacemen
         if !Arc::ptr_eq(&self.handle.shared, &handle.shared) {
             return Err(ScopedObservationAutomaticResyncError::SourceAccess);
         }
-        let snapshot = stage
-            .semantic
-            .projection
-            .scope_join_snapshot()
-            .map_err(|_| ScopedObservationAutomaticResyncError::Projection)?;
-        let plan = self
-            .plan_related_sources_inner(&snapshot)
-            .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
-        let batch = self
-            .execute_related_sources_inner(pass, plan, None, AccessPhase::Revalidation, observed_at)
-            .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
-        self.admit_replacement_batch(pass, stage, batch)
+        let mut directory_state = None;
+        let mut related_state = None;
+        for _round in 0..self.max_reconciliation_rounds {
+            let before = stage
+                .semantic
+                .projection
+                .scope_join_snapshot()
+                .map_err(|_| ScopedObservationAutomaticResyncError::Projection)?;
+            let directory_plan = self
+                .plan_scope_join_directories_inner(&before)
+                .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+            let directory_batch = self
+                .execute_scope_join_directories_inner(
+                    pass,
+                    directory_plan,
+                    directory_state.as_ref(),
+                    &stage.admission,
+                    AccessPhase::Revalidation,
+                    false,
+                    observed_at,
+                )
+                .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+            directory_state =
+                Some(self.admit_directory_replacement_batch(pass, stage, directory_batch)?);
+
+            let related_snapshot = stage
+                .semantic
+                .projection
+                .scope_join_snapshot()
+                .map_err(|_| ScopedObservationAutomaticResyncError::Projection)?;
+            let plan = self
+                .plan_related_sources_inner(&related_snapshot)
+                .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+            let batch = self
+                .execute_related_sources_inner(
+                    pass,
+                    plan,
+                    related_state.as_ref(),
+                    AccessPhase::Revalidation,
+                    false,
+                    observed_at,
+                )
+                .map_err(|_| ScopedObservationAutomaticResyncError::SourceAccess)?;
+            related_state = Some(self.admit_replacement_batch(pass, stage, batch)?);
+
+            let after = stage
+                .semantic
+                .projection
+                .scope_join_snapshot()
+                .map_err(|_| ScopedObservationAutomaticResyncError::Projection)?;
+            if after == before {
+                return Ok(());
+            }
+        }
+        Err(ScopedObservationAutomaticResyncError::SourceAccess)
     }
 }
 
@@ -1615,29 +2383,18 @@ impl PreparedConfiguredAppendRuntime {
         observed_at: i64,
     ) -> Result<PreparedScopedRelatedReconciliationBatch, ConfiguredScopedObservationRuntimeError>
     {
-        self.execute_related_sources_inner(pass, plan, previous, phase, observed_at)
+        self.execute_related_sources_inner(
+            pass,
+            plan,
+            previous,
+            phase,
+            previous.is_some(),
+            observed_at,
+        )
     }
 
     pub(crate) fn required_coverage_objects(&self) -> usize {
         self.required_coverage_objects
-    }
-
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        ScopedObservationAccessHost,
-        Vec<ScopedKnownAppendObject>,
-        Vec<ScopedObservationAppendPassBinding>,
-        Vec<PreparedScopedDirectoryRelationBinding>,
-        Vec<PreparedScopedRelatedRelationBinding>,
-    ) {
-        (
-            self.host,
-            self.objects,
-            self.bindings,
-            self.directory_bindings,
-            self.related_relation_bindings,
-        )
     }
 
     /// Create the sole event drain and install the native watcher without
@@ -1676,13 +2433,17 @@ impl PreparedConfiguredAppendRuntime {
             },
         )?;
         let handle = runtime.handle();
-        let related_replacement = if self.related_relation_bindings.is_empty() {
+        let dynamic_replacement = if self.scope_join_directory_bindings.is_empty()
+            && self.related_relation_bindings.is_empty()
+        {
             None
         } else {
-            Some(ConfiguredScopedRelatedReplacementExtension::new(
+            Some(ConfiguredScopedDynamicReplacementExtension::new(
                 handle.clone(),
                 self.directory_bindings.clone(),
+                self.scope_join_directory_bindings,
                 self.related_relation_bindings,
+                self.required_coverage_objects,
             )?)
         };
         let watcher = handle
@@ -1694,7 +2455,8 @@ impl PreparedConfiguredAppendRuntime {
             objects: self.objects,
             bindings: self.bindings,
             directory_bindings: self.directory_bindings,
-            related_replacement,
+            dynamic_replacement,
+            scope_join_directory_state: None,
             related_state: None,
             admission,
             projection,
@@ -1756,6 +2518,14 @@ impl std::fmt::Debug for PreparedConfiguredAppendRuntime {
                     .collect::<Vec<_>>(),
             )
             .field(
+                "scope_join_directory_relation_ids",
+                &self
+                    .scope_join_directory_bindings
+                    .iter()
+                    .map(PreparedScopedJoinDirectoryRelationBinding::relation_id)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
                 "related_relation_ids",
                 &self
                     .related_relation_bindings
@@ -1793,7 +2563,8 @@ impl ConfiguredScopedObservationSupervisor {
             objects,
             bindings,
             directory_bindings,
-            related_replacement,
+            dynamic_replacement,
+            scope_join_directory_state: _,
             related_state: _,
             admission,
             projection,
@@ -1828,7 +2599,7 @@ impl ConfiguredScopedObservationSupervisor {
                 return ConfiguredScopedObservationSupervisorRunResult::BootstrapFailed(error);
             }
         };
-        let replacement_extension = related_replacement.map(|replacement| {
+        let replacement_extension = dynamic_replacement.map(|replacement| {
             Box::new(replacement) as Box<dyn ScopedObservationReplacementExtension>
         });
         let source = match handle.bind_epoch_source_owner_with_replacement_extension(
@@ -1911,10 +2682,11 @@ impl ConfiguredScopedObservationSupervisor {
             configured_observed_at(),
         )
         .await?;
-        configured_execute_related_pass(
+        configured_execute_dynamic_pass(
             &self.handle,
             scan.access_pass(),
-            self.related_replacement.as_ref(),
+            self.dynamic_replacement.as_ref(),
+            &mut self.scope_join_directory_state,
             &mut self.related_state,
             &mut self.admission,
             &mut self.projection,
@@ -1983,10 +2755,11 @@ impl ConfiguredScopedObservationSupervisor {
                             configured_observed_at(),
                         )
                         .await?;
-                        configured_execute_related_pass(
+                        configured_execute_dynamic_pass(
                             &self.handle,
                             reconcile.access_pass(),
-                            self.related_replacement.as_ref(),
+                            self.dynamic_replacement.as_ref(),
+                            &mut self.scope_join_directory_state,
                             &mut self.related_state,
                             &mut self.admission,
                             &mut self.projection,
@@ -2051,10 +2824,11 @@ fn configured_fail_watcher(watcher: &mut ScopedObservationNativeWatcher) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn configured_execute_related_pass(
+async fn configured_execute_dynamic_pass(
     handle: &ScopedObservationAsyncHandle,
     pass: &ScopedObservationAccessPass,
-    runtime: Option<&ConfiguredScopedRelatedReplacementExtension>,
+    runtime: Option<&ConfiguredScopedDynamicReplacementExtension>,
+    scope_join_directory_state: &mut Option<PreparedScopedJoinDirectoryState>,
     state: &mut Option<PreparedScopedRelatedReconciliationState>,
     admission: &mut ScopedObservationAdmissionLane,
     projection: &mut ScopedObservationProjectionSink,
@@ -2062,51 +2836,112 @@ async fn configured_execute_related_pass(
     observed_at: i64,
 ) -> Result<(), ConfiguredScopedObservationRuntimeError> {
     let Some(runtime) = runtime else {
-        return if state.is_none() {
+        return if scope_join_directory_state.is_none() && state.is_none() {
             Ok(())
         } else {
             Err(ConfiguredScopedObservationRuntimeError::SourceBinding)
         };
     };
-    if (phase == AccessPhase::Initial) != state.is_none() || !admission.is_empty() {
+    let starts_initial = scope_join_directory_state.is_none() && state.is_none();
+    let starts_revalidation = scope_join_directory_state.is_some() && state.is_some();
+    if !admission.is_empty()
+        || (phase == AccessPhase::Initial && !starts_initial)
+        || (phase == AccessPhase::Revalidation && !starts_revalidation)
+    {
         return Err(ConfiguredScopedObservationRuntimeError::Admission);
-    }
-    let snapshot = projection
-        .scope_join_snapshot()
-        .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
-    let plan = runtime.plan_related_sources_inner(&snapshot)?;
-    let batch =
-        runtime.execute_related_sources_inner(pass, plan, state.as_ref(), phase, observed_at)?;
-    let (observations, memberships, retired_sources, next_state) = batch.into_parts();
-    // Bootstrap corrections may add or refresh evidence-derived sources. A
-    // disappearing join owner needs an ordered retirement transaction; until
-    // that boundary is available, fail the still-unpublished bootstrap rather
-    // than certify stale membership. Whole-epoch replay starts from an empty
-    // stage and therefore never reaches this branch.
-    if !retired_sources.is_empty() {
-        return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
     }
     let delivery_phase = match phase {
         AccessPhase::Initial => ScopedAppendDeliveryPhase::Bootstrap,
         AccessPhase::Revalidation => ScopedAppendDeliveryPhase::Correction,
     };
-    for authority in memberships {
-        let membership = ScopedRelationMembershipObservation::from_related_membership(authority)
-            .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
-        admission
-            .record_related_relation_membership(handle.host(), delivery_phase, membership)
-            .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
-        configured_offer_pending(handle, admission, projection).await?;
+    for round in 0..runtime.max_reconciliation_rounds {
+        let before = projection
+            .scope_join_snapshot()
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+        let refresh_retained = phase == AccessPhase::Revalidation && round == 0;
+
+        let directory_plan = runtime.plan_scope_join_directories_inner(&before)?;
+        let directory_batch = runtime.execute_scope_join_directories_inner(
+            pass,
+            directory_plan,
+            scope_join_directory_state.as_ref(),
+            admission,
+            phase,
+            refresh_retained,
+            observed_at,
+        )?;
+        let PreparedScopedJoinDirectoryBatch {
+            memberships,
+            members,
+            retired_roots,
+            retired_members,
+            next_state,
+        } = directory_batch;
+        // A disappearing owner/member requires ordered source retirement. The
+        // current unpublished bootstrap fails closed; a full replacement
+        // starts from an empty stage and cannot reach this branch.
+        if !retired_roots.is_empty() || !retired_members.is_empty() {
+            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+        }
+        for authority in memberships {
+            let membership =
+                ScopedRelationMembershipObservation::from_dynamic_membership(authority)
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            admission
+                .record_dynamic_relation_membership(handle.host(), delivery_phase, membership)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            configured_offer_pending(handle, admission, projection).await?;
+        }
+        for lifecycle in members {
+            admission
+                .admit_directory_member(pass.pass_id(), delivery_phase, lifecycle)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            configured_offer_pending(handle, admission, projection).await?;
+        }
+        *scope_join_directory_state = Some(next_state);
+
+        let related_snapshot = projection
+            .scope_join_snapshot()
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+        let plan = runtime.plan_related_sources_inner(&related_snapshot)?;
+        let batch = runtime.execute_related_sources_inner(
+            pass,
+            plan,
+            state.as_ref(),
+            phase,
+            refresh_retained,
+            observed_at,
+        )?;
+        let (observations, memberships, retired_sources, next_state) = batch.into_parts();
+        if !retired_sources.is_empty() {
+            return Err(ConfiguredScopedObservationRuntimeError::SourceBinding);
+        }
+        for authority in memberships {
+            let membership =
+                ScopedRelationMembershipObservation::from_dynamic_membership(authority)
+                    .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            admission
+                .record_dynamic_relation_membership(handle.host(), delivery_phase, membership)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            configured_offer_pending(handle, admission, projection).await?;
+        }
+        for observed in observations {
+            let (_object_token, observation) = observed.into_parts();
+            admission
+                .admit_related_object(pass.pass_id(), delivery_phase, observation)
+                .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
+            configured_offer_pending(handle, admission, projection).await?;
+        }
+        *state = Some(next_state);
+
+        let after = projection
+            .scope_join_snapshot()
+            .map_err(|_| ConfiguredScopedObservationRuntimeError::SourcePass)?;
+        if after == before {
+            return Ok(());
+        }
     }
-    for observed in observations {
-        let (_object_token, observation) = observed.into_parts();
-        admission
-            .admit_related_object(pass.pass_id(), delivery_phase, observation)
-            .map_err(|_| ConfiguredScopedObservationRuntimeError::Admission)?;
-        configured_offer_pending(handle, admission, projection).await?;
-    }
-    *state = Some(next_state);
-    Ok(())
+    Err(ConfiguredScopedObservationRuntimeError::ReconcileLimit)
 }
 
 async fn configured_execute_directory_pass(
@@ -2429,6 +3264,7 @@ pub(crate) struct PreparedScopedObservationAttachment {
     root_relation_id: String,
     known_object_sources: BTreeMap<String, PreparedScopedKnownObjectSource>,
     directory_relation_bounds: BTreeMap<String, ScopeRelationBounds>,
+    scope_join_directory_bindings: BTreeMap<String, PreparedScopedJoinDirectoryRelationBinding>,
     related_relation_bindings: BTreeMap<String, PreparedScopedRelatedRelationBinding>,
     unsupported_observation_relations: BTreeSet<String>,
     relation_identity_inputs: BTreeMap<String, Vec<ScopedObservationOwnedIdentityInput>>,
@@ -2483,6 +3319,7 @@ impl PreparedScopedObservationAttachment {
             root_relation_id: _,
             known_object_sources,
             directory_relation_bounds,
+            scope_join_directory_bindings,
             related_relation_bindings,
             unsupported_observation_relations,
             relation_identity_inputs,
@@ -2496,6 +3333,10 @@ impl PreparedScopedObservationAttachment {
             return Err(unsupported_configured_runtime());
         }
         if directory_relation_bounds.keys().any(|relation_id| {
+            known_object_sources.contains_key(relation_id)
+                || scope_join_directory_bindings.contains_key(relation_id)
+                || related_relation_bindings.contains_key(relation_id)
+        }) || scope_join_directory_bindings.keys().any(|relation_id| {
             known_object_sources.contains_key(relation_id)
                 || related_relation_bindings.contains_key(relation_id)
         }) || related_relation_bindings
@@ -2614,6 +3455,17 @@ impl PreparedScopedObservationAttachment {
             });
         }
         let mut prepared_related_bindings = Vec::with_capacity(related_relation_bindings.len());
+        let mut prepared_scope_join_directory_bindings =
+            Vec::with_capacity(scope_join_directory_bindings.len());
+        for (_, binding) in scope_join_directory_bindings {
+            let max_objects = usize::try_from(binding.bounds.max_objects)
+                .map_err(|_| invalid_configured_runtime())?;
+            required_coverage_objects = required_coverage_objects
+                .checked_add(1)
+                .and_then(|count| count.checked_add(max_objects))
+                .ok_or_else(invalid_configured_runtime)?;
+            prepared_scope_join_directory_bindings.push(binding);
+        }
         for (_, binding) in related_relation_bindings {
             let max_objects = usize::try_from(binding.bounds.max_objects)
                 .map_err(|_| invalid_configured_runtime())?;
@@ -2628,6 +3480,7 @@ impl PreparedScopedObservationAttachment {
             objects,
             bindings,
             directory_bindings,
+            scope_join_directory_bindings: prepared_scope_join_directory_bindings,
             related_relation_bindings: prepared_related_bindings,
             required_coverage_objects,
         })
@@ -2663,6 +3516,14 @@ impl std::fmt::Debug for PreparedScopedObservationAttachment {
                 "directory_relation_ids",
                 &self
                     .directory_relation_bounds
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "scope_join_directory_relation_ids",
+                &self
+                    .scope_join_directory_bindings
                     .keys()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
@@ -2751,6 +3612,24 @@ fn compose_prepared_attachment(
         })
         .map(|relation| (relation.relation_id.clone(), relation.bounds))
         .collect::<BTreeMap<_, _>>();
+    let scope_join_directory_bindings = observation_relations
+        .iter()
+        .filter(|relation| {
+            relation.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                && relation.directory_identity_authority
+                    == Some(ScopeDirectoryIdentityAuthority::ScopeJoin)
+        })
+        .map(|relation| {
+            (
+                relation.relation_id.clone(),
+                PreparedScopedJoinDirectoryRelationBinding {
+                    relation_id: relation.relation_id.clone(),
+                    identity_input_names: relation.identity_inputs.clone(),
+                    bounds: relation.bounds,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let related_relation_bindings = observation_relations
         .iter()
         .filter(|relation| {
@@ -2787,10 +3666,13 @@ fn compose_prepared_attachment(
             ScopeRelationPrimitive::KnownObject
             | ScopeRelationPrimitive::SiblingObject
             | ScopeRelationPrimitive::ReferencedObjectFromField => false,
-            ScopeRelationPrimitive::ChildDirectoryByNativeId => {
-                relation.directory_identity_authority
-                    != Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot)
-            }
+            ScopeRelationPrimitive::ChildDirectoryByNativeId => !matches!(
+                relation.directory_identity_authority,
+                Some(
+                    ScopeDirectoryIdentityAuthority::ConfiguredRoot
+                        | ScopeDirectoryIdentityAuthority::ScopeJoin
+                )
+            ),
             _ => true,
         })
         .map(|relation| relation.relation_id.clone())
@@ -2952,6 +3834,7 @@ fn compose_prepared_attachment(
         root_relation_id,
         known_object_sources,
         directory_relation_bounds,
+        scope_join_directory_bindings,
         related_relation_bindings,
         unsupported_observation_relations,
         relation_identity_inputs,

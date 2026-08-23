@@ -25,12 +25,13 @@ use crate::adapter::{
     FactEnvelope, FactProvenance, FactRevisionId, FactSemanticContext, FactSemanticRevision,
     MessageRevisionFact, NativeArtifactProbe, NativeIdentityClaim, NativeRuntimeMarkerRevisionFact,
     PlanRevisionFact, QualifiedTimestamp, QualifiedValueQuality, RawRetentionPolicy,
-    RecordMappingDisposition, ScopeJoinEvidence, ScopeJoinParameterSet, ScopeJoinUpdate,
-    ScopeRelationPrimitive, SemanticRevisionRef, Sha256Digest, SourceAccess, SourceCoveragePoint,
-    SourceCoverageSet, SourceInstance, SourceObjectList, SourceObjectListRequest, SourceQuery,
-    SourceRecordId, SourceRows, SourceSnapshot, SupportOperation, TaskRevisionFact,
-    ToolRevisionFact, TypedAccessAuthorization, UsageRevisionV2Fact, UserInputOperation,
-    UserInputRequestRevisionFact, EXTERNAL_ENTITY_REFERENCE_VERSION,
+    RecordMappingDisposition, ScopeDirectoryIdentityAuthority, ScopeJoinEvidence,
+    ScopeJoinParameterSet, ScopeJoinUpdate, ScopeRelationPrimitive, SemanticRevisionRef,
+    Sha256Digest, SourceAccess, SourceCoveragePoint, SourceCoverageSet, SourceInstance,
+    SourceObjectList, SourceObjectListRequest, SourceQuery, SourceRecordId, SourceRows,
+    SourceSnapshot, SupportOperation, TaskRevisionFact, ToolRevisionFact, TypedAccessAuthorization,
+    UsageRevisionV2Fact, UserInputOperation, UserInputRequestRevisionFact,
+    EXTERNAL_ENTITY_REFERENCE_VERSION,
 };
 use crate::coverage_runtime::{
     derive_coverage_membership_revision, source_membership_prefix, CoverageMembershipObject,
@@ -1172,14 +1173,14 @@ pub(crate) struct ScopedRelationMembershipObservation {
 
 enum ScopedRelationMembershipAuthority {
     Directory(Box<ScopedObservationDirectoryListing>),
-    Related(ScopedObservationRelatedMembershipAuthority),
+    Dynamic(ScopedObservationDynamicMembershipAuthority),
 }
 
 /// Complete attachment/pass-bound authority for one evidence-derived relation
 /// membership snapshot. The exact native objects were already read through
 /// the access pass; this value retains their opaque tokens, semantic source
 /// coordinates, and owner-bound membership revision without native locators.
-pub(crate) struct ScopedObservationRelatedMembershipAuthority {
+pub(crate) struct ScopedObservationDynamicMembershipAuthority {
     attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
     access_pass_id: u64,
     relation_id: Arc<str>,
@@ -1192,14 +1193,14 @@ impl ScopedRelationMembershipAuthority {
     fn relation_id(&self) -> &str {
         match self {
             Self::Directory(listing) => listing.relation_id(),
-            Self::Related(authority) => authority.relation_id(),
+            Self::Dynamic(authority) => authority.relation_id(),
         }
     }
 
     fn directory_listing(&self) -> Option<&ScopedObservationDirectoryListing> {
         match self {
             Self::Directory(listing) => Some(listing.as_ref()),
-            Self::Related(_) => None,
+            Self::Dynamic(_) => None,
         }
     }
 
@@ -1210,7 +1211,7 @@ impl ScopedRelationMembershipAuthority {
     ) -> bool {
         match self {
             Self::Directory(_) => true,
-            Self::Related(authority) => {
+            Self::Dynamic(authority) => {
                 authority.access_pass_id == access_pass_id
                     && authority.members.len() == member_sources.len()
                     && authority
@@ -1222,7 +1223,7 @@ impl ScopedRelationMembershipAuthority {
     }
 }
 
-impl ScopedObservationRelatedMembershipAuthority {
+impl ScopedObservationDynamicMembershipAuthority {
     pub(crate) fn relation_id(&self) -> &str {
         &self.relation_id
     }
@@ -1250,10 +1251,10 @@ impl ScopedObservationRelatedMembershipAuthority {
     }
 }
 
-impl std::fmt::Debug for ScopedObservationRelatedMembershipAuthority {
+impl std::fmt::Debug for ScopedObservationDynamicMembershipAuthority {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ScopedObservationRelatedMembershipAuthority")
+            .debug_struct("ScopedObservationDynamicMembershipAuthority")
             .field("has_attachment_authority", &true)
             .field("access_pass_id", &self.access_pass_id)
             .field("relation_id", &self.relation_id)
@@ -1310,8 +1311,8 @@ impl ScopedRelationMembershipObservation {
         })
     }
 
-    pub(crate) fn from_related_membership(
-        authority: ScopedObservationRelatedMembershipAuthority,
+    pub(crate) fn from_dynamic_membership(
+        authority: ScopedObservationDynamicMembershipAuthority,
     ) -> Result<Self, ScopedAdmissionError> {
         let relation_id = authority.relation_id().to_string();
         let source = authority.source().clone();
@@ -1348,7 +1349,7 @@ impl ScopedRelationMembershipObservation {
                 explicit_errors: Vec::new(),
                 completeness: CoverageSetCompleteness::Complete,
             },
-            authority: ScopedRelationMembershipAuthority::Related(authority),
+            authority: ScopedRelationMembershipAuthority::Dynamic(authority),
         })
     }
 }
@@ -1727,14 +1728,14 @@ impl ScopedObservationAdmissionLane {
     /// Retain one complete evidence-derived membership snapshot only through
     /// the host whose unforgeable attachment authority minted it. Equal root
     /// coordinates from another observer are not interchangeable.
-    pub(crate) fn record_related_relation_membership(
+    pub(crate) fn record_dynamic_relation_membership(
         &mut self,
         host: &ScopedObservationAccessHost,
         phase: ScopedAppendDeliveryPhase,
         observation: ScopedRelationMembershipObservation,
     ) -> Result<(), ScopedAdmissionError> {
         let access_pass_id = match &observation.authority {
-            ScopedRelationMembershipAuthority::Related(authority)
+            ScopedRelationMembershipAuthority::Dynamic(authority)
                 if Arc::ptr_eq(&authority.attachment_authority, &host.attachment_authority)
                     && !host.state.closed.load(Ordering::Acquire)
                     && source_belongs_to_root(&authority.source, &host.root_identity)
@@ -1745,7 +1746,7 @@ impl ScopedObservationAdmissionLane {
                 authority.access_pass_id
             }
             ScopedRelationMembershipAuthority::Directory(_)
-            | ScopedRelationMembershipAuthority::Related(_) => {
+            | ScopedRelationMembershipAuthority::Dynamic(_) => {
                 return Err(ScopedAdmissionError::InvalidCoverage);
             }
         };
@@ -2180,7 +2181,7 @@ impl ScopedObservationAdmissionLane {
             .dynamic_relation_authorities
             .get(&relation_id)
             .is_some_and(|authority| match authority {
-                ScopedRelationMembershipAuthority::Related(authority) => {
+                ScopedRelationMembershipAuthority::Dynamic(authority) => {
                     authority.access_pass_id() == access_pass_id && authority.admits(identity)
                 }
                 ScopedRelationMembershipAuthority::Directory(_) => false,
@@ -19981,6 +19982,15 @@ pub struct ScopedObservationDirectoryPassBinding {
     identity_inputs: Vec<ScopedObservationOwnedIdentityInput>,
 }
 
+/// Attachment-bound proof that one directory coordinate came from the
+/// configured runtime's validated scope-join planner. The ordinary configured
+/// binding remains intentionally insufficient for a `scope_join` declaration.
+struct ScopedObservationScopeJoinDirectoryPassBinding {
+    attachment_authority: Arc<ScopedObservationAttachmentAuthority>,
+    access_pass_id: u64,
+    binding: ScopedObservationDirectoryPassBinding,
+}
+
 impl ScopedObservationDirectoryPassBinding {
     pub fn new(
         relation_id: impl Into<String>,
@@ -20035,6 +20045,17 @@ impl std::fmt::Debug for ScopedObservationDirectoryPassBinding {
     }
 }
 
+impl std::fmt::Debug for ScopedObservationScopeJoinDirectoryPassBinding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScopedObservationScopeJoinDirectoryPassBinding")
+            .field("has_attachment_authority", &true)
+            .field("has_access_pass_id", &(self.access_pass_id != 0))
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
+    }
+}
+
 struct ScopedObservationDirectoryListingSnapshotBatch {
     listing: ScopedObservationDirectoryListing,
     members: Vec<ScopedObservationDirectoryMemberLifecycle>,
@@ -20051,6 +20072,37 @@ struct ScopedObservationDirectorySnapshotRequest<'prior> {
     phase: AccessPhase,
     relation_ordinal: u64,
     observed_at: i64,
+}
+
+enum ScopedObservationDirectoryListingPassBinding<'binding> {
+    Configured(&'binding ScopedObservationDirectoryPassBinding),
+    ScopeJoin(&'binding ScopedObservationScopeJoinDirectoryPassBinding),
+}
+
+impl ScopedObservationDirectoryListingPassBinding<'_> {
+    fn scan(
+        &self,
+        host: &ScopedObservationAccessHost,
+        pass: &ScopedObservationAccessPass,
+        phase: AccessPhase,
+        previous: Option<&ScopedObservationDirectoryListing>,
+    ) -> Result<ScopedObservationDirectoryScan, ScopedObservationAccessError> {
+        match self {
+            Self::Configured(binding) => {
+                let identity_inputs = binding.borrowed_identity_inputs();
+                host.scan_directory_relation_membership(
+                    pass,
+                    binding.relation_id(),
+                    &identity_inputs,
+                    phase,
+                    previous,
+                )
+            }
+            Self::ScopeJoin(binding) => {
+                host.scan_scope_join_directory_relation_membership(pass, binding, phase, previous)
+            }
+        }
+    }
 }
 
 /// Read, decode, and final-scan one exact directory relation without mutating
@@ -20084,18 +20136,39 @@ fn scoped_read_directory_relation_listing_snapshot(
     binding: &ScopedObservationDirectoryPassBinding,
     request: ScopedObservationDirectorySnapshotRequest<'_>,
 ) -> Result<ScopedObservationDirectoryListingSnapshotBatch, ()> {
+    scoped_read_directory_relation_listing_snapshot_inner(
+        host,
+        pass,
+        ScopedObservationDirectoryListingPassBinding::Configured(binding),
+        request,
+    )
+}
+
+fn scoped_read_scope_join_directory_relation_listing_snapshot(
+    host: &ScopedObservationAccessHost,
+    pass: &ScopedObservationAccessPass,
+    binding: &ScopedObservationScopeJoinDirectoryPassBinding,
+    request: ScopedObservationDirectorySnapshotRequest<'_>,
+) -> Result<ScopedObservationDirectoryListingSnapshotBatch, ()> {
+    scoped_read_directory_relation_listing_snapshot_inner(
+        host,
+        pass,
+        ScopedObservationDirectoryListingPassBinding::ScopeJoin(binding),
+        request,
+    )
+}
+
+fn scoped_read_directory_relation_listing_snapshot_inner(
+    host: &ScopedObservationAccessHost,
+    pass: &ScopedObservationAccessPass,
+    binding: ScopedObservationDirectoryListingPassBinding<'_>,
+    request: ScopedObservationDirectorySnapshotRequest<'_>,
+) -> Result<ScopedObservationDirectoryListingSnapshotBatch, ()> {
     if request.relation_ordinal == 0 {
         return Err(());
     }
-    let identity_inputs = binding.borrowed_identity_inputs();
-    let mut listing = match host
-        .scan_directory_relation_membership(
-            pass,
-            binding.relation_id(),
-            &identity_inputs,
-            request.phase,
-            request.previous,
-        )
+    let mut listing = match binding
+        .scan(host, pass, request.phase, request.previous)
         .map_err(|_| ())?
     {
         ScopedObservationDirectoryScan::Snapshot(listing) => *listing,
@@ -20140,14 +20213,8 @@ fn scoped_read_directory_relation_listing_snapshot(
         );
     }
 
-    let verification = match host
-        .scan_directory_relation_membership(
-            pass,
-            binding.relation_id(),
-            &identity_inputs,
-            request.phase,
-            Some(&listing),
-        )
+    let verification = match binding
+        .scan(host, pass, request.phase, Some(&listing))
         .map_err(|_| ())?
     {
         ScopedObservationDirectoryScan::Snapshot(verification) => *verification,
@@ -21269,17 +21336,17 @@ impl ScopedObservationAccessHost {
         &self.compatibility
     }
 
-    /// Seal the complete member set produced by one configured related-source
+    /// Seal the complete member set produced by one configured dynamic-source
     /// reconciliation. The caller supplies only path-free identities already
     /// minted by this attachment; the host derives the separate membership
     /// source and binds it to the exact active pass.
-    fn bind_related_relation_membership(
+    fn bind_dynamic_relation_membership(
         &self,
         pass: &ScopedObservationAccessPass,
         relation_id: &str,
         revision: Revision,
         members: BTreeMap<AccessObjectToken, ScopedSourceObjectIdentity>,
-    ) -> Result<ScopedObservationRelatedMembershipAuthority, ScopedObservationAccessError> {
+    ) -> Result<ScopedObservationDynamicMembershipAuthority, ScopedObservationAccessError> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(ScopedObservationAccessError::Closed);
         }
@@ -21294,7 +21361,7 @@ impl ScopedObservationAccessHost {
                 .any(|declared| declared.as_ref() == relation_id)
         {
             return Err(ScopedObservationAccessError::InvalidGrant(
-                "related relation membership does not match the active attachment".to_string(),
+                "dynamic relation membership does not match the active attachment".to_string(),
             ));
         }
         let mut unique_sources = BTreeSet::new();
@@ -21303,7 +21370,7 @@ impl ScopedObservationAccessHost {
                 || !unique_sources.insert(source.clone())
         }) {
             return Err(ScopedObservationAccessError::InvalidGrant(
-                "related relation membership contains an invalid source".to_string(),
+                "dynamic relation membership contains an invalid source".to_string(),
             ));
         }
         let mut membership_stream_identity =
@@ -21318,7 +21385,7 @@ impl ScopedObservationAccessHost {
         )
         .map_err(|_| {
             ScopedObservationAccessError::InvalidGrant(
-                "related relation membership identity is invalid".to_string(),
+                "dynamic relation membership identity is invalid".to_string(),
             )
         })?;
         let object_key = CoverageObjectKey::derive(
@@ -21327,7 +21394,7 @@ impl ScopedObservationAccessHost {
         )
         .map_err(|_| {
             ScopedObservationAccessError::InvalidGrant(
-                "related relation membership identity is invalid".to_string(),
+                "dynamic relation membership identity is invalid".to_string(),
             )
         })?;
         let source = ScopedSourceObjectIdentity {
@@ -21338,10 +21405,10 @@ impl ScopedObservationAccessHost {
         };
         if unique_sources.contains(&source) {
             return Err(ScopedObservationAccessError::InvalidGrant(
-                "related relation membership collides with a member source".to_string(),
+                "dynamic relation membership collides with a member source".to_string(),
             ));
         }
-        Ok(ScopedObservationRelatedMembershipAuthority {
+        Ok(ScopedObservationDynamicMembershipAuthority {
             attachment_authority: Arc::clone(&self.attachment_authority),
             access_pass_id: pass.pass_id,
             relation_id: Arc::from(relation_id),
@@ -21364,6 +21431,102 @@ impl ScopedObservationAccessHost {
         phase: AccessPhase,
         previous: Option<&ScopedObservationDirectoryListing>,
     ) -> Result<ScopedObservationDirectoryScan, ScopedObservationAccessError> {
+        self.scan_directory_relation_membership_inner(
+            pass,
+            relation_id,
+            identity_inputs,
+            phase,
+            previous,
+            ScopeDirectoryIdentityAuthority::ConfiguredRoot,
+        )
+    }
+
+    fn bind_scope_join_directory_pass(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        binding: ScopedObservationDirectoryPassBinding,
+    ) -> Result<ScopedObservationScopeJoinDirectoryPassBinding, ScopedObservationAccessError> {
+        if self.state.closed.load(Ordering::Acquire) {
+            return Err(ScopedObservationAccessError::Closed);
+        }
+        if pass.pass_id == 0
+            || !Arc::ptr_eq(&self.state, &pass.state)
+            || !Arc::ptr_eq(&self.attachment_authority, &pass.attachment_authority)
+            || self.root_identity != pass.root_identity
+        {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "scope-join directory binding does not match the active attachment".to_string(),
+            ));
+        }
+        let declaration = pass
+            .plan
+            .relation(binding.relation_id())
+            .filter(|declaration| {
+                declaration.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                    && declaration.directory_identity_authority
+                        == Some(ScopeDirectoryIdentityAuthority::ScopeJoin)
+            })
+            .ok_or_else(|| {
+                ScopedObservationAccessError::InvalidGrant(
+                    "scope-join directory binding does not match the active attachment".to_string(),
+                )
+            })?;
+        if declaration.identity_inputs.len() != binding.identity_inputs.len()
+            || declaration
+                .identity_inputs
+                .iter()
+                .zip(&binding.identity_inputs)
+                .any(|(expected, actual)| expected != &actual.name)
+        {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "scope-join directory binding does not match the active attachment".to_string(),
+            ));
+        }
+        Ok(ScopedObservationScopeJoinDirectoryPassBinding {
+            attachment_authority: Arc::clone(&self.attachment_authority),
+            access_pass_id: pass.pass_id,
+            binding,
+        })
+    }
+
+    fn scan_scope_join_directory_relation_membership(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        binding: &ScopedObservationScopeJoinDirectoryPassBinding,
+        phase: AccessPhase,
+        previous: Option<&ScopedObservationDirectoryListing>,
+    ) -> Result<ScopedObservationDirectoryScan, ScopedObservationAccessError> {
+        if binding.access_pass_id == 0
+            || binding.access_pass_id != pass.pass_id
+            || !Arc::ptr_eq(&binding.attachment_authority, &self.attachment_authority)
+            || !Arc::ptr_eq(&self.state, &pass.state)
+            || !Arc::ptr_eq(&self.attachment_authority, &pass.attachment_authority)
+            || self.root_identity != pass.root_identity
+        {
+            return Err(ScopedObservationAccessError::InvalidGrant(
+                "scope-join directory binding does not match the active attachment".to_string(),
+            ));
+        }
+        let identity_inputs = binding.binding.borrowed_identity_inputs();
+        self.scan_directory_relation_membership_inner(
+            pass,
+            binding.binding.relation_id(),
+            &identity_inputs,
+            phase,
+            previous,
+            ScopeDirectoryIdentityAuthority::ScopeJoin,
+        )
+    }
+
+    fn scan_directory_relation_membership_inner(
+        &self,
+        pass: &ScopedObservationAccessPass,
+        relation_id: &str,
+        identity_inputs: &[ScopeIdentityInput<'_>],
+        phase: AccessPhase,
+        previous: Option<&ScopedObservationDirectoryListing>,
+        expected_identity_authority: ScopeDirectoryIdentityAuthority,
+    ) -> Result<ScopedObservationDirectoryScan, ScopedObservationAccessError> {
         if self.state.closed.load(Ordering::Acquire) {
             return Err(ScopedObservationAccessError::Closed);
         }
@@ -21374,6 +21537,10 @@ impl ScopedObservationAccessHost {
                 .dynamic_observation_relations
                 .iter()
                 .any(|id| id.as_ref() == relation_id)
+            || pass.plan.relation(relation_id).is_none_or(|declaration| {
+                declaration.primitive != ScopeRelationPrimitive::ChildDirectoryByNativeId
+                    || declaration.directory_identity_authority != Some(expected_identity_authority)
+            })
         {
             return Err(ScopedObservationAccessError::InvalidGrant(
                 "relation is not a composed directory observation".to_string(),
@@ -22252,6 +22419,8 @@ impl ScopedObservationAccessHost {
                 .relation(&binding.relation_id)
                 .filter(|declaration| {
                     declaration.primitive == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                        && declaration.directory_identity_authority
+                            == Some(ScopeDirectoryIdentityAuthority::ConfiguredRoot)
                 })
                 .ok_or(ScopedObservationSourceOwnerBindingError::InvalidRelationSet)?;
             if declaration.identity_inputs.len() != binding.identity_inputs.len()
@@ -22282,14 +22451,17 @@ impl ScopedObservationAccessHost {
                         .admission
                         .dynamic_relation_authorities
                         .get(relation_id.as_str()),
-                    Some(ScopedRelationMembershipAuthority::Related(_))
+                    Some(ScopedRelationMembershipAuthority::Dynamic(_))
                 )
                 || plan.relation(relation_id).is_none_or(|declaration| {
                     !matches!(
                         declaration.primitive,
                         ScopeRelationPrimitive::SiblingObject
                             | ScopeRelationPrimitive::ReferencedObjectFromField
-                    )
+                    ) && !(declaration.primitive
+                        == ScopeRelationPrimitive::ChildDirectoryByNativeId
+                        && declaration.directory_identity_authority
+                            == Some(ScopeDirectoryIdentityAuthority::ScopeJoin))
                 })
             {
                 return Err(ScopedObservationSourceOwnerBindingError::InvalidRelationSet);
