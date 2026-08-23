@@ -70,10 +70,6 @@ RFC012_DECODE_RUNTIME_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|observer)"
     r"|rusqlite|napi)(?:::|\b)"
 )
-RFC012_CATALOG_CONTRACT_FORBIDDEN_RE = re.compile(
-    r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|observer|source)"
-    r"|rusqlite|napi)(?:::|\b)"
-)
 RFC012_SEMANTIC_CONTRACT_FORBIDDEN_RE = re.compile(
     r"\b(?:crate::(?:claude|codex|factory|grok|core|engine|napi_engine|orchestrate|scoped_observation|source|catalog_contract|observation_contract)"
     r"|rusqlite|napi)(?:::|\b)"
@@ -114,10 +110,6 @@ PORTABLE_CLIENT_CONTRACT_MODULES = frozenset(
     for relative in (
         "packages/sdk/src/contracts/rfc012-semantic-json.ts",
         "packages/sdk/src/contracts/rfc012a.ts",
-        "packages/sdk/src/contracts/rfc012b.ts",
-        "packages/sdk/src/contracts/rfc012b-pages.ts",
-        "packages/sdk/src/contracts/rfc012b-client.ts",
-        "packages/sdk/src/contracts/rfc012b-hydration.ts",
     )
 )
 SDK_PRODUCTION_ENTRIES = (
@@ -725,58 +717,21 @@ def discover_rfc012_coverage_crate_boundary_violations() -> set[str]:
 
 
 def discover_rfc012_catalog_contract_boundary_violations() -> set[str]:
-    """Draft RFC 012B semantics cannot acquire storage, source, vendor, or transport authority."""
-    relative = "crates/spaghetti-napi/src/catalog_contract.rs"
-    path = REPO_ROOT / relative
+    """The catalog lives behind the Rust engine boundary and nowhere else.
+
+    RFC 012B's catalog was once a draft semantic contract mirrored into
+    hand-written TypeScript. It is now durable engine rows reached through the
+    generated N-API bindings, so any reappearance of a separate catalog
+    contract module — in either language — is a regression to two authorities.
+    """
     found: set[str] = set()
-    contract_paths = [path]
-    contract_dir = path.with_suffix("")
-    if contract_dir.exists():
-        contract_paths.extend(sorted(contract_dir.rglob("*.rs")))
-    if not path.exists() or any(
-        RFC012_CATALOG_CONTRACT_FORBIDDEN_RE.search(production_rust_text(contract_path))
-        for contract_path in contract_paths
-    ):
-        found.add(relative)
-    lib = REPO_ROOT / "crates/spaghetti-napi/src/lib.rs"
-    if re.search(r"^\s*pub\s+mod\s+catalog_contract\s*;", read(lib), re.MULTILINE):
-        found.add(f"{repo_path(lib)}#premature-public-catalog-contract")
-
-    portable_relatives = (
-        "packages/sdk/src/contracts/rfc012b.ts",
-        "packages/sdk/src/contracts/rfc012b-client.ts",
-        "packages/sdk/src/contracts/rfc012b-hydration.ts",
-        "packages/sdk/src/contracts/rfc012b-pages.ts",
-    )
-    portable_roots = [REPO_ROOT / relative for relative in portable_relatives]
-    contracts_root = portable_roots[0].parent.resolve()
-    for relative, portable in zip(portable_relatives, portable_roots, strict=True):
-        if not portable.exists():
-            found.add(relative)
-    if all(portable.exists() for portable in portable_roots):
-        pending = portable_roots.copy()
-        visited: set[Path] = set()
-        while pending:
-            importer = pending.pop().resolve()
-            if importer in visited:
-                continue
-            visited.add(importer)
-            for specifier in RUNTIME_MODULE_RE.findall(read(importer)):
-                edge = f"{repo_path(importer)} -> {specifier}"
-                target = resolve_typescript_module(importer, specifier)
-                if (
-                    not specifier.startswith(".")
-                    or target is None
-                    or not target.is_relative_to(contracts_root)
-                ):
-                    found.add(edge)
-                    continue
-                pending.append(target)
-
-    # No barrel-export requirement: these modules are internal to
-    # `client/*` and the SDK barrel is an explicit allowlist (landing plan §4).
-    # The self-containment check above is what actually matters here — a
-    # catalog contract may not reach outside `contracts/`.
+    rust_contract = REPO_ROOT / "crates/spaghetti-napi/src/catalog_contract.rs"
+    if rust_contract.exists() or rust_contract.with_suffix("").exists():
+        found.add(repo_path(rust_contract))
+    contracts_dir = REPO_ROOT / "packages/sdk/src/contracts"
+    if contracts_dir.exists():
+        for module in sorted(contracts_dir.glob("rfc012b*.ts")):
+            found.add(repo_path(module))
     return found
 
 

@@ -22,27 +22,6 @@ import {
   normalizeTransportError,
   protocolMismatchError,
 } from './errors.js';
-import {
-  catalogQueryContextFromResponse,
-  defaultCatalogReadinessTransportRequest,
-  parseCatalogHydrationSchedulingResult,
-  parseCatalogProjectPageResult,
-  parseCatalogReadinessTransportRequest,
-  parseCatalogResolutionResult,
-  parseCatalogSessionPageResult,
-  prepareCatalogPageRequest,
-  prepareCatalogHydrationRequest,
-  prepareCatalogResolutionRequest,
-  type CatalogEntityResolutionRequest,
-  type CatalogHydrationSchedulingResult,
-  type CatalogLibraryPageRequest,
-  type CatalogProjectPageResult,
-  type CatalogQueryContext,
-  type CatalogSelectedHydrationRequest,
-  type CatalogSessionPageResult,
-} from '../contracts/rfc012b-client.js';
-import type { CatalogQueryContractRequest } from '../contracts/rfc012b.js';
-import type { CatalogEntityResolutionResponse } from '../contracts/rfc012b-pages.js';
 
 export interface OpenSpaghettiClientOptions {
   transport: SpaghettiClientTransport;
@@ -69,8 +48,6 @@ class DefaultSpaghettiClient implements SpaghettiClient {
   private readonly supersession = new Map<string, SupersessionEntry>();
   private readonly inFlight = new Map<number, AbortController>();
   private readonly subscriptions = new Set<AbortController>();
-  private readonly catalogHydrationResults = new Map<string, CatalogHydrationSchedulingResult>();
-  private readonly catalogHydrationTurns = new Map<string, Promise<void>>();
   private readonly subscriptionMetrics: SpaghettiSubscriptionMetrics = {
     activeSubscriptions: 0,
     replayRequests: 0,
@@ -99,72 +76,29 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     return this.query('getOverview', undefined, options);
   }
 
-  async getCatalogReadiness(
-    request?: CatalogQueryContractRequest,
-    options?: SpaghettiQueryOptions,
-  ): Promise<CatalogQueryContext> {
-    const transportRequest = catalogInput(() =>
-      request === undefined
-        ? defaultCatalogReadinessTransportRequest()
-        : parseCatalogReadinessTransportRequest({ contractRequest: request }),
-    );
-    const response = await this.query('getCatalogReadiness', transportRequest, options);
-    return catalogOutput(() => catalogQueryContextFromResponse(transportRequest.contractRequest, response));
+  getReadiness(options?: SpaghettiQueryOptions): Promise<SpaghettiClientResponseMap['getReadiness']> {
+    return this.query('getReadiness', undefined, options);
   }
 
-  async listLibraryProjects(
-    request: CatalogLibraryPageRequest,
+  resolveCatalogEntity(
+    request: SpaghettiClientRequestMap['resolveCatalogEntity'],
     options?: SpaghettiQueryOptions,
-  ): Promise<CatalogProjectPageResult> {
-    const prepared = catalogInput(() => prepareCatalogPageRequest(request, 'projects'));
-    const response = await this.query('listLibraryProjects', prepared.transportRequest, options);
-    return catalogOutput(() => parseCatalogProjectPageResult(response, prepared));
+  ): Promise<SpaghettiClientResponseMap['resolveCatalogEntity']> {
+    return this.query('resolveCatalogEntity', request, options);
   }
 
-  async listLibrarySessions(
-    request: CatalogLibraryPageRequest,
+  listCatalogProjects(
+    request?: Exclude<SpaghettiClientRequestMap['listCatalogProjects'], undefined>,
     options?: SpaghettiQueryOptions,
-  ): Promise<CatalogSessionPageResult> {
-    const prepared = catalogInput(() => prepareCatalogPageRequest(request, 'sessions'));
-    const response = await this.query('listLibrarySessions', prepared.transportRequest, options);
-    return catalogOutput(() => parseCatalogSessionPageResult(response, prepared));
+  ): Promise<SpaghettiClientResponseMap['listCatalogProjects']> {
+    return this.query('listCatalogProjects', request, options);
   }
 
-  async resolveCatalogEntity(
-    request: CatalogEntityResolutionRequest,
+  listCatalogSessions(
+    request?: Exclude<SpaghettiClientRequestMap['listCatalogSessions'], undefined>,
     options?: SpaghettiQueryOptions,
-  ): Promise<CatalogEntityResolutionResponse> {
-    const prepared = catalogInput(() => prepareCatalogResolutionRequest(request));
-    const response = await this.query('resolveCatalogEntity', prepared.transportRequest, options);
-    return catalogOutput(() => parseCatalogResolutionResult(response, prepared));
-  }
-
-  async requestCatalogHydration(
-    request: CatalogSelectedHydrationRequest,
-    options?: SpaghettiQueryOptions,
-  ): Promise<CatalogHydrationSchedulingResult> {
-    const prepared = catalogInput(() => prepareCatalogHydrationRequest(request));
-    const token = prepared.transportRequest.stableRequestToken;
-    const predecessor = this.catalogHydrationTurns.get(token) ?? Promise.resolve();
-    let releaseTurn!: () => void;
-    const turn = new Promise<void>((resolve) => {
-      releaseTurn = resolve;
-    });
-    const tail = predecessor.then(() => turn);
-    this.catalogHydrationTurns.set(token, tail);
-    await predecessor;
-    try {
-      const previous = this.catalogHydrationResults.get(token);
-      const response = await this.query('requestCatalogHydration', prepared.transportRequest, options);
-      const result = catalogOutput(() => parseCatalogHydrationSchedulingResult(response, prepared, previous));
-      this.catalogHydrationResults.set(token, result);
-      return result;
-    } finally {
-      releaseTurn();
-      if (this.catalogHydrationTurns.get(token) === tail) {
-        this.catalogHydrationTurns.delete(token);
-      }
-    }
+  ): Promise<SpaghettiClientResponseMap['listCatalogSessions']> {
+    return this.query('listCatalogSessions', request, options);
   }
 
   replayChanges(
@@ -408,8 +342,6 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     for (const controller of this.inFlight.values()) controller.abort(cancelledProtocolError());
     this.inFlight.clear();
     this.supersession.clear();
-    this.catalogHydrationResults.clear();
-    this.catalogHydrationTurns.clear();
     this.disposePromise = Promise.resolve().then(() => this.transport.dispose());
     return this.disposePromise;
   }
@@ -680,26 +612,6 @@ function compareChangeCursors(
   right: NonNullable<SpaghettiSubscribeRequest['from']>,
 ): number {
   return left.commitSeq === right.commitSeq ? left.ordinal - right.ordinal : left.commitSeq - right.commitSeq;
-}
-
-function catalogInput<T>(parse: () => T): T {
-  try {
-    return parse();
-  } catch {
-    throw clientError({
-      code: 'invalid_request',
-      message: 'The catalog query request is invalid.',
-      reason: 'catalog_contract_validation_failed',
-    });
-  }
-}
-
-function catalogOutput<T>(parse: () => T): T {
-  try {
-    return parse();
-  } catch {
-    throw clientError(protocolMismatchError('catalog response violated the negotiated RFC 012B contract'));
-  }
 }
 
 function combineSignals(...candidates: Array<AbortSignal | undefined>): AbortSignal | undefined {

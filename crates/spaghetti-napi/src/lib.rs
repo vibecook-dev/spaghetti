@@ -22,7 +22,6 @@
 use napi_derive::napi;
 
 pub mod adapter;
-mod catalog_contract;
 pub mod claude;
 pub mod codex;
 pub mod core;
@@ -31,6 +30,7 @@ mod decode_runtime;
 pub mod engine;
 pub mod factory;
 pub mod grok;
+mod napi_catalog;
 mod napi_engine;
 pub mod observer;
 #[cfg(feature = "legacy-oracle")]

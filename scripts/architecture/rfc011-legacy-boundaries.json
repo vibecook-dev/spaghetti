@@ -67,7 +67,7 @@
       "allowed": []
     },
     "rfc012_catalog_contract_boundary_violations": {
-      "description": "The draft RFC 012B catalog semantic contract cannot depend on persistence, source runtime, N-API, scoped observation, or concrete adapters, and cannot be exported publicly before its transport contract is complete.",
+      "description": "The catalog is durable engine state reached through generated N-API bindings. A separate catalog contract module in Rust or TypeScript would be a second authority and is forbidden.",
       "allowed": []
     },
     "rfc012_semantic_contract_boundary_violations": {

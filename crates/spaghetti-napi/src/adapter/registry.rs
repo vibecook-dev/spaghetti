@@ -241,22 +241,6 @@ impl AdapterRegistry {
         )
     }
 
-    /// Select a promoted or explicitly forward-catalog-only contract without
-    /// granting durable or scoped source authority. Complete-only catalog
-    /// producers separately reject forward-recognized authority before I/O.
-    pub(crate) fn authorize_catalog_if_supported(
-        &self,
-        adapter_id: &AdapterId,
-        probe: &NativeArtifactProbe,
-    ) -> Result<Option<TypedAccessAuthorization>, AdapterError> {
-        self.authorize_supported_operation(
-            adapter_id,
-            probe,
-            SupportOperation::CatalogDiscovery,
-            &["catalog.project", "catalog.session"],
-        )
-    }
-
     /// Select a promoted scoped-observation contract for one already-probed
     /// native artifact. Candidate, recognized-unverified, and incompatible
     /// artifacts deliberately return `None`; they never reach the stricter
@@ -743,23 +727,6 @@ pub(crate) mod tests {
             markers: vec!["fixture.marker".to_string()],
             contradictory_markers: false,
         };
-        let catalog_authorization = registry
-            .authorize_catalog_if_supported(&AdapterId::new("fixture").unwrap(), &probe)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            catalog_authorization.operation().operation(),
-            SupportOperation::CatalogDiscovery
-        );
-        let catalog_selection = catalog_authorization.select_catalog_access().unwrap();
-        assert_eq!(catalog_selection.contracts().query_pack_version, Some(1));
-        assert_eq!(
-            catalog_selection.contracts().fact_family_versions,
-            BTreeMap::from([
-                ("catalog.project".to_string(), 1),
-                ("catalog.session".to_string(), 1),
-            ])
-        );
         let durable_authorization = registry
             .authorize_durable_if_supported(&AdapterId::new("fixture").unwrap(), &probe)
             .unwrap()

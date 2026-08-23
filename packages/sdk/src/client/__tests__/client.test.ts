@@ -485,8 +485,12 @@ describe('NapiTransport dispatch', () => {
     await client.getOverview();
     await client.replayChanges();
     await client.waitForCommit({ afterCommitSeq: 0, timeoutMs: 1 });
+    await client.getReadiness();
     await client.listProjects({ limit: 1 });
     await client.listSessions({ projectId: 'project' });
+    await client.resolveCatalogEntity({ externalRef: '1:ref' });
+    await client.listCatalogProjects({ limit: 1 });
+    await client.listCatalogSessions({ projectId: 'project' });
     await client.getSession({ sessionId: 'session' });
     await client.getMessages({ projectId: 'project', sessionId: 'session' });
     await client.search({ text: 'needle' });
@@ -525,8 +529,12 @@ describe('NapiTransport dispatch', () => {
         'overview',
         'replayChanges',
         'waitForCommit',
+        'readiness',
         'listHistoryProjects',
         'listHistorySessions',
+        'resolveCatalogEntity',
+        'listCatalogProjects',
+        'listCatalogSessions',
         'getSession',
         'getMessages',
         'search',

@@ -9,35 +9,35 @@ import type { SourcePosition } from "./SourcePosition.js";
 /**
  * One typed RFC 012C semantic revision, delivered.
  */
-export type SemanticEvent = { 
+export type SemanticEvent = {
 /**
  * Deterministic idempotency key. Deduplicate by `(scope_epoch, event_id)`.
  */
-event_id: ObserverEventId, 
+event_id: ObserverEventId,
 /**
  * Monotonic delivery order inside one attachment. Not comparable across
  * attachments and never comparable to a durable commit sequence.
  */
-sequence: number, scope_epoch: number, family: ObserverFamily, phase: ObserverPhase, operation: SemanticOperation, 
+sequence: number, scope_epoch: number, family: ObserverFamily, phase: ObserverPhase, operation: SemanticOperation,
 /**
  * The durable/live join identity for this revision. A value delivered
  * here is equal to the one an aggregate-facing durable query returns for
  * the same revision, which is what makes cross-topology reconciliation
  * possible without comparing observer event ids.
  */
-semantic_revision_ref: { semantic_reference_contract_version: number, fact_revision_id: string }, 
+semantic_revision_ref: { semantic_reference_contract_version: number, fact_revision_id: string },
 /**
  * Canonical fact identity the revision belongs to.
  */
-fact_id: string, actor: ActorRef, source: SourcePosition, 
+fact_id: string, actor: ActorRef, source: SourcePosition,
 /**
  * Native timestamp when the adapter proved one, in epoch milliseconds.
  */
-native_time: number | null, 
+native_time: number | null,
 /**
  * Host time the record was read, in epoch milliseconds.
  */
-observed_at: number, 
+observed_at: number,
 /**
  * The reduced typed value, exactly as RFC 012C defines it for this family.
  * Absent for a retraction.

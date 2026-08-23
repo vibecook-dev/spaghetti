@@ -5,28 +5,28 @@
  * travels here: transcript streams are declared `HashOnly`, so an event
  * carries the record's digest and byte range, not its bytes.
  */
-export type SourcePosition = { 
+export type SourcePosition = {
 /**
  * Declared stream this object belongs to, e.g. `session-transcripts`.
  */
-stream_id: string, 
+stream_id: string,
 /**
  * Path of the object relative to its declared access root.
  */
-object_path: string, 
+object_path: string,
 /**
  * Access root the path is relative to (`projects`, `home`, ...).
  */
-root_name: string, 
+root_name: string,
 /**
  * Bumped on truncation, replacement, or native identity change.
  */
-generation: number, 
+generation: number,
 /**
  * Byte range of the record inside the current generation, when the driver
  * is append-delimited.
  */
-byte_start: number | null, byte_end: number | null, 
+byte_start: number | null, byte_end: number | null,
 /**
  * Digest of the native record that produced the event.
  */

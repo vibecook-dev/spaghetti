@@ -49,10 +49,6 @@ fn compiled_catalog_verifies_all_candidates_without_authorizing_typed_access() {
         .authorize_durable_if_supported(&ClaudeCodeAdapter::new().manifest().id, &probe)
         .unwrap()
         .is_none());
-    assert!(registry
-        .authorize_catalog_if_supported(&ClaudeCodeAdapter::new().manifest().id, &probe)
-        .unwrap()
-        .is_none());
     let candidate = catalog
         .classify(&NativeArtifactProbe {
             family: "codex".to_string(),

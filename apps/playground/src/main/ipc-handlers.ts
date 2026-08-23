@@ -16,6 +16,7 @@ export function registerIpcHandlers(client: SdkHostClient): void {
   ipcMain.handle(IPC_CHANNELS.getObservationHostStatus, () => client.request('getObservationHostStatus'));
   ipcMain.handle(IPC_CHANNELS.getObservationOwnerStatus, () => client.request('getObservationOwnerStatus'));
   ipcMain.handle(IPC_CHANNELS.getCanonicalStats, () => readCanonicalStats(client));
+  ipcMain.handle(IPC_CHANNELS.getReadiness, () => client.request('getReadiness'));
 
   // Projects ----------------------------------------------------------------
   ipcMain.handle(IPC_CHANNELS.getProjectList, () => client.request('getProjectList'));

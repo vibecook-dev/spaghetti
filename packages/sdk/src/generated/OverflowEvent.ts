@@ -6,11 +6,11 @@ import type { OverflowReason } from "./OverflowReason.js";
  * Continuity was lost; the named epoch is invalid and its undelivered events
  * were discarded. A full replacement snapshot follows in a new epoch.
  */
-export type OverflowEvent = { event_id: ObserverEventId, sequence: number, 
+export type OverflowEvent = { event_id: ObserverEventId, sequence: number,
 /**
  * The epoch being abandoned.
  */
-scope_epoch: number, reason: OverflowReason, 
+scope_epoch: number, reason: OverflowReason,
 /**
  * Last sequence that was contiguous in the invalidated epoch.
  */

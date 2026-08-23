@@ -182,14 +182,69 @@ export interface SpaghettiEngineStatus {
   state: 'bootstrapping' | 'running' | 'stopping' | 'stopped';
   databasePath: string;
   acceptingQueries: boolean;
-  catalogQueryReady: boolean;
-  searchAvailable: boolean;
   writerAlive: boolean;
   configuredQueryWorkers: number;
   aliveQueryWorkers: number;
   inFlightQueries: number;
   observation: SpaghettiEngineObservationStatus;
   owner?: SpaghettiEngineOwner;
+}
+
+/**
+ * Catalog and readiness shapes come from `./generated/`, which ts-rs emits
+ * from the Rust definitions. They are aliased here so consumers keep one
+ * import site; the shapes themselves are never hand-written (landing plan
+ * §5.4).
+ */
+export type {
+  CatalogProjectPage as SpaghettiCatalogProjectPage,
+  CatalogProjectRow as SpaghettiCatalogProject,
+  CatalogSessionPage as SpaghettiCatalogSessionPage,
+  CatalogSessionRow as SpaghettiCatalogSession,
+  CatalogState as SpaghettiCatalogState,
+  IdentityConflict as SpaghettiCatalogIdentityConflict,
+  Readiness as SpaghettiReadiness,
+  ReadinessField as SpaghettiReadinessField,
+  ReadinessState as SpaghettiReadinessState,
+} from './generated/index.js';
+
+import type {
+  CatalogState as SpaghettiCatalogState,
+  CatalogProjectPage as SpaghettiCatalogProjectPage,
+  CatalogProjectRow as SpaghettiCatalogProject,
+  CatalogSessionPage as SpaghettiCatalogSessionPage,
+  CatalogSessionRow as SpaghettiCatalogSession,
+  Readiness as SpaghettiReadiness,
+} from './generated/index.js';
+
+/** Page request. Not native output — the caller composes it. */
+export interface SpaghettiCatalogPageOptions {
+  cursor?: string;
+  limit?: number;
+  /** Restrict to these adapters. Omitted or empty means all of them. */
+  adapterIds?: string[];
+}
+
+export interface SpaghettiCatalogSessionPageOptions extends SpaghettiCatalogPageOptions {
+  projectId?: string;
+}
+
+/** One resolved external reference, composed from the generated row types. */
+export interface SpaghettiCatalogResolution {
+  kind: 'project' | 'session' | 'retracted' | 'unknown';
+  project?: SpaghettiCatalogProject;
+  session?: SpaghettiCatalogSession;
+}
+
+/** What catalog-first startup committed before history began. */
+export interface SpaghettiCatalogStartup {
+  catalogProjects: number;
+  catalogSessions: number;
+  /** Adapters whose discovery pass could not read their complete surface. */
+  degradedSources: string[];
+  supervisorsStarted: number;
+  historyBackground: boolean;
+  status: SpaghettiEngineStatus;
 }
 
 export interface SpaghettiEngineHealth {
@@ -311,6 +366,13 @@ export interface SpaghettiEngineHistoryProject {
   latestActivityAt?: string;
   latestActivitySource?: SpaghettiEngineHistoryActivitySource;
   index?: SpaghettiEngineHistoryProjectIndex;
+  /**
+   * Persistable RFC 012A external reference. Absent only when discovery has
+   * not yet run for this row's source.
+   */
+  externalRef?: string;
+  /** How much of this entity is available, from the catalog's derivation. */
+  catalogState?: SpaghettiCatalogState;
   lastCommitSeq: number;
 }
 
@@ -368,6 +430,13 @@ export interface SpaghettiEngineHistorySession {
   latestActivityAt?: string;
   latestActivitySource?: SpaghettiEngineHistoryActivitySource;
   index?: SpaghettiEngineHistorySessionIndex;
+  /**
+   * Persistable RFC 012A external reference. Absent only when discovery has
+   * not yet run for this row's source.
+   */
+  externalRef?: string;
+  /** How much of this entity is available, from the catalog's derivation. */
+  catalogState?: SpaghettiCatalogState;
   lastCommitSeq: number;
 }
 
@@ -1784,16 +1853,28 @@ export interface SpaghettiEngine {
   readonly status: SpaghettiEngineStatus;
   health(signal?: AbortSignal): Promise<SpaghettiEngineHealth>;
   overview(signal?: AbortSignal): Promise<SpaghettiEngineOverview>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  getCatalogReadinessJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  listLibraryProjectsJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  listLibrarySessionsJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B strict JSON transport; values are policy-WITHHELD. */
-  resolveCatalogEntityJson(requestJson: string, signal?: AbortSignal): Promise<string>;
-  /** RFC 012B engine-owned selected-session hydration command transport. */
-  requestCatalogHydrationJson(requestJson: string, signal?: AbortSignal): Promise<string>;
+  /**
+   * List discoverable projects. Answerable seconds after
+   * `startConfiguredObservation`, without waiting for history or search.
+   */
+  listCatalogProjects(
+    options?: SpaghettiCatalogPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiCatalogProjectPage>;
+  /** List discoverable sessions, optionally within one project. */
+  listCatalogSessions(
+    options?: SpaghettiCatalogSessionPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiCatalogSessionPage>;
+  /** Resolve one persisted external reference against the current catalog. */
+  resolveCatalogEntity(externalRef: string, signal?: AbortSignal): Promise<SpaghettiCatalogResolution>;
+  /** The readiness vector, derived from committed rows. */
+  readiness(signal?: AbortSignal): Promise<SpaghettiReadiness>;
+  /**
+   * Wait until every configured supervisor has finished starting.
+   * `startConfiguredObservation` resolves as soon as the catalog commits.
+   */
+  awaitObservationStart(signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   replayChanges(
     options?: SpaghettiEngineChangeReplayOptions,
     signal?: AbortSignal,
@@ -1881,11 +1962,14 @@ export interface SpaghettiEngine {
     options: SpaghettiEngineAdapterObservationOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiEngineStatus>;
-  /** Start all configured sources behind one global catalog and watcher barrier. */
+  /**
+   * Start all configured sources catalog first: each source commits its
+   * discovered projects and sessions before any watcher begins a history scan.
+   */
   startConfiguredObservation(
     options: SpaghettiEngineConfiguredObservationOptions,
     signal?: AbortSignal,
-  ): Promise<SpaghettiEngineStatus>;
+  ): Promise<SpaghettiCatalogStartup>;
   /** Force one running adapter supervisor through reconciliation. */
   refreshObservation(adapterId: string, signal?: AbortSignal): Promise<SpaghettiEngineStatus>;
   /** Stop one adapter supervisor without disposing the engine. */

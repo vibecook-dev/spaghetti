@@ -1,12 +1,24 @@
 /**
- * Projects command — list all projects with usage stats
+ * Projects command — list the project catalog.
+ *
+ * The row set comes from the catalog, so this answers seconds after the engine
+ * opens and keeps working while history, usage, and search converge in the
+ * background. Decoded statistics are merged in only once history has actually
+ * converged; until then the table shows what exists and says what is missing.
  */
 
 import type { ProjectListItem } from '@vibecook/spaghetti-sdk';
-import type { ObservationService } from '@vibecook/spaghetti-sdk/observation';
+import type { ObservationService, SpaghettiCatalogProject } from '@vibecook/spaghetti-sdk/observation';
 import { theme } from '../lib/color.js';
 import { formatTokens, formatTokenUsage, formatRelativeTime, formatNumber, totalTokens } from '../lib/format.js';
 import { sourceReportsPerMessageTokens } from '@vibecook/spaghetti-sdk';
+import {
+  allCatalogProjects,
+  catalogStateLabel,
+  decodedStatsAvailable,
+  indexingNotice,
+  readinessField,
+} from '../lib/catalog.js';
 import { renderTable } from '../lib/table.js';
 import type { Column } from '../lib/table.js';
 
@@ -18,129 +30,152 @@ export interface ProjectsOptions {
 
 type SortKey = 'active' | 'sessions' | 'messages' | 'tokens' | 'name';
 
-function sortProjects(projects: ProjectListItem[], key: SortKey): ProjectListItem[] {
-  const sorted = [...projects];
+/** One display row: a catalog project plus decoded stats when they exist. */
+interface ProjectRow {
+  catalog: SpaghettiCatalogProject;
+  stats?: ProjectListItem;
+}
+
+/** Decoded tokens for a row, or zero when history has not reached it. */
+function statTokens(stats: ProjectListItem | undefined): number {
+  return stats ? totalTokens(stats.tokenUsage) : 0;
+}
+
+function displayName(row: ProjectRow): string {
+  return row.stats?.folderName ?? row.catalog.displayPath?.split('/').pop() ?? row.catalog.nativeProjectKey;
+}
+
+function sortRows(rows: ProjectRow[], key: SortKey): ProjectRow[] {
+  const sorted = [...rows];
   switch (key) {
     case 'active':
-      return sorted.sort(
-        (a: ProjectListItem, b: ProjectListItem) =>
-          new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime(),
-      );
+      return sorted.sort((a, b) => (b.catalog.latestActivityAt ?? '').localeCompare(a.catalog.latestActivityAt ?? ''));
     case 'sessions':
-      return sorted.sort((a: ProjectListItem, b: ProjectListItem) => b.sessionCount - a.sessionCount);
+      return sorted.sort((a, b) => b.catalog.sessionCount - a.catalog.sessionCount);
     case 'messages':
-      return sorted.sort((a: ProjectListItem, b: ProjectListItem) => b.messageCount - a.messageCount);
+      return sorted.sort((a, b) => (b.stats?.messageCount ?? 0) - (a.stats?.messageCount ?? 0));
     case 'tokens':
-      return sorted.sort(
-        (a: ProjectListItem, b: ProjectListItem) => totalTokens(b.tokenUsage) - totalTokens(a.tokenUsage),
-      );
+      return sorted.sort((a, b) => statTokens(b.stats) - statTokens(a.stats));
     case 'name':
-      return sorted.sort((a: ProjectListItem, b: ProjectListItem) => a.folderName.localeCompare(b.folderName));
+      return sorted.sort((a, b) => displayName(a).localeCompare(displayName(b)));
     default:
       return sorted;
   }
 }
 
-export async function projectsCommand(api: ObservationService, opts: ProjectsOptions): Promise<void> {
-  let projects = await api.getProjectList();
-
-  // Sort
-  const sortKey = (opts.sort ?? 'active') as SortKey;
-  projects = sortProjects(projects, sortKey);
-
-  // Limit
-  if (opts.limit && opts.limit > 0) {
-    projects = projects.slice(0, opts.limit);
+/**
+ * Index decoded project statistics by `<adapter>:<native key>`. One display
+ * project may merge several native members, so every member is indexed.
+ */
+function indexStats(projects: ProjectListItem[]): Map<string, ProjectListItem> {
+  const byMember = new Map<string, ProjectListItem>();
+  for (const project of projects) {
+    for (const member of project.members) {
+      byMember.set(`${member.sourceId}:${member.slug}`, project);
+    }
   }
+  return byMember;
+}
 
-  // JSON output
+export async function projectsCommand(api: ObservationService, opts: ProjectsOptions): Promise<void> {
+  const [readiness, catalog] = await Promise.all([api.getReadiness(), allCatalogProjects(api)]);
+  const stats = decodedStatsAvailable(readiness)
+    ? indexStats(await api.getProjectList())
+    : new Map<string, ProjectListItem>();
+
+  let rows: ProjectRow[] = catalog.map((project) => ({
+    catalog: project,
+    stats: stats.get(`${project.adapterId}:${project.nativeProjectKey}`),
+  }));
+
+  rows = sortRows(rows, (opts.sort ?? 'active') as SortKey);
+  if (opts.limit && opts.limit > 0) rows = rows.slice(0, opts.limit);
+
   if (opts.json) {
-    process.stdout.write(JSON.stringify(projects, null, 2) + '\n');
+    process.stdout.write(
+      JSON.stringify(
+        {
+          readiness,
+          atCommitSeq: readiness.atCommitSeq,
+          projects: rows.map((row) => ({ ...row.catalog, stats: row.stats ?? null })),
+        },
+        null,
+        2,
+      ) + '\n',
+    );
     return;
   }
 
-  if (projects.length === 0) {
-    process.stdout.write(theme.muted('\n  No projects found.\n\n'));
+  if (rows.length === 0) {
+    const reason = readiness.catalog.state === 'pending' ? 'No source has been scanned yet.' : 'No projects found.';
+    process.stdout.write(theme.muted(`\n  ${reason}\n\n`));
     return;
   }
 
   const columns: Column[] = [
+    { key: '_index', label: '#', width: 4, align: 'right', format: (v: any) => theme.muted(String(v)) },
+    { key: '_name', label: 'Project', format: (v: any) => theme.project(String(v)) },
+    { key: '_agents', label: 'Agents', width: 14, format: (v: any) => theme.agent(String(v)) },
     {
-      key: '_index',
-      label: '#',
-      width: 4,
-      align: 'right',
-      format: (v: any) => theme.muted(String(v)),
-    },
-    {
-      key: 'folderName',
-      label: 'Project',
-      format: (v: any) => theme.project(String(v)),
-    },
-    {
-      key: '_agents',
-      label: 'Agents',
-      width: 20,
-      format: (v: any) => theme.agent(String(v)),
-    },
-    {
-      key: 'sessionCount',
+      key: '_sessions',
       label: 'Sessions',
-      width: 10,
+      width: 9,
       align: 'right',
       format: (v: any) => formatNumber(Number(v)),
     },
+    { key: '_state', label: 'State', width: 12, format: (v: any) => String(v) },
     {
-      key: 'messageCount',
+      key: '_messages',
       label: 'Messages',
-      width: 10,
+      width: 9,
       align: 'right',
-      format: (v: any) => formatNumber(Number(v)),
+      format: (v: any) => (v === null ? theme.muted('—') : formatNumber(Number(v))),
     },
+    { key: '_tokens', label: 'Tokens', width: 10, align: 'right', format: (v: any) => theme.tokens(String(v)) },
     {
-      key: '_tokens',
-      label: 'Tokens',
-      width: 10,
-      align: 'right',
-      format: (v: any) => theme.tokens(String(v)),
-    },
-    {
-      key: 'lastActiveAt',
+      key: '_lastActive',
       label: 'Last Active',
       width: 12,
       align: 'right',
-      format: (v: any) => theme.time(formatRelativeTime(String(v))),
+      format: (v: any) => (v ? theme.time(formatRelativeTime(String(v))) : theme.muted('—')),
     },
   ];
 
-  // Add index + pre-formatted tokens (Codex shows "—")
-  const rows = projects.map((p: ProjectListItem, i: number) => ({
-    ...p,
-    _index: i + 1,
-    _agents: p.sourceIds.join(', '),
-    _tokens: formatTokenUsage(p.tokenUsage, undefined, p.tokensEstimated),
+  const tableRows = rows.map((row, index) => ({
+    _index: index + 1,
+    _name: displayName(row),
+    _agents: row.catalog.adapterId,
+    _sessions: row.catalog.sessionCount,
+    _state: row.catalog.degraded ? theme.error('degraded') : catalogStateLabel(row.catalog.catalogState),
+    _messages: row.stats?.messageCount ?? null,
+    _tokens: row.stats ? formatTokenUsage(row.stats.tokenUsage, undefined, row.stats.tokensEstimated) : '—',
+    _lastActive: row.catalog.latestActivityAt ?? '',
   }));
 
-  const table = renderTable(rows, columns);
+  const table = renderTable(tableRows, columns);
 
-  // Summary footer — only sum tokens from sources that report them
   let totalSessions = 0;
   let totalMessages = 0;
   let totalTok = 0;
   let anyTokenSource = false;
-  for (const p of projects) {
-    totalSessions += p.sessionCount;
-    totalMessages += p.messageCount;
-    if (p.sourceIds.some(sourceReportsPerMessageTokens)) {
+  for (const row of rows) {
+    totalSessions += row.catalog.sessionCount;
+    totalMessages += row.stats?.messageCount ?? 0;
+    if (row.stats?.sourceIds.some(sourceReportsPerMessageTokens)) {
       anyTokenSource = true;
-      totalTok += totalTokens(p.tokenUsage);
+      totalTok += totalTokens(row.stats.tokenUsage);
     }
   }
 
   const tokFooter = anyTokenSource ? `${formatTokens(totalTok)} tokens` : 'tokens n/a';
-  const footer = theme.muted(
-    `  ${projects.length} projects \u00b7 ${formatNumber(totalSessions)} sessions \u00b7 ${formatNumber(totalMessages)} messages \u00b7 ${tokFooter}`,
-  );
+  const lines = [
+    theme.muted(
+      `  ${rows.length} projects · ${formatNumber(totalSessions)} sessions · ${formatNumber(totalMessages)} messages · ${tokFooter}`,
+    ),
+    `  ${readinessField('catalog', readiness.catalog)}`,
+  ];
+  const notice = indexingNotice(readiness);
+  if (notice) lines.push(`  ${notice}`);
 
-  process.stdout.write('\n' + table + '\n\n' + footer + '\n\n');
+  process.stdout.write('\n' + table + '\n\n' + lines.join('\n') + '\n\n');
 }

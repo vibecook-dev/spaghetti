@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,13 +8,11 @@ import { fileURLToPath } from 'node:url';
 import {
   createObservationService,
   loadNativeAddon,
-  observationHostProgressiveView,
   openObservationHost,
   type ObservationHost,
   type ObservationHostProgress,
   type ObservationHostSource,
   type ObservationService,
-  type SpaghettiEngineStatus,
 } from '../index.js';
 
 const native = loadNativeAddon();
@@ -53,38 +51,6 @@ function multiAdapterFixture(): { dbPath: string; sources: ObservationHostSource
   };
 }
 
-describe('observation host progressive startup', () => {
-  test('catalog-first view withholds search until catalog is queryable', () => {
-    const bootstrapping = observationHostProgressiveView({
-      state: 'bootstrapping',
-      catalogQueryReady: true,
-      searchAvailable: false,
-      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
-    });
-    assert.equal(bootstrapping.catalogQueryReady, true);
-    assert.equal(bootstrapping.searchAvailable, false);
-    assert.equal(bootstrapping.selectedHydrationAvailable, true);
-
-    const runningWithoutCatalog = observationHostProgressiveView({
-      state: 'running',
-      catalogQueryReady: false,
-      searchAvailable: false,
-      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
-    });
-    assert.equal(runningWithoutCatalog.catalogQueryReady, false);
-    assert.equal(runningWithoutCatalog.searchAvailable, false);
-
-    const runningWithCatalog = observationHostProgressiveView({
-      state: 'running',
-      catalogQueryReady: true,
-      searchAvailable: true,
-      observation: { supervisorsRunning: 1 } as SpaghettiEngineStatus['observation'],
-    });
-    assert.equal(runningWithCatalog.searchAvailable, true);
-    assert.equal(runningWithCatalog.selectedHydrationAvailable, true);
-  });
-});
-
 describe('observation host options', () => {
   test('rejects empty and duplicate adapter composition before opening storage', async () => {
     await assert.rejects(
@@ -122,7 +88,17 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.ok(ready.length > 0);
     assert.equal(host.status.acceptingQueries, true);
     assert.equal(host.status.aliveQueryWorkers, 1);
-    assert.equal(host.status.searchAvailable, false);
+
+    // Catalog-first: the library is listable while search is still pending.
+    const readiness = await host.readiness();
+    assert.equal(readiness.catalog.state, 'ready');
+    assert.equal(readiness.search.state, 'pending');
+    assert.ok(host.catalog.catalogProjects > 0, 'discovery committed projects');
+    assert.ok(host.catalog.catalogSessions > 0, 'discovery committed sessions');
+    assert.deepEqual(host.catalog.degradedSources, []);
+    const catalogProjects = await host.client.listCatalogProjects();
+    assert.ok(catalogProjects.projects.length > 0, 'projects are listable before search');
+
     const sources = await host.client.listSources();
     assert.ok(sources.items.length >= 1);
     const started = Date.now();
@@ -146,14 +122,20 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     hosts.push(host);
 
     assert.equal(host.status.state, 'running');
+    // Catalog-first: the host returns before watchers finish starting, so a
+    // caller that needs history says so explicitly.
+    await host.whenObserving();
     assert.equal(host.status.observation.supervisorsRunning, 3);
     assert.equal(host.clientInfo.transportKind, 'napi');
     assert.equal((await host.snapshot()).health.healthy, true);
     assert.deepEqual(
-      startup.filter((progress) => progress.stage === 'adapter-ready').map((progress) => progress.adapterId),
-      ['claude-code', 'codex', 'grok'],
+      startup.map((progress) => progress.stage),
+      ['opening', 'discovering-catalog', 'catalog-ready', 'ready'],
     );
-    assert.equal(startup.at(-1)?.stage, 'ready');
+    const committed = startup.find((progress) => progress.stage === 'catalog-ready')?.catalog;
+    assert.ok(committed, 'catalog-ready reports what discovery committed');
+    assert.equal(committed.supervisorsStarted, 3);
+    assert.equal(committed.historyBackground, true);
 
     const sources = await host.client.listSources();
     assert.deepEqual(sources.items.map((source) => source.adapterId).sort(), ['claude-code', 'codex', 'grok']);
@@ -240,11 +222,11 @@ describe('multi-adapter observation host', { skip: !native }, () => {
       'query selection must remain an owner-only mutation',
     );
 
-    const projects = await host.client.listProjects({ limit: 10 });
-    const projectId = projects.items[0]?.projectId;
+    const projects = await host.client.listCatalogProjects({ limit: 10 });
+    const projectId = projects.projects[0]?.projectId;
     assert.ok(projectId);
-    const sessions = await host.client.listSessions({ projectId, limit: 10 });
-    const sessionId = sessions.items[0]?.sessionId;
+    const sessions = await host.client.listCatalogSessions({ projectId, limit: 10 });
+    const sessionId = sessions.sessions[0]?.sessionId;
     assert.ok(sessionId);
     const coverage = await host.client.getFactFamilyCoverage({
       projectId,
@@ -413,3 +395,235 @@ describe('multi-adapter observation host', { skip: !native }, () => {
     assert.equal(recovered.isReady(), true);
   });
 });
+
+/**
+ * The catalog must not disturb what existing callers already read.
+ *
+ * `listProjects` / `listSessions` are the RFC 011 history queries the
+ * playground and CLI have always used. The baseline below was captured
+ * through the public client at `3db39a7` — before any catalog code existed —
+ * on this same committed fixture corpus, so this compares against a genuine
+ * "before" rather than against the implementation it is meant to police.
+ *
+ * Identity fields (`projectId`, `sessionId`, `sourceInstanceId`) derive from
+ * the source root, which is a fresh temp directory on every run, so they are
+ * normalized to their stable native keys. Everything else — field set, values,
+ * and row order — is compared exactly.
+ */
+describe('history query contract survives the catalog', { skip: !native }, () => {
+  test('listProjects and listSessions return their pre-catalog fields unchanged', async () => {
+    const fixture = multiAdapterFixture();
+    const host = await openObservationHost({
+      ...fixture,
+      queryWorkers: 1,
+      ownerLabel: 'history-contract-test',
+    });
+    hosts.push(host);
+    await host.whenObserving();
+
+    const baseline = JSON.parse(
+      readFileSync(new URL('./fixtures/history-contract-baseline.json', import.meta.url), 'utf8'),
+    ) as HistoryBaseline;
+
+    const projects = await host.client.listProjects({ limit: 200 });
+    assert.equal(projects.contractVersion, baseline.projectsContractVersion);
+    assert.deepEqual(
+      projects.items.map((row) => normalizeProject(row as unknown as Record<string, unknown>)),
+      baseline.projects,
+      'every listProjects field, value, and row position must be what it was before the catalog',
+    );
+
+    for (const project of projects.items) {
+      const key = projectKey(project);
+      const expected = baseline.sessionsByProject[key];
+      assert.ok(expected, `baseline is missing ${key}`);
+      const page = await host.client.listSessions({ projectId: project.projectId, limit: 200 });
+      assert.equal(page.contractVersion, expected.contractVersion);
+      const rows = page.items.map((row) =>
+        normalizeSession(row as unknown as Record<string, unknown>, project.adapterId),
+      );
+      assert.deepEqual(
+        rows.map(withoutFirstPrompt),
+        expected.items.map(withoutFirstPrompt),
+        `every listSessions field, value, and row position for ${key} must be unchanged`,
+      );
+      // `firstPrompt` is compared only when present. Its population races in
+      // the RFC 011 decode path — measured at 31 or 32 of 34 fixture sessions
+      // across repeated runs of the pre-catalog tree — so pinning it exactly
+      // would assert a pre-existing bug rather than this lane's behavior.
+      rows.forEach((row, index) => {
+        const before = expected.items[index]?.firstPrompt;
+        if (row.firstPrompt !== undefined && before !== undefined) {
+          assert.equal(row.firstPrompt, before, `firstPrompt changed for ${key}`);
+        }
+      });
+    }
+
+    // `lastCommitSeq` keeps its contract even though its value moved: a
+    // committed row is never ahead of the page's watermark.
+    for (const project of projects.items) {
+      assert.ok(project.lastCommitSeq > 0);
+      assert.ok(project.lastCommitSeq <= projects.atCommitSeq);
+    }
+
+    // The other half of "additive": the new fields are actually populated.
+    for (const project of projects.items) {
+      assert.ok(project.externalRef, 'a decoded project carries its external reference');
+      assert.ok(
+        ['transcript_backed', 'hydrated', 'searchable'].includes(project.catalogState ?? ''),
+        `a decoded project reports a decoded catalog state, got ${project.catalogState}`,
+      );
+    }
+  });
+
+  test('getOverview, search, and listMemoryDocuments are unchanged too', async () => {
+    const fixture = multiAdapterFixture();
+    const host = await openObservationHost({
+      ...fixture,
+      queryWorkers: 1,
+      ownerLabel: 'history-contract-reads-test',
+    });
+    hosts.push(host);
+    await host.whenObserving();
+
+    const baseline = JSON.parse(
+      readFileSync(new URL('./fixtures/history-contract-baseline.json', import.meta.url), 'utf8'),
+    ) as HistoryBaseline;
+
+    const overview = (await host.client.getOverview()) as unknown as Record<string, unknown>;
+    assert.deepEqual(
+      Object.fromEntries(OVERVIEW_CONTRACT_FIELDS.map((field) => [field, overview[field]])),
+      baseline.overview,
+      'getOverview still reports the same corpus it did before the catalog',
+    );
+    assert.equal(overview.schemaVersion, 64, 'the catalog owns the schema bump this compares across');
+
+    for (const expected of baseline.searches) {
+      const page = await host.client.search({ text: expected.text, limit: 50 });
+      assert.deepEqual(
+        normalizePage(page as unknown as Record<string, unknown>),
+        normalizePage(expected.page),
+        `search("${expected.text}") must return the same hits, in the same order, with the same snippets and scores`,
+      );
+    }
+
+    const projects = await host.client.listProjects({ limit: 200 });
+    for (const project of projects.items) {
+      const key = projectKey(project);
+      const expected = baseline.memoryByProject[key];
+      assert.ok(expected, `baseline is missing memory documents for ${key}`);
+      const page = await host.client.listMemoryDocuments({ projectId: project.projectId, limit: 50 });
+      assert.deepEqual(
+        normalizePage(page as unknown as Record<string, unknown>),
+        normalizePage(expected),
+        `listMemoryDocuments for ${key} must be unchanged`,
+      );
+    }
+  });
+});
+
+/** Copy a row without the named keys. */
+function omit(row: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).filter(([key]) => !keys.includes(key)));
+}
+
+/** Drop the one field the history path does not populate deterministically. */
+function withoutFirstPrompt(row: Record<string, unknown>): Record<string, unknown> {
+  return omit(row, ['firstPrompt']);
+}
+
+/** Remove `lastCommitSeq` wherever it appears, including on nested index rows. */
+function stripWatermarks(value: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'lastCommitSeq') continue;
+    out[key] =
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? stripWatermarks(item as Record<string, unknown>)
+        : item;
+  }
+  return out;
+}
+
+interface HistoryBaseline {
+  projectsContractVersion: number;
+  projects: Array<Record<string, unknown>>;
+  sessionsByProject: Record<string, { contractVersion: number; items: Array<Record<string, unknown>> }>;
+  overview: Record<string, unknown>;
+  searches: Array<{ text: string; page: Record<string, unknown> }>;
+  memoryByProject: Record<string, Record<string, unknown>>;
+}
+
+/**
+ * Counts are `getOverview`'s contract. `commitSeq`, the change-log counters,
+ * and `writerDataVersion` all move because the catalog commits rows of its
+ * own, and `schemaVersion` moves because this lane bumps it — those are the
+ * intended differences, not regressions.
+ */
+const OVERVIEW_CONTRACT_FIELDS = [
+  'projects',
+  'sessions',
+  'messages',
+  'canonicalSessions',
+  'canonicalMessages',
+  'journalMode',
+  'queryOnly',
+  'readOnly',
+] as const;
+
+/**
+ * Row identity and ingest bookkeeping vary per run: opaque ids derive from a
+ * temp source root, `observedAtUnixMs` is wall-clock, and object/generation/
+ * commit numbers move with the number of commits. Native keys, text, and
+ * ordering are the contract.
+ */
+const VOLATILE_ROW_FIELDS = [
+  'messageId',
+  'projectId',
+  'sessionId',
+  'runId',
+  'parentRunId',
+  'documentId',
+  'decisiveFactId',
+  'observedAtUnixMs',
+  'sourceObjectId',
+  'sourceGeneration',
+  'sourceInstanceId',
+  'lastCommitSeq',
+] as const;
+
+function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
+  return omit(row, VOLATILE_ROW_FIELDS);
+}
+
+/** Compare a page by its declared contract and its rows, not its watermark. */
+function normalizePage(page: Record<string, unknown>): Record<string, unknown> {
+  const rest = omit(page, ['atCommitSeq', 'projectId', 'nextCursor']);
+  const items = Array.isArray(page.items) ? (page.items as Array<Record<string, unknown>>).map(normalizeRow) : [];
+  return { ...rest, items };
+}
+
+function projectKey(project: { adapterId: string; nativeProjectKey: string }): string {
+  return `#project:${project.adapterId}:${project.nativeProjectKey}`;
+}
+
+/**
+ * Drop the fields the catalog added, pin run-varying identity, and drop
+ * `lastCommitSeq` — a watermark whose absolute value moves whenever the
+ * number of commits changes. Its real contract is asserted separately.
+ */
+function normalizeProject(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...omit(stripWatermarks(row), ['externalRef', 'catalogState']),
+    projectId: `#project:${String(row.adapterId)}:${String(row.nativeProjectKey)}`,
+    sourceInstanceId: `#source:${String(row.adapterId)}`,
+  };
+}
+
+function normalizeSession(row: Record<string, unknown>, adapterId: string): Record<string, unknown> {
+  return {
+    ...omit(stripWatermarks(row), ['externalRef', 'catalogState']),
+    sessionId: `#session:${String(row.nativeSessionId)}`,
+    projectId: `#project:${adapterId}:${String(row.nativeProjectKey)}`,
+  };
+}

@@ -7,53 +7,47 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine as _;
 use napi::bindgen_prelude::{
     AbortSignal, AsyncBlock, AsyncBlockBuilder, AsyncTask, Env, Error, Result, Status, Task,
-    Utf16String,
 };
 use napi_derive::napi;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 
-use crate::adapter::{
-    AdapterError, AdapterRegistry, ExternalEntityRef, SupportCatalog, SupportContractError,
+use crate::adapter::{AdapterError, AdapterRegistry, SupportCatalog, SupportContractError};
+use crate::napi_catalog::{
+    AwaitObservationStartTask, CatalogProjectsTask, CatalogResolveTask, CatalogSessionsTask,
+    EngineCatalogPageOptions, EngineCatalogSessionPageOptions, EngineCatalogStartup, ReadinessTask,
 };
-use crate::catalog_contract::evidence::{CatalogEntityRef, CatalogLocatorClaimKey};
-use crate::catalog_contract::query::CatalogQueryContractRequest;
-use crate::catalog_contract::CatalogSnapshotId;
-use crate::catalog_contract::{CatalogCoveragePlanId, CatalogQueryKind};
+
 use crate::claude::ClaudeCodeAdapter;
 use crate::codex::CodexAdapter;
 use crate::engine::{
-    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats,
-    CatalogHydrationPreparationRequest, CatalogPageQueryRequest, CatalogReadinessQueryRequest,
-    CatalogResolutionQueryRequest, ChangeCursor, ChangeReplay, ChangeReplayRequest,
-    CheckpointPerformanceSnapshot, CommitWaitResult, ConfiguredObservationSource, DelegationPage,
-    DelegationPageRequest, DelegationSummary, DurableChange, EngineError, EngineHealthSnapshot,
-    EngineOptions, EngineOverview, EngineStatusSnapshot, FactFamilyCoverageItem,
-    FactFamilyCoveragePage, FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary,
-    FactFamilyReplayCommand, FactFamilyReplayResult, HistoryProjectIndexSummary,
-    HistoryProjectPage, HistoryProjectPageRequest, HistoryProjectSummary,
-    HistorySessionIndexSummary, HistorySessionPage, HistorySessionPageRequest,
-    HistorySessionSummary, MemoryDocument, MemoryDocumentPage, MemoryDocumentPageRequest,
-    MessageDetail, MessagePage, MessagePageRequest, NamedCount, NamedLatencySnapshot,
-    ObservationStatusSnapshot, ObservationSupervisorOptions, OwnerMetadata, PlanDetail, PlanPage,
-    PlanPageRequest, QueryCancellationToken, QueryPerformanceSnapshot, ReconcileOutcome,
-    ReconcileRequest, RunStateLookup, RunStateRequest, RuntimePresenceSnapshot, RuntimeRunEvidence,
-    RuntimeRunSnapshot, RuntimeSnapshot, RuntimeSnapshotRequest, SearchHit, SearchPage,
-    SearchPageRequest, SessionDetail, SessionDetails, SessionDetailsRequest, SessionIndexDetail,
-    SourceCapabilitySummary, SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest,
-    SourcePerformanceSnapshot, SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore,
-    StoragePerformanceSnapshot, TaskCollectionPage, TaskCollectionPageRequest,
-    TaskCollectionSummary, TaskDetail, TaskPage, TaskPageRequest, TeamConfigSummary, TeamDetails,
-    TeamDetailsRequest, TeamInboxMessage, TeamInboxMessagePage, TeamInboxMessagePageRequest,
-    TeamInboxPage, TeamInboxPageRequest, TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest,
-    TeamSummary, TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
-    ToolResultDetail, ToolResultPage, ToolResultPageRequest, UntimedUsageSummary, UsageAggregate,
-    UsageCoverageSummary, UsageDay, UsageReport, UsageRequest, UsageTokenValues, UsageWindow,
-    UsageWindowReport, WorkflowDetails, WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage,
-    WorkflowMemberPageRequest, WorkflowPage, WorkflowPageRequest, WorkflowSummary,
-    WriterPerformanceSnapshot, CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT,
-    DEFAULT_CHANGE_REPLAY_LIMIT, DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
+    ArtifactDetail, ArtifactPage, ArtifactPageRequest, CanonicalStats, ChangeCursor, ChangeReplay,
+    ChangeReplayRequest, CheckpointPerformanceSnapshot, CommitWaitResult,
+    ConfiguredObservationSource, DelegationPage, DelegationPageRequest, DelegationSummary,
+    DurableChange, EngineError, EngineHealthSnapshot, EngineOptions, EngineOverview,
+    EngineStatusSnapshot, FactFamilyCoverageItem, FactFamilyCoveragePage,
+    FactFamilyCoveragePageRequest, FactFamilyCoverageSetSummary, FactFamilyReplayCommand,
+    FactFamilyReplayResult, HistoryProjectIndexSummary, HistoryProjectPage,
+    HistoryProjectPageRequest, HistoryProjectSummary, HistorySessionIndexSummary,
+    HistorySessionPage, HistorySessionPageRequest, HistorySessionSummary, MemoryDocument,
+    MemoryDocumentPage, MemoryDocumentPageRequest, MessageDetail, MessagePage, MessagePageRequest,
+    NamedCount, NamedLatencySnapshot, ObservationStatusSnapshot, ObservationSupervisorOptions,
+    OwnerMetadata, PlanDetail, PlanPage, PlanPageRequest, QueryCancellationToken,
+    QueryPerformanceSnapshot, ReconcileOutcome, ReconcileRequest, RunStateLookup, RunStateRequest,
+    RuntimePresenceSnapshot, RuntimeRunEvidence, RuntimeRunSnapshot, RuntimeSnapshot,
+    RuntimeSnapshotRequest, SearchHit, SearchPage, SearchPageRequest, SessionDetail,
+    SessionDetails, SessionDetailsRequest, SessionIndexDetail, SourceCapabilitySummary,
+    SourceDimensionPerformanceSnapshot, SourcePage, SourcePageRequest, SourcePerformanceSnapshot,
+    SourcePipelineSnapshot, SourceSummary, SpaghettiEngineCore, StoragePerformanceSnapshot,
+    TaskCollectionPage, TaskCollectionPageRequest, TaskCollectionSummary, TaskDetail, TaskPage,
+    TaskPageRequest, TeamConfigSummary, TeamDetails, TeamDetailsRequest, TeamInboxMessage,
+    TeamInboxMessagePage, TeamInboxMessagePageRequest, TeamInboxPage, TeamInboxPageRequest,
+    TeamInboxSummary, TeamMember, TeamPage, TeamPageRequest, TeamSummary, TimelineFacets,
+    TimelineMessage, TimelinePage, TimelinePageRequest, ToolResultDetail, ToolResultPage,
+    ToolResultPageRequest, UntimedUsageSummary, UsageAggregate, UsageCoverageSummary, UsageDay,
+    UsageReport, UsageRequest, UsageTokenValues, UsageWindow, UsageWindowReport, WorkflowDetails,
+    WorkflowDetailsRequest, WorkflowMember, WorkflowMemberPage, WorkflowMemberPageRequest,
+    WorkflowPage, WorkflowPageRequest, WorkflowSummary, WriterPerformanceSnapshot,
+    CHANGE_REPLAY_CONTRACT_VERSION, DEFAULT_CAPABILITY_PAGE_LIMIT, DEFAULT_CHANGE_REPLAY_LIMIT,
+    DEFAULT_COMMIT_WAIT_TIMEOUT_MS, DEFAULT_DETAIL_PAGE_LIMIT,
     DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT, DEFAULT_HISTORY_PAGE_LIMIT,
     DEFAULT_ORCHESTRATION_PAGE_LIMIT, DEFAULT_RUNTIME_PAGE_LIMIT, DEFAULT_SEARCH_PAGE_LIMIT,
     DEFAULT_TEAM_PAGE_LIMIT, DEFAULT_TIMELINE_PAGE_LIMIT, MAX_CHANGE_REPLAY_PAYLOAD_BYTES,
@@ -63,58 +57,7 @@ use crate::grok::GrokAdapter;
 const CLAUDE_ADAPTER_ID: &str = "claude-code";
 const CODEX_ADAPTER_ID: &str = "codex";
 const GROK_ADAPTER_ID: &str = "grok";
-const MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES: usize = 256 * 1024;
 const DEFAULT_SHARED_SOURCE_PASSES: usize = 4;
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogPageJsonRequestWire {
-    contract_request: CatalogQueryContractRequest,
-    coverage_plan_id: CatalogCoveragePlanId,
-    snapshot_id: CatalogSnapshotId,
-    page_size: u32,
-    #[serde(default)]
-    continuation: Option<JsonValue>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogResolutionJsonRequestWire {
-    contract_request: CatalogQueryContractRequest,
-    coverage_plan_id: CatalogCoveragePlanId,
-    snapshot_id: CatalogSnapshotId,
-    external_ref: ExternalEntityRef,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CatalogHydrationJsonRequestWire {
-    contract_request: CatalogQueryContractRequest,
-    coverage_plan_id: CatalogCoveragePlanId,
-    snapshot_id: CatalogSnapshotId,
-    selected_base_session_ref: CatalogEntityRef,
-    locator_claim_key: CatalogLocatorClaimKey,
-    stable_request_token: String,
-}
-
-fn bounded_catalog_json(json: Utf16String) -> Result<String> {
-    if json.len() > MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES {
-        return Err(public_catalog_input_error());
-    }
-    let json = String::from_utf16(&json).map_err(|_| public_catalog_input_error())?;
-    if json.is_empty() || json.len() > MAX_PUBLIC_CATALOG_REQUEST_JSON_BYTES {
-        return Err(public_catalog_input_error());
-    }
-    Ok(json)
-}
-
-fn parse_catalog_json<T: DeserializeOwned>(json: &str) -> Result<T> {
-    serde_json::from_str(json).map_err(|_| public_catalog_input_error())
-}
-
-fn public_catalog_input_error() -> Error {
-    Error::new(Status::InvalidArg, "invalid catalog query request")
-}
 
 pub(crate) fn verified_builtin_support_catalog(
 ) -> std::result::Result<SupportCatalog, SupportContractError> {
@@ -145,18 +88,6 @@ pub(crate) fn verified_builtin_registry(
             crate::grok::support_probe::probe_grok_native_artifact,
         )
         .build_verified(support_catalog)
-}
-
-fn builtin_catalog_source_runtimes() -> std::result::Result<
-    crate::source::catalog_runtime_registry::CatalogSourceRuntimeRegistry,
-    AdapterError,
-> {
-    crate::source::catalog_runtime_registry::CatalogSourceRuntimeRegistry::builder()
-        .register(crate::claude::catalog_runtime::ClaudeCatalogSourceRuntime)
-        .register(crate::codex::catalog_runtime::CodexCatalogSourceRuntime)
-        .register(crate::grok::catalog_runtime::GrokCatalogSourceRuntime)
-        .build()
-        .map_err(|error| AdapterError::invalid_contract(error.to_string()))
 }
 
 fn ns_to_ms(value: u64) -> f64 {
@@ -256,8 +187,6 @@ pub struct EngineStatus {
     pub state: String,
     pub database_path: String,
     pub accepting_queries: bool,
-    pub catalog_query_ready: bool,
-    pub search_available: bool,
     pub writer_alive: bool,
     pub configured_query_workers: u32,
     pub alive_query_workers: u32,
@@ -272,8 +201,6 @@ impl From<EngineStatusSnapshot> for EngineStatus {
             state: value.state,
             database_path: value.database_path,
             accepting_queries: value.accepting_queries,
-            catalog_query_ready: value.catalog_query_ready,
-            search_available: value.search_available,
             writer_alive: value.writer_alive,
             configured_query_workers: value.configured_query_workers,
             alive_query_workers: value.alive_query_workers,
@@ -493,6 +420,12 @@ pub struct EngineHistoryProject {
     pub latest_activity_at: Option<String>,
     pub latest_activity_source: Option<String>,
     pub index: Option<EngineHistoryProjectIndex>,
+    /// Persistable RFC 012A external reference; absent until discovery has
+    /// seen this project.
+    pub external_ref: Option<String>,
+    /// `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
+    /// the same derivation the catalog page uses.
+    pub catalog_state: Option<String>,
     pub last_commit_seq: f64,
 }
 
@@ -510,6 +443,8 @@ impl From<HistoryProjectSummary> for EngineHistoryProject {
             latest_activity_at: value.latest_activity_at,
             latest_activity_source: value.latest_activity_source,
             index: value.index.map(Into::into),
+            external_ref: value.external_ref,
+            catalog_state: value.catalog_state,
             last_commit_seq: value.last_commit_seq as f64,
         }
     }
@@ -631,6 +566,12 @@ pub struct EngineHistorySession {
     pub latest_activity_at: Option<String>,
     pub latest_activity_source: Option<String>,
     pub index: Option<EngineHistorySessionIndex>,
+    /// Persistable RFC 012A external reference; absent until discovery has
+    /// seen this session.
+    pub external_ref: Option<String>,
+    /// `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
+    /// the same derivation the catalog page uses.
+    pub catalog_state: Option<String>,
     pub last_commit_seq: f64,
 }
 
@@ -654,6 +595,8 @@ impl From<HistorySessionSummary> for EngineHistorySession {
             latest_activity_at: value.latest_activity_at,
             latest_activity_source: value.latest_activity_source,
             index: value.index.map(Into::into),
+            external_ref: value.external_ref,
+            catalog_state: value.catalog_state,
             last_commit_seq: value.last_commit_seq as f64,
         }
     }
@@ -3679,90 +3622,6 @@ impl SpaghettiEngine {
         )
     }
 
-    /// Negotiate and return the restart-authenticated RFC 012B coverage plan
-    /// plus current readiness as canonical JSON. The response carries no
-    /// native path or LOCAL policy-view values.
-    #[napi(ts_return_type = "Promise<string>")]
-    pub fn get_catalog_readiness_json(
-        &self,
-        request_json: Utf16String,
-        signal: Option<AbortSignal>,
-    ) -> Result<AsyncTask<CatalogJsonTask>> {
-        self.catalog_json_task(request_json, CatalogJsonOperation::Readiness, signal)
-    }
-
-    /// Read one snapshot-bound RFC 012B project page through the policy-
-    /// WITHHELD public view.
-    #[napi(ts_return_type = "Promise<string>")]
-    pub fn list_library_projects_json(
-        &self,
-        request_json: Utf16String,
-        signal: Option<AbortSignal>,
-    ) -> Result<AsyncTask<CatalogJsonTask>> {
-        self.catalog_json_task(
-            request_json,
-            CatalogJsonOperation::Page(CatalogQueryKind::Projects),
-            signal,
-        )
-    }
-
-    /// Read one snapshot-bound RFC 012B session page through the policy-
-    /// WITHHELD public view.
-    #[napi(ts_return_type = "Promise<string>")]
-    pub fn list_library_sessions_json(
-        &self,
-        request_json: Utf16String,
-        signal: Option<AbortSignal>,
-    ) -> Result<AsyncTask<CatalogJsonTask>> {
-        self.catalog_json_task(
-            request_json,
-            CatalogJsonOperation::Page(CatalogQueryKind::Sessions),
-            signal,
-        )
-    }
-
-    /// Resolve one persisted RFC 012B external reference against the current
-    /// exact plan and snapshot, returning only the policy-WITHHELD view.
-    #[napi(ts_return_type = "Promise<string>")]
-    pub fn resolve_catalog_entity_json(
-        &self,
-        request_json: Utf16String,
-        signal: Option<AbortSignal>,
-    ) -> Result<AsyncTask<CatalogJsonTask>> {
-        self.catalog_json_task(request_json, CatalogJsonOperation::Resolution, signal)
-    }
-
-    /// Request one idempotent RFC 012B selected-session hydration through the
-    /// engine-owned bounded scheduler. Cancellation applies through command
-    /// preparation; accepted native work is owned by the engine lifecycle.
-    #[napi(ts_return_type = "Promise<string>")]
-    pub fn request_catalog_hydration_json(
-        &self,
-        request_json: Utf16String,
-        signal: Option<AbortSignal>,
-    ) -> Result<AsyncTask<CatalogJsonTask>> {
-        self.catalog_json_task(request_json, CatalogJsonOperation::Hydration, signal)
-    }
-
-    fn catalog_json_task(
-        &self,
-        request_json: Utf16String,
-        operation: CatalogJsonOperation,
-        signal: Option<AbortSignal>,
-    ) -> Result<AsyncTask<CatalogJsonTask>> {
-        let request_json = bounded_catalog_json(request_json)?;
-        let cancellation = cancellation_for_signal(signal.as_ref());
-        Ok(AsyncTask::with_optional_signal(
-            CatalogJsonTask {
-                engine: Arc::clone(&self.inner),
-                request_json,
-                operation,
-                cancellation,
-            },
-            signal,
-        ))
-    }
-
     /// Replay one bounded, snapshot-consistent page of durable projection
     /// changes. Binary keys and payloads remain lossless base64 strings.
     #[napi(ts_return_type = "Promise<EngineChangeReplay>")]
@@ -3813,6 +3672,74 @@ impl SpaghettiEngine {
                 .map_err(napi_error)
         })
         .build(&env)
+    }
+
+    /// List catalog projects — everything discoverable, complete or explicitly
+    /// degraded. Available seconds after `startConfiguredObservation`, without
+    /// waiting for history, usage, or full-text search.
+    ///
+    /// This is a different question from `listHistoryProjects`, which reports
+    /// what has been decoded. Both are kept because both are asked.
+    #[napi(ts_return_type = "Promise<EngineCatalogProjectPage>")]
+    pub fn list_catalog_projects(
+        &self,
+        options: Option<EngineCatalogPageOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<CatalogProjectsTask> {
+        AsyncTask::with_optional_signal(
+            CatalogProjectsTask::new(Arc::clone(&self.inner), options),
+            signal,
+        )
+    }
+
+    /// List catalog sessions, optionally within one project. Rows carry the
+    /// evidence behind their project association and any competing identity.
+    #[napi(ts_return_type = "Promise<EngineCatalogSessionPage>")]
+    pub fn list_catalog_sessions(
+        &self,
+        options: Option<EngineCatalogSessionPageOptions>,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<CatalogSessionsTask> {
+        AsyncTask::with_optional_signal(
+            CatalogSessionsTask::new(Arc::clone(&self.inner), options),
+            signal,
+        )
+    }
+
+    /// Resolve a persisted external reference against the current catalog.
+    #[napi(ts_return_type = "Promise<EngineCatalogResolution>")]
+    pub fn resolve_catalog_entity(
+        &self,
+        external_ref: String,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<CatalogResolveTask> {
+        AsyncTask::with_optional_signal(
+            CatalogResolveTask::new(Arc::clone(&self.inner), external_ref),
+            signal,
+        )
+    }
+
+    /// Wait until every configured supervisor has finished starting.
+    ///
+    /// `startConfiguredObservation` resolves as soon as the catalog commits,
+    /// so watchers are still coming up behind it. Callers that need decoded
+    /// history await this; callers that only need the library do not.
+    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    pub fn await_observation_start(
+        &self,
+        signal: Option<AbortSignal>,
+    ) -> AsyncTask<AwaitObservationStartTask> {
+        AsyncTask::with_optional_signal(
+            AwaitObservationStartTask::new(Arc::clone(&self.inner)),
+            signal,
+        )
+    }
+
+    /// The readiness vector: catalog, history, usage, capabilities, artifacts,
+    /// and search, each derived from committed rows.
+    #[napi(ts_return_type = "Promise<EngineReadiness>")]
+    pub fn readiness(&self, signal: Option<AbortSignal>) -> AsyncTask<ReadinessTask> {
+        AsyncTask::with_optional_signal(ReadinessTask::new(Arc::clone(&self.inner)), signal)
     }
 
     /// List canonical projects in Rust-defined activity order. The cursor is
@@ -4358,9 +4285,10 @@ impl SpaghettiEngine {
         )
     }
 
-    /// Start the complete configured source set behind one global catalog,
-    /// watcher, and history-scan planning barrier.
-    #[napi(ts_return_type = "Promise<EngineStatus>")]
+    /// Start the complete configured source set, catalog first: every source
+    /// commits its discovered projects and sessions before any watcher begins
+    /// a history scan.
+    #[napi(ts_return_type = "Promise<EngineCatalogStartup>")]
     pub fn start_configured_observation(
         &self,
         options: EngineConfiguredObservationOptions,
@@ -4539,8 +4467,6 @@ impl Task for OpenEngineTask {
             .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
         let registry = verified_builtin_registry(support_catalog)
             .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
-        let catalog_source_runtimes = builtin_catalog_source_runtimes()
-            .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
         let source_pass_pool = crate::source::SharedSourcePassPool::new(
             DEFAULT_SHARED_SOURCE_PASSES,
         )
@@ -4550,7 +4476,7 @@ impl Task for OpenEngineTask {
                 "could not initialize bounded source admission".to_string(),
             )
         })?;
-        let inner = SpaghettiEngineCore::open_with_runtime_registry(
+        let inner = SpaghettiEngineCore::open_with_registry(
             EngineOptions {
                 database_path: PathBuf::from(&self.options.db_path),
                 query_workers,
@@ -4559,7 +4485,6 @@ impl Task for OpenEngineTask {
                 source_pass_pool: Some(source_pass_pool),
             },
             registry,
-            catalog_source_runtimes,
         )
         .map_err(napi_error)?;
         Ok(SpaghettiEngine { inner })
@@ -4603,21 +4528,6 @@ impl Task for HealthTask {
 
 pub struct OverviewTask {
     engine: Arc<SpaghettiEngineCore>,
-}
-
-#[derive(Clone, Copy)]
-enum CatalogJsonOperation {
-    Readiness,
-    Page(CatalogQueryKind),
-    Resolution,
-    Hydration,
-}
-
-pub struct CatalogJsonTask {
-    engine: Arc<SpaghettiEngineCore>,
-    request_json: String,
-    operation: CatalogJsonOperation,
-    cancellation: QueryCancellationToken,
 }
 
 pub struct ChangeReplayTask {
@@ -4869,8 +4779,8 @@ impl Task for StartClaudeObservationTask {
 }
 
 impl Task for StartConfiguredObservationTask {
-    type Output = EngineStatus;
-    type JsValue = EngineStatus;
+    type Output = EngineCatalogStartup;
+    type JsValue = EngineCatalogStartup;
 
     fn compute(&mut self) -> Result<Self::Output> {
         let mut configured = Vec::with_capacity(self.options.sources.len());
@@ -4885,10 +4795,18 @@ impl Task for StartConfiguredObservationTask {
                     .unwrap_or_else(|| "production_observation".to_string()),
             ));
         }
-        self.engine
+        let outcome = self
+            .engine
             .start_configured_observation_cancellable(configured, self.cancellation.clone())
             .map_err(napi_error)?;
-        Ok(self.engine.status().into())
+        Ok(EngineCatalogStartup {
+            catalog_projects: outcome.catalog_projects as f64,
+            catalog_sessions: outcome.catalog_sessions as f64,
+            degraded_sources: outcome.degraded_sources,
+            supervisors_started: u32::try_from(outcome.supervisors_started).unwrap_or(u32::MAX),
+            history_background: outcome.history_background,
+            status: self.engine.status().into(),
+        })
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
@@ -4903,6 +4821,11 @@ impl Task for RefreshClaudeObservationTask {
     fn compute(&mut self) -> Result<Self::Output> {
         self.engine
             .refresh_observation_supervisor_cancellable(&self.adapter_id, self.cancellation.clone())
+            .map_err(napi_error)?;
+        // Reconcile catalog membership with the native surface: a created or
+        // deleted transcript is a catalog fact, not just a history one.
+        self.engine
+            .rescan_catalog(Some(&self.adapter_id))
             .map_err(napi_error)?;
         Ok(self.engine.status().into())
     }
@@ -4939,94 +4862,6 @@ impl Task for OverviewTask {
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
         Ok(output)
     }
-}
-
-impl Task for CatalogJsonTask {
-    type Output = String;
-    type JsValue = String;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        match self.operation {
-            CatalogJsonOperation::Readiness => {
-                let contract_request =
-                    parse_catalog_json::<CatalogQueryContractRequest>(&self.request_json)?;
-                let result = self
-                    .engine
-                    .catalog_readiness(
-                        CatalogReadinessQueryRequest::new(contract_request),
-                        self.cancellation.clone(),
-                    )
-                    .map_err(catalog_napi_error)?;
-                serialize_catalog_json(&result)
-            }
-            CatalogJsonOperation::Page(query_kind) => {
-                let wire = parse_catalog_json::<CatalogPageJsonRequestWire>(&self.request_json)?;
-                let request = CatalogPageQueryRequest::from_wire(
-                    wire.contract_request,
-                    wire.coverage_plan_id,
-                    wire.snapshot_id,
-                    query_kind,
-                    wire.page_size,
-                    wire.continuation,
-                )
-                .map_err(catalog_napi_error)?;
-                let result = self
-                    .engine
-                    .catalog_page(request, self.cancellation.clone())
-                    .map_err(catalog_napi_error)?;
-                let wire = result.to_wire_value().map_err(catalog_napi_error)?;
-                serialize_catalog_json(&wire)
-            }
-            CatalogJsonOperation::Resolution => {
-                let wire =
-                    parse_catalog_json::<CatalogResolutionJsonRequestWire>(&self.request_json)?;
-                let result = self
-                    .engine
-                    .resolve_catalog_entity(
-                        CatalogResolutionQueryRequest::new(
-                            wire.contract_request,
-                            wire.coverage_plan_id,
-                            wire.snapshot_id,
-                            wire.external_ref,
-                        ),
-                        self.cancellation.clone(),
-                    )
-                    .map_err(catalog_napi_error)?;
-                serialize_catalog_json(&result)
-            }
-            CatalogJsonOperation::Hydration => {
-                let wire =
-                    parse_catalog_json::<CatalogHydrationJsonRequestWire>(&self.request_json)?;
-                let request = CatalogHydrationPreparationRequest::new(
-                    wire.contract_request,
-                    wire.coverage_plan_id,
-                    wire.snapshot_id,
-                    wire.selected_base_session_ref,
-                    wire.locator_claim_key,
-                    wire.stable_request_token.as_bytes(),
-                )
-                .map_err(catalog_napi_error)?;
-                let result = self
-                    .engine
-                    .schedule_catalog_hydration(request, self.cancellation.clone())
-                    .map_err(catalog_napi_error)?;
-                serialize_catalog_json(&result)
-            }
-        }
-    }
-
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
-    }
-}
-
-fn serialize_catalog_json(value: &impl Serialize) -> Result<String> {
-    serde_json::to_string(value).map_err(|_| {
-        Error::new(
-            Status::GenericFailure,
-            "catalog query response serialization failed",
-        )
-    })
 }
 
 impl Task for ChangeReplayTask {
@@ -5778,7 +5613,7 @@ impl Task for DisposeTask {
     }
 }
 
-fn napi_error(error: EngineError) -> Error {
+pub(crate) fn napi_error(error: EngineError) -> Error {
     let status = match &error {
         EngineError::InvalidConfig(_)
         | EngineError::InvalidQuery(_)
@@ -5789,33 +5624,6 @@ fn napi_error(error: EngineError) -> Error {
         _ => Status::GenericFailure,
     };
     Error::new(status, public_engine_error_message(&error))
-}
-
-fn catalog_napi_error(error: EngineError) -> Error {
-    let status = match &error {
-        EngineError::InvalidConfig(_)
-        | EngineError::InvalidQuery(_)
-        | EngineError::InvalidCommit(_) => Status::InvalidArg,
-        EngineError::QueryCancelled => Status::Cancelled,
-        EngineError::QueryQueueFull => Status::QueueFull,
-        EngineError::ShuttingDown => Status::Closing,
-        _ => Status::GenericFailure,
-    };
-    let message = match &error {
-        EngineError::InvalidQuery(message)
-            if message.starts_with("IncompatibleCatalogContract:") =>
-        {
-            message.clone()
-        }
-        EngineError::InvalidQuery(_) | EngineError::InvalidCommit(_) => {
-            "invalid catalog query request".to_string()
-        }
-        EngineError::QueryCancelled => "catalog query cancelled".to_string(),
-        EngineError::QueryQueueFull => "catalog query queue is full".to_string(),
-        EngineError::ShuttingDown => "catalog query engine is stopping".to_string(),
-        _ => "catalog query failed".to_string(),
-    };
-    Error::new(status, message)
 }
 
 fn public_engine_error_message(error: &EngineError) -> String {

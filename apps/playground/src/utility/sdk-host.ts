@@ -56,6 +56,8 @@ async function dispatch(request: SdkRpcRequest): Promise<unknown> {
       return runtime.getObservationHostStatus();
     case 'getObservationOwnerStatus':
       return runtime.getObservationOwnerStatus();
+    case 'getReadiness':
+      return runtime.read((sdk) => sdk.getReadiness());
     case 'getProjectList':
       return runtime.read((sdk) => sdk.getProjectList());
     case 'getProjectTokenActivity': {

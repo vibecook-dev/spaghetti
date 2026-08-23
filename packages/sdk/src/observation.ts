@@ -7,7 +7,6 @@ export {
 } from './observation-service.js';
 export {
   openObservationHost,
-  observationHostProgressiveView,
   type ObservationHost,
   type ObservationHostFactFamilyReplayRequest,
   type ObservationHostOptions,
@@ -16,3 +15,17 @@ export {
   type ObservationHostSource,
 } from './observation-host.js';
 export { MessagePortIpcChannel, type SpaghettiMessagePort } from './client/index.js';
+export type {
+  SpaghettiCatalogPageOptions,
+  SpaghettiCatalogProject,
+  SpaghettiCatalogProjectPage,
+  SpaghettiCatalogResolution,
+  SpaghettiCatalogSession,
+  SpaghettiCatalogSessionPage,
+  SpaghettiCatalogSessionPageOptions,
+  SpaghettiCatalogStartup,
+  SpaghettiCatalogState,
+  SpaghettiReadiness,
+  SpaghettiReadinessField,
+  SpaghettiReadinessState,
+} from './native.js';

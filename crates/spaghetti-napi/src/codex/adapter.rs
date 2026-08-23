@@ -13,15 +13,15 @@ use crate::adapter::{
     ActorRunRevisionFact, ActorRunRole, AdapterDiagnostic, AdapterError, AdapterErrorClass,
     AdapterId, AdapterManifest, AdapterObjectContext, AdapterSupportBinding, AgentAdapter,
     Availability, CapabilityDeclaration, CapabilityGranularity, CapabilityId, CapabilitySupport,
-    ConsistencyPolicy, ContentBlock, ContractCompleteness, DecodeContext, DecodeDisposition,
-    DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey, EntityScope, EvidenceKind,
-    EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole, ObjectSelector,
-    QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue, QualifiedValueQuality,
-    RawRetentionPolicy, RunEvidenceFact, RunFact, ScopeProgramManifest, SessionFact,
-    SourceInstance, SourceInstanceKey, SourceInstanceSpec, SourceObjectDescriptor, SourceRoot,
-    StreamAuthority, StreamId, StreamSpec, SupportLevel, TimestampQuality, UsageBucketsV2,
-    UsageQualifiedValue, UsageResponseIdentity, UsageRevisionV2Fact, UsageValueAuthority,
-    UsageValueProvenance,
+    CatalogDiscoveryLimits, ConsistencyPolicy, ContentBlock, ContractCompleteness, DecodeContext,
+    DecodeDisposition, DecoderId, DeletionPolicy, DiscoveryContext, DriverSpec, EntityKey,
+    EntityScope, EvidenceKind, EvidenceStrength, Fact, FactBatch, MessageFact, MessageRole,
+    ObjectSelector, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue,
+    QualifiedValueQuality, RawRetentionPolicy, RunEvidenceFact, RunFact, ScopeProgramManifest,
+    SessionFact, SourceCatalogDiscovery, SourceInstance, SourceInstanceKey, SourceInstanceSpec,
+    SourceObjectDescriptor, SourceRoot, StreamAuthority, StreamId, StreamSpec, SupportLevel,
+    TimestampQuality, UsageBucketsV2, UsageQualifiedValue, UsageResponseIdentity,
+    UsageRevisionV2Fact, UsageValueAuthority, UsageValueProvenance,
 };
 use crate::source::{
     platform_path_key, AppendDelimitedConfig, IngestPriority, SourceRecord, SourceRecordState,
@@ -189,6 +189,14 @@ impl AgentAdapter for CodexAdapter {
                 })
             })
             .collect()
+    }
+
+    fn discover_catalog(
+        &self,
+        instance: &SourceInstance,
+        limits: &CatalogDiscoveryLimits,
+    ) -> Result<SourceCatalogDiscovery, AdapterError> {
+        super::catalog_discovery::discover(instance, limits)
     }
 
     fn streams(&self, instance: &SourceInstance) -> Result<Vec<StreamSpec>, AdapterError> {
