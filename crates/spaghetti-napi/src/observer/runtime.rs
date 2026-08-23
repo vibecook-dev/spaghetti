@@ -62,6 +62,10 @@ pub(crate) struct ObserverRuntime {
     next_local_object_id: u64,
     root_key: ScopeMemberKey,
     phase: ObserverPhase,
+    /// Set when this epoch lost continuity. Ordinary delivery stops, but
+    /// reading and reduction continue so the replacement snapshot is built at
+    /// the drained watermark rather than at the moment the queue filled.
+    replacement_pending: bool,
 }
 
 impl ObserverRuntime {
@@ -135,6 +139,7 @@ impl ObserverRuntime {
             next_local_object_id: 1,
             root_key,
             phase: ObserverPhase::Bootstrap,
+            replacement_pending: false,
         })
     }
 
@@ -179,15 +184,19 @@ impl ObserverRuntime {
             }));
     }
 
-    /// Reconcile until no object reports more bytes ready.
+    /// Reconcile until no object reports more bytes ready, then publish a
+    /// replacement epoch if this one lost continuity along the way.
     fn reconcile_until_drained(&mut self) {
         for _ in 0..MAX_PASSES_PER_WAKE {
             if self.delivery.is_closing() {
-                return;
+                break;
             }
             if !self.reconcile_once() {
-                return;
+                break;
             }
+        }
+        if self.replacement_pending && !self.delivery.is_closing() {
+            self.publish_replacement();
         }
     }
 
@@ -255,9 +264,11 @@ impl ObserverRuntime {
                 more = true;
             }
             for fact in &pass.facts {
-                if !self.emit_fact(&key, fact, generation) {
-                    return true;
-                }
+                // Reduction continues even after continuity is lost: the
+                // checkpoint has already advanced past these records, so
+                // dropping them here would leave the replacement snapshot
+                // short of what the source actually holds.
+                self.emit_fact(&key, fact, generation);
             }
             match pass.error {
                 Some(message) => self.record_object_error(&key, message, false),
@@ -270,15 +281,13 @@ impl ObserverRuntime {
     }
 
     /// Reduce one decoded fact and deliver whatever the reducer decided.
-    /// Returns false when delivery triggered an epoch replacement, because the
-    /// caller's iteration order is no longer meaningful.
-    fn emit_fact(&mut self, owner: &ScopeMemberKey, fact: &DecodedFact, generation: u64) -> bool {
+    fn emit_fact(&mut self, owner: &ScopeMemberKey, fact: &DecodedFact, generation: u64) {
         let Some((family, change)) = self.state.apply(fact, owner) else {
-            return true;
+            return;
         };
         let source = self.source_position(owner, generation, fact);
         match change {
-            StateChange::Unchanged => true,
+            StateChange::Unchanged => {}
             StateChange::Upsert { semantic, value } => {
                 let actor = self.actor_for(&value);
                 let event = self.build_semantic(
@@ -291,7 +300,7 @@ impl ObserverRuntime {
                     fact.native_time,
                     fact.observed_at,
                 );
-                self.admit(family, event)
+                self.admit(family, event);
             }
             StateChange::Retract { semantic } => {
                 let actor = ActorRef::root(&self.scope, ActorAttribution::ScopeFallback);
@@ -305,7 +314,7 @@ impl ObserverRuntime {
                     fact.native_time,
                     fact.observed_at,
                 );
-                self.admit(family, event)
+                self.admit(family, event);
             }
         }
     }
@@ -336,9 +345,7 @@ impl ObserverRuntime {
                 None,
                 observed_at,
             );
-            if !self.admit(family, event) {
-                return;
-            }
+            self.admit(family, event);
         }
     }
 
@@ -379,29 +386,33 @@ impl ObserverRuntime {
     }
 
     /// Offer one semantic event under the current phase's backpressure rule.
-    /// Returns false when the epoch was replaced.
-    fn admit(&mut self, family: ObserverFamily, event: SemanticEvent) -> bool {
+    fn admit(&mut self, family: ObserverFamily, event: SemanticEvent) {
+        if self.replacement_pending {
+            // Ordinary delivery is suspended until the replacement epoch opens.
+            return;
+        }
         let event = ObserverEvent::semantic(family, event);
         match self.phase {
             // Bootstrap and correction may pause the producer. Queue fullness
             // alone must never manufacture continuity loss.
             ObserverPhase::Bootstrap | ObserverPhase::Correction => {
                 self.delivery.admit_semantic_blocking(event);
-                true
             }
-            ObserverPhase::Live => match self.delivery.admit_semantic(event) {
-                Admission::Accepted => true,
-                Admission::Full => {
-                    self.replace_epoch(OverflowReason::QueueFull);
-                    false
+            ObserverPhase::Live => {
+                if self.delivery.admit_semantic(event) == Admission::Full {
+                    self.begin_overflow(OverflowReason::QueueFull);
                 }
-            },
+            }
         }
     }
 
-    /// Continuity is lost: invalidate the epoch, then rebuild a complete
-    /// replacement snapshot in a new one and publish it atomically.
-    fn replace_epoch(&mut self, reason: OverflowReason) {
+    /// Continuity is lost. Mark the epoch invalid and say so immediately; the
+    /// replacement snapshot follows once the current pass set is drained.
+    fn begin_overflow(&mut self, reason: OverflowReason) {
+        if self.replacement_pending {
+            return;
+        }
+        self.replacement_pending = true;
         let (invalid_epoch, last_contiguous, _discarded) = self.delivery.invalidate_epoch();
         let mut builder = EventIdBuilder::new("observer.overflow");
         builder
@@ -420,7 +431,13 @@ impl ObserverRuntime {
                 last_contiguous_sequence: last_contiguous,
                 observed_at: now_ms(),
             }));
+    }
 
+    /// Open the next epoch and publish a complete replacement snapshot built
+    /// from reducer state at the drained watermark. A clean bootstrap at the
+    /// same coverage produces identical family digests.
+    fn publish_replacement(&mut self) {
+        self.replacement_pending = false;
         self.delivery.begin_replacement_epoch();
         let previous_phase = self.phase;
         self.phase = ObserverPhase::Correction;

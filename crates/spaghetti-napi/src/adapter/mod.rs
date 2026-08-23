@@ -58,10 +58,6 @@ pub use facts::{
 pub(crate) use facts::{
     BoundedNativeEvidence, RecordMappingDisposition, MAX_UNKNOWN_RAW_PAYLOAD_BYTES,
 };
-#[cfg(test)]
-pub(crate) use registry::tests::{
-    scoped_access_request as fixture_scoped_access_request, supported_fixture_registry_with_scope,
-};
 pub use registry::{AdapterRegistry, AdapterRegistryBuilder};
 pub use scope::{
     ScopeContractError, ScopeDirectoryIdentityAuthority, ScopeJoinEvidence, ScopeJoinIdentityInput,

@@ -136,9 +136,32 @@ impl ObserveSessionRequest {
     }
 }
 
+/// Resolve symlinks in the part of `path` that exists, keeping the components
+/// that do not exist yet.
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    let mut suffix = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&cursor) {
+            let mut resolved = canonical;
+            for component in suffix.iter().rev() {
+                resolved.push(component);
+            }
+            return resolved;
+        }
+        let Some(name) = cursor.file_name().map(std::ffi::OsString::from) else {
+            return path.to_path_buf();
+        };
+        suffix.push(name);
+        if !cursor.pop() {
+            return path.to_path_buf();
+        }
+    }
+}
+
 /// Decompose `<agent_root>/projects/<project>/<session>.jsonl` without
-/// touching the filesystem, so an attach before native creation still settles
-/// a final identity.
+/// requiring the transcript to exist, so an attach before native creation
+/// still settles a final identity.
 fn split_transcript_locator(
     agent_root: &Path,
     transcript_path: &Path,
@@ -148,13 +171,11 @@ fn split_transcript_locator(
             "transcript_path must be absolute".to_string(),
         ));
     }
-    // Canonicalize only the parts that exist: the session directory may be
-    // created after attach. Fall back to the lexical path when it does not.
-    let normalized = transcript_path
-        .parent()
-        .and_then(|parent| std::fs::canonicalize(parent).ok())
-        .and_then(|parent| transcript_path.file_name().map(|name| parent.join(name)))
-        .unwrap_or_else(|| transcript_path.to_path_buf());
+    // Canonicalize the deepest ancestor that exists and re-attach the rest.
+    // The session directory may be created after attach, and the agent root is
+    // already canonical, so a purely lexical comparison would reject a valid
+    // locator whenever the root path traverses a symlink.
+    let normalized = canonicalize_existing_prefix(transcript_path);
 
     let projects_root = agent_root.join("projects");
     let relative = normalized.strip_prefix(&projects_root).map_err(|_| {
