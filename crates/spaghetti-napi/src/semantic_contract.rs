@@ -10,10 +10,10 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::adapter::{
-    compare_coverage, ActorAffiliationDimension, ActorAffiliationRevisionFact,
-    ActorAffiliationState, ActorRunRevisionFact, ActorRunRole, AdapterError, CanonicalEntityKey,
-    CanonicalFactId, CanonicalSourceInstanceKey, ContentBlockRevisionFact,
-    ContentBlockRevisionValue, ContractCompleteness, CoverageComparison,
+    compare_coverage, object_scoped_native_revision_key, ActorAffiliationDimension,
+    ActorAffiliationRevisionFact, ActorAffiliationState, ActorRunRevisionFact, ActorRunRole,
+    AdapterError, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
+    ContentBlockRevisionFact, ContentBlockRevisionValue, ContractCompleteness, CoverageComparison,
     EffectiveStateQualifiedValue, EffectiveStateRevisionFact, ExternalEntityRef, FactRevisionId,
     MessageRevisionFact, NativeIdentityClaim, NativeRuntimeMarkerProvenance,
     NativeRuntimeMarkerRevisionFact, NativeRuntimeMarkerValue, PlanRevisionFact,
@@ -838,6 +838,30 @@ fn verify_semantic_revision(
     fact_id: &CanonicalFactId,
     semantic_revision_ref: &SemanticRevisionRef,
 ) -> Result<(), SemanticFixtureError> {
+    verify_semantic_revision_with(
+        family,
+        family_version,
+        expected_family,
+        semantic_revision_key_hex,
+        (recomputed, recomputed),
+        fact_id,
+        semantic_revision_ref,
+    )
+}
+
+/// As [`verify_semantic_revision`], but for a family whose revision identity
+/// is derived from something other than the value key alone. The pair is the
+/// family's value revision key and the revision the identity is derived from;
+/// they are equal for a family that keys its revision by value.
+fn verify_semantic_revision_with(
+    family: &str,
+    family_version: u32,
+    expected_family: &str,
+    semantic_revision_key_hex: &str,
+    (recomputed, derived_revision): ([u8; 32], [u8; 32]),
+    fact_id: &CanonicalFactId,
+    semantic_revision_ref: &SemanticRevisionRef,
+) -> Result<(), SemanticFixtureError> {
     if family != expected_family {
         return Err(SemanticFixtureError::invalid(format!(
             "example family must be {expected_family}"
@@ -855,7 +879,7 @@ fn verify_semantic_revision(
         )));
     }
     let expected_ref = SemanticRevisionRef::new(
-        FactRevisionId::derive(fact_id, 1, &recomputed)
+        FactRevisionId::derive(fact_id, 1, &derived_revision)
             .map_err(|error| SemanticFixtureError::invalid(error.to_string()))?,
     );
     if expected_ref != *semantic_revision_ref {
@@ -1244,21 +1268,33 @@ fn effective_state_native_bytes(dimension: EffectiveStateDimension) -> &'static 
     }
 }
 
+/// Verify one object-scoped runtime family's revision identity.
+///
+/// These families bind the record that proved the value, so the fixture's
+/// `semantic_revision_key_hex` (the value key) and its
+/// `semantic_revision_ref` are related through
+/// [`object_scoped_native_revision_key`] rather than directly. The three
+/// families that keep a value-only revision — actor-run, actor-affiliation,
+/// and usage-v2 — call [`verify_semantic_revision`] directly instead.
 fn verify_fact_revision_identity(
     family: &str,
     fact_id: &CanonicalFactId,
+    source_record_id: &SourceRecordId,
     semantic_revision_key_hex: &str,
     semantic_revision_ref: &SemanticRevisionRef,
     revision_key: Result<[u8; 32], AdapterError>,
 ) -> Result<(), SemanticFixtureError> {
     let revision_key =
         revision_key.map_err(|error| SemanticFixtureError::invalid(error.to_string()))?;
-    verify_semantic_revision(
+    verify_semantic_revision_with(
         family,
         FAMILY_VERSION,
         family,
         semantic_revision_key_hex,
-        revision_key,
+        (
+            revision_key,
+            object_scoped_native_revision_key(source_record_id, &revision_key),
+        ),
         fact_id,
         semantic_revision_ref,
     )
@@ -1474,6 +1510,7 @@ fn validate_effective_state_slot(
     verify_fact_revision_identity(
         EFFECTIVE_STATE_FAMILY,
         &fixture.fact_id,
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         effective_state_revision(fixture, slot).semantic_revision_key(),
@@ -1613,6 +1650,7 @@ fn validate_interaction_slot(
     verify_fact_revision_identity(
         USER_INPUT_FAMILY,
         &fixture.fact_id,
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         interaction_revision(fixture, slot).semantic_revision_key(),
@@ -1760,6 +1798,7 @@ fn validate_message_slot(
     verify_fact_revision_identity(
         MESSAGE_FAMILY,
         &fixture.fact_id,
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         message_revision(fixture, slot).semantic_revision_key(),
@@ -1787,6 +1826,7 @@ fn validate_content_block_slot(
     verify_fact_revision_identity(
         CONTENT_BLOCK_FAMILY,
         &content_block.fact_id,
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         content_block_revision(fixture, content_block, slot).semantic_revision_key(),
@@ -2044,6 +2084,7 @@ fn validate_native_marker_slot(
     verify_fact_revision_identity(
         NATIVE_MARKER_FAMILY,
         &example.fact_id,
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         revision.semantic_revision_key(),
@@ -2226,6 +2267,7 @@ fn validate_task_slot(
     verify_fact_revision_identity(
         TASK_FAMILY,
         &fixture.fact_id,
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         task_revision(fixture, &fixture.native_task_id, slot).semantic_revision_key(),
@@ -2401,6 +2443,7 @@ fn validate_plan_slot(
     verify_fact_revision_identity(
         PLAN_FAMILY,
         &fixture.fact_id,
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         plan_revision(fixture, &fixture.native_plan_id, slot).semantic_revision_key(),
@@ -2693,6 +2736,7 @@ fn validate_tool_slot(
             ToolRevisionKind::Call => &fixture.fact_id,
             ToolRevisionKind::Result => &fixture.result_fact_id,
         },
+        &fixture.source_record_id,
         &slot.semantic_revision_key_hex,
         &slot.semantic_revision_ref,
         tool_revision(fixture, slot).semantic_revision_key(),
@@ -2860,9 +2904,11 @@ mod tests {
 
     fn committed_native_marker_slot(
         fact_id: &CanonicalFactId,
+        source_record_id: &SourceRecordId,
         revision: NativeRuntimeMarkerRevisionFact,
     ) -> NativeMarkerRevisionSlotWire {
         let semantic_revision_key = revision.semantic_revision_key().unwrap();
+        let bound = object_scoped_native_revision_key(source_record_id, &semantic_revision_key);
         NativeMarkerRevisionSlotWire {
             correlated_native_id: revision.correlated_native_id,
             value: revision.value,
@@ -2873,17 +2919,14 @@ mod tests {
             operation: revision.operation,
             semantic_revision_key_hex: hex_digest(&semantic_revision_key),
             semantic_revision_ref: SemanticRevisionRef::new(
-                FactRevisionId::derive(fact_id, 1, &semantic_revision_key).unwrap(),
+                FactRevisionId::derive(fact_id, 1, &bound).unwrap(),
             ),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     fn committed_native_marker_example(
-        adapter_id: &str,
-        source_instance_key: &CanonicalSourceInstanceKey,
-        session: CanonicalEntityKey,
-        actor_run: CanonicalEntityKey,
+        context: &EffectiveStateFixtureWire,
         native_marker_id: &str,
         correlated_native_id: Option<&str>,
         current_value: NativeRuntimeMarkerValue,
@@ -2897,8 +2940,8 @@ mod tests {
                         completeness: ContractCompleteness,
                         operation: UserInputOperation,
                         effective_at: i64| NativeRuntimeMarkerRevisionFact {
-            session,
-            actor_run,
+            session: context.session,
+            actor_run: context.actor_run,
             native_marker_id: native_marker_id.to_owned(),
             correlated_native_id: correlated_native_id.map(str::to_owned),
             value,
@@ -2919,8 +2962,8 @@ mod tests {
         );
         let stable_native_key = current_revision.stable_native_fact_key().unwrap();
         let fact_id = CanonicalFactId::native(
-            adapter_id,
-            source_instance_key,
+            &context.adapter_id,
+            &context.source_instance_key,
             NATIVE_MARKER_FAMILY,
             &stable_native_key,
         )
@@ -2943,13 +2986,14 @@ mod tests {
             UserInputOperation::Upsert,
             base_time + 3,
         );
+        let record = &context.source_record_id;
         NativeMarkerExampleWire {
             native_marker_id: native_marker_id.to_owned(),
             fact_id,
-            current: committed_native_marker_slot(&fact_id, current_revision),
-            correction: committed_native_marker_slot(&fact_id, correction_revision),
-            retract: committed_native_marker_slot(&fact_id, retract_revision),
-            partial: committed_native_marker_slot(&fact_id, partial_revision),
+            current: committed_native_marker_slot(&fact_id, record, current_revision),
+            correction: committed_native_marker_slot(&fact_id, record, correction_revision),
+            retract: committed_native_marker_slot(&fact_id, record, retract_revision),
+            partial: committed_native_marker_slot(&fact_id, record, partial_revision),
         }
     }
 
@@ -2957,7 +3001,7 @@ mod tests {
     fn rfc012c_native_marker_fixture_is_rust_generated_and_strict() {
         let context = decode_rfc012c_effective_state_v1(RFC012C_EFFECTIVE_STATE_FIXTURE).unwrap();
         let fixture = NativeMarkerFixtureWire {
-            adapter_id: context.adapter_id,
+            adapter_id: context.adapter_id.clone(),
             actor_run: context.actor_run,
             family: NATIVE_MARKER_FAMILY.to_owned(),
             family_version: FAMILY_VERSION,
@@ -2967,10 +3011,7 @@ mod tests {
             source_instance_key: context.source_instance_key,
             source_record_id: context.source_record_id,
             compaction: committed_native_marker_example(
-                "fixture-adapter",
-                &context.source_instance_key,
-                context.session,
-                context.actor_run,
+                &context,
                 "compaction-1",
                 None,
                 NativeRuntimeMarkerValue::Compaction {
@@ -2993,10 +3034,7 @@ mod tests {
                 1_776_211_200_000,
             ),
             progress: committed_native_marker_example(
-                "fixture-adapter",
-                &context.source_instance_key,
-                context.session,
-                context.actor_run,
+                &context,
                 "progress-1",
                 Some("tool-1"),
                 NativeRuntimeMarkerValue::Progress {
@@ -3022,10 +3060,7 @@ mod tests {
                 1_776_211_200_100,
             ),
             queue: committed_native_marker_example(
-                "fixture-adapter",
-                &context.source_instance_key,
-                context.session,
-                context.actor_run,
+                &context,
                 "queue-1",
                 Some("tool-1"),
                 NativeRuntimeMarkerValue::Queue {

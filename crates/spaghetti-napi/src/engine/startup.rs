@@ -70,6 +70,20 @@ pub(crate) struct ConfiguredObservationStartupOutcome {
     pub(crate) history_background: bool,
 }
 
+/// The message a panic carried, when it carried one.
+///
+/// A panic payload is almost always the formatted `panic!` string; anything
+/// else is reported as unknown rather than guessed at.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return message;
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.as_str();
+    }
+    "unknown panic payload"
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConfiguredObservationStartupState {
     Starting,
@@ -78,46 +92,65 @@ enum ConfiguredObservationStartupState {
     Stopped,
 }
 
+/// Terminal state plus, for a failure, the underlying error's own message.
+///
+/// The startup thread used to reduce every failure to `Failed` and drop the
+/// error, so a caller was told only that the worker was "unavailable" — the
+/// rejected commit, the decode contract error, and a genuine spawn failure
+/// were indistinguishable. Keeping the message is what makes the first two
+/// diagnosable.
+#[derive(Debug, Clone)]
+struct ConfiguredObservationStartupProgress {
+    state: ConfiguredObservationStartupState,
+    failure: Option<String>,
+}
+
 struct ConfiguredObservationStartupShared {
-    state: Mutex<ConfiguredObservationStartupState>,
+    progress: Mutex<ConfiguredObservationStartupProgress>,
     finished: Condvar,
 }
 
 impl ConfiguredObservationStartupShared {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            state: Mutex::new(ConfiguredObservationStartupState::Starting),
+            progress: Mutex::new(ConfiguredObservationStartupProgress {
+                state: ConfiguredObservationStartupState::Starting,
+                failure: None,
+            }),
             finished: Condvar::new(),
         })
     }
 
-    fn set(&self, state: ConfiguredObservationStartupState) {
-        *self
-            .state
+    fn set(&self, state: ConfiguredObservationStartupState, failure: Option<String>) {
+        let mut progress = self
+            .progress
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = state;
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        progress.state = state;
+        progress.failure = failure;
+        drop(progress);
         self.finished.notify_all();
     }
 
     fn get(&self) -> ConfiguredObservationStartupState {
-        *self
-            .state
+        self.progress
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .state
     }
 
-    fn wait(&self) -> ConfiguredObservationStartupState {
-        let mut state = self
-            .state
+    fn wait(&self) -> ConfiguredObservationStartupProgress {
+        let mut progress = self
+            .progress
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        while *state == ConfiguredObservationStartupState::Starting {
-            state = self
+        while progress.state == ConfiguredObservationStartupState::Starting {
+            progress = self
                 .finished
-                .wait(state)
+                .wait(progress)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        *state
+        progress.clone()
     }
 }
 
@@ -150,16 +183,26 @@ impl ConfiguredObservationStartupRuntime {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     finish_configured_observation_startup(engine, starting, &thread_cancellation)
                 }));
-                let state = match result {
-                    Ok(Ok(())) => ConfiguredObservationStartupState::Installed,
+                let (state, failure) = match result {
+                    Ok(Ok(())) => (ConfiguredObservationStartupState::Installed, None),
                     Ok(Err(EngineError::QueryCancelled | EngineError::ShuttingDown))
                         if thread_cancellation.is_cancelled() =>
                     {
-                        ConfiguredObservationStartupState::Stopped
+                        (ConfiguredObservationStartupState::Stopped, None)
                     }
-                    Ok(Err(_)) | Err(_) => ConfiguredObservationStartupState::Failed,
+                    Ok(Err(error)) => (
+                        ConfiguredObservationStartupState::Failed,
+                        Some(error.to_string()),
+                    ),
+                    Err(panic) => (
+                        ConfiguredObservationStartupState::Failed,
+                        Some(format!(
+                            "startup panicked: {}",
+                            panic_message(panic.as_ref())
+                        )),
+                    ),
                 };
-                thread_shared.set(state);
+                thread_shared.set(state, failure);
             })
             .map_err(|error| EngineError::WorkerStart {
                 worker: "configured observation startup",
@@ -190,7 +233,8 @@ impl ConfiguredObservationStartupRuntime {
             worker: "configured observation startup",
         });
         if self.shared.get() == ConfiguredObservationStartupState::Starting {
-            self.shared.set(ConfiguredObservationStartupState::Stopped);
+            self.shared
+                .set(ConfiguredObservationStartupState::Stopped, None);
         }
         result
     }
@@ -199,6 +243,29 @@ impl ConfiguredObservationStartupRuntime {
 impl Drop for ConfiguredObservationStartupRuntime {
     fn drop(&mut self) {
         let _ = self.shutdown();
+    }
+}
+
+/// Turn a terminal startup state into the caller's answer.
+///
+/// Report what actually failed: callers previously saw only "configured
+/// observation startup worker is unavailable", which hid a rejected fact
+/// commit behind a message about liveness.
+fn configured_observation_startup_result(
+    progress: ConfiguredObservationStartupProgress,
+) -> Result<(), EngineError> {
+    match progress.state {
+        ConfiguredObservationStartupState::Installed => Ok(()),
+        ConfiguredObservationStartupState::Starting => {
+            unreachable!("wait returns a terminal state")
+        }
+        ConfiguredObservationStartupState::Failed => Err(EngineError::WorkerFailed {
+            worker: "configured observation startup",
+            detail: progress
+                .failure
+                .unwrap_or_else(|| "startup reported no detail".to_string()),
+        }),
+        ConfiguredObservationStartupState::Stopped => Err(EngineError::ShuttingDown),
     }
 }
 
@@ -418,19 +485,10 @@ impl SpaghettiEngineCore {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
             .map(|runtime| Arc::clone(&runtime.shared));
-        match shared {
-            Some(shared) => match shared.wait() {
-                ConfiguredObservationStartupState::Installed => Ok(()),
-                ConfiguredObservationStartupState::Starting => {
-                    unreachable!("wait returns a terminal state")
-                }
-                ConfiguredObservationStartupState::Failed => Err(EngineError::WorkerUnavailable {
-                    worker: "configured observation startup",
-                }),
-                ConfiguredObservationStartupState::Stopped => Err(EngineError::ShuttingDown),
-            },
-            None => Ok(()),
-        }
+        let Some(shared) = shared else {
+            return Ok(());
+        };
+        configured_observation_startup_result(shared.wait())
     }
 
     pub(super) fn clear_configured_observation_startup(&self) -> Result<(), EngineError> {
@@ -531,4 +589,71 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The failure a background startup hit reaches the caller.
+    ///
+    /// A rejected fact commit used to arrive as "configured observation
+    /// startup worker is unavailable" — a message about liveness, for a
+    /// database constraint. Finding the real cause meant bypassing the
+    /// configured path and calling `startObservation` directly.
+    #[test]
+    fn a_failed_startup_reports_what_failed() {
+        let commit = EngineError::InvalidCommit(
+            "UNIQUE constraint failed: fact_records.semantic_fact_revision_id".to_string(),
+        );
+        let error = configured_observation_startup_result(ConfiguredObservationStartupProgress {
+            state: ConfiguredObservationStartupState::Failed,
+            failure: Some(commit.to_string()),
+        })
+        .expect_err("a failed startup is an error");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("fact_records.semantic_fact_revision_id"),
+            "the underlying failure must survive: {message}"
+        );
+        assert!(
+            message.contains("invalid observation commit"),
+            "the underlying category must survive: {message}"
+        );
+        assert!(
+            !message.contains("unavailable"),
+            "a failed startup is not an absent worker: {message}"
+        );
+    }
+
+    /// A startup that finished normally, or was stopped, is unchanged.
+    #[test]
+    fn an_installed_startup_is_not_an_error_and_a_stopped_one_is_shutdown() {
+        assert!(
+            configured_observation_startup_result(ConfiguredObservationStartupProgress {
+                state: ConfiguredObservationStartupState::Installed,
+                failure: None,
+            })
+            .is_ok()
+        );
+        assert!(matches!(
+            configured_observation_startup_result(ConfiguredObservationStartupProgress {
+                state: ConfiguredObservationStartupState::Stopped,
+                failure: None,
+            }),
+            Err(EngineError::ShuttingDown)
+        ));
+    }
+
+    /// A panicking startup keeps its panic message.
+    #[test]
+    fn a_panicking_startup_keeps_its_message() {
+        let payload = std::panic::catch_unwind(|| panic!("decode spine gave up"))
+            .expect_err("the closure panics");
+        assert_eq!(panic_message(payload.as_ref()), "decode spine gave up");
+
+        let unknown: Box<dyn std::any::Any + Send> = Box::new(7_u8);
+        assert_eq!(panic_message(unknown.as_ref()), "unknown panic payload");
+    }
 }

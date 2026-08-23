@@ -11,10 +11,10 @@ use crate::source::SourceRecord;
 
 use super::disposition::RecordMappingDisposition;
 use super::{
-    AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey, CanonicalFactId,
-    CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness, DependencyRevision,
-    FactRevisionId, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue,
-    QualifiedValueQuality, SemanticRevisionRef, SourceRecordId, TimestampQuality,
+    bound_fact_revision_id, AdapterDiagnostic, AdapterError, AdapterId, CanonicalEntityKey,
+    CanonicalFactId, CanonicalSourceInstanceKey, CapabilityId, ContractCompleteness,
+    DependencyRevision, FactRevisionId, QualifiedTimestamp, QualifiedUnknownReason, QualifiedValue,
+    QualifiedValueQuality, RevisionBinding, SemanticRevisionRef, SourceRecordId, TimestampQuality,
 };
 
 const FACT_HASH_BYTES: usize = 32;
@@ -3199,7 +3199,7 @@ impl FactBatch {
             value.kind(),
             true,
             stable_native_fact_key,
-            revision_key.as_ref().map(|key| key.as_slice()),
+            value.revision_binding(revision_key.as_ref().map(|key| key.as_slice())),
         )?;
         self.push_internal(record, value, Some(semantic))
     }
@@ -3228,7 +3228,7 @@ impl FactBatch {
             value.kind(),
             true,
             &semantic_key,
-            revision_key.as_ref().map(|key| key.as_slice()),
+            value.revision_binding(revision_key.as_ref().map(|key| key.as_slice())),
         )?;
         self.push_internal(record, value, Some(semantic))
     }
@@ -3244,14 +3244,7 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
-        if value
-            .required_value_semantic_revision_key()?
-            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
-        {
-            return Err(AdapterError::invalid_contract(
-                "fact family requires its canonical value semantic revision key",
-            ));
-        }
+        Self::require_canonical_value_revision(&value, source_or_semantic_revision)?;
         let semantic_key = self
             .semantic_context
             .as_ref()
@@ -3266,7 +3259,7 @@ impl FactBatch {
             value.kind(),
             true,
             &semantic_key,
-            Some(source_or_semantic_revision),
+            value.revision_binding(Some(source_or_semantic_revision)),
         )?;
         if let Some(existing) = self.facts.iter().find(|envelope| {
             envelope
@@ -3359,20 +3352,13 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
-        if value
-            .required_value_semantic_revision_key()?
-            .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
-        {
-            return Err(AdapterError::invalid_contract(
-                "fact family requires its canonical value semantic revision key",
-            ));
-        }
+        Self::require_canonical_value_revision(&value, source_or_semantic_revision)?;
         let semantic = self.semantic_revision(
             record,
             value.kind(),
             true,
             stable_native_fact_key,
-            Some(source_or_semantic_revision),
+            value.revision_binding(Some(source_or_semantic_revision)),
         )?;
         self.push_internal(record, value, Some(semantic))
     }
@@ -3392,7 +3378,7 @@ impl FactBatch {
             value.kind(),
             false,
             deterministic_semantic_subkey,
-            revision_key.as_ref().map(|key| key.as_slice()),
+            value.revision_binding(revision_key.as_ref().map(|key| key.as_slice())),
         )?;
         self.push_internal(record, value, Some(semantic))
     }
@@ -3406,6 +3392,23 @@ impl FactBatch {
         source_or_semantic_revision: &[u8],
         value: Fact,
     ) -> Result<FactId, AdapterError> {
+        Self::require_canonical_value_revision(&value, source_or_semantic_revision)?;
+        let semantic = self.semantic_revision(
+            record,
+            value.kind(),
+            false,
+            deterministic_semantic_subkey,
+            value.revision_binding(Some(source_or_semantic_revision)),
+        )?;
+        self.push_internal(record, value, Some(semantic))
+    }
+
+    /// A family with a canonical value revision key cannot be emitted under a
+    /// different one.
+    fn require_canonical_value_revision(
+        value: &Fact,
+        source_or_semantic_revision: &[u8],
+    ) -> Result<(), AdapterError> {
         if value
             .required_value_semantic_revision_key()?
             .is_some_and(|expected| expected.as_slice() != source_or_semantic_revision)
@@ -3414,14 +3417,7 @@ impl FactBatch {
                 "fact family requires its canonical value semantic revision key",
             ));
         }
-        let semantic = self.semantic_revision(
-            record,
-            value.kind(),
-            false,
-            deterministic_semantic_subkey,
-            Some(source_or_semantic_revision),
-        )?;
-        self.push_internal(record, value, Some(semantic))
+        Ok(())
     }
 
     fn push_internal(
@@ -3478,7 +3474,7 @@ impl FactBatch {
         fact_kind: &str,
         native: bool,
         semantic_key: &[u8],
-        explicit_revision: Option<&[u8]>,
+        binding: RevisionBinding<'_>,
     ) -> Result<FactSemanticRevision, AdapterError> {
         let context = self.semantic_context.as_ref().ok_or_else(|| {
             AdapterError::invalid_contract(
@@ -3511,9 +3507,8 @@ impl FactBatch {
             )
         }
         .map_err(semantic_identity_error)?;
-        let revision_key = explicit_revision.unwrap_or_else(|| source_record_id.as_bytes());
-        let fact_revision_id =
-            FactRevisionId::derive(&fact_id, 1, revision_key).map_err(semantic_identity_error)?;
+        let fact_revision_id = bound_fact_revision_id(&fact_id, 1, binding, &source_record_id)
+            .map_err(semantic_identity_error)?;
         Ok(FactSemanticRevision {
             source_record_id,
             fact_id,

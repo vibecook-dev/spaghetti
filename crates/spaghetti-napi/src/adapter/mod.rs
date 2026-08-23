@@ -74,6 +74,9 @@ pub use scope::{
     ScopeRelationPrimitive, ScopeRelationSourceBinding, ScopeRelationSourcePrimitive,
     ScopeUnavailableBehavior, SCOPE_PROGRAM_SCHEMA_VERSION,
 };
+pub(crate) use semantic::{
+    bound_fact_revision_id, object_scoped_native_revision_key, RevisionBinding,
+};
 pub use semantic::{
     compare_coverage, CanonicalEntityKey, CanonicalFactId, CanonicalSourceInstanceKey,
     ContractCompleteness, CoverageAbsence, CoverageAbsenceKind, CoverageComparison,

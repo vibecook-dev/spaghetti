@@ -17,7 +17,7 @@
     "semantic_revision_key_hex": "486c85e5dcd1af34221510632a4f33754576c9b457e056f41e8cf76555328c54",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:TE_-_MR5m97L82BOV9ZfPxOoQvekUbIlacIzlwBZ9_A"
+      "fact_revision_id": "v1:sRWcEoafkjvp_cF81oH8SCNxd-X9kqKFTBBCCA2-yx4"
     },
     "value": {
       "value": "default",
@@ -37,7 +37,7 @@
     "semantic_revision_key_hex": "ec6969185f43553dfab9898c1028ae2d0bfec8b8df60fbe880525092dc6b3119",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:7pcj2DiHjC_MIMBRv8elc9lUbisrgkwLK1cifmzjXB8"
+      "fact_revision_id": "v1:X7CUNPo4i7g-XoSB9QXMwm3JHpc542-7TMESp1fna50"
     },
     "value": {
       "value": "accept_edits",
@@ -58,7 +58,7 @@
     "semantic_revision_key_hex": "78bd8b362b779e992e88e6de4657652075833695c812c5bb8ed970a61b1acb41",
     "semantic_revision_ref": {
       "semantic_reference_contract_version": 1,
-      "fact_revision_id": "v1:7fO1aYqWx3cDzF70s9KRE1bMe5h2tFrE0sJsRbPXBHY"
+      "fact_revision_id": "v1:8qwL8QsUfw1wZ1zVrpUz8Gz7TnO49n3Gd0BsAmnP_bo"
     },
     "value": {
       "value": "accept_edits",

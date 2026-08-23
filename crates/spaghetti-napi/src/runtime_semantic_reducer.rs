@@ -6,11 +6,12 @@
 //! that shared law; it deliberately contains no database or observer types.
 
 use crate::adapter::{
-    ActorAffiliationRevisionFact, ActorRunRevisionFact, ContentBlockRevisionFact,
-    ContractCompleteness, EffectiveStateRevisionFact, Fact, FactRevisionId, FactSemanticRevision,
-    MessageRevisionFact, NativeRuntimeMarkerRevisionFact, PlanRevisionFact, SemanticRevisionRef,
-    TaskLifecycleState, TaskRevisionFact, ToolRevisionFact, UsageRevisionV2Fact,
-    UserInputLifecycleState, UserInputOperation, UserInputQuestion, UserInputRequestRevisionFact,
+    object_scoped_native_revision_key, ActorAffiliationRevisionFact, ActorRunRevisionFact,
+    ContentBlockRevisionFact, ContractCompleteness, EffectiveStateRevisionFact, Fact,
+    FactRevisionId, FactSemanticRevision, MessageRevisionFact, NativeRuntimeMarkerRevisionFact,
+    PlanRevisionFact, SemanticRevisionRef, TaskLifecycleState, TaskRevisionFact, ToolRevisionFact,
+    UsageRevisionV2Fact, UserInputLifecycleState, UserInputOperation, UserInputQuestion,
+    UserInputRequestRevisionFact,
 };
 
 pub(crate) const RUNTIME_REDUCED_STATE_DIGEST_CONTRACT_VERSION: u32 = 1;
@@ -39,6 +40,26 @@ pub(crate) enum RuntimeSemanticReductionError {
     CapacityExhausted,
 }
 
+/// The revision identity an object-scoped runtime family must carry.
+///
+/// These families bind the record that proved the value (see
+/// `Fact::revision_binds_source_record`), so validating one against the value
+/// alone would accept — and require — the identity an *earlier* record already
+/// claimed for the same value. That is what let a session returning to an
+/// earlier model, or a transcript repeating a record verbatim, emit two facts
+/// under one `FactRevisionId`.
+fn object_scoped_revision_id(
+    semantic: &FactSemanticRevision,
+    revision_key: &[u8; 32],
+) -> Result<FactRevisionId, RuntimeSemanticReductionError> {
+    FactRevisionId::derive(
+        &semantic.fact_id,
+        RuntimeSemanticFamily::VERSION,
+        &object_scoped_native_revision_key(&semantic.source_record_id, revision_key),
+    )
+    .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)
+}
+
 fn validate_effective_state_entity(
     semantic: &FactSemanticRevision,
     revision: &EffectiveStateRevisionFact,
@@ -52,8 +73,7 @@ fn validate_effective_state_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -73,8 +93,7 @@ fn validate_content_block_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -94,8 +113,7 @@ fn validate_native_marker_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -115,8 +133,7 @@ fn validate_user_input_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -136,8 +153,7 @@ fn validate_message_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -160,8 +176,7 @@ fn validate_plan_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -184,8 +199,7 @@ fn validate_task_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -205,8 +219,7 @@ fn validate_tool_entity(
     let revision_key = revision
         .semantic_revision_key()
         .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let expected = FactRevisionId::derive(&semantic.fact_id, 1, &revision_key)
-        .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    let expected = object_scoped_revision_id(semantic, &revision_key)?;
     if expected != semantic.fact_revision_id {
         return Err(RuntimeSemanticReductionError::InvalidRevision);
     }
@@ -1069,12 +1082,12 @@ fn rebind_runtime_fact_revision(
         _ => return Err(RuntimeSemanticReductionError::InvalidRevision),
     }
     .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
-    let fact_revision_id = FactRevisionId::derive(
-        &incoming_semantic.fact_id,
-        RuntimeSemanticFamily::VERSION,
-        &revision_key,
-    )
-    .map_err(|_| RuntimeSemanticReductionError::InvalidRevision)?;
+    // Every family that reaches this path binds the record that proved the
+    // value. A correction derived here is a revision of the same object-scoped
+    // entity, so it binds the same discriminator; deriving it from the
+    // corrected value alone would let two records that correct to one value
+    // claim a single revision.
+    let fact_revision_id = object_scoped_revision_id(incoming_semantic, &revision_key)?;
     let semantic = FactSemanticRevision {
         source_record_id: incoming_semantic.source_record_id,
         fact_id: incoming_semantic.fact_id,

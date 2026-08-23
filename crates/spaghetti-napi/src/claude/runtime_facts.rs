@@ -1153,16 +1153,23 @@ pub(crate) fn plan_subject(plan: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Bound a plan step or subject to a canonical, storable string.
+///
+/// Truncation happens on a character boundary *and* is re-trimmed: cutting a
+/// long step mid-sentence routinely lands on a space, and a value with
+/// trailing whitespace is not canonical runtime semantic text. Emitting one
+/// failed the whole record's decode on real plans rather than shortening a
+/// step.
 fn bounded_step_text(step: &str) -> String {
     const MAX_STEP_BYTES: usize = 200;
     if step.len() <= MAX_STEP_BYTES {
-        return step.to_string();
+        return step.trim().to_string();
     }
     let mut end = MAX_STEP_BYTES;
     while end > 0 && !step.is_char_boundary(end) {
         end -= 1;
     }
-    step[..end].to_string()
+    step[..end].trim().to_string()
 }
 
 /// Tasks from the declared todo sidecar, as an RFC 012C owned-set snapshot.
