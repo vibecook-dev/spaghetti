@@ -6,7 +6,6 @@
 //! prevents retries, panics, and partial reads from bypassing a scope budget.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-#[cfg(test)]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -24,7 +23,6 @@ pub const DEFAULT_ACCESS_TRACE_CAPACITY: usize = 256;
 
 const MAX_RELATION_ID_BYTES: usize = 128;
 const MAX_TRACE_CAPACITY: usize = 16_384;
-#[cfg(test)]
 const MAX_RENDERED_SCOPE_LOCATOR_BYTES: usize = 4 * 1024;
 pub(crate) const MAX_IDENTITY_VALUE_BYTES: usize = 64 * 1024;
 
@@ -850,6 +848,23 @@ impl ScopeAccessReservation {
     }
 }
 
+/// Render one declared relation's locator against identity inputs.
+///
+/// This is the confinement law for declared locators, and the only sanctioned
+/// way to turn a declaration plus evidence into a path. It rejects a template
+/// whose placeholders are not declared identity inputs, an identity value
+/// carrying a path separator or control byte, and a rendered locator that is
+/// absolute, drive-qualified, or contains `.`/`..`/empty components — then
+/// re-checks the result through the same confined-path key the drivers use.
+pub(crate) fn render_declared_locator(
+    declaration: &ScopeRelationDeclaration,
+    expected_primitive: ScopeRelationPrimitive,
+    identity_inputs: &[ScopeIdentityInput<'_>],
+) -> Result<PathBuf, AccessBudgetError> {
+    validate_bound_locator_template(declaration, expected_primitive)?;
+    render_confined_locator(&declaration.locator, identity_inputs)
+}
+
 #[cfg(test)]
 pub(crate) fn validate_evidence_locator_template(
     declaration: &ScopeRelationDeclaration,
@@ -860,7 +875,6 @@ pub(crate) fn validate_evidence_locator_template(
     )
 }
 
-#[cfg(test)]
 fn validate_bound_locator_template(
     declaration: &ScopeRelationDeclaration,
     expected_primitive: ScopeRelationPrimitive,
@@ -871,7 +885,6 @@ fn validate_bound_locator_template(
     validate_locator_identity_placeholders(declaration)
 }
 
-#[cfg(test)]
 fn validate_locator_identity_placeholders(
     declaration: &ScopeRelationDeclaration,
 ) -> Result<(), AccessBudgetError> {
@@ -889,7 +902,6 @@ fn validate_locator_identity_placeholders(
     Ok(())
 }
 
-#[cfg(test)]
 fn render_confined_locator(
     template: &str,
     identity_inputs: &[ScopeIdentityInput<'_>],
@@ -954,7 +966,6 @@ fn render_confined_locator(
     Ok(path)
 }
 
-#[cfg(test)]
 fn locator_placeholders(locator: &str) -> Result<Vec<(usize, usize, &str)>, AccessBudgetError> {
     let bytes = locator.as_bytes();
     let mut placeholders = Vec::new();
@@ -985,7 +996,6 @@ fn locator_placeholders(locator: &str) -> Result<Vec<(usize, usize, &str)>, Acce
     Ok(placeholders)
 }
 
-#[cfg(test)]
 fn invalid_locator_template() -> AccessBudgetError {
     AccessBudgetError::InvalidConfig(
         "scope locator template or bound identity input is invalid".to_string(),

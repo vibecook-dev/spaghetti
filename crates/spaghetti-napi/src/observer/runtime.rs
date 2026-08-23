@@ -27,8 +27,7 @@ use super::object::{DecodedFact, ObjectReset, ObservedObject, UnknownRecord};
 use super::queue::{Admission, Delivery};
 use super::request::ResolvedRequest;
 use super::scope::{
-    resolve_members, watch_anchors, JoinedLocators, ScopeMember, ScopeMemberKey, StreamCatalog,
-    ROOT_TRANSCRIPT_STREAM,
+    resolve_members, JoinedLocators, ScopeMember, ScopeMemberKey, ScopeProgram, StreamCatalog,
 };
 use super::state::{ScopeState, StateChange};
 use super::ObserverError;
@@ -85,6 +84,9 @@ pub(crate) struct ObserverRuntime {
     adapter: Arc<dyn AgentAdapter>,
     instance: SourceInstance,
     catalog: StreamCatalog,
+    /// The declared scope program this attachment evaluates. Every path the
+    /// observer opens comes from one of its relations.
+    program: ScopeProgram,
     scope: ScopeIdentity,
     delivery: Arc<Delivery>,
     objects: BTreeMap<ScopeMemberKey, ObservedObject>,
@@ -127,15 +129,16 @@ impl ObserverRuntime {
         let programs = manifest.scope_programs.as_ref().ok_or_else(|| {
             ObserverError::Unsupported("adapter declares no scope program".to_string())
         })?;
-        if !programs
+        let declared = programs
             .programs
             .iter()
-            .any(|program| program.root_entity_kind == "session")
-        {
-            return Err(ObserverError::Unsupported(
-                "adapter declares no session-rooted scope program".to_string(),
-            ));
-        }
+            .find(|program| program.root_entity_kind == "session")
+            .ok_or_else(|| {
+                ObserverError::Unsupported(
+                    "adapter declares no session-rooted scope program".to_string(),
+                )
+            })?;
+        let program = ScopeProgram::select(declared)?;
 
         let specs = adapter
             .discover(&DiscoveryContext {
@@ -163,17 +166,24 @@ impl ObserverRuntime {
                 .streams(&instance)
                 .map_err(|error| ObserverError::Adapter(error.to_string()))?,
         );
-        let root_key = ScopeMemberKey {
-            stream_id: ROOT_TRANSCRIPT_STREAM.to_string(),
-            root_name: "projects".to_string(),
-            relative_path: request.root_transcript_relative(),
-        };
+        // The root member as the declared program resolves it, so the runtime
+        // never has to name a stream or a root itself.
+        let root_key = resolve_members(&request, &program, &catalog, &JoinedLocators::default())
+            .into_iter()
+            .find(|member| member.relation_id == declared_root_relation(declared))
+            .map(|member| member.key)
+            .ok_or_else(|| {
+                ObserverError::InvalidRootIdentity(
+                    "the declared root relation does not claim this transcript locator".to_string(),
+                )
+            })?;
 
         Ok(Self {
             request,
             adapter,
             instance,
             catalog,
+            program,
             scope,
             delivery,
             objects: BTreeMap::new(),
@@ -207,7 +217,7 @@ impl ObserverRuntime {
     ) {
         // Watch before scan. A watcher installed after the scan would miss
         // every append that landed during it.
-        let _watcher = install.then(|| install_watcher(&self.request, hint));
+        let _watcher = install.then(|| install_watcher(&self.request, &self.program, hint));
 
         self.phase = ObserverPhase::Bootstrap;
         self.reconcile_until_drained();
@@ -336,7 +346,7 @@ impl ObserverRuntime {
     /// Re-resolve membership and rebuild the path index. This walks the session
     /// subtree, so it runs on a sweep rather than on every pass.
     fn resolve_scope(&mut self) {
-        self.members = resolve_members(&self.request, &self.catalog, &self.joined);
+        self.members = resolve_members(&self.request, &self.program, &self.catalog, &self.joined);
         self.member_paths = self
             .members
             .iter()
@@ -954,7 +964,11 @@ fn actor_run_of(value: &Fact) -> Option<CanonicalEntityKey> {
 /// Install one recursive watcher per declared anchor, falling back to the
 /// nearest existing ancestor so that attaching before the session directory
 /// exists still observes its creation.
-fn install_watcher(request: &ResolvedRequest, hint: Sender<Wake>) -> Option<RecommendedWatcher> {
+fn install_watcher(
+    request: &ResolvedRequest,
+    program: &ScopeProgram,
+    hint: Sender<Wake>,
+) -> Option<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         // Notifications are hints. Report the paths when the backend gives
         // them; an empty list makes the owner sweep instead of guessing.
@@ -967,7 +981,7 @@ fn install_watcher(request: &ResolvedRequest, hint: Sender<Wake>) -> Option<Reco
     })
     .ok()?;
     let mut watched: BTreeSet<PathBuf> = BTreeSet::new();
-    for anchor in watch_anchors(request) {
+    for anchor in program.watch_anchors(request) {
         let Some(existing) = nearest_existing_ancestor(&anchor, &request.agent_root) else {
             continue;
         };
@@ -997,6 +1011,11 @@ pub(crate) fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or_default()
+}
+
+/// The relation the declared program calls its root.
+fn declared_root_relation(program: &crate::adapter::ScopeProgramDeclaration) -> String {
+    program.root_relation_id.clone().unwrap_or_default()
 }
 
 /// Bounded wake channel between the watcher, the consumer's poll hint, and the

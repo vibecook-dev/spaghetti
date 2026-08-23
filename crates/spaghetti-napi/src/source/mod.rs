@@ -19,6 +19,7 @@ mod sqlite_snapshot;
 #[cfg(test)]
 mod conformance;
 
+pub(crate) use access::render_declared_locator;
 #[cfg(test)]
 pub(crate) use access::validate_evidence_locator_template;
 pub use access::{
