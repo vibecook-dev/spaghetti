@@ -30,7 +30,7 @@
  * | Transport-neutral client | playground, CLI, IPC hosts | `client/`, `observation` |
  * | Native engine surface | playground, CLI | `native` |
  * | Legacy live tail | **Chopsticks** (pinned) | see below |
- * | Session observer | **Chopsticks** | Phase B; see the placeholder below |
+ * | Session observer | **Chopsticks** | `observeSession` + generated events |
  * | VibeField Phase A | **VibeField** | generated identity + durable watermark |
  * | Presentation helpers | playground | source display metadata |
  * | Settings | CLI (`spag doctor`) | engine selection, db path |
@@ -61,8 +61,9 @@ export * from './observation.js';
 export * from './native.js';
 
 // ── Legacy live tail — Chopsticks pins these three names ───────────────────
-// Superseded by `observeSession` (RFC 012 landing plan §3.1) once L1's native
-// observer lands. Kept working for one release after that, then removed.
+// Superseded by `observeSession` below. Kept working for one release after
+// Chopsticks migrates, then removed together with its allowlist entry in
+// `scripts/architecture/rfc011-legacy-boundaries.json`.
 // `SessionMessage` reaches consumers through `./types/index.js` above.
 export { watchSessionTranscript } from './live/session-tail.js';
 export type {
@@ -71,12 +72,41 @@ export type {
   WatchSessionTranscriptOptions,
 } from './live/session-tail.js';
 
-// ── Store-free session observer ────────────────────────────────────────────
-// `observeSession(request): SessionObserver` lands here in Phase B, wrapping
-// L1's native observer with generated event types. The previous placeholder
-// wrapper was removed along with the native transport it wrapped: it had no
-// consumer, and shipping a second observer API to delete later is exactly the
-// accretion this landing exists to stop.
+// ── Store-free session observer (RFC 012 landing plan §3.1) ────────────────
+// The replacement for `watchSessionTranscript`: one attachment to one session
+// tree, all eleven semantic families plus the control events, and no database.
+export {
+  isSemanticEvent,
+  observeSession,
+  type ObserveSessionOptions,
+  type ObserveSessionRequest,
+  type ObserverEvent,
+  type SemanticObserverEvent,
+  type SessionObserver,
+  type SessionObserverStatus,
+} from './observe-session.js';
+// The members of that union, so a consumer can name the shape a handler takes.
+// Generated from Rust by `pnpm generate:types`; never edited by hand.
+export type {
+  ActorAttribution,
+  ActorRef,
+  ClosedEvent,
+  FamilyManifestEntry,
+  ObjectCoverage,
+  ObserverBarrier,
+  ObserverErrorEvent,
+  ObserverEventId,
+  ObserverFamily,
+  ObserverPhase,
+  OverflowEvent,
+  OverflowReason,
+  ResetEvent,
+  SemanticEvent,
+  SemanticOperation,
+  SourceErrorEvent,
+  SourcePosition,
+  UnknownEvidenceEvent,
+} from './generated/index.js';
 
 // ── VibeField Phase A — generated identity and durable watermark ───────────
 export {

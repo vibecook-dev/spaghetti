@@ -33,20 +33,22 @@ pub struct ObserveSessionRequest {
     /// When supplied, must equal the session id implied by the locator.
     /// A mismatch fails the attach rather than emitting a provisional identity.
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub native_session_id: Option<String>,
     /// Follow declared child/sidecar relations. Defaults to true.
     #[serde(default)]
+    #[ts(optional = nullable)]
     pub include_descendants: Option<bool>,
     #[serde(default)]
-    #[ts(type = "number | null")]
+    #[ts(optional = nullable)]
     pub max_queued_events: Option<u32>,
     #[serde(default)]
-    #[ts(type = "number | null")]
+    #[ts(optional = nullable)]
     pub max_queued_bytes: Option<u32>,
     /// Bounded reconciliation fallback for filesystem notifications, which are
     /// hints and are allowed to be lost or coalesced.
     #[serde(default)]
-    #[ts(type = "number | null")]
+    #[ts(optional = nullable)]
     pub poll_interval_ms: Option<u32>,
 }
 
