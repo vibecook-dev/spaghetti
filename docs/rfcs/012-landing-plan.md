@@ -214,6 +214,31 @@ it is the largest and depends on L2's codegen).
   `observeSession`; keep the old tail one release as fallback.
 - VibeField: integration note listing the §3.2 surface with examples.
 
+## 8a. Follow-ups filed during the landing (not blockers)
+
+- Reconcile `NativeRuntimeMarkerRevisionFact::stable_native_fact_key` (test-only, in the
+  contract fixture) with the emitter's inline key in `claude/runtime_facts.rs` — the two
+  derivations differ (session/actor_run/kind vs marker id only); changes native-marker
+  identities; do it with the fixture regenerated deliberately.
+- `source_timestamp_hint` is `None` at all 17 production `RecordOrigin` sites, so
+  `effective_at` never carries native time into runtime facts (RFC 012C §9 evidence gap).
+- `EngineError::BootstrapInProgress` is matched on message text in the SDK; give it a stable
+  token prefix like `RESET_REQUIRED`.
+- Cold-build WAL reached ~2 GiB at 400k records with 2/3 checkpoints reader-blocked (27 s);
+  run the bounded-cadence experiment (08-15 E2) now that real-corpus runs work.
+- Observer bootstrap is decode-bound (~15 ms/MB, 635 ms @ 43.7 MB vs the 500 ms @ 50 MB
+  budget): primed blake3 hasher / per-batch key prefix in `adapter/facts.rs` — matters for
+  the observer's serial bootstrap and CPU, not durable ingest (writer-bound).
+- `fixtures/contracts/rfc012a-access-request-v1.json` is Rust-unverified after L5c (only
+  `scripts/agent_support/test_contracts.py` reads it) — retire or re-verify.
+- Playground session list still seeds from history (library list is catalog-first); a
+  `decoded` flag through `SessionListItem` + an explicit empty reader state would finish it.
+- `requestHydration` (priority hydration command) removed with the 012B stack; reintroduce
+  only when a consumer needs it.
+- Two `#[ignore]`d real-corpus smoke tests exist (`catalog_startup_on_a_real_corpus`,
+  `runtime_facts_commit_on_a_real_corpus`, env `CLAUDE_CORPUS_ROOT`) — run them before each
+  release on a real machine.
+
 ## 8. Status (integrator-only; updated at wave boundaries)
 
 | Item | State | Evidence |
@@ -223,5 +248,5 @@ it is the largest and depends on L2's codegen).
 | L2 sdk-api | Phase A merged `a0bc677`; **Phase B merged `ff1e2da`** (2026-08-23); final AbortSignal option pending | Phase A: ts-rs pipeline + `pnpm generate:types` + CI diff; 13,694 lines of hand-written contracts/shims deleted; barrel 38 → 17 explicit exports (allowlist); VibeField Phase A refs generated + tested on real engine output; `watchSessionTranscript` restored to the barrel (missing at base). Phase B: `observeSession(request, options)` async-iterator SDK API over the native observer (single consumer, one-batch buffering, close-on-exit), 7 behavioral tests on real `.claude`-shaped trees, Chopsticks README section; found the observer `bootstrap_complete`/65,536-record bug (routed to L1). SDK 431/0, CLI 110/0, validate-all 9/9 |
 | L3 usage | **merged** `71c7268` + `d6fed37` (2026-08-23) | response-level usage is the only usage path: Codex/Grok adapters now emit response-level facts (Codex legacy double-counted cache-read inside input and reasoning inside output; Grok delta 0); legacy `usage_contributions`/`usage_totals`, `query_pack_selections`, shadow/selected packs, `Fact::Usage`, 5 napi methods, usage experiments deleted (+2,157/−12,688); `spag stats` + playground show corrected totals with value quality; oracle exact on in-repo fixture (119 responses) and real slice (5,238 responses); Claude full corpus 78.52B → 36.88B tokens (2.129×, 362,043 rows → 158,118 responses); getStats p95 −24%, getUsage p95 +0.7 ms (accepted); SCHEMA_VERSION 63 (rebuild ≈29 min on 2.9 GB corpus); Rust 912/912, SDK 429/0, CLI 110/0, validate-all 9/9 |
 | L4 catalog | **merged** `d92c5b7` (2026-08-23) | catalog-first startup: discovery pass → `projects`/`sessions` catalog rows with `catalog_state`/degraded/external refs, one `Readiness` vector (ts-rs) consumed by the host, `spag projects/sessions/doctor`, playground indicator; real corpus: catalog listable **122 ms cold / 8 ms warm** (budget 10 s / 1 s); 66,777 lines of 012B machinery deleted (+9,896/−77,467; Rust 218,013 → 153,278, SDK → 61,880; schema tables 108 → 100, SCHEMA_VERSION 64); whole-response equality guard for listProjects/listSessions/getOverview/search/listMemoryDocuments vs a `3db39a7` baseline; three bugs fixed (1.7 s COUNT→EXISTS readiness, degraded_reason CHECK abort, CLI projectId); Rust 666/666, SDK 399/0, CLI 117/0, validate-all 9/9. Follow-up: playground library list onto the catalog path (2 IPC channels). Found: full rebuild of the real corpus extrapolates to ~3 h → L7 |
-| Wave 2 | in progress: **L5d identity (BLOCKER)** (`land/l5d-identity`). Done: **L5c** `2b6e9f65` (adapter/support.rs dead access-request subsystem deleted 5,436 → 3,241 lines; 8 stragglers; **clippy 0 workspace-wide — CI `-D warnings` gate green**), **L6c** `b1c95722` (typed `projection_pending` mapping for the cold-build search gate; playground shows "Building the search index…"; 4 teardown guards), **L6b** `014b85d4`/`1eef4755` (one RFC 012A opaque-ref encoding across catalog/durable/observer, no rebuild; 46 value-type names exported; cross-surface equality test), **L7** `c29ae151`, **L5b** `6291174a`, **L6** `97eb9e0`, **L1e** `168a829`, **L5** `ffc6c2f`, **L8** `4febb6e`, L1c/L1d/L4b/L0/CI; integrator: coordinator inline tests → `engine/coordinator/tests.rs` `47b89c38` | Rust 810/810 (2 ignored), SDK 362/0, CLI 117/0, playground 35/0, validate-all 9/9, clippy 0; Rust crate **147,514** LOC (from 315,610), SDK **54,142** (from 81,349); ratchet 3/18/17 |
-| Wave 3 | not started | — |
+| Wave 2 | **complete 2026-08-23 17:15** (`main` `ffaa18c6`). Lanes: L5 `ffc6c2f` (all 11 families emitted), L5b `6291174a` (support-release model), L5c `2b6e9f65` (clippy → 0), **L5d** (`BLOCKER` fixed: runtime-family revision identity now names the proving record; plan step-key decode fatal fixed; startup errors surfaced; full real corpus ingests: 2,304,845 runtime facts, 0 failed reconciles, 725 s), L6 `97eb9e0` / L6b `1eef4755` / L6c `b1c95722` (generated-type surface, one opaque-ref encoding, typed bootstrap error), L7 `c29ae151` (ingest 70 → 11,653 rec/s; full corpus ~3 h → 202 s; perf report), L8 `4febb6e` (docs trimmed/archived, integration notes), L1c/L1d/L1e (observer hardening + declared ScopeProgram evaluator), L4b (playground library 491 ms), L0 (hygiene), plus integrator fixes (coordinator tests → tests.rs; reset-before-replay assertion; racy Grok test) | Final gate: Rust 820/820 (3 ignored), clippy `-D warnings` exit 0, SDK 362/0, CLI 117/0, playground 35/0, validate-all 9/9, legacy-oracle check clean, generate:types idempotent; Rust crate **148,336** LOC (from 315,610, −53%), SDK **54,142** (from 81,349, −33%); ratchet 3/18/17 |
+| Wave 3 | ready to start — requires owner actions | 1. **push** `main` (+ archive branch) → first CI run since 08-11 (expect green: every gate runs locally); 2. do NOT merge the release-please PR until CI is green on `main`; 3. 0.8.0 release notes are drafted (CHANGELOG.md, README) — breaking: usage totals corrected (~2.1× lower on Claude), schema v64 full rebuild at first start (catalog in ~100 ms; full history on a 3 GB corpus ≈ 200 s), fact revision identities changed for the 8 runtime families, SDK barrel curated, `watchSessionTranscript` deprecated with one-release overlap; 4. **promotion of real Claude/Codex/Grok support releases needs a named human sanitizer review + performance report** (validator refuses placeholders); 5. Chopsticks PR: bump from SDK 0.5.16, replace `watchSessionTranscript` with `observeSession` (guide: `docs/integration/chopsticks-observe-session.md`); 6. VibeField: `docs/integration/vibefield-phase-a.md` |
