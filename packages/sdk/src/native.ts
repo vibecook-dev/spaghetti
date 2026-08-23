@@ -191,86 +191,33 @@ export interface SpaghettiEngineStatus {
 }
 
 /**
- * How much of an entity is available. Each state implies the previous one:
- * `discovered` means only that native evidence proves it exists.
+ * Catalog and readiness shapes come from `./generated/`, which ts-rs emits
+ * from the Rust definitions. They are aliased here so consumers keep one
+ * import site; the shapes themselves are never hand-written (landing plan
+ * §5.4).
  */
-export type SpaghettiCatalogState = 'discovered' | 'transcript_backed' | 'hydrated' | 'searchable';
+export type {
+  CatalogProjectPage as SpaghettiCatalogProjectPage,
+  CatalogProjectRow as SpaghettiCatalogProject,
+  CatalogSessionPage as SpaghettiCatalogSessionPage,
+  CatalogSessionRow as SpaghettiCatalogSession,
+  CatalogState as SpaghettiCatalogState,
+  IdentityConflict as SpaghettiCatalogIdentityConflict,
+  Readiness as SpaghettiReadiness,
+  ReadinessField as SpaghettiReadinessField,
+  ReadinessState as SpaghettiReadinessState,
+} from './generated/index.js';
 
-/** State of one readiness field. */
-export type SpaghettiReadinessState = 'pending' | 'indexing' | 'ready' | 'degraded' | 'unavailable';
+import type {
+  CatalogState as SpaghettiCatalogState,
+  CatalogProjectPage as SpaghettiCatalogProjectPage,
+  CatalogProjectRow as SpaghettiCatalogProject,
+  CatalogSessionPage as SpaghettiCatalogSessionPage,
+  CatalogSessionRow as SpaghettiCatalogSession,
+  Readiness as SpaghettiReadiness,
+} from './generated/index.js';
 
-export interface SpaghettiReadinessField {
-  state: SpaghettiReadinessState;
-  /** Commit sequence this field's evidence was read at. */
-  committedAtSeq: number;
-  /** Progress or reason, when there is one to give. */
-  detail?: string;
-}
-
-/**
- * The single readiness surface. Fields are independent: `catalog` is routinely
- * `ready` while `history` is `indexing` and `search` is `pending`.
- */
-export interface SpaghettiReadiness {
-  catalog: SpaghettiReadinessField;
-  history: SpaghettiReadinessField;
-  usage: SpaghettiReadinessField;
-  capabilities: SpaghettiReadinessField;
-  artifacts: SpaghettiReadinessField;
-  search: SpaghettiReadinessField;
-  atCommitSeq: number;
-}
-
-/** A competing project association retained next to the selected one. */
-export interface SpaghettiCatalogIdentityConflict {
-  competingNativeProjectKey: string;
-  basis: string;
-  provenance: string;
-}
-
-export interface SpaghettiCatalogProject {
-  projectId: string;
-  /** Persistable external reference; stable across restarts. */
-  externalRef: string;
-  adapterId: string;
-  nativeProjectKey: string;
-  displayName?: string;
-  displayPath?: string;
-  catalogState: SpaghettiCatalogState;
-  degraded: boolean;
-  degradedReason?: string;
-  sessionCount: number;
-  transcriptSessionCount: number;
-  hydratedSessionCount: number;
-  latestActivityAt?: string;
-  lastCommitSeq: number;
-}
-
-export interface SpaghettiCatalogSession {
-  sessionId: string;
-  projectId: string;
-  externalRef: string;
-  adapterId: string;
-  nativeSessionId?: string;
-  title?: string;
-  catalogState: SpaghettiCatalogState;
-  degraded: boolean;
-  degradedReason?: string;
-  /** Which native evidence produced the project association. */
-  associationBasis: string;
-  associationQuality: string;
-  associationProvenance: string;
-  nativeCreatedAt?: string;
-  nativeUpdatedAt?: string;
-  /** The count the agent claims. Absent rather than zero when unknown. */
-  nativeMessageCount?: number;
-  /** Messages actually decoded so far. */
-  decodedMessageCount: number;
-  transcriptPresent: boolean;
-  identityConflicts: SpaghettiCatalogIdentityConflict[];
-  lastCommitSeq: number;
-}
-
+/** Page request. Not native output — the caller composes it. */
 export interface SpaghettiCatalogPageOptions {
   cursor?: string;
   limit?: number;
@@ -282,19 +229,7 @@ export interface SpaghettiCatalogSessionPageOptions extends SpaghettiCatalogPage
   projectId?: string;
 }
 
-export interface SpaghettiCatalogProjectPage {
-  projects: SpaghettiCatalogProject[];
-  /** Opaque continuation token bound to `atCommitSeq`. */
-  cursor?: string;
-  atCommitSeq: number;
-}
-
-export interface SpaghettiCatalogSessionPage {
-  sessions: SpaghettiCatalogSession[];
-  cursor?: string;
-  atCommitSeq: number;
-}
-
+/** One resolved external reference, composed from the generated row types. */
 export interface SpaghettiCatalogResolution {
   kind: 'project' | 'session' | 'retracted' | 'unknown';
   project?: SpaghettiCatalogProject;
@@ -431,6 +366,13 @@ export interface SpaghettiEngineHistoryProject {
   latestActivityAt?: string;
   latestActivitySource?: SpaghettiEngineHistoryActivitySource;
   index?: SpaghettiEngineHistoryProjectIndex;
+  /**
+   * Persistable RFC 012A external reference. Absent only when discovery has
+   * not yet run for this row's source.
+   */
+  externalRef?: string;
+  /** How much of this entity is available, from the catalog's derivation. */
+  catalogState?: SpaghettiCatalogState;
   lastCommitSeq: number;
 }
 
@@ -488,6 +430,13 @@ export interface SpaghettiEngineHistorySession {
   latestActivityAt?: string;
   latestActivitySource?: SpaghettiEngineHistoryActivitySource;
   index?: SpaghettiEngineHistorySessionIndex;
+  /**
+   * Persistable RFC 012A external reference. Absent only when discovery has
+   * not yet run for this row's source.
+   */
+  externalRef?: string;
+  /** How much of this entity is available, from the catalog's derivation. */
+  catalogState?: SpaghettiCatalogState;
   lastCommitSeq: number;
 }
 
@@ -2202,9 +2151,12 @@ export interface SpaghettiEngine {
    * List discoverable projects. Answerable seconds after
    * `startConfiguredObservation`, without waiting for history or search.
    */
-  listProjects(options?: SpaghettiCatalogPageOptions, signal?: AbortSignal): Promise<SpaghettiCatalogProjectPage>;
+  listCatalogProjects(
+    options?: SpaghettiCatalogPageOptions,
+    signal?: AbortSignal,
+  ): Promise<SpaghettiCatalogProjectPage>;
   /** List discoverable sessions, optionally within one project. */
-  listSessions(
+  listCatalogSessions(
     options?: SpaghettiCatalogSessionPageOptions,
     signal?: AbortSignal,
   ): Promise<SpaghettiCatalogSessionPage>;

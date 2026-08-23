@@ -253,11 +253,11 @@ class RustObservationService extends EventEmitter implements ObservationService 
   }
 
   listCatalogProjects(options?: SpaghettiCatalogPageOptions): Promise<SpaghettiCatalogProjectPage> {
-    return this.requireHost().client.listProjects(options);
+    return this.requireHost().client.listCatalogProjects(options);
   }
 
   listCatalogSessions(options?: SpaghettiCatalogSessionPageOptions): Promise<SpaghettiCatalogSessionPage> {
-    return this.requireHost().client.listSessions(options);
+    return this.requireHost().client.listCatalogSessions(options);
   }
 
   getReadiness(): Promise<SpaghettiReadiness> {
@@ -826,13 +826,13 @@ class RustObservationService extends EventEmitter implements ObservationService 
   private async allProjects(): Promise<SpaghettiEngineHistoryProject[]> {
     await this.awaitObserving();
     if (this.projectLoad) return await this.projectLoad;
-    const work = collectPages((cursor) =>
-      this.requireHost().client.listHistoryProjects({ cursor, limit: PAGE_LIMIT }),
-    ).then((projects) => {
-      this.projectCatalogLoaded = true;
-      for (const project of projects) this.projectsById.set(project.projectId, project);
-      return projects;
-    });
+    const work = collectPages((cursor) => this.requireHost().client.listProjects({ cursor, limit: PAGE_LIMIT })).then(
+      (projects) => {
+        this.projectCatalogLoaded = true;
+        for (const project of projects) this.projectsById.set(project.projectId, project);
+        return projects;
+      },
+    );
     const tracked = work.finally(() => {
       if (this.projectLoad === tracked) this.projectLoad = null;
     });
@@ -845,7 +845,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
     const pending = this.sessionLoads.get(projectId);
     if (pending) return await pending;
     const work = collectPages((cursor) =>
-      this.requireHost().client.listHistorySessions({ projectId, cursor, limit: PAGE_LIMIT }),
+      this.requireHost().client.listSessions({ projectId, cursor, limit: PAGE_LIMIT }),
     ).then((sessions) => {
       const project = this.projectsById.get(projectId);
       if (project) {

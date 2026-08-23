@@ -517,7 +517,7 @@ describe('Claude observation shadow native lifecycle', { skip: !native }, () => 
       assert.deepEqual(client.info.methods, SPAGHETTI_CLIENT_METHODS);
       const [overview, projects, replay] = await Promise.all([
         client.getOverview(),
-        client.listHistoryProjects({ limit: 10 }),
+        client.listProjects({ limit: 10 }),
         client.replayChanges({ limit: 10 }),
       ]);
       assert.deepEqual([overview.canonicalSessions, overview.canonicalMessages], [1, 1]);

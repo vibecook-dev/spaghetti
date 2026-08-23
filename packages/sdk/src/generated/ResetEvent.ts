@@ -6,7 +6,7 @@ import type { SourcePosition } from "./SourcePosition.js";
 /**
  * A source object's generation changed under us.
  */
-export type ResetEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number, source: SourcePosition, old_generation: number, new_generation: number, 
+export type ResetEvent = { event_id: ObserverEventId, sequence: number, scope_epoch: number, source: SourcePosition, old_generation: number, new_generation: number,
 /**
  * `truncated`, `identity_changed`, `prefix_mismatch`, `contract_replay`.
  */

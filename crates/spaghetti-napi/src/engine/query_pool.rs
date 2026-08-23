@@ -25,9 +25,11 @@ use super::capability_query::{
     TaskCollectionPageRequest, TaskPage, TaskPageRequest, ToolResultPage, ToolResultPageRequest,
 };
 use super::catalog::{
-    read_project_page, read_readiness, read_session_page, resolve_catalog_entity,
-    CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest, CatalogSessionPage,
-    CatalogSessionPageRequest, Readiness,
+    encode_external_ref, read_project_page, read_readiness, read_session_page,
+    resolve_catalog_entity, CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest,
+    CatalogSessionPage, CatalogSessionPageRequest, Readiness, HISTORY_PROJECT_CATALOG_COLUMNS,
+    HISTORY_PROJECT_CATALOG_CTE, HISTORY_PROJECT_CATALOG_JOINS, HISTORY_SESSION_CATALOG_COLUMNS,
+    HISTORY_SESSION_CATALOG_JOIN,
 };
 use super::coverage_query::{
     read_fact_family_coverage_page, read_fact_family_replay_target,
@@ -144,6 +146,10 @@ pub struct HistoryProjectSummary {
     pub latest_activity_at: Option<String>,
     pub latest_activity_source: Option<String>,
     pub index: Option<HistoryProjectIndexSummary>,
+    /// Catalog facts for this row; see `engine::catalog`. Absent until
+    /// discovery has run for this row's source.
+    pub external_ref: Option<String>,
+    pub catalog_state: Option<String>,
     pub last_commit_seq: u64,
 }
 
@@ -192,6 +198,10 @@ pub struct HistorySessionSummary {
     pub latest_activity_at: Option<String>,
     pub latest_activity_source: Option<String>,
     pub index: Option<HistorySessionIndexSummary>,
+    /// Catalog facts for this row; see `engine::catalog`. Absent until
+    /// discovery has run for this row's source.
+    pub external_ref: Option<String>,
+    pub catalog_state: Option<String>,
     pub last_commit_seq: u64,
 }
 
@@ -554,27 +564,23 @@ enum QueryCommand {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
         request: Box<CatalogProjectPageRequest>,
-        search_ready: bool,
         response: Sender<Result<CatalogProjectPage, EngineError>>,
     },
     CatalogSessions {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
         request: Box<CatalogSessionPageRequest>,
-        search_ready: bool,
         response: Sender<Result<CatalogSessionPage, EngineError>>,
     },
     CatalogResolve {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
         external_ref: String,
-        search_ready: bool,
         response: Sender<Result<CatalogEntityResolution, EngineError>>,
     },
     CatalogReadiness {
         cancellation_epoch: u64,
         cancellation: QueryCancellationToken,
-        search_ready: bool,
         response: Sender<Result<Readiness, EngineError>>,
     },
     SourceCatalog {
@@ -1642,7 +1648,6 @@ impl QueryClient {
     pub(crate) fn catalog_projects(
         &self,
         request: CatalogProjectPageRequest,
-        search_ready: bool,
     ) -> Result<CatalogProjectPage, EngineError> {
         self.send_cancellable(
             QueryCancellationToken::default(),
@@ -1650,7 +1655,6 @@ impl QueryClient {
                 cancellation_epoch,
                 cancellation,
                 request: Box::new(request),
-                search_ready,
                 response,
             },
         )
@@ -1659,7 +1663,6 @@ impl QueryClient {
     pub(crate) fn catalog_sessions(
         &self,
         request: CatalogSessionPageRequest,
-        search_ready: bool,
     ) -> Result<CatalogSessionPage, EngineError> {
         self.send_cancellable(
             QueryCancellationToken::default(),
@@ -1667,7 +1670,6 @@ impl QueryClient {
                 cancellation_epoch,
                 cancellation,
                 request: Box::new(request),
-                search_ready,
                 response,
             },
         )
@@ -1676,7 +1678,6 @@ impl QueryClient {
     pub(crate) fn resolve_catalog_entity(
         &self,
         external_ref: String,
-        search_ready: bool,
     ) -> Result<CatalogEntityResolution, EngineError> {
         self.send_cancellable(
             QueryCancellationToken::default(),
@@ -1684,19 +1685,17 @@ impl QueryClient {
                 cancellation_epoch,
                 cancellation,
                 external_ref,
-                search_ready,
                 response,
             },
         )
     }
 
-    pub(crate) fn readiness(&self, search_ready: bool) -> Result<Readiness, EngineError> {
+    pub(crate) fn readiness(&self) -> Result<Readiness, EngineError> {
         self.send_cancellable(
             QueryCancellationToken::default(),
             |cancellation_epoch, cancellation, response| QueryCommand::CatalogReadiness {
                 cancellation_epoch,
                 cancellation,
-                search_ready,
                 response,
             },
         )
@@ -2075,13 +2074,14 @@ fn query_thread(
                     continue;
                 }
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = read_history_projects(&connection, &request).and_then(|page| {
-                    if is_cancelled(&control, cancellation_epoch) {
-                        Err(EngineError::QueryCancelled)
-                    } else {
-                        Ok(page)
-                    }
-                });
+                let result = super::history_query::read_history_projects(&connection, &request)
+                    .and_then(|page| {
+                        if is_cancelled(&control, cancellation_epoch) {
+                            Err(EngineError::QueryCancelled)
+                        } else {
+                            Ok(page)
+                        }
+                    });
                 let _ = response.send(result);
             }
             QueryCommand::HistorySessions {
@@ -2094,13 +2094,14 @@ fn query_thread(
                     continue;
                 }
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
-                let result = read_history_sessions(&connection, &request).and_then(|page| {
-                    if is_cancelled(&control, cancellation_epoch) {
-                        Err(EngineError::QueryCancelled)
-                    } else {
-                        Ok(page)
-                    }
-                });
+                let result = super::history_query::read_history_sessions(&connection, &request)
+                    .and_then(|page| {
+                        if is_cancelled(&control, cancellation_epoch) {
+                            Err(EngineError::QueryCancelled)
+                        } else {
+                            Ok(page)
+                        }
+                    });
                 let _ = response.send(result);
             }
             QueryCommand::SessionDetails {
@@ -2605,7 +2606,6 @@ fn query_thread(
                 cancellation_epoch,
                 cancellation,
                 request,
-                search_ready,
                 response,
             } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -2614,7 +2614,7 @@ fn query_thread(
                     &control,
                     cancellation_epoch,
                     &cancellation,
-                    || read_project_page(&connection, &request, search_ready),
+                    || read_project_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -2622,7 +2622,6 @@ fn query_thread(
                 cancellation_epoch,
                 cancellation,
                 request,
-                search_ready,
                 response,
             } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -2631,7 +2630,7 @@ fn query_thread(
                     &control,
                     cancellation_epoch,
                     &cancellation,
-                    || read_session_page(&connection, &request, search_ready),
+                    || read_session_page(&connection, &request),
                 );
                 let _ = response.send(result);
             }
@@ -2639,7 +2638,6 @@ fn query_thread(
                 cancellation_epoch,
                 cancellation,
                 external_ref,
-                search_ready,
                 response,
             } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -2648,14 +2646,13 @@ fn query_thread(
                     &control,
                     cancellation_epoch,
                     &cancellation,
-                    || resolve_catalog_entity(&connection, &external_ref, search_ready),
+                    || resolve_catalog_entity(&connection, &external_ref),
                 );
                 let _ = response.send(result);
             }
             QueryCommand::CatalogReadiness {
                 cancellation_epoch,
                 cancellation,
-                search_ready,
                 response,
             } => {
                 let _in_flight = InFlightGuard::enter(&control.in_flight);
@@ -2664,7 +2661,7 @@ fn query_thread(
                     &control,
                     cancellation_epoch,
                     &cancellation,
-                    || read_readiness(&connection, search_ready),
+                    || read_readiness(&connection),
                 );
                 let _ = response.send(result);
             }
@@ -2841,35 +2838,35 @@ fn open_reader(database_path: &PathBuf) -> Result<Connection, EngineError> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum HistoryCursorKind {
+pub(super) enum HistoryCursorKind {
     Projects,
     Sessions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct HistoryCursorPayload {
-    version: u32,
-    kind: HistoryCursorKind,
-    at_commit_seq: u64,
-    sort_time: String,
-    entity_key: String,
+pub(super) struct HistoryCursorPayload {
+    pub(super) version: u32,
+    pub(super) kind: HistoryCursorKind,
+    pub(super) at_commit_seq: u64,
+    pub(super) sort_time: String,
+    pub(super) entity_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    project_id: Option<String>,
+    pub(super) project_id: Option<String>,
 }
 
-struct HistoryProjectRow {
-    summary: HistoryProjectSummary,
-    project_key: Vec<u8>,
-    sort_time: String,
+pub(super) struct HistoryProjectRow {
+    pub(super) summary: HistoryProjectSummary,
+    pub(super) project_key: Vec<u8>,
+    pub(super) sort_time: String,
 }
 
-struct HistorySessionRow {
-    summary: HistorySessionSummary,
-    session_key: Vec<u8>,
-    sort_time: String,
+pub(super) struct HistorySessionRow {
+    pub(super) summary: HistorySessionSummary,
+    pub(super) session_key: Vec<u8>,
+    pub(super) sort_time: String,
 }
 
-fn validate_history_page_limit(limit: u32) -> Result<(), EngineError> {
+pub(super) fn validate_history_page_limit(limit: u32) -> Result<(), EngineError> {
     if !(1..=MAX_HISTORY_PAGE_LIMIT).contains(&limit) {
         return Err(EngineError::InvalidQuery(format!(
             "history page limit must be between 1 and {MAX_HISTORY_PAGE_LIMIT}, got {limit}"
@@ -2878,14 +2875,14 @@ fn validate_history_page_limit(limit: u32) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn encode_history_cursor(cursor: &HistoryCursorPayload) -> Result<String, EngineError> {
+pub(super) fn encode_history_cursor(cursor: &HistoryCursorPayload) -> Result<String, EngineError> {
     let json = serde_json::to_vec(cursor).map_err(|error| {
         EngineError::InvalidQuery(format!("could not encode history cursor: {error}"))
     })?;
     Ok(URL_SAFE_NO_PAD.encode(json))
 }
 
-fn decode_history_cursor(
+pub(super) fn decode_history_cursor(
     value: &str,
     expected_kind: HistoryCursorKind,
     expected_project_id: Option<&str>,
@@ -2928,7 +2925,9 @@ fn decode_history_cursor(
     Ok(cursor)
 }
 
-fn cursor_entity_key(cursor: Option<&HistoryCursorPayload>) -> Result<Vec<u8>, EngineError> {
+pub(super) fn cursor_entity_key(
+    cursor: Option<&HistoryCursorPayload>,
+) -> Result<Vec<u8>, EngineError> {
     cursor
         .map(|cursor| {
             URL_SAFE_NO_PAD.decode(&cursor.entity_key).map_err(|_| {
@@ -2939,7 +2938,7 @@ fn cursor_entity_key(cursor: Option<&HistoryCursorPayload>) -> Result<Vec<u8>, E
         .map(|key| key.unwrap_or_default())
 }
 
-fn validate_history_cursor_watermark(
+pub(super) fn validate_history_cursor_watermark(
     cursor: Option<&HistoryCursorPayload>,
     current_watermark: u64,
 ) -> Result<(), EngineError> {
@@ -2954,626 +2953,7 @@ fn validate_history_cursor_watermark(
     Ok(())
 }
 
-fn read_history_projects(
-    connection: &Connection,
-    request: &HistoryProjectPageRequest,
-) -> Result<HistoryProjectPage, EngineError> {
-    validate_history_page_limit(request.limit)?;
-    let cursor = request
-        .cursor
-        .as_deref()
-        .map(|value| decode_history_cursor(value, HistoryCursorKind::Projects, None))
-        .transpose()?;
-    let cursor_key = cursor_entity_key(cursor.as_ref())?;
-    let cursor_time = cursor
-        .as_ref()
-        .map(|cursor| cursor.sort_time.as_str())
-        .unwrap_or("");
-
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| query_sqlite_error("begin history project snapshot", error))?;
-    let watermark = read_committed_watermark(&transaction)?;
-    validate_history_cursor_watermark(cursor.as_ref(), watermark)?;
-    let mut statement = transaction
-        .prepare(
-            r#"
-            WITH project_evidence AS (
-                SELECT cs.project_key, cs.native_project_key,
-                       fr.source_instance_id, cs.last_commit_seq
-                FROM canonical_sessions cs
-                JOIN fact_records fr ON fr.fact_id = cs.fact_id
-                UNION ALL
-                SELECT ci.project_key, ci.native_project_key,
-                       fr.source_instance_id, ci.last_commit_seq
-                FROM canonical_session_indexes ci
-                JOIN fact_records fr ON fr.fact_id = ci.decisive_fact_id
-                UNION ALL
-                SELECT md.project_key, md.native_project_key,
-                       fr.source_instance_id, md.last_commit_seq
-                FROM canonical_project_memory_documents md
-                JOIN fact_records fr ON fr.fact_id = md.decisive_fact_id
-            ),
-            projects AS (
-                SELECT project_key, MIN(native_project_key) AS native_project_key,
-                       MIN(source_instance_id) AS source_instance_id,
-                       MAX(last_commit_seq) AS evidence_commit_seq
-                FROM project_evidence
-                GROUP BY project_key
-            ),
-            session_stats AS (
-                SELECT project_key, COUNT(*) AS session_count,
-                       MAX(source_time) AS latest_session_at,
-                       MAX(last_commit_seq) AS last_commit_seq
-                FROM canonical_sessions
-                GROUP BY project_key
-            ),
-            message_stats AS (
-                SELECT cs.project_key, COUNT(cm.message_key) AS message_count,
-                       MAX(cm.source_time) AS latest_message_at,
-                       MAX(cm.last_commit_seq) AS last_commit_seq
-                FROM canonical_sessions cs
-                JOIN canonical_messages cm ON cm.session_key = cs.session_key
-                GROUP BY cs.project_key
-            ),
-            index_entry_stats AS (
-                SELECT project_key,
-                       MAX(CASE WHEN resolution_status = 'resolved' THEN modified_at END)
-                           AS latest_index_at,
-                       MAX(last_commit_seq) AS last_commit_seq
-                FROM canonical_session_index_entries
-                GROUP BY project_key
-            ),
-            memory_stats AS (
-                SELECT project_key, COUNT(*) AS document_count,
-                       MAX(is_index) AS has_index,
-                       MAX(last_commit_seq) AS last_commit_seq
-                FROM canonical_project_memory_documents
-                GROUP BY project_key
-            ),
-            project_rows AS (
-                SELECT p.project_key, si.adapter_id, p.source_instance_id,
-                       p.native_project_key,
-                       COALESCE(ss.session_count, 0) AS session_count,
-                       COALESCE(ms.message_count, 0) AS message_count,
-                       COALESCE(mem.document_count, 0) AS memory_document_count,
-                       COALESCE(mem.has_index, 0) AS has_memory_index,
-                       MAX(
-                           COALESCE(ms.latest_message_at, ''),
-                           COALESCE(ss.latest_session_at, ''),
-                           COALESCE(ies.latest_index_at, '')
-                       ) AS activity_sort,
-                       CASE
-                           WHEN COALESCE(ms.latest_message_at, '') != ''
-                            AND ms.latest_message_at = MAX(
-                                COALESCE(ms.latest_message_at, ''),
-                                COALESCE(ss.latest_session_at, ''),
-                                COALESCE(ies.latest_index_at, '')
-                            ) THEN 'message'
-                           WHEN COALESCE(ss.latest_session_at, '') != ''
-                            AND ss.latest_session_at = MAX(
-                                COALESCE(ms.latest_message_at, ''),
-                                COALESCE(ss.latest_session_at, ''),
-                                COALESCE(ies.latest_index_at, '')
-                            ) THEN 'session'
-                           WHEN COALESCE(ies.latest_index_at, '') != '' THEN 'session_index'
-                           ELSE NULL
-                       END AS activity_source,
-                       ci.index_status, ci.original_path, ci.entry_count,
-                       ci.assertion_count, ci.competing_snapshot_count,
-                       ci.last_commit_seq AS index_commit_seq,
-                       MAX(
-                           p.evidence_commit_seq,
-                           COALESCE(ss.last_commit_seq, 0),
-                           COALESCE(ms.last_commit_seq, 0),
-                           COALESCE(ies.last_commit_seq, 0),
-                           COALESCE(mem.last_commit_seq, 0),
-                           COALESCE(ci.last_commit_seq, 0)
-                       ) AS last_commit_seq
-                FROM projects p
-                JOIN source_instances si ON si.source_instance_id = p.source_instance_id
-                LEFT JOIN session_stats ss ON ss.project_key = p.project_key
-                LEFT JOIN message_stats ms ON ms.project_key = p.project_key
-                LEFT JOIN index_entry_stats ies ON ies.project_key = p.project_key
-                LEFT JOIN memory_stats mem ON mem.project_key = p.project_key
-                LEFT JOIN canonical_session_indexes ci ON ci.project_key = p.project_key
-            )
-            SELECT project_key, adapter_id, source_instance_id, native_project_key,
-                   session_count, message_count, memory_document_count, has_memory_index,
-                   activity_sort, activity_source,
-                   index_status, original_path, entry_count, assertion_count,
-                   competing_snapshot_count, index_commit_seq, last_commit_seq
-            FROM project_rows
-            WHERE (?1 = 0)
-               OR activity_sort < ?2
-               OR (activity_sort = ?2 AND project_key < ?3)
-            ORDER BY activity_sort DESC, project_key DESC
-            LIMIT ?4
-            "#,
-        )
-        .map_err(|error| query_sqlite_error("prepare history project page", error))?;
-    let mut rows = statement
-        .query(rusqlite::params![
-            i64::from(cursor.is_some()),
-            cursor_time,
-            cursor_key,
-            i64::from(request.limit) + 1,
-        ])
-        .map_err(|error| query_sqlite_error("execute history project page", error))?;
-    let mut projects = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| query_sqlite_error("advance history project page", error))?
-    {
-        let project_key: Vec<u8> = row
-            .get(0)
-            .map_err(|error| query_sqlite_error("decode history project key", error))?;
-        let source_instance_id = decode_nonnegative_u64(
-            row.get(2)
-                .map_err(|error| query_sqlite_error("decode history source instance", error))?,
-            "history source instance id",
-        )?;
-        let activity_sort: String = row
-            .get(8)
-            .map_err(|error| query_sqlite_error("decode history project order", error))?;
-        let index_status: Option<String> = row
-            .get(10)
-            .map_err(|error| query_sqlite_error("decode history project index status", error))?;
-        let index = index_status
-            .map(|status| {
-                Ok(HistoryProjectIndexSummary {
-                    status,
-                    original_path: row.get(11).map_err(|error| {
-                        query_sqlite_error("decode history project original path", error)
-                    })?,
-                    entry_count: decode_nonnegative_u64(
-                        row.get(12).map_err(|error| {
-                            query_sqlite_error("decode history project index entries", error)
-                        })?,
-                        "history project index entry count",
-                    )?,
-                    assertion_count: decode_nonnegative_u64(
-                        row.get(13).map_err(|error| {
-                            query_sqlite_error("decode history project index assertions", error)
-                        })?,
-                        "history project index assertion count",
-                    )?,
-                    competing_snapshot_count: decode_nonnegative_u64(
-                        row.get(14).map_err(|error| {
-                            query_sqlite_error("decode history project competing snapshots", error)
-                        })?,
-                        "history project competing snapshot count",
-                    )?,
-                    last_commit_seq: decode_nonnegative_u64(
-                        row.get(15).map_err(|error| {
-                            query_sqlite_error("decode history project index commit", error)
-                        })?,
-                        "history project index commit sequence",
-                    )?,
-                })
-            })
-            .transpose()?;
-        projects.push(HistoryProjectRow {
-            summary: HistoryProjectSummary {
-                project_id: encode_entity_id(PROJECT_ID_PREFIX, &project_key),
-                adapter_id: row
-                    .get(1)
-                    .map_err(|error| query_sqlite_error("decode history adapter id", error))?,
-                source_instance_id,
-                native_project_key: row.get(3).map_err(|error| {
-                    query_sqlite_error("decode native history project key", error)
-                })?,
-                transcript_session_count: decode_nonnegative_u64(
-                    row.get(4).map_err(|error| {
-                        query_sqlite_error("decode history project session count", error)
-                    })?,
-                    "history project session count",
-                )?,
-                message_count: decode_nonnegative_u64(
-                    row.get(5).map_err(|error| {
-                        query_sqlite_error("decode history project message count", error)
-                    })?,
-                    "history project message count",
-                )?,
-                memory_document_count: decode_nonnegative_u64(
-                    row.get(6).map_err(|error| {
-                        query_sqlite_error("decode history project memory count", error)
-                    })?,
-                    "history project memory document count",
-                )?,
-                has_memory_index: row.get::<_, i64>(7).map_err(|error| {
-                    query_sqlite_error("decode history project memory index flag", error)
-                })? != 0,
-                latest_activity_at: (!activity_sort.is_empty()).then(|| activity_sort.clone()),
-                latest_activity_source: row.get(9).map_err(|error| {
-                    query_sqlite_error("decode history project activity source", error)
-                })?,
-                index,
-                last_commit_seq: decode_nonnegative_u64(
-                    row.get(16).map_err(|error| {
-                        query_sqlite_error("decode history project commit sequence", error)
-                    })?,
-                    "history project commit sequence",
-                )?,
-            },
-            project_key,
-            sort_time: activity_sort,
-        });
-    }
-    drop(rows);
-    drop(statement);
-    transaction
-        .commit()
-        .map_err(|error| query_sqlite_error("finish history project snapshot", error))?;
-
-    let has_more = projects.len() > request.limit as usize;
-    if has_more {
-        projects.truncate(request.limit as usize);
-    }
-    let next_cursor = if has_more {
-        projects
-            .last()
-            .map(|row| {
-                encode_history_cursor(&HistoryCursorPayload {
-                    version: HISTORY_QUERY_CONTRACT_VERSION,
-                    kind: HistoryCursorKind::Projects,
-                    at_commit_seq: watermark,
-                    sort_time: row.sort_time.clone(),
-                    entity_key: URL_SAFE_NO_PAD.encode(&row.project_key),
-                    project_id: None,
-                })
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    Ok(HistoryProjectPage {
-        contract_version: HISTORY_QUERY_CONTRACT_VERSION,
-        at_commit_seq: watermark,
-        items: projects.into_iter().map(|row| row.summary).collect(),
-        next_cursor,
-    })
-}
-
-fn read_history_sessions(
-    connection: &Connection,
-    request: &HistorySessionPageRequest,
-) -> Result<HistorySessionPage, EngineError> {
-    validate_history_page_limit(request.limit)?;
-    let project_key = decode_entity_id(&request.project_id, PROJECT_ID_PREFIX, "project id")?;
-    let cursor = request
-        .cursor
-        .as_deref()
-        .map(|value| {
-            decode_history_cursor(
-                value,
-                HistoryCursorKind::Sessions,
-                Some(request.project_id.as_str()),
-            )
-        })
-        .transpose()?;
-    let cursor_key = cursor_entity_key(cursor.as_ref())?;
-    let cursor_time = cursor
-        .as_ref()
-        .map(|cursor| cursor.sort_time.as_str())
-        .unwrap_or("");
-
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| query_sqlite_error("begin history session snapshot", error))?;
-    let watermark = read_committed_watermark(&transaction)?;
-    validate_history_cursor_watermark(cursor.as_ref(), watermark)?;
-    let mut statement = transaction
-        .prepare(
-            r#"
-            WITH target_sessions AS (
-                SELECT *
-                FROM canonical_sessions
-                WHERE project_key = ?1
-            ),
-            message_stats AS (
-                SELECT cm.session_key, COUNT(*) AS message_count,
-                       MIN(cm.source_time) AS first_message_at,
-                       MAX(cm.source_time) AS last_message_at,
-                       MAX(cm.last_commit_seq) AS last_commit_seq
-                FROM canonical_messages cm
-                JOIN target_sessions target ON target.session_key = cm.session_key
-                GROUP BY cm.session_key
-            ),
-            session_rows AS (
-                SELECT cs.session_key, cs.project_key, cs.native_session_id,
-                       cs.native_project_key, cs.cwd, cs.git_branch,
-                       cs.first_prompt, cs.ai_title, cs.custom_title,
-                       COALESCE(ms.message_count, 0) AS message_count,
-                       ms.first_message_at,
-                       (
-                           SELECT cm.source_time_quality
-                           FROM canonical_messages cm
-                           WHERE cm.session_key = cs.session_key
-                             AND cm.source_time = ms.first_message_at
-                           ORDER BY cm.message_key ASC
-                           LIMIT 1
-                       ) AS first_message_quality,
-                       ms.last_message_at,
-                       (
-                           SELECT cm.source_time_quality
-                           FROM canonical_messages cm
-                           WHERE cm.session_key = cs.session_key
-                             AND cm.source_time = ms.last_message_at
-                           ORDER BY cm.message_key DESC
-                           LIMIT 1
-                       ) AS last_message_quality,
-                       MAX(
-                           COALESCE(ms.last_message_at, ''),
-                           COALESCE(cs.source_time, ''),
-                           CASE
-                               WHEN si.transcript_status = 'present'
-                                AND si.resolution_status = 'resolved'
-                               THEN COALESCE(si.modified_at, '')
-                               ELSE ''
-                           END
-                       ) AS activity_sort,
-                       CASE
-                           WHEN COALESCE(ms.last_message_at, '') != ''
-                            AND ms.last_message_at = MAX(
-                                COALESCE(ms.last_message_at, ''),
-                                COALESCE(cs.source_time, ''),
-                                CASE
-                                    WHEN si.transcript_status = 'present'
-                                     AND si.resolution_status = 'resolved'
-                                    THEN COALESCE(si.modified_at, '')
-                                    ELSE ''
-                                END
-                            ) THEN 'message'
-                           WHEN COALESCE(cs.source_time, '') != ''
-                            AND cs.source_time = MAX(
-                                COALESCE(ms.last_message_at, ''),
-                                COALESCE(cs.source_time, ''),
-                                CASE
-                                    WHEN si.transcript_status = 'present'
-                                     AND si.resolution_status = 'resolved'
-                                    THEN COALESCE(si.modified_at, '')
-                                    ELSE ''
-                                END
-                            ) THEN 'session'
-                           WHEN si.transcript_status = 'present'
-                            AND si.resolution_status = 'resolved'
-                            AND COALESCE(si.modified_at, '') != '' THEN 'session_index'
-                           ELSE NULL
-                       END AS activity_source,
-                       si.full_path, si.file_mtime_ms, si.first_prompt AS index_first_prompt,
-                       si.summary, si.message_count AS index_message_count,
-                       si.created_at, si.created_at_quality, si.modified_at,
-                       si.modified_at_quality, si.git_branch AS index_git_branch,
-                       si.project_path, si.is_sidechain, si.transcript_status,
-                       si.resolution_status, si.assertion_count,
-                       si.competing_entry_count, si.identity_conflict,
-                       si.join_conflict, si.last_commit_seq AS index_commit_seq,
-                       MAX(
-                           cs.last_commit_seq,
-                           COALESCE(ms.last_commit_seq, 0),
-                           COALESCE(si.last_commit_seq, 0)
-                       ) AS last_commit_seq
-                FROM target_sessions cs
-                LEFT JOIN message_stats ms ON ms.session_key = cs.session_key
-                LEFT JOIN canonical_session_index_entries si ON si.session_key = cs.session_key
-            )
-            SELECT session_key, project_key, native_session_id, native_project_key,
-                   cwd, git_branch, first_prompt, ai_title, custom_title,
-                   message_count, first_message_at, first_message_quality,
-                   last_message_at, last_message_quality, activity_sort,
-                   activity_source, full_path, file_mtime_ms, index_first_prompt,
-                   summary, index_message_count, created_at, created_at_quality,
-                   modified_at, modified_at_quality, index_git_branch, project_path,
-                   is_sidechain, transcript_status, resolution_status,
-                   assertion_count, competing_entry_count, identity_conflict,
-                   join_conflict, index_commit_seq, last_commit_seq
-            FROM session_rows
-            WHERE (?2 = 0)
-               OR activity_sort < ?3
-               OR (activity_sort = ?3 AND session_key < ?4)
-            ORDER BY activity_sort DESC, session_key DESC
-            LIMIT ?5
-            "#,
-        )
-        .map_err(|error| query_sqlite_error("prepare history session page", error))?;
-    let mut rows = statement
-        .query(rusqlite::params![
-            project_key,
-            i64::from(cursor.is_some()),
-            cursor_time,
-            cursor_key,
-            i64::from(request.limit) + 1,
-        ])
-        .map_err(|error| query_sqlite_error("execute history session page", error))?;
-    let mut sessions = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .map_err(|error| query_sqlite_error("advance history session page", error))?
-    {
-        let session_key: Vec<u8> = row
-            .get(0)
-            .map_err(|error| query_sqlite_error("decode history session key", error))?;
-        let row_project_key: Vec<u8> = row
-            .get(1)
-            .map_err(|error| query_sqlite_error("decode history session project key", error))?;
-        let activity_sort: String = row
-            .get(14)
-            .map_err(|error| query_sqlite_error("decode history session order", error))?;
-        let index_full_path: Option<String> = row
-            .get(16)
-            .map_err(|error| query_sqlite_error("decode history session index path", error))?;
-        let index = index_full_path
-            .map(|full_path| {
-                Ok(HistorySessionIndexSummary {
-                    full_path,
-                    file_mtime_ms: decode_nonnegative_u64(
-                        row.get(17).map_err(|error| {
-                            query_sqlite_error("decode history session file mtime", error)
-                        })?,
-                        "history session file mtime",
-                    )?,
-                    first_prompt: row.get(18).map_err(|error| {
-                        query_sqlite_error("decode history session index prompt", error)
-                    })?,
-                    summary: row.get(19).map_err(|error| {
-                        query_sqlite_error("decode history session index summary", error)
-                    })?,
-                    message_count: decode_nonnegative_u64(
-                        row.get(20).map_err(|error| {
-                            query_sqlite_error("decode history session index message count", error)
-                        })?,
-                        "history session index message count",
-                    )?,
-                    created_at: row.get(21).map_err(|error| {
-                        query_sqlite_error("decode history session created time", error)
-                    })?,
-                    created_at_quality: row.get(22).map_err(|error| {
-                        query_sqlite_error("decode history session created quality", error)
-                    })?,
-                    modified_at: row.get(23).map_err(|error| {
-                        query_sqlite_error("decode history session modified time", error)
-                    })?,
-                    modified_at_quality: row.get(24).map_err(|error| {
-                        query_sqlite_error("decode history session modified quality", error)
-                    })?,
-                    git_branch: row.get(25).map_err(|error| {
-                        query_sqlite_error("decode history session index branch", error)
-                    })?,
-                    project_path: row.get(26).map_err(|error| {
-                        query_sqlite_error("decode history session project path", error)
-                    })?,
-                    is_sidechain: row.get::<_, i64>(27).map_err(|error| {
-                        query_sqlite_error("decode history session sidechain flag", error)
-                    })? != 0,
-                    transcript_status: row.get(28).map_err(|error| {
-                        query_sqlite_error("decode history session transcript status", error)
-                    })?,
-                    resolution_status: row.get(29).map_err(|error| {
-                        query_sqlite_error("decode history session resolution status", error)
-                    })?,
-                    assertion_count: decode_nonnegative_u64(
-                        row.get(30).map_err(|error| {
-                            query_sqlite_error("decode history session index assertions", error)
-                        })?,
-                        "history session index assertion count",
-                    )?,
-                    competing_entry_count: decode_nonnegative_u64(
-                        row.get(31).map_err(|error| {
-                            query_sqlite_error("decode history session competing entries", error)
-                        })?,
-                        "history session competing entry count",
-                    )?,
-                    identity_conflict: row.get::<_, i64>(32).map_err(|error| {
-                        query_sqlite_error("decode history session identity conflict", error)
-                    })? != 0,
-                    join_conflict: row.get::<_, i64>(33).map_err(|error| {
-                        query_sqlite_error("decode history session join conflict", error)
-                    })? != 0,
-                    last_commit_seq: decode_nonnegative_u64(
-                        row.get(34).map_err(|error| {
-                            query_sqlite_error("decode history session index commit", error)
-                        })?,
-                        "history session index commit sequence",
-                    )?,
-                })
-            })
-            .transpose()?;
-        sessions.push(HistorySessionRow {
-            summary: HistorySessionSummary {
-                session_id: encode_entity_id(SESSION_ID_PREFIX, &session_key),
-                project_id: encode_entity_id(PROJECT_ID_PREFIX, &row_project_key),
-                native_session_id: row.get(2).map_err(|error| {
-                    query_sqlite_error("decode native history session id", error)
-                })?,
-                native_project_key: row.get(3).map_err(|error| {
-                    query_sqlite_error("decode native history project key", error)
-                })?,
-                cwd: row
-                    .get(4)
-                    .map_err(|error| query_sqlite_error("decode history session cwd", error))?,
-                git_branch: row.get(5).map_err(|error| {
-                    query_sqlite_error("decode history session git branch", error)
-                })?,
-                first_prompt: row.get(6).map_err(|error| {
-                    query_sqlite_error("decode history session first prompt", error)
-                })?,
-                ai_title: row.get(7).map_err(|error| {
-                    query_sqlite_error("decode history session AI title", error)
-                })?,
-                custom_title: row.get(8).map_err(|error| {
-                    query_sqlite_error("decode history session custom title", error)
-                })?,
-                message_count: decode_nonnegative_u64(
-                    row.get(9).map_err(|error| {
-                        query_sqlite_error("decode history session message count", error)
-                    })?,
-                    "history session message count",
-                )?,
-                first_message_at: row.get(10).map_err(|error| {
-                    query_sqlite_error("decode history first message time", error)
-                })?,
-                first_message_time_quality: row.get(11).map_err(|error| {
-                    query_sqlite_error("decode history first message quality", error)
-                })?,
-                last_message_at: row.get(12).map_err(|error| {
-                    query_sqlite_error("decode history last message time", error)
-                })?,
-                last_message_time_quality: row.get(13).map_err(|error| {
-                    query_sqlite_error("decode history last message quality", error)
-                })?,
-                latest_activity_at: (!activity_sort.is_empty()).then(|| activity_sort.clone()),
-                latest_activity_source: row.get(15).map_err(|error| {
-                    query_sqlite_error("decode history session activity source", error)
-                })?,
-                index,
-                last_commit_seq: decode_nonnegative_u64(
-                    row.get(35).map_err(|error| {
-                        query_sqlite_error("decode history session commit sequence", error)
-                    })?,
-                    "history session commit sequence",
-                )?,
-            },
-            session_key,
-            sort_time: activity_sort,
-        });
-    }
-    drop(rows);
-    drop(statement);
-    transaction
-        .commit()
-        .map_err(|error| query_sqlite_error("finish history session snapshot", error))?;
-
-    let has_more = sessions.len() > request.limit as usize;
-    if has_more {
-        sessions.truncate(request.limit as usize);
-    }
-    let next_cursor = if has_more {
-        sessions
-            .last()
-            .map(|row| {
-                encode_history_cursor(&HistoryCursorPayload {
-                    version: HISTORY_QUERY_CONTRACT_VERSION,
-                    kind: HistoryCursorKind::Sessions,
-                    at_commit_seq: watermark,
-                    sort_time: row.sort_time.clone(),
-                    entity_key: URL_SAFE_NO_PAD.encode(&row.session_key),
-                    project_id: Some(request.project_id.clone()),
-                })
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    Ok(HistorySessionPage {
-        contract_version: HISTORY_QUERY_CONTRACT_VERSION,
-        at_commit_seq: watermark,
-        project_id: request.project_id.clone(),
-        items: sessions.into_iter().map(|row| row.summary).collect(),
-        next_cursor,
-    })
-}
-
+/// Decode the catalog reference a history row carries, if discovery has run.
 fn read_overview(connection: &Connection) -> Result<QueryOverview, EngineError> {
     let transaction = connection
         .unchecked_transaction()
@@ -4319,7 +3699,7 @@ fn decode_cursor(commit_seq: i64, ordinal: i64) -> Result<ChangeCursor, EngineEr
     })
 }
 
-fn decode_nonnegative_u64(value: i64, field: &'static str) -> Result<u64, EngineError> {
+pub(super) fn decode_nonnegative_u64(value: i64, field: &'static str) -> Result<u64, EngineError> {
     u64::try_from(value).map_err(|_| EngineError::Sqlite {
         operation: "decode source catalog integer",
         detail: format!("{field} was negative: {value}"),
@@ -4356,7 +3736,7 @@ fn to_query_i64(value: u64, field: &'static str) -> Result<i64, EngineError> {
         .map_err(|_| EngineError::InvalidQuery(format!("{field} exceeds SQLite integer range")))
 }
 
-fn query_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
+pub(super) fn query_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
     EngineError::Sqlite {
         operation,
         detail: error.to_string(),
@@ -4476,20 +3856,18 @@ mod tests {
             .query_row("PRAGMA data_version", [], |row| row.get(0))
             .unwrap();
         let overview = client.overview().unwrap();
-        let projects = client
-            .history_projects(HistoryProjectPageRequest {
-                cursor: None,
-                limit: DEFAULT_HISTORY_PAGE_LIMIT,
-            })
-            .unwrap();
+        let page = HistoryProjectPageRequest {
+            cursor: None,
+            limit: DEFAULT_HISTORY_PAGE_LIMIT,
+        };
+        let projects = client.history_projects(page).unwrap();
         let missing_project_id = encode_entity_id(PROJECT_ID_PREFIX, b"missing-project");
-        let sessions = client
-            .history_sessions(HistorySessionPageRequest {
-                project_id: missing_project_id.clone(),
-                cursor: None,
-                limit: DEFAULT_HISTORY_PAGE_LIMIT,
-            })
-            .unwrap();
+        let page = HistorySessionPageRequest {
+            project_id: missing_project_id.clone(),
+            cursor: None,
+            limit: DEFAULT_HISTORY_PAGE_LIMIT,
+        };
+        let sessions = client.history_sessions(page).unwrap();
         let missing_session_id = encode_entity_id(SESSION_ID_PREFIX, b"missing-session");
         let session_details = client
             .session_details(SessionDetailsRequest {
@@ -4714,10 +4092,11 @@ mod tests {
 
         let queued_client = client.clone();
         let queued = thread::spawn(move || {
-            queued_client.history_projects(HistoryProjectPageRequest {
+            let page = HistoryProjectPageRequest {
                 cursor: None,
                 limit: DEFAULT_HISTORY_PAGE_LIMIT,
-            })
+            };
+            queued_client.history_projects(page)
         });
         while client.commands.is_empty() {
             thread::yield_now();

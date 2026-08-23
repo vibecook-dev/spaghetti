@@ -11,6 +11,7 @@ mod commit;
 mod coordinator;
 mod coverage_query;
 mod detail_query;
+mod history_query;
 mod ingest_profile;
 mod local_permissions;
 mod memory_projection;
@@ -786,7 +787,7 @@ impl SpaghettiEngineCore {
         request: CatalogProjectPageRequest,
     ) -> Result<CatalogProjectPage, EngineError> {
         let (_, queries) = self.clients()?;
-        queries.catalog_projects(request, self.search_ready())
+        queries.catalog_projects(request)
     }
 
     /// List catalog sessions, optionally scoped to one project. Rows carry
@@ -796,7 +797,7 @@ impl SpaghettiEngineCore {
         request: CatalogSessionPageRequest,
     ) -> Result<CatalogSessionPage, EngineError> {
         let (_, queries) = self.clients()?;
-        queries.catalog_sessions(request, self.search_ready())
+        queries.catalog_sessions(request)
     }
 
     /// Resolve one persisted RFC 012A external reference against the current
@@ -806,7 +807,7 @@ impl SpaghettiEngineCore {
         external_ref: String,
     ) -> Result<CatalogEntityResolution, EngineError> {
         let (_, queries) = self.clients()?;
-        queries.resolve_catalog_entity(external_ref, self.search_ready())
+        queries.resolve_catalog_entity(external_ref)
     }
 
     /// Block until every configured supervisor has finished starting.
@@ -823,18 +824,7 @@ impl SpaghettiEngineCore {
     /// capabilities, artifacts, and search, all derived from committed rows.
     pub fn readiness(&self) -> Result<Readiness, EngineError> {
         let (_, queries) = self.clients()?;
-        queries.readiness(self.search_ready())
-    }
-
-    /// Full-text structures are finalized only after query bootstrap ends, so
-    /// this is engine state rather than a row and is passed into the readers.
-    fn search_ready(&self) -> bool {
-        let lifecycle = self.lock_lifecycle();
-        lifecycle.phase == LifecyclePhase::Running
-            && lifecycle
-                .runtime
-                .as_ref()
-                .is_some_and(|runtime| !runtime.bootstrap_active)
+        queries.readiness()
     }
 
     /// Commit one catalog discovery pass through the single writer.

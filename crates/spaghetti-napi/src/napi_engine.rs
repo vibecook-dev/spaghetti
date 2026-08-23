@@ -430,6 +430,12 @@ pub struct EngineHistoryProject {
     pub latest_activity_at: Option<String>,
     pub latest_activity_source: Option<String>,
     pub index: Option<EngineHistoryProjectIndex>,
+    /// Persistable RFC 012A external reference; absent until discovery has
+    /// seen this project.
+    pub external_ref: Option<String>,
+    /// `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
+    /// the same derivation the catalog page uses.
+    pub catalog_state: Option<String>,
     pub last_commit_seq: f64,
 }
 
@@ -447,6 +453,8 @@ impl From<HistoryProjectSummary> for EngineHistoryProject {
             latest_activity_at: value.latest_activity_at,
             latest_activity_source: value.latest_activity_source,
             index: value.index.map(Into::into),
+            external_ref: value.external_ref,
+            catalog_state: value.catalog_state,
             last_commit_seq: value.last_commit_seq as f64,
         }
     }
@@ -568,6 +576,12 @@ pub struct EngineHistorySession {
     pub latest_activity_at: Option<String>,
     pub latest_activity_source: Option<String>,
     pub index: Option<EngineHistorySessionIndex>,
+    /// Persistable RFC 012A external reference; absent until discovery has
+    /// seen this session.
+    pub external_ref: Option<String>,
+    /// `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
+    /// the same derivation the catalog page uses.
+    pub catalog_state: Option<String>,
     pub last_commit_seq: f64,
 }
 
@@ -591,6 +605,8 @@ impl From<HistorySessionSummary> for EngineHistorySession {
             latest_activity_at: value.latest_activity_at,
             latest_activity_source: value.latest_activity_source,
             index: value.index.map(Into::into),
+            external_ref: value.external_ref,
+            catalog_state: value.catalog_state,
             last_commit_seq: value.last_commit_seq as f64,
         }
     }
@@ -4351,8 +4367,11 @@ impl SpaghettiEngine {
     /// List catalog projects — everything discoverable, complete or explicitly
     /// degraded. Available seconds after `startConfiguredObservation`, without
     /// waiting for history, usage, or full-text search.
+    ///
+    /// This is a different question from `listHistoryProjects`, which reports
+    /// what has been decoded. Both are kept because both are asked.
     #[napi(ts_return_type = "Promise<EngineCatalogProjectPage>")]
-    pub fn list_projects(
+    pub fn list_catalog_projects(
         &self,
         options: Option<EngineCatalogPageOptions>,
         signal: Option<AbortSignal>,
@@ -4366,7 +4385,7 @@ impl SpaghettiEngine {
     /// List catalog sessions, optionally within one project. Rows carry the
     /// evidence behind their project association and any competing identity.
     #[napi(ts_return_type = "Promise<EngineCatalogSessionPage>")]
-    pub fn list_sessions(
+    pub fn list_catalog_sessions(
         &self,
         options: Option<EngineCatalogSessionPageOptions>,
         signal: Option<AbortSignal>,

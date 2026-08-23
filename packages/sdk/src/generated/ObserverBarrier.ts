@@ -7,7 +7,7 @@ import type { ObserverEventId } from "./ObserverEventId.js";
  * Delivered at `bootstrap_complete` and `resync_complete`. Everything a
  * consumer needs to swap its staged epoch atomically.
  */
-export type ObserverBarrier = { event_id: ObserverEventId, sequence: number, scope_epoch: number, 
+export type ObserverBarrier = { event_id: ObserverEventId, sequence: number, scope_epoch: number,
 /**
  * True once the root transcript exists. A named-but-absent root produces
  * an empty complete bootstrap, not an error.

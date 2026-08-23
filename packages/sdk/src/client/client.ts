@@ -87,18 +87,18 @@ class DefaultSpaghettiClient implements SpaghettiClient {
     return this.query('resolveCatalogEntity', request, options);
   }
 
-  listHistoryProjects(
-    request?: Exclude<SpaghettiClientRequestMap['listHistoryProjects'], undefined>,
+  listCatalogProjects(
+    request?: Exclude<SpaghettiClientRequestMap['listCatalogProjects'], undefined>,
     options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['listHistoryProjects']> {
-    return this.query('listHistoryProjects', request, options);
+  ): Promise<SpaghettiClientResponseMap['listCatalogProjects']> {
+    return this.query('listCatalogProjects', request, options);
   }
 
-  listHistorySessions(
-    request: SpaghettiClientRequestMap['listHistorySessions'],
+  listCatalogSessions(
+    request?: Exclude<SpaghettiClientRequestMap['listCatalogSessions'], undefined>,
     options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['listHistorySessions']> {
-    return this.query('listHistorySessions', request, options);
+  ): Promise<SpaghettiClientResponseMap['listCatalogSessions']> {
+    return this.query('listCatalogSessions', request, options);
   }
 
   replayChanges(
@@ -123,7 +123,7 @@ class DefaultSpaghettiClient implements SpaghettiClient {
   }
 
   listSessions(
-    request?: Exclude<SpaghettiClientRequestMap['listSessions'], undefined>,
+    request: SpaghettiClientRequestMap['listSessions'],
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['listSessions']> {
     return this.query('listSessions', request, options);

@@ -9,6 +9,8 @@
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use rusqlite::{params, Connection, Row};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use super::super::query_identity::{
     decode_entity_id, encode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX,
@@ -40,40 +42,54 @@ pub struct CatalogSessionPageRequest {
     pub adapter_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct CatalogProjectRow {
     pub project_id: String,
     pub external_ref: String,
     pub adapter_id: String,
     pub native_project_key: String,
+    #[ts(optional)]
     pub display_name: Option<String>,
+    #[ts(optional)]
     pub display_path: Option<String>,
     pub catalog_state: CatalogState,
     pub degraded: bool,
+    #[ts(optional)]
     pub degraded_reason: Option<String>,
     pub session_count: u64,
     pub transcript_session_count: u64,
     pub hydrated_session_count: u64,
+    #[ts(optional)]
     pub latest_activity_at: Option<String>,
     pub last_commit_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct CatalogSessionRow {
     pub session_id: String,
     pub project_id: String,
     pub external_ref: String,
     pub adapter_id: String,
+    #[ts(optional)]
     pub native_session_id: Option<String>,
+    #[ts(optional)]
     pub title: Option<String>,
     pub catalog_state: CatalogState,
     pub degraded: bool,
+    #[ts(optional)]
     pub degraded_reason: Option<String>,
     pub association_basis: String,
     pub association_quality: String,
     pub association_provenance: String,
+    #[ts(optional)]
     pub native_created_at: Option<String>,
+    #[ts(optional)]
     pub native_updated_at: Option<String>,
+    #[ts(optional)]
     pub native_message_count: Option<u64>,
     pub decoded_message_count: u64,
     pub transcript_present: bool,
@@ -83,23 +99,31 @@ pub struct CatalogSessionRow {
 
 /// A competing project association that lost precedence but keeps its
 /// evidence. RFC 012B forbids merging these away.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct IdentityConflict {
     pub competing_native_project_key: String,
     pub basis: String,
     pub provenance: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct CatalogProjectPage {
     pub projects: Vec<CatalogProjectRow>,
+    #[ts(optional)]
     pub cursor: Option<String>,
     pub at_commit_seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct CatalogSessionPage {
     pub sessions: Vec<CatalogSessionRow>,
+    #[ts(optional)]
     pub cursor: Option<String>,
     pub at_commit_seq: u64,
 }
@@ -124,15 +148,84 @@ const SESSION_STATE_SQL: &str = r#"
         WHEN cs.transcript_present = 0 THEN 'discovered'
         WHEN can.session_key IS NULL THEN 'discovered'
         WHEN COALESCE(msg.message_count, 0) = 0 THEN 'transcript_backed'
-        WHEN ?1 = 1 THEN 'searchable'
+        WHEN (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
+            THEN 'searchable'
         ELSE 'hydrated'
     END
 "#;
 
+/// SQL the history page borrows so both surfaces derive `catalog_state` from
+/// one definition. Keeping it here — rather than inline in `query_pool.rs` —
+/// is what stops the two derivations drifting apart.
+pub const HISTORY_PROJECT_CATALOG_CTE: &str = r#"
+    catalog_rollup AS (
+        SELECT cs.project_key,
+               COUNT(*) AS catalog_sessions,
+               SUM(
+                   CASE WHEN cs.transcript_present = 1 AND can.session_key IS NOT NULL
+                        THEN 1 ELSE 0 END
+               ) AS backed_sessions,
+               SUM(CASE WHEN COALESCE(cmsg.message_count, 0) > 0 THEN 1 ELSE 0 END)
+                   AS hydrated_sessions
+        FROM catalog_sessions cs
+        LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key
+        LEFT JOIN (
+            SELECT session_key, COUNT(*) AS message_count
+            FROM canonical_messages GROUP BY session_key
+        ) cmsg ON cmsg.session_key = cs.session_key
+        GROUP BY cs.project_key
+    ),
+"#;
+
+/// Whether full-text structures are finalized.
+///
+/// The marker is durable (`schema_meta.query_bootstrap_state` exists only
+/// while finalization is incomplete), so every surface reads the same row
+/// instead of being handed an engine flag. That is what keeps the history page
+/// and the catalog page from disagreeing about one session.
+pub const SEARCH_READY_SQL: &str = r#"
+    (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
+"#;
+
+/// Projected columns for a history project row.
+pub const HISTORY_PROJECT_CATALOG_COLUMNS: &str = r#"
+    cp.external_ref AS catalog_external_ref,
+    CASE
+        WHEN cp.project_key IS NULL THEN NULL
+        WHEN COALESCE(cr.catalog_sessions, 0) = 0 THEN 'discovered'
+        WHEN cr.hydrated_sessions < cr.catalog_sessions
+            THEN CASE WHEN cr.backed_sessions >= cr.catalog_sessions
+                      THEN 'transcript_backed' ELSE 'discovered' END
+        WHEN (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
+            THEN 'searchable'
+        ELSE 'hydrated'
+    END AS catalog_state,
+"#;
+
+pub const HISTORY_PROJECT_CATALOG_JOINS: &str = r#"
+    LEFT JOIN catalog_projects cp ON cp.project_key = p.project_key
+    LEFT JOIN catalog_rollup cr ON cr.project_key = p.project_key
+"#;
+
+/// Projected columns for a history session row.
+pub const HISTORY_SESSION_CATALOG_COLUMNS: &str = r#"
+    cat.external_ref AS catalog_external_ref,
+    CASE
+        WHEN cat.session_key IS NULL THEN NULL
+        WHEN cat.transcript_present = 0 THEN 'discovered'
+        WHEN COALESCE(ms.message_count, 0) = 0 THEN 'transcript_backed'
+        WHEN (SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')
+            THEN 'searchable'
+        ELSE 'hydrated'
+    END AS catalog_state,
+"#;
+
+pub const HISTORY_SESSION_CATALOG_JOIN: &str =
+    "LEFT JOIN catalog_sessions cat ON cat.session_key = cs.session_key";
+
 pub fn read_project_page(
     connection: &Connection,
     request: &CatalogProjectPageRequest,
-    search_ready: bool,
 ) -> Result<CatalogProjectPage, EngineError> {
     let limit = validate_limit(request.bounds.limit)?;
     let transaction = connection
@@ -176,15 +269,15 @@ pub fn read_project_page(
         FROM catalog_projects p
         LEFT JOIN rollup r ON r.project_key = p.project_key
         LEFT JOIN catalog_sources src ON src.source_instance_id = p.source_instance_id
-        WHERE p.last_commit_seq <= ?2
+        WHERE p.last_commit_seq <= ?1
           AND ({adapter_filter})
           AND (
-              ?3 = 0
-              OR COALESCE(r.latest_activity, '') < ?4
-              OR (COALESCE(r.latest_activity, '') = ?4 AND p.project_key < ?5)
+              ?2 = 0
+              OR COALESCE(r.latest_activity, '') < ?3
+              OR (COALESCE(r.latest_activity, '') = ?3 AND p.project_key < ?4)
           )
         ORDER BY COALESCE(r.latest_activity, '') DESC, p.project_key DESC
-        LIMIT ?6
+        LIMIT ?5
         "#
     );
 
@@ -194,7 +287,6 @@ pub fn read_project_page(
     let rows = statement
         .query_map(
             params![
-                i64::from(search_ready),
                 to_i64(watermark)?,
                 i64::from(!cursor_key.is_empty() || !cursor_sort.is_empty()),
                 cursor_sort,
@@ -244,7 +336,6 @@ pub fn read_project_page(
 pub fn read_session_page(
     connection: &Connection,
     request: &CatalogSessionPageRequest,
-    search_ready: bool,
 ) -> Result<CatalogSessionPage, EngineError> {
     let limit = validate_limit(request.bounds.limit)?;
     let project_key = request
@@ -279,16 +370,16 @@ pub fn read_session_page(
             FROM canonical_messages GROUP BY session_key
         ) msg ON msg.session_key = cs.session_key
         LEFT JOIN catalog_sources src ON src.source_instance_id = cs.source_instance_id
-        WHERE cs.last_commit_seq <= ?2
-          AND (?7 IS NULL OR cs.project_key = ?7)
+        WHERE cs.last_commit_seq <= ?1
+          AND (?6 IS NULL OR cs.project_key = ?6)
           AND ({adapter_filter})
           AND (
-              ?3 = 0
-              OR cs.sort_time < ?4
-              OR (cs.sort_time = ?4 AND cs.session_key < ?5)
+              ?2 = 0
+              OR cs.sort_time < ?3
+              OR (cs.sort_time = ?3 AND cs.session_key < ?4)
           )
         ORDER BY cs.sort_time DESC, cs.session_key DESC
-        LIMIT ?6
+        LIMIT ?5
         "#
     );
 
@@ -298,7 +389,6 @@ pub fn read_session_page(
     let rows = statement
         .query_map(
             params![
-                i64::from(search_ready),
                 to_i64(watermark)?,
                 i64::from(!cursor_key.is_empty() || !cursor_sort.is_empty()),
                 cursor_sort,
@@ -356,7 +446,6 @@ pub fn read_session_page(
 pub fn resolve_catalog_entity(
     connection: &Connection,
     external_ref: &str,
-    search_ready: bool,
 ) -> Result<CatalogEntityResolution, EngineError> {
     let Some(digest) = decode_external_ref(external_ref) else {
         return Ok(CatalogEntityResolution::Unknown);
@@ -379,7 +468,6 @@ pub fn resolve_catalog_entity(
                 },
                 adapter_ids: Vec::new(),
             },
-            search_ready,
         )?;
         let wanted = encode_entity_id(PROJECT_ID_PREFIX, &project_key);
         return Ok(page
@@ -410,7 +498,6 @@ pub fn resolve_catalog_entity(
             project_id: None,
             adapter_ids: Vec::new(),
         },
-        search_ready,
     )?;
     let wanted = encode_entity_id(SESSION_ID_PREFIX, &session_key);
     Ok(page
@@ -612,7 +699,9 @@ fn decode_cursor(value: Option<&str>, watermark: u64) -> Result<Option<Cursor>, 
     }))
 }
 
-fn encode_external_ref(digest: &[u8]) -> String {
+/// Text form of a persisted external reference. Shared with the history page
+/// so both surfaces spell the same reference identically.
+pub fn encode_external_ref(digest: &[u8]) -> String {
     format!(
         "{EXTERNAL_REF_ENCODING_VERSION}:{}",
         URL_SAFE_NO_PAD.encode(digest)

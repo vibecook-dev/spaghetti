@@ -489,8 +489,8 @@ describe('NapiTransport dispatch', () => {
     await client.listProjects({ limit: 1 });
     await client.listSessions({ projectId: 'project' });
     await client.resolveCatalogEntity({ externalRef: '1:ref' });
-    await client.listHistoryProjects({ limit: 1 });
-    await client.listHistorySessions({ projectId: 'project' });
+    await client.listCatalogProjects({ limit: 1 });
+    await client.listCatalogSessions({ projectId: 'project' });
     await client.getSession({ sessionId: 'session' });
     await client.getMessages({ projectId: 'project', sessionId: 'session' });
     await client.search({ text: 'needle' });
@@ -534,11 +534,11 @@ describe('NapiTransport dispatch', () => {
         'replayChanges',
         'waitForCommit',
         'readiness',
-        'listProjects',
-        'listSessions',
-        'resolveCatalogEntity',
         'listHistoryProjects',
         'listHistorySessions',
+        'resolveCatalogEntity',
+        'listCatalogProjects',
+        'listCatalogSessions',
         'getSession',
         'getMessages',
         'search',
@@ -639,8 +639,9 @@ describe('embedded SpaghettiClient', { skip: !native }, () => {
     );
     assert.equal(concurrentOverview?.commitSeq, 0);
     const projects = await client.listProjects();
+    assert.equal(projects.contractVersion, 1);
     assert.equal(projects.atCommitSeq, 0);
-    assert.deepEqual(projects.projects, []);
+    assert.deepEqual(projects.items, []);
 
     await assert.rejects(client.listProjects({ limit: 0 }), (error) => errorCode(error, 'invalid_request'));
     await assert.rejects(client.replayChanges({ limit: 0 }), (error) => errorCode(error, 'invalid_request'));

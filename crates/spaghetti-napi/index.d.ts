@@ -31,13 +31,16 @@ export declare class SpaghettiEngine {
    * List catalog projects — everything discoverable, complete or explicitly
    * degraded. Available seconds after `startConfiguredObservation`, without
    * waiting for history, usage, or full-text search.
+   *
+   * This is a different question from `listHistoryProjects`, which reports
+   * what has been decoded. Both are kept because both are asked.
    */
-  listProjects(options?: EngineCatalogPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogProjectPage>
+  listCatalogProjects(options?: EngineCatalogPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogProjectPage>
   /**
    * List catalog sessions, optionally within one project. Rows carry the
    * evidence behind their project association and any competing identity.
    */
-  listSessions(options?: EngineCatalogSessionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogSessionPage>
+  listCatalogSessions(options?: EngineCatalogSessionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogSessionPage>
   /** Resolve a persisted external reference against the current catalog. */
   resolveCatalogEntity(externalRef: string, signal?: AbortSignal | undefined | null): Promise<EngineCatalogResolution>
   /**
@@ -711,6 +714,16 @@ export interface EngineHistoryProject {
   latestActivityAt?: string
   latestActivitySource?: string
   index?: EngineHistoryProjectIndex
+  /**
+   * Persistable RFC 012A external reference; absent until discovery has
+   * seen this project.
+   */
+  externalRef?: string
+  /**
+   * `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
+   * the same derivation the catalog page uses.
+   */
+  catalogState?: string
   lastCommitSeq: number
 }
 
@@ -748,6 +761,16 @@ export interface EngineHistorySession {
   latestActivityAt?: string
   latestActivitySource?: string
   index?: EngineHistorySessionIndex
+  /**
+   * Persistable RFC 012A external reference; absent until discovery has
+   * seen this session.
+   */
+  externalRef?: string
+  /**
+   * `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
+   * the same derivation the catalog page uses.
+   */
+  catalogState?: string
   lastCommitSeq: number
 }
 

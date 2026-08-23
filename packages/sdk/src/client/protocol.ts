@@ -40,11 +40,11 @@ export interface SpaghettiClientRequestMap {
   getHealth: undefined;
   getOverview: undefined;
   getReadiness: undefined;
-  listProjects: EngineRequest<'listProjects'>;
-  listSessions: EngineRequest<'listSessions'>;
+  listProjects: EngineRequest<'listHistoryProjects'>;
+  listSessions: EngineRequest<'listHistorySessions'>;
+  listCatalogProjects: EngineRequest<'listCatalogProjects'>;
+  listCatalogSessions: EngineRequest<'listCatalogSessions'>;
   resolveCatalogEntity: { externalRef: string };
-  listHistoryProjects: EngineRequest<'listHistoryProjects'>;
-  listHistorySessions: EngineRequest<'listHistorySessions'>;
   replayChanges: EngineRequest<'replayChanges'>;
   waitForCommit: EngineRequest<'waitForCommit'>;
   getSession: GetSessionRequest;
@@ -82,11 +82,11 @@ export interface SpaghettiClientResponseMap {
   getHealth: EngineResult<'health'>;
   getOverview: EngineResult<'overview'>;
   getReadiness: EngineResult<'readiness'>;
-  listProjects: EngineResult<'listProjects'>;
-  listSessions: EngineResult<'listSessions'>;
+  listProjects: EngineResult<'listHistoryProjects'>;
+  listSessions: EngineResult<'listHistorySessions'>;
+  listCatalogProjects: EngineResult<'listCatalogProjects'>;
+  listCatalogSessions: EngineResult<'listCatalogSessions'>;
   resolveCatalogEntity: EngineResult<'resolveCatalogEntity'>;
-  listHistoryProjects: EngineResult<'listHistoryProjects'>;
-  listHistorySessions: EngineResult<'listHistorySessions'>;
   replayChanges: EngineResult<'replayChanges'>;
   waitForCommit: EngineResult<'waitForCommit'>;
   getSession: EngineResult<'getSession'>;
@@ -125,9 +125,9 @@ export const SPAGHETTI_CLIENT_METHODS = completeMethodList([
   'getHealth',
   'getOverview',
   'getReadiness',
+  'listCatalogProjects',
+  'listCatalogSessions',
   'resolveCatalogEntity',
-  'listHistoryProjects',
-  'listHistorySessions',
   'replayChanges',
   'waitForCommit',
   'listProjects',
@@ -344,16 +344,20 @@ export interface SpaghettiClient {
     request: SpaghettiClientRequestMap['resolveCatalogEntity'],
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['resolveCatalogEntity']>;
-  /** Decoded project detail. Converges after the catalog is already listable. */
-  listHistoryProjects(
-    request?: Exclude<SpaghettiClientRequestMap['listHistoryProjects'], undefined>,
+  /**
+   * List catalog projects: everything discoverable, answerable as soon as
+   * discovery commits. `listProjects` answers the other question — what has
+   * been decoded — and keeps its existing shape.
+   */
+  listCatalogProjects(
+    request?: Exclude<SpaghettiClientRequestMap['listCatalogProjects'], undefined>,
     options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['listHistoryProjects']>;
-  /** Decoded session detail for one project. */
-  listHistorySessions(
-    request: SpaghettiClientRequestMap['listHistorySessions'],
+  ): Promise<SpaghettiClientResponseMap['listCatalogProjects']>;
+  /** List catalog sessions, optionally within one project. */
+  listCatalogSessions(
+    request?: Exclude<SpaghettiClientRequestMap['listCatalogSessions'], undefined>,
     options?: SpaghettiQueryOptions,
-  ): Promise<SpaghettiClientResponseMap['listHistorySessions']>;
+  ): Promise<SpaghettiClientResponseMap['listCatalogSessions']>;
   replayChanges(
     request?: Exclude<SpaghettiClientRequestMap['replayChanges'], undefined>,
     options?: SpaghettiQueryOptions,
@@ -363,16 +367,17 @@ export interface SpaghettiClient {
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['waitForCommit']>;
   /**
-   * List catalog projects. This is the library listing: it answers as soon as
-   * discovery commits, without waiting for history or search.
+   * List decoded projects. Unchanged contract: the same fields, sort, filters,
+   * and cursor as before the catalog existed, plus `catalogState` and
+   * `externalRef` on every row.
    */
   listProjects(
     request?: Exclude<SpaghettiClientRequestMap['listProjects'], undefined>,
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['listProjects']>;
-  /** List catalog sessions, optionally within one project. */
+  /** List decoded sessions for one project. Unchanged contract. */
   listSessions(
-    request?: Exclude<SpaghettiClientRequestMap['listSessions'], undefined>,
+    request: SpaghettiClientRequestMap['listSessions'],
     options?: SpaghettiQueryOptions,
   ): Promise<SpaghettiClientResponseMap['listSessions']>;
   getSession(

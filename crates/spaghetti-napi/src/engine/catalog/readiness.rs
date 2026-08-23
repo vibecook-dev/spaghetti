@@ -10,13 +10,17 @@
 //! point of catalog-first startup.
 
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 use super::super::query_pool::read_committed_watermark;
 use super::super::runtime_semantic_projection::USAGE_V2_PROJECTION_ID;
 use super::super::EngineError;
 
 /// State of one readiness field.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum ReadinessState {
     /// No work has been committed yet.
     Pending,
@@ -42,11 +46,14 @@ impl ReadinessState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ReadinessField {
     pub state: ReadinessState,
     /// Commit sequence the evidence for this field was read at.
     pub committed_at_seq: u64,
+    #[ts(optional)]
     pub detail: Option<String>,
 }
 
@@ -61,7 +68,9 @@ impl ReadinessField {
 }
 
 /// What the host, `spag doctor`, and the playground library screen all read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct Readiness {
     pub catalog: ReadinessField,
     pub history: ReadinessField,
@@ -83,12 +92,11 @@ struct Evidence {
     canonical_sessions: i64,
     hydrated_sessions: i64,
     scanned_at_commit_seq: i64,
+    /// Read from the same durable marker the query SQL uses.
+    search_ready: bool,
 }
 
-pub fn read_readiness(
-    connection: &Connection,
-    search_ready: bool,
-) -> Result<Readiness, EngineError> {
+pub fn read_readiness(connection: &Connection) -> Result<Readiness, EngineError> {
     let transaction = connection
         .unchecked_transaction()
         .map_err(|error| sqlite_error("begin readiness snapshot", error))?;
@@ -123,7 +131,7 @@ pub fn read_readiness(
         watermark,
         "sessions decoded for artifact facts",
     );
-    let search = if search_ready {
+    let search = if evidence.search_ready {
         convergence_field(
             &evidence,
             evidence.hydrated_sessions,
@@ -348,6 +356,14 @@ fn read_evidence(connection: &Connection) -> Result<Evidence, EngineError> {
         )
         .map_err(|error| sqlite_error("read catalog convergence evidence", error))?;
 
+    let search_ready: bool = connection
+        .query_row(
+            "SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| sqlite_error("read durable search readiness", error))?;
+
     Ok(Evidence {
         sources,
         degraded_sources,
@@ -358,6 +374,7 @@ fn read_evidence(connection: &Connection) -> Result<Evidence, EngineError> {
         canonical_sessions,
         hydrated_sessions,
         scanned_at_commit_seq,
+        search_ready,
     })
 }
 

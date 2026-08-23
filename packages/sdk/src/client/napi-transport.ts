@@ -210,13 +210,13 @@ async function executeEngineRequest(
     case 'waitForCommit':
       return engine.waitForCommit(request.payload, signal);
     case 'listProjects':
-      return engine.listProjects(request.payload, signal);
-    case 'listSessions':
-      return engine.listSessions(request.payload, signal);
-    case 'listHistoryProjects':
       return engine.listHistoryProjects(request.payload, signal);
-    case 'listHistorySessions':
+    case 'listSessions':
       return engine.listHistorySessions(request.payload, signal);
+    case 'listCatalogProjects':
+      return engine.listCatalogProjects(request.payload, signal);
+    case 'listCatalogSessions':
+      return engine.listCatalogSessions(request.payload, signal);
     case 'getSession':
       return engine.getSession(request.payload.sessionId, signal);
     case 'getMessages':

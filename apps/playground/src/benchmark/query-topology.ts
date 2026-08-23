@@ -300,21 +300,21 @@ async function run(): Promise<void> {
     const memoryBefore = await host.getHostDiagnostics();
     const overview = await client.getOverview();
     const canonicalStats = await readCanonicalStats(host);
-    const projects = await client.listHistoryProjects({ limit: 50 });
+    const projects = await client.listProjects({ limit: 50 });
     const search = await client.search({ text: searchText, limit: 50 });
     assert.equal(overview.canonicalSessions > 0, true);
     assert.equal(canonicalStats.atCommitSeq, overview.commitSeq);
     assert.equal(projects.items.length > 0, true);
     const project = projects.items.find((item) => item.messageCount > 0);
     assert.ok(project, 'fixture needs a project with canonical messages');
-    const sessions = await client.listHistorySessions({ projectId: project.projectId, limit: 50 });
+    const sessions = await client.listSessions({ projectId: project.projectId, limit: 50 });
     const session = sessions.items.find((item) => item.messageCount > 0);
     assert.ok(session, 'fixture needs a canonical session with messages');
 
     const operations: Record<string, () => Promise<unknown>> = {
       overview: () => client!.getOverview(),
-      projects50: () => client!.listHistoryProjects({ limit: 50 }),
-      sessions50: () => client!.listHistorySessions({ projectId: project.projectId, limit: 50 }),
+      projects50: () => client!.listProjects({ limit: 50 }),
+      sessions50: () => client!.listSessions({ projectId: project.projectId, limit: 50 }),
       messages50: () => client!.getMessages({ projectId: project.projectId, sessionId: session.sessionId, limit: 50 }),
       search50: () => client!.search({ text: searchText, limit: 50 }),
       timeline50: () => client!.getTimeline({ projectId: project.projectId, sessionId: session.sessionId, limit: 50 }),

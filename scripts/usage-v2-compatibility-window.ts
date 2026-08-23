@@ -801,7 +801,7 @@ function fakeCompatibility(): SpaghettiEngineRuntimeUsageCompatibility {
 }
 
 async function listEngineProjectIds(client: {
-  listHistoryProjects: (request: { cursor?: string; limit: number }) => Promise<{
+  listProjects: (request: { cursor?: string; limit: number }) => Promise<{
     items: Array<{ projectId: string }>;
     nextCursor?: string;
   }>;
@@ -809,10 +809,10 @@ async function listEngineProjectIds(client: {
   const ids = new Set<string>();
   let cursor: string | undefined;
   do {
-    const page = await client.listHistoryProjects({ cursor, limit: PROJECT_PAGE_LIMIT });
+    const page = await client.listProjects({ cursor, limit: PROJECT_PAGE_LIMIT });
     for (const item of page.items) {
       if (typeof item.projectId !== 'string' || !item.projectId.startsWith('project_v1_')) {
-        throw new Error('listHistoryProjects returned a non-opaque project identity');
+        throw new Error('listProjects returned a non-opaque project identity');
       }
       ids.add(item.projectId);
     }

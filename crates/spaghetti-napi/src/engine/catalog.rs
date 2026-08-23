@@ -34,11 +34,16 @@ mod tests;
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
 pub(crate) use discovery::{scan_source, SourceScan};
 pub use query::{
-    read_project_page, read_session_page, resolve_catalog_entity, CatalogEntityResolution,
-    CatalogProjectPage, CatalogProjectPageRequest, CatalogProjectRow, CatalogSessionPage,
-    CatalogSessionPageRequest, CatalogSessionRow, IdentityConflict,
+    encode_external_ref, read_project_page, read_session_page, resolve_catalog_entity,
+    CatalogEntityResolution, CatalogProjectPage, CatalogProjectPageRequest, CatalogProjectRow,
+    CatalogSessionPage, CatalogSessionPageRequest, CatalogSessionRow, IdentityConflict,
+    HISTORY_PROJECT_CATALOG_COLUMNS, HISTORY_PROJECT_CATALOG_CTE, HISTORY_PROJECT_CATALOG_JOINS,
+    HISTORY_SESSION_CATALOG_COLUMNS, HISTORY_SESSION_CATALOG_JOIN,
 };
 pub use readiness::{read_readiness, Readiness, ReadinessField, ReadinessState};
 pub(crate) use store::{commit_source_scan, CatalogScanReceipt};
@@ -51,7 +56,9 @@ pub const DEFAULT_CATALOG_PAGE_LIMIT: u32 = 100;
 /// How much of an entity is available, from bare discoverability up to
 /// full-text searchable. Ordering is meaningful: a later variant implies
 /// every earlier one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum CatalogState {
     /// Native evidence proves the entity exists. Nothing is decoded.
     Discovered,
