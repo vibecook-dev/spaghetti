@@ -2368,6 +2368,9 @@ CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session_time ON usage_v2_respon
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_actor ON usage_v2_response_contributions(actor_run_key, usage_key);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_source_generation ON usage_v2_response_contributions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_session ON runtime_actor_runs_v2(session_key, actor_run_key);
+-- The usage scope bridge joins catalog sessions to RFC 012C identities on the
+-- native session id, so that column needs its own lookup path.
+CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_native_session ON runtime_actor_runs_v2(native_session_id, session_key);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_source_generation ON runtime_actor_runs_v2(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_affiliations_v2_actor ON runtime_actor_affiliations_v2(actor_run_key, dimension, affiliation_key);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_affiliations_v2_target ON runtime_actor_affiliations_v2(dimension, target_key, state, actor_run_key);

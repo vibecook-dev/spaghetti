@@ -194,7 +194,7 @@ const SCOPED_SESSIONS: &str = r#"
 fn scoped_responses(extra: &str) -> String {
     format!(
         r#"
-        FROM ({SCOPED_SESSIONS}) AS scope
+        FROM scope
         JOIN usage_v2_response_contributions u ON u.session_key = scope.runtime_session_key
         JOIN fact_records fr ON fr.fact_id = u.fact_id
         JOIN usage_v2_qualification_specs qi ON qi.qualification_key = u.input_qualification_key
@@ -343,7 +343,7 @@ fn read_scope_aggregate(
     extra: &str,
 ) -> Result<(UsageAggregate, UsageScopeMetadata), EngineError> {
     let sql = format!(
-        "SELECT {projection},\n               {METADATA_PROJECTION}{source}",
+        "WITH scope AS MATERIALIZED ({SCOPED_SESSIONS})\n         SELECT {projection},\n               {METADATA_PROJECTION}{source}",
         projection = aggregate_projection(),
         source = scoped_responses(extra),
     );
@@ -381,6 +381,7 @@ fn read_usage_days(
 ) -> Result<Vec<UsageDay>, EngineError> {
     let sql = format!(
         r#"
+        WITH scope AS MATERIALIZED ({SCOPED_SESSIONS})
         SELECT substr(u.source_time, 1, 10) AS activity_day,
                {projection},
                {METADATA_PROJECTION}{source}
@@ -410,25 +411,43 @@ fn read_coverage(
     transaction: &Transaction<'_>,
     scope: &ValidatedUsageScope,
 ) -> Result<Vec<UsageCoverageSummary>, EngineError> {
+    // One materialized pass over the scoped contributions feeds all four bucket
+    // arms. Repeating the identity bridge per arm made this the slowest query in
+    // the pack; SQLite has no reason to hoist it on its own.
     let arms = BUCKETS
         .iter()
         .map(|(bucket, column, _)| {
             format!(
                 r#"
                 SELECT '{bucket}' AS bucket, q.quality, q.completeness, q.unknown_reason,
-                       q.authority, q.native_field, u.model, u.source_time_quality,
-                       u.{column} AS token_value
-                FROM ({SCOPED_SESSIONS}) AS scope
-                JOIN usage_v2_response_contributions u ON u.session_key = scope.runtime_session_key
-                JOIN usage_v2_qualification_specs q ON q.qualification_key = u.{column_key}
+                       q.authority, q.native_field, s.model, s.source_time_quality,
+                       s.{column} AS token_value
+                FROM scoped AS s
+                JOIN usage_v2_qualification_specs q ON q.qualification_key = s.{column_key}
                 "#,
                 column_key = qualification_column(column),
             )
         })
         .collect::<Vec<_>>()
         .join("                UNION ALL");
+    let columns = BUCKETS
+        .iter()
+        .map(|(_, column, _)| format!("u.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let qualification_columns = BUCKETS
+        .iter()
+        .map(|(_, column, _)| format!("u.{}", qualification_column(column)))
+        .collect::<Vec<_>>()
+        .join(", ");
     let sql = format!(
         r#"
+        WITH scope AS MATERIALIZED ({SCOPED_SESSIONS}),
+        scoped AS MATERIALIZED (
+            SELECT {columns}, {qualification_columns}, u.model, u.source_time_quality
+            FROM scope
+            JOIN usage_v2_response_contributions u ON u.session_key = scope.runtime_session_key
+        )
         SELECT bucket, quality, completeness, unknown_reason, authority, native_field,
                model, source_time_quality, COUNT(*), COALESCE(SUM(token_value), 0)
         FROM ({arms})
