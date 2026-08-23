@@ -179,14 +179,20 @@ it is the largest and depends on L2's codegen).
   (RFC 012A: adapters emit facts only), with `ts_rs::TS` on `adapter/facts.rs`
   so `SemanticEvent.value` is typed; then collapse per-adapter triplicates;
   one `version` field replacing candidate/promoted; promote real
-  Claude/Codex/Grok support releases; delete `candidate-2026-08-15`; restore
+  Claude/Codex/Grok support releases; read Grok's per-response usage from
+  `updates.jsonl` (`params.update.usage.*`) so Grok usage becomes exact
+  instead of session-estimated; delete `candidate-2026-08-15`; restore
   the 08-15 scope relation set so `observer/scope.rs` evaluates the declared
   `ScopeProgram` instead of resolving locators in Rust; keep fixture-agent as
   a test fixture only.
-- **L6 napi surface**: collapse `Engine*` mirror DTOs to what napi-rs
-  needs; delete the 2,455-line hand-written mirror of `index.d.ts` in
+- **L6 napi/SDK surface**: collapse `Engine*` mirror DTOs to what napi-rs
+  needs; delete the hand-written mirror of `index.d.ts` in
   `packages/sdk/src/native.ts` (import the generated `@vibecook/spaghetti-sdk-native`
-  types instead); readiness vector as the only status surface.
+  types instead); replace the remaining Rust-parser-vs-TS-parser parity tests
+  with Rust-output-vs-generated-type tests and then delete
+  `contracts/rfc012a.ts`, `rfc012c.ts`, `rfc012-semantic-json.ts` (~5.4k lines;
+  parity is a test, a second parser is not); readiness vector as the only
+  status surface.
 - **L7 perf**: observer bootstrap is 15 ms/MB (662 ms for a 43.7 MB root;
   budget 500 ms @ 50 MB) and per-append latency scales with member count
   (38 ms p50 at 674 objects) because every reconciliation pass re-opens every
