@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "support_release_id": "codex-support-2026-08-15",
+  "adapter_id": "codex",
+  "version": "2026-08-15",
+  "artifact_compatibility": {
+    "family": "codex",
+    "platforms": [
+      "darwin"
+    ],
+    "exact_versions": [],
+    "ranges": [],
+    "required_markers": [
+      "rollout.record-type",
+      "session-meta.cli-version"
+    ],
+    "forward_catalog_only": false
+  },
+  "references": {
+    "ads": {
+      "path": "agent-support/codex/2026-08-15/ads.json",
+      "sha256": "sha256:bea1546229c7336f7e3cf79d4b634f7796edc0ab5b2295c3e4065180a901df5b"
+    },
+    "source_declaration": {
+      "path": "agent-support/codex/2026-08-15/source-declarations.json",
+      "sha256": "sha256:c4d6d49516dc525fb7b3d514924c1024b6998a1831c44c9c6b7936f96163c25b"
+    },
+    "scope_program": {
+      "path": "agent-support/codex/2026-08-15/scope-programs.json",
+      "sha256": "sha256:7990862cac4b59164dd8d25218077cce33e12fc15b66086e2763fcf6057a9fa5"
+    },
+    "evidence": {
+      "path": "agent-support/codex/2026-08-15/evidence.json",
+      "sha256": "sha256:527ceb5f50edbe4e86774c03ed5b74a04a2c6c2e9c57a2cfa3e78fb68760cb7e"
+    },
+    "conformance": {
+      "path": "agent-support/codex/2026-08-15/conformance.json",
+      "sha256": "sha256:9b950f3638f61f4dbd0c1b7087a207e76f45908bb33cdfb0adca47aa09094d99"
+    }
+  },
+  "versions": {
+    "adapter_package": "0.7.0",
+    "decoder_contract": 1,
+    "decoder_state": [
+      1
+    ],
+    "source_record_identity": 1,
+    "fact_identity": 1,
+    "external_entity_reference": 1,
+    "semantic_revision_reference": 1,
+    "coverage": [
+      1
+    ],
+    "durable_contracts": {},
+    "observation_contracts": {}
+  },
+  "capabilities": [
+    {
+      "capability_id": "project-session-catalog",
+      "topology": "catalog",
+      "level": "unsupported",
+      "notes": "RFC 012B catalog assertions and tier composition are not implemented."
+    },
+    {
+      "capability_id": "rollout-history",
+      "topology": "durable",
+      "level": "supported",
+      "notes": "Current decoder maps rollout history into the existing database; candidate remains non-selectable."
+    },
+    {
+      "capability_id": "usage-runtime",
+      "topology": "durable",
+      "level": "degraded",
+      "notes": "Existing usage facts lack RFC 012C cross-version conformance."
+    },
+    {
+      "capability_id": "root-session-observation",
+      "topology": "scoped",
+      "level": "unsupported",
+      "notes": "Known-object ScopeProgram is not wired to common observer delivery."
+    }
+  ],
+  "stream_contracts": [
+    {
+      "stream_id": "rollout-sessions",
+      "overlap_strategy": "full_only",
+      "safe_decoder_state_boundary": "object_generation_cursor"
+    }
+  ],
+  "reports": {
+    "conformance_sha256": null,
+    "performance_sha256": null
+  },
+  "sanitizer_review": {
+    "status": "pending",
+    "reviewed_at": null,
+    "reviewer": null
+  },
+  "lifecycle": {
+    "candidate_at": "2026-08-15",
+    "promoted_at": null,
+    "retired_at": null,
+    "supersedes": null,
+    "superseded_by": null
+  },
+  "known_limitations": [
+    "Candidate entries never confer runtime support.",
+    "No independent sanitized rollout lifecycle corpus is bound to this release.",
+    "Catalog, scoped observation, and public durable/observation contract versions are pending."
+  ],
+  "drift_signatures": [],
+  "promotion_blockers": [
+    "Pin the Codex artifact/version and required markers.",
+    "Author independent sanitized lifecycle, usage, compaction, and unknown-record fixtures.",
+    "Pass identity, tier, scope, cross-topology, performance, and sanitizer review gates.",
+    "Assign public durable and observation contract versions."
+  ]
+}

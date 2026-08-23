@@ -6404,10 +6404,7 @@ mod tests {
         assert_eq!(covered.domain_name, "runtime.usage-v2");
         assert_eq!(covered.domain_version, 1);
         assert_eq!(covered.adapter_id, "claude-code");
-        assert_eq!(
-            covered.support_release_id,
-            "claude-code-support-2026-08-21-candidate"
-        );
+        assert_eq!(covered.support_release_id, "claude-code-support-2026-08-21");
         assert_eq!(covered.completeness, "complete");
         assert_eq!(covered.last_commit_seq, 2);
         assert_eq!(covered.point_count, 1);

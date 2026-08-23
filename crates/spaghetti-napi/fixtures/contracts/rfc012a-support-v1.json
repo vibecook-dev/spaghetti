@@ -3,7 +3,8 @@
   "releases": [
     {
       "support_release_id": "candidate-only-support-v1",
-      "status": "candidate",
+      "version": "2026-08-21",
+      "runtime_selectable": false,
       "capabilities": [
         {
           "capability_id": "candidate-catalog",
@@ -23,16 +24,23 @@
       ],
       "artifact_compatibility": {
         "family": "candidate-agent",
-        "platforms": ["darwin"],
-        "exact_versions": ["1.0.0"],
+        "platforms": [
+          "darwin"
+        ],
+        "exact_versions": [
+          "1.0.0"
+        ],
         "ranges": [],
-        "required_markers": ["candidate.marker"],
+        "required_markers": [
+          "candidate.marker"
+        ],
         "forward_catalog_only": true
       }
     },
     {
       "support_release_id": "fixture-support-v1",
-      "status": "promoted",
+      "version": "2026-08-21",
+      "runtime_selectable": true,
       "capabilities": [
         {
           "capability_id": "fixture-catalog",
@@ -52,8 +60,13 @@
       ],
       "artifact_compatibility": {
         "family": "fixture-agent",
-        "platforms": ["darwin"],
-        "exact_versions": ["1.2.3", "1.2.3-beta"],
+        "platforms": [
+          "darwin"
+        ],
+        "exact_versions": [
+          "1.2.3",
+          "1.2.3-beta"
+        ],
         "ranges": [
           {
             "minimum": "2.0.0",
@@ -62,13 +75,16 @@
             "maximum_inclusive": false
           }
         ],
-        "required_markers": ["native.marker"],
+        "required_markers": [
+          "native.marker"
+        ],
         "forward_catalog_only": true
       }
     },
     {
       "support_release_id": "capability-restricted-support-v1",
-      "status": "promoted",
+      "version": "2026-08-21",
+      "runtime_selectable": true,
       "capabilities": [
         {
           "capability_id": "restricted-catalog",
@@ -114,7 +130,9 @@
         "family": "fixture-agent",
         "platform": "darwin",
         "version": "1.2.3",
-        "markers": ["native.marker"],
+        "markers": [
+          "native.marker"
+        ],
         "contradictory_markers": false
       },
       "expected": {
@@ -137,7 +155,9 @@
         "family": "fixture-agent",
         "platform": "darwin",
         "version": "1.2.3-beta",
-        "markers": ["native.marker"],
+        "markers": [
+          "native.marker"
+        ],
         "contradictory_markers": false
       },
       "expected": {
@@ -160,7 +180,9 @@
         "family": "fixture-agent",
         "platform": "darwin",
         "version": "2.3",
-        "markers": ["native.marker"],
+        "markers": [
+          "native.marker"
+        ],
         "contradictory_markers": false
       },
       "expected": {
@@ -183,7 +205,9 @@
         "family": "fixture-agent",
         "platform": "darwin",
         "version": "9.0.0",
-        "markers": ["native.marker"],
+        "markers": [
+          "native.marker"
+        ],
         "contradictory_markers": false
       },
       "expected": {
@@ -279,7 +303,9 @@
         "family": "fixture-agent",
         "platform": "linux",
         "version": "1.2.3",
-        "markers": ["native.marker"],
+        "markers": [
+          "native.marker"
+        ],
         "contradictory_markers": false
       },
       "expected": {
@@ -325,7 +351,9 @@
         "family": "candidate-agent",
         "platform": "darwin",
         "version": "1.0.0",
-        "markers": ["candidate.marker"],
+        "markers": [
+          "candidate.marker"
+        ],
         "contradictory_markers": false
       },
       "expected": {
@@ -348,7 +376,9 @@
         "family": "fixture-agent",
         "platform": "darwin",
         "version": "1.2.3",
-        "markers": ["native.marker"],
+        "markers": [
+          "native.marker"
+        ],
         "contradictory_markers": true
       },
       "expected": {
@@ -371,26 +401,54 @@
     "model_major": 1,
     "external_entity_reference_version": 1,
     "semantic_revision_reference_version": 1,
-    "coverage_contract_versions": [2, 1],
+    "coverage_contract_versions": [
+      2,
+      1
+    ],
     "fact_family_versions": {
-      "interaction": [1],
-      "usage": [2]
+      "interaction": [
+        1
+      ],
+      "usage": [
+        2
+      ]
     },
-    "query_pack_versions": [2, 1],
-    "observation_contract_versions": [2, 1]
+    "query_pack_versions": [
+      2,
+      1
+    ],
+    "observation_contract_versions": [
+      2,
+      1
+    ]
   },
   "contract_offer": {
     "selection_contract_version": 1,
     "model_major": 1,
-    "external_entity_reference_versions": [1],
-    "semantic_revision_reference_versions": [1],
-    "coverage_contract_versions": [1],
+    "external_entity_reference_versions": [
+      1
+    ],
+    "semantic_revision_reference_versions": [
+      1
+    ],
+    "coverage_contract_versions": [
+      1
+    ],
     "fact_family_versions": {
-      "interaction": [1],
-      "usage": [1, 2]
+      "interaction": [
+        1
+      ],
+      "usage": [
+        1,
+        2
+      ]
     },
-    "query_pack_versions": [1],
-    "observation_contract_versions": [1]
+    "query_pack_versions": [
+      1
+    ],
+    "observation_contract_versions": [
+      1
+    ]
   },
   "expected_contract_selection": {
     "selection_contract_version": 1,

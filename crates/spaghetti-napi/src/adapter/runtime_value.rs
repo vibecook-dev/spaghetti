@@ -24,12 +24,18 @@ use super::facts::{
 };
 
 /// One RFC 012C revision, in the shape it crosses the observer wire.
+///
+/// The two widest arms are boxed: an enum is as wide as its widest variant, and
+/// a qualified usage snapshot or a typed question set dwarfs the rest. `Box` is
+/// transparent to serde and to ts-rs, so neither the wire shape nor the
+/// generated TypeScript moves — the test below and the committed bindings both
+/// hold it to that.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum RuntimeSemanticValue {
     ActorRunRevision(ActorRunRevisionFact),
     ActorAffiliationRevision(ActorAffiliationRevisionFact),
-    UserInputRequestRevision(UserInputRequestRevisionFact),
+    UserInputRequestRevision(Box<UserInputRequestRevisionFact>),
     MessageRevision(MessageRevisionFact),
     ContentBlockRevision(ContentBlockRevisionFact),
     NativeRuntimeMarkerRevision(NativeRuntimeMarkerRevisionFact),
@@ -37,7 +43,7 @@ pub enum RuntimeSemanticValue {
     PlanRevision(PlanRevisionFact),
     ToolRevision(ToolRevisionFact),
     EffectiveStateRevision(EffectiveStateRevisionFact),
-    UsageRevisionV2(UsageRevisionV2Fact),
+    UsageRevisionV2(Box<UsageRevisionV2Fact>),
 }
 
 impl RuntimeSemanticValue {
@@ -47,7 +53,9 @@ impl RuntimeSemanticValue {
         Some(match fact {
             Fact::ActorRunRevision(value) => Self::ActorRunRevision(value.clone()),
             Fact::ActorAffiliationRevision(value) => Self::ActorAffiliationRevision(value.clone()),
-            Fact::UserInputRequestRevision(value) => Self::UserInputRequestRevision(value.clone()),
+            Fact::UserInputRequestRevision(value) => {
+                Self::UserInputRequestRevision(Box::new(value.clone()))
+            }
             Fact::MessageRevision(value) => Self::MessageRevision(value.clone()),
             Fact::ContentBlockRevision(value) => Self::ContentBlockRevision(value.clone()),
             Fact::NativeRuntimeMarkerRevision(value) => {
@@ -57,7 +65,7 @@ impl RuntimeSemanticValue {
             Fact::PlanRevision(value) => Self::PlanRevision(value.clone()),
             Fact::ToolRevision(value) => Self::ToolRevision(value.clone()),
             Fact::EffectiveStateRevision(value) => Self::EffectiveStateRevision(value.clone()),
-            Fact::UsageRevisionV2(value) => Self::UsageRevisionV2(value.clone()),
+            Fact::UsageRevisionV2(value) => Self::UsageRevisionV2(Box::new(value.clone())),
             _ => return None,
         })
     }

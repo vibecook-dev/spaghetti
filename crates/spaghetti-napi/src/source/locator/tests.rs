@@ -14,7 +14,7 @@ use crate::adapter::{ScopeProgramManifest, ScopeRelationDeclaration};
 fn artifact_declaration(locator: &str) -> ScopeRelationDeclaration {
     let mut manifest = ScopeProgramManifest::from_json(include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+        "/../../agent-support/grok/2026-08-15/scope-programs.json"
     )))
     .expect("the committed Grok manifest parses");
     let relation = manifest.programs[0]

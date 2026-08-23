@@ -1,0 +1,151 @@
+{
+  "package": "X4",
+  "adapter_id": "claude-code",
+  "support_release_id": "claude-code-support-2026-08-21",
+  "native_version": "2.1.223",
+  "product_path": "durable-history-and-usage-v2",
+  "catalog": "unsupported",
+  "scoped": "unsupported",
+  "checks": [
+    {
+      "check_id": "schema-validation",
+      "status": "pass"
+    },
+    {
+      "check_id": "sanitizer",
+      "status": "pass"
+    },
+    {
+      "check_id": "family-disposition",
+      "status": "pass"
+    },
+    {
+      "check_id": "source-bounds",
+      "status": "pass"
+    },
+    {
+      "check_id": "scope-source-binding",
+      "status": "pass"
+    },
+    {
+      "check_id": "scope-access",
+      "status": "not_applicable"
+    },
+    {
+      "check_id": "version-classifier",
+      "status": "pass"
+    },
+    {
+      "check_id": "contract-negotiation",
+      "status": "pass"
+    },
+    {
+      "check_id": "identity-determinism",
+      "status": "pass"
+    },
+    {
+      "check_id": "root-actor-cross-topology-identity",
+      "status": "pass"
+    },
+    {
+      "check_id": "tier-compositionality",
+      "status": "not_applicable"
+    },
+    {
+      "check_id": "usage-v2-shadow-reducer",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-semantic-revision-identity",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-independent-oracle",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-oracle-parity",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-private-corpus-parity",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-contract22-private-corpus-parity",
+      "status": "pass"
+    },
+    {
+      "check_id": "actor-affiliation-reducer",
+      "status": "pass"
+    },
+    {
+      "check_id": "native-team-affiliation-correlation",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-shadow-query",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-pack-readiness",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-source-coverage",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-public-coverage-query",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-explicit-replay",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-public-replay-authorization",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-administrative-crash-boundaries",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-query-selection",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-query-selection-sdk",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-composite-aggregate",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-compatibility-and-rollback",
+      "status": "pass"
+    },
+    {
+      "check_id": "usage-v2-compatibility-window",
+      "status": "pass"
+    },
+    {
+      "check_id": "runtime-actor-affiliation-usage-cross-topology-parity",
+      "status": "pass"
+    },
+    {
+      "check_id": "classified-native-drift",
+      "status": "pass"
+    },
+    {
+      "check_id": "unknown-retention",
+      "status": "pass"
+    },
+    {
+      "check_id": "cross-topology-parity",
+      "status": "not_applicable"
+    }
+  ]
+}

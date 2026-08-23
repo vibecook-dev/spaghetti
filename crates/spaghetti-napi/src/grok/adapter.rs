@@ -38,42 +38,42 @@ pub(crate) fn verified_support_release(
     crate::adapter::verify_support_release_bundle(
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/grok/candidate-2026-08-15/support-release.json"
+            "/../../agent-support/grok/2026-08-15/support-release.json"
         )),
         &[
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/grok/candidate-2026-08-15/ads.json",
+                "agent-support/grok/2026-08-15/ads.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/grok/candidate-2026-08-15/ads.json"
+                    "/../../agent-support/grok/2026-08-15/ads.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/grok/candidate-2026-08-15/source-declarations.json",
+                "agent-support/grok/2026-08-15/source-declarations.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/grok/candidate-2026-08-15/source-declarations.json"
+                    "/../../agent-support/grok/2026-08-15/source-declarations.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/grok/candidate-2026-08-15/scope-programs.json",
+                "agent-support/grok/2026-08-15/scope-programs.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+                    "/../../agent-support/grok/2026-08-15/scope-programs.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/grok/candidate-2026-08-15/evidence.json",
+                "agent-support/grok/2026-08-15/evidence.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/grok/candidate-2026-08-15/evidence.json"
+                    "/../../agent-support/grok/2026-08-15/evidence.json"
                 )),
             ),
             crate::adapter::SupportBundleDocument::new(
-                "agent-support/grok/candidate-2026-08-15/conformance.json",
+                "agent-support/grok/2026-08-15/conformance.json",
                 include_bytes!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
-                    "/../../agent-support/grok/candidate-2026-08-15/conformance.json"
+                    "/../../agent-support/grok/2026-08-15/conformance.json"
                 )),
             ),
         ],
@@ -82,7 +82,7 @@ pub(crate) fn verified_support_release(
 
 const SCOPE_PROGRAM_DOCUMENT: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+    "/../../agent-support/grok/2026-08-15/scope-programs.json"
 ));
 const MEMBERSHIP_STREAM: &str = "session-membership";
 const TRANSCRIPT_STREAM: &str = "chat-history";
@@ -131,10 +131,10 @@ impl GrokAdapter {
                 contract_version: 2,
                 support_binding: Some(
                     AdapterSupportBinding::new(
-                        "grok-support-2026-08-15-candidate",
+                        "grok-support-2026-08-15",
                         env!("CARGO_PKG_VERSION"),
                         2,
-                        "sha256:084e76087a1da70b1f985f8673841c47426b9672919ff5e8d39a0603a1010cc6",
+                        "sha256:75df1bad38a2975da5d4614b1485d57d4da4f5e11fe6939fd2d3850620b3240b",
                         "sha256:52a6f4949c76ccdde9c71a8601a1fe654010ba332a0d04fabe5d91777a85c520",
                         "sha256:2da094e844d59bb1d8cabcc6797fe4a0a2ccf61eaba95c31249fa6beedead173",
                     )

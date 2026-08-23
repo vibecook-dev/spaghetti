@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::adapter::{AdapterError, NativeArtifactProbe};
+use crate::adapter::{
+    platform_id, probe_error, sorted_directory_entries, AdapterError, NativeArtifactProbe,
+};
 
 const MAX_PROBE_ROOTS: usize = 16;
 const MAX_YEAR_ENTRIES: usize = 64;
@@ -13,50 +15,6 @@ const MAX_DAY_ENTRIES: usize = 64;
 const MAX_ROLLOUTS_PER_DAY: usize = 4_096;
 const MAX_HEAD_PREFIX_BYTES: usize = 64 * 1024;
 const MAX_VERSION_BYTES: usize = 128;
-
-fn probe_error(message: &'static str) -> AdapterError {
-    AdapterError::invalid_contract(message)
-}
-
-fn platform_id() -> &'static str {
-    match std::env::consts::OS {
-        "macos" => "darwin",
-        "windows" => "windows",
-        other => other,
-    }
-}
-
-fn sorted_directory_entries(path: &Path, limit: usize) -> Result<Vec<PathBuf>, AdapterError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => {
-            return Err(probe_error(
-                "native support probe could not inspect a directory",
-            ))
-        }
-    };
-    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
-        return Err(probe_error(
-            "native support probe selected an invalid directory",
-        ));
-    }
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(path)
-        .map_err(|_| probe_error("native support probe could not read a directory"))?
-    {
-        let entry = entry
-            .map_err(|_| probe_error("native support probe could not read a directory entry"))?;
-        if entries.len() == limit {
-            return Err(probe_error(
-                "native support probe directory exceeded its entry bound",
-            ));
-        }
-        entries.push(entry.path());
-    }
-    entries.sort();
-    Ok(entries)
-}
 
 fn sorted_numeric_directories(
     path: &Path,

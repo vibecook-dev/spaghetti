@@ -1357,7 +1357,7 @@ mod tests {
     fn grok_scope_manifest() -> ScopeProgramManifest {
         ScopeProgramManifest::from_json(include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../agent-support/grok/candidate-2026-08-15/scope-programs.json"
+            "/../../agent-support/grok/2026-08-15/scope-programs.json"
         )))
         .unwrap()
     }

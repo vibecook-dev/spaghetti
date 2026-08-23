@@ -195,7 +195,13 @@ def _inside_range(version: str, version_range: Mapping[str, Any]) -> bool:
 
 
 def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]]) -> CompatibilityResult:
-    """Classify one native artifact without allowing candidates to confer support."""
+    """Classify one native artifact without letting an unpromoted release confer support.
+
+    A release entry is selectable when it carries ``runtime_selectable``. That
+    is derived from the scope program's declared status by whoever loads the
+    bundle — it is deliberately not a second status field on the release
+    document, which would let a release and its declarations disagree.
+    """
 
     release_list = list(releases)
     release_ids = [str(entry["support_release_id"]) for entry in release_list]
@@ -242,7 +248,7 @@ def classify_runtime(probe: RuntimeProbe, releases: Iterable[Mapping[str, Any]])
     promoted_on_platform = [
         entry
         for entry in entries
-        if entry["status"] == "promoted"
+        if entry.get("runtime_selectable", False)
         and probe.platform in entry["artifact_compatibility"]["platforms"]
     ]
     marker_compatible = []
