@@ -93,11 +93,14 @@ impl ScopeState {
     /// Drop every fact owned by one object, or by one superseded generation of
     /// it. RFC 012D section 11: deletion and reset retract old object-owned
     /// state through the common reducers rather than leaving it stale.
+    /// Returns each retracted revision with the generation it belonged to, so
+    /// the delivered event names the generation that owned the fact rather than
+    /// the one that replaced it.
     pub(crate) fn retract_owned(
         &mut self,
         owner: &ScopeMemberKey,
         before_generation: Option<u64>,
-    ) -> Vec<(ObserverFamily, FactSemanticRevision)> {
+    ) -> Vec<(ObserverFamily, FactSemanticRevision, u64)> {
         let doomed: Vec<_> = self
             .entries
             .iter()
@@ -112,7 +115,7 @@ impl ScopeState {
             .filter_map(|key| {
                 self.entries
                     .remove(&key)
-                    .map(|entry| (key.0.into(), entry.semantic))
+                    .map(|entry| (key.0.into(), entry.semantic, entry.generation))
             })
             .collect()
     }

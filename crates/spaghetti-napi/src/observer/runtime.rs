@@ -370,12 +370,12 @@ impl ObserverRuntime {
     fn retract_owned(&mut self, owner: &ScopeMemberKey, before_generation: Option<u64>) {
         let retracted = self.state.retract_owned(owner, before_generation);
         let observed_at = now_ms();
-        for (family, semantic) in retracted {
+        for (family, semantic, generation) in retracted {
             let source = SourcePosition {
                 stream_id: owner.stream_id.clone(),
                 object_path: owner.relative_path.to_string_lossy().into_owned(),
                 root_name: owner.root_name.clone(),
-                generation: before_generation.unwrap_or_default(),
+                generation,
                 byte_start: None,
                 byte_end: None,
                 record_digest: String::new(),
