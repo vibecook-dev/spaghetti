@@ -421,13 +421,7 @@ fn emit_message_and_blocks(
         completeness,
         operation: UserInputOperation::Upsert,
     };
-    let revision = message.semantic_revision_key()?;
-    output.push_native_object_scoped_with_revision(
-        record,
-        &message_key,
-        &revision,
-        Fact::MessageRevision(message),
-    )?;
+    output.push_native_object_scoped(record, &message_key, Fact::MessageRevision(message))?;
 
     for (ordinal, key, block) in blocks {
         let (content, block_completeness) = content_block_value(block);
@@ -452,11 +446,9 @@ fn emit_message_and_blocks(
             operation: UserInputOperation::Upsert,
         };
         let block_key_bytes = fact.stable_native_fact_key()?;
-        let revision = fact.semantic_revision_key()?;
-        output.push_native_object_scoped_with_revision(
+        output.push_native_object_scoped(
             record,
             &block_key_bytes,
-            &revision,
             Fact::ContentBlockRevision(fact),
         )?;
 
@@ -611,13 +603,7 @@ fn push_tool_revision(
         ToolRevisionKind::Result => 2,
     });
     key.extend_from_slice(fact.native_tool_id.as_bytes());
-    let revision = fact.semantic_revision_key()?;
-    output.push_native_object_scoped_with_revision(
-        record,
-        &key,
-        &revision,
-        Fact::ToolRevision(fact.clone()),
-    )?;
+    output.push_native_object_scoped(record, &key, Fact::ToolRevision(fact.clone()))?;
     Ok(())
 }
 
@@ -629,11 +615,9 @@ fn push_user_input_revision(
     let mut key = Vec::new();
     key.extend_from_slice(b"runtime.user-input-request\0");
     key.extend_from_slice(fact.native_tool_use_id.as_bytes());
-    let revision = fact.semantic_revision_key()?;
-    output.push_native_object_scoped_with_revision(
+    output.push_native_object_scoped(
         record,
         &key,
-        &revision,
         Fact::UserInputRequestRevision(fact.clone()),
     )?;
     Ok(())
@@ -732,9 +716,17 @@ fn bounded_text(text: &str) -> (String, ContractCompleteness) {
     (text[..end].to_string(), ContractCompleteness::Partial)
 }
 
+/// Digest a native payload without materializing it.
+///
+/// A tool result can be megabytes; serializing it into a `Vec` only to hash
+/// the `Vec` doubled the cost of every tool-bearing record. Streaming the
+/// serializer straight into the hasher produces the identical digest.
 fn value_digest(value: &Value) -> [u8; 32] {
-    let encoded = serde_json::to_vec(value).unwrap_or_default();
-    *blake3::hash(&encoded).as_bytes()
+    let mut hasher = blake3::Hasher::new();
+    if serde_json::to_writer(&mut hasher, value).is_err() {
+        return *blake3::hash(b"").as_bytes();
+    }
+    *hasher.finalize().as_bytes()
 }
 
 /// Native extension kinds cross the boundary as bounded machine identifiers.
@@ -852,13 +844,7 @@ fn emit_effective_state(
         key.extend_from_slice(b"runtime.effective-state\0");
         key.push(effective_state_slot(dimension) as u8);
         key.extend_from_slice(input.actor_run.as_bytes());
-        let revision = fact.semantic_revision_key()?;
-        output.push_native_object_scoped_with_revision(
-            record,
-            &key,
-            &revision,
-            Fact::EffectiveStateRevision(fact),
-        )?;
+        output.push_native_object_scoped(record, &key, Fact::EffectiveStateRevision(fact))?;
     }
     Ok(())
 }
@@ -976,22 +962,19 @@ fn emit_native_markers(
             completeness: ContractCompleteness::Complete,
             operation: UserInputOperation::Upsert,
         };
-        let revision = fact.semantic_revision_key()?;
         if derived {
-            output.push_derived_with_revision(
+            output.push_derived(
                 record,
                 b"runtime.native-marker/queue-operation",
-                &revision,
                 Fact::NativeRuntimeMarkerRevision(fact),
             )?;
         } else {
             let mut key = Vec::new();
             key.extend_from_slice(b"runtime.native-marker\0");
             key.extend_from_slice(marker_id.as_bytes());
-            output.push_native_object_scoped_with_revision(
+            output.push_native_object_scoped(
                 record,
                 &key,
-                &revision,
                 Fact::NativeRuntimeMarkerRevision(fact),
             )?;
         }
@@ -1223,13 +1206,7 @@ pub(crate) fn emit_task_snapshot_runtime_facts(
         let mut key = Vec::new();
         key.extend_from_slice(b"runtime.task\0");
         key.extend_from_slice(item.native_task_id.as_bytes());
-        let revision = fact.semantic_revision_key()?;
-        output.push_native_object_scoped_with_revision(
-            record,
-            &key,
-            &revision,
-            Fact::TaskRevision(fact),
-        )?;
+        output.push_native_object_scoped(record, &key, Fact::TaskRevision(fact))?;
     }
     Ok(())
 }
@@ -1269,13 +1246,7 @@ pub(crate) fn emit_plan_runtime_facts(
     let mut key = Vec::new();
     key.extend_from_slice(b"runtime.plan\0");
     key.extend_from_slice(native_plan_id.as_bytes());
-    let revision = fact.semantic_revision_key()?;
-    output.push_native_object_scoped_with_revision(
-        record,
-        &key,
-        &revision,
-        Fact::PlanRevision(fact),
-    )?;
+    output.push_native_object_scoped(record, &key, Fact::PlanRevision(fact))?;
     Ok(())
 }
 

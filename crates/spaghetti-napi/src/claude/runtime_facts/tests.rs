@@ -997,24 +997,40 @@ fn decode_throughput_and_fact_identity_digest() {
     let borrowed: Vec<&str> = lines.iter().map(String::as_str).collect();
 
     // One batch per record, exactly as the engine's decode spine does it.
+    // Reported as the minimum of several rounds: this machine runs other
+    // lanes, and the minimum is the round least disturbed by them. A mean
+    // would mostly measure the neighbours.
+    let rounds: usize = std::env::var("SPAG_BENCH_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(5);
     let mut hasher = blake3::Hasher::new();
     let mut facts = 0_usize;
-    let started = std::time::Instant::now();
-    decode_each_record(&borrowed, |batch| {
-        for envelope in batch.facts() {
-            if let Some(semantic) = envelope.semantic_revision {
-                facts += 1;
-                hasher.update(envelope.value.kind().as_bytes());
-                hasher.update(semantic.fact_id.as_bytes());
-                hasher.update(semantic.fact_revision_id.as_bytes());
+    let mut elapsed = std::time::Duration::MAX;
+    for round in 0..rounds {
+        let mut round_facts = 0_usize;
+        let mut round_hasher = blake3::Hasher::new();
+        let started = std::time::Instant::now();
+        decode_each_record(&borrowed, |batch| {
+            for envelope in batch.facts() {
+                if let Some(semantic) = envelope.semantic_revision {
+                    round_facts += 1;
+                    round_hasher.update(envelope.value.kind().as_bytes());
+                    round_hasher.update(semantic.fact_id.as_bytes());
+                    round_hasher.update(semantic.fact_revision_id.as_bytes());
+                }
             }
+        });
+        elapsed = elapsed.min(started.elapsed());
+        if round == 0 {
+            facts = round_facts;
+            hasher = round_hasher;
         }
-    });
-    let elapsed = started.elapsed();
+    }
 
     let megabytes = bytes as f64 / (1024.0 * 1024.0);
     println!(
-        "decode: {:.1} MB / {} records / {} canonical facts in {:.1} ms = {:.2} ms/MB",
+        "decode: {:.1} MB / {} records / {} canonical facts in {:.1} ms = {:.2} ms/MB (best of {rounds})",
         megabytes,
         lines.len(),
         facts,
