@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{bounded, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 use crate::adapter::FactBatch;
 use crate::core::schema;
@@ -75,6 +75,7 @@ enum WriterCommand {
         response: Sender<Result<bool, EngineError>>,
     },
     FinalizeQueryBootstrap {
+        recovery: bool,
         response: Sender<Result<Option<u64>, EngineError>>,
     },
     Commit {
@@ -235,12 +236,21 @@ impl WriterClient {
     }
 
     pub(crate) fn finalize_query_bootstrap(&self) -> Result<Option<u64>, EngineError> {
+        self.finish_query_bootstrap(false)
+    }
+
+    pub(crate) fn recover_query_bootstrap(&self) -> Result<Option<u64>, EngineError> {
+        self.finish_query_bootstrap(true)
+    }
+
+    fn finish_query_bootstrap(&self, recovery: bool) -> Result<Option<u64>, EngineError> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(EngineError::WorkerUnavailable { worker: "writer" });
         }
         let (response_tx, response_rx) = bounded(1);
         self.commands
             .send(WriterCommand::FinalizeQueryBootstrap {
+                recovery,
                 response: response_tx,
             })
             .map_err(|_| EngineError::WorkerUnavailable { worker: "writer" })?;
@@ -568,7 +578,7 @@ fn writer_thread(
                 });
                 let _ = response.send(result);
             }
-            WriterCommand::FinalizeQueryBootstrap { response } => {
+            WriterCommand::FinalizeQueryBootstrap { recovery, response } => {
                 let started = Instant::now();
                 let skip = super::ingest_profile::IngestProfileSkip::current();
                 let result = query_bootstrap_active(&connection).and_then(|active| {
@@ -577,25 +587,34 @@ fn writer_thread(
                         return Ok(None);
                     }
                     ensure_disk_reserve(&database_path)?;
-                    if !skip.checkpoints && !skip.finalize {
+                    if recovery || (!skip.checkpoints && !skip.finalize) {
                         let started = Instant::now();
                         let checkpoint = checkpoints.checkpoint(&connection, &telemetry, true);
                         telemetry.record_bootstrap_phase(
                             "bootstrap.pre_finalize_checkpoint",
                             started.elapsed(),
                         );
-                        checkpoint?;
+                        let checkpoint = checkpoint?;
+                        if recovery {
+                            require_reader_free_checkpoint(checkpoint)?;
+                        }
                     }
-                    let watermark =
-                        finalize_query_bootstrap_connection_profiled(&mut connection, &telemetry)?;
-                    if !skip.checkpoints && !skip.finalize {
+                    let watermark = if recovery {
+                        finalize_query_bootstrap_connection(&mut connection)?
+                    } else {
+                        finalize_query_bootstrap_connection_profiled(&mut connection, &telemetry)?
+                    };
+                    if recovery || (!skip.checkpoints && !skip.finalize) {
                         let started = Instant::now();
                         let checkpoint = checkpoints.checkpoint(&connection, &telemetry, true);
                         telemetry.record_bootstrap_phase(
                             "bootstrap.post_finalize_checkpoint",
                             started.elapsed(),
                         );
-                        checkpoint?;
+                        let checkpoint = checkpoint?;
+                        if recovery {
+                            require_reader_free_checkpoint(checkpoint)?;
+                        }
                     }
                     bootstrap_active = false;
                     Ok(watermark)
@@ -1657,11 +1676,13 @@ fn disk_reserve_bytes(total_bytes: u64) -> u64 {
     (total_bytes / 50).clamp(MIN_DISK_RESERVE_BYTES, MAX_DISK_RESERVE_BYTES)
 }
 
-fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
-    let mut connection = Connection::open(database_path).map_err(|error| EngineError::Sqlite {
-        operation: "open writer connection",
-        detail: error.to_string(),
-    })?;
+fn open_writer(database_path: &Path) -> Result<Connection, EngineError> {
+    if stored_schema_version_for_fast_discard(database_path)
+        .is_some_and(|version| version != schema::SCHEMA_VERSION)
+    {
+        discard_stale_database_files(database_path)?;
+    }
+    let connection = open_writer_connection(database_path)?;
     super::local_permissions::restrict_owner_file(database_path).map_err(|error| {
         EngineError::Sqlite {
             operation: "restrict writer database permissions",
@@ -1683,13 +1704,6 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
         operation: "initialize schema",
         detail: error.to_string(),
     })?;
-    if query_bootstrap_active(&connection)? {
-        let checkpoint = reader_free_checkpoint(&connection)?;
-        require_reader_free_checkpoint(checkpoint)?;
-        finalize_query_bootstrap_connection(&mut connection)?;
-        let checkpoint = reader_free_checkpoint(&connection)?;
-        require_reader_free_checkpoint(checkpoint)?;
-    }
     // Let SQLite refresh bounded planner statistics for tables that need it.
     // The 0x10000 bit asks a newly opened long-lived connection to consider
     // every table once; SQLite's optimize pragma decides whether ANALYZE work
@@ -1711,6 +1725,46 @@ fn open_writer(database_path: &PathBuf) -> Result<Connection, EngineError> {
         }
     })?;
     Ok(connection)
+}
+
+fn open_writer_connection(database_path: &Path) -> Result<Connection, EngineError> {
+    Connection::open(database_path).map_err(|error| EngineError::Sqlite {
+        operation: "open writer connection",
+        detail: error.to_string(),
+    })
+}
+
+fn stored_schema_version_for_fast_discard(database_path: &Path) -> Option<u32> {
+    if !database_path.exists() {
+        return None;
+    }
+    // Inspection is read-only so merely deciding whether a cache is stale
+    // cannot checkpoint a large WAL. Any inspection failure falls back to the
+    // ordinary writer open and its existing corruption/recovery behavior.
+    let connection = Connection::open_with_flags(
+        database_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    schema::current_schema_version(&connection).ok().flatten()
+}
+
+fn discard_stale_database_files(database_path: &Path) -> Result<(), EngineError> {
+    for suffix in ["-shm", "-wal", "-journal", ""] {
+        let mut path = database_path.as_os_str().to_os_string();
+        path.push(suffix);
+        match std::fs::remove_file(PathBuf::from(path)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(EngineError::Sqlite {
+                    operation: "discard stale observation cache",
+                    detail: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn query_bootstrap_active(connection: &Connection) -> Result<bool, EngineError> {

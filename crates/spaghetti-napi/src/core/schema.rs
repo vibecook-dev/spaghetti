@@ -216,8 +216,10 @@ const CANONICAL_FTS_TRIGGERS: &[&str] = &[
 /// state machine.
 pub const SCHEMA_VERSION: u32 = 64;
 
-/// Full DDL for the current schema — lifted verbatim from the TS `SCHEMA_SQL`
-/// template literal. Whitespace differs; structure does not.
+/// Core DDL for the current schema, lifted from the TS `SCHEMA_SQL` template
+/// literal. The query-only indexes in [`BOOTSTRAP_QUERY_INDEXES`] and the
+/// canonical FTS triggers are installed separately so an interrupted deferred
+/// bootstrap can reopen without eagerly rebuilding them.
 const SCHEMA_SQL: &str = r#"
 -- Meta
 CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -1958,7 +1960,6 @@ CREATE INDEX IF NOT EXISTS idx_source_objects_stream_state ON source_objects(sou
 CREATE INDEX IF NOT EXISTS idx_source_objects_last_commit ON source_objects(last_commit_seq);
 CREATE INDEX IF NOT EXISTS idx_ingest_commits_source_seq ON ingest_commits(source_instance_id, commit_seq);
 CREATE INDEX IF NOT EXISTS idx_ingest_commits_retention ON ingest_commits(committed_at, commit_seq);
-CREATE INDEX IF NOT EXISTS idx_change_log_topic_cursor ON change_log(topic, commit_seq, ordinal);
 CREATE INDEX IF NOT EXISTS idx_projection_versions_readiness ON projection_versions(readiness, projection_id);
 CREATE INDEX IF NOT EXISTS idx_source_coverage_sets_instance_owner ON source_coverage_sets(source_instance_id, owner_id);
 CREATE INDEX IF NOT EXISTS idx_source_coverage_points_object ON source_coverage_points(stream_key, object_key, coverage_set_id);
@@ -1966,7 +1967,6 @@ CREATE INDEX IF NOT EXISTS idx_source_record_errors_commit ON source_record_erro
 CREATE INDEX IF NOT EXISTS idx_fact_records_object_generation ON fact_records(source_object_id, source_generation);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_records_semantic_revision ON fact_records(semantic_fact_revision_id) WHERE semantic_fact_revision_id IS NOT NULL;
 DROP INDEX IF EXISTS idx_fact_records_source_instance;
-CREATE INDEX IF NOT EXISTS idx_fact_records_source_instance_compact ON fact_records(source_instance_id);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_project ON canonical_sessions(project_key, session_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_sessions_source_generation ON canonical_sessions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_session_index_snapshot_assertions_project ON session_index_snapshot_assertions(project_key, fact_id);
@@ -1989,18 +1989,13 @@ CREATE INDEX IF NOT EXISTS idx_interpretation_settings_assertions_scope ON inter
 CREATE INDEX IF NOT EXISTS idx_canonical_interpretation_settings_documents_scope ON canonical_interpretation_settings_documents(scope_key, layer, document_key);
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_native ON message_tool_references(session_key, native_tool_use_id, reference_kind, message_key);
 CREATE INDEX IF NOT EXISTS idx_message_tool_references_source ON message_tool_references(source_object_id, source_generation, session_key, native_tool_use_id);
-CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_kind ON canonical_message_content_blocks(session_key, content_kind, message_key);
-CREATE INDEX IF NOT EXISTS idx_canonical_message_blocks_session_tool ON canonical_message_content_blocks(session_key, tool_name, message_key) WHERE tool_name IS NOT NULL;
 DROP INDEX IF EXISTS idx_canonical_message_blocks_run;
 DROP INDEX IF EXISTS idx_canonical_messages_session_order;
-CREATE INDEX IF NOT EXISTS idx_canonical_messages_session_activity ON canonical_messages(session_key, source_time, message_key, source_time_quality, last_commit_seq);
-CREATE INDEX IF NOT EXISTS idx_canonical_messages_run_activity ON canonical_messages(run_key, source_time, message_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_messages_source_generation ON canonical_messages(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_session ON canonical_runs(session_key, run_key);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_commit ON canonical_runs(last_commit_seq DESC, run_key DESC);
 CREATE INDEX IF NOT EXISTS idx_canonical_runs_source_generation ON canonical_runs(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session ON usage_v2_response_contributions(session_key, usage_key);
-CREATE INDEX IF NOT EXISTS idx_usage_v2_response_session_time ON usage_v2_response_contributions(session_key, source_time, usage_key);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_actor ON usage_v2_response_contributions(actor_run_key, usage_key);
 CREATE INDEX IF NOT EXISTS idx_usage_v2_response_source_generation ON usage_v2_response_contributions(source_object_id, source_generation);
 CREATE INDEX IF NOT EXISTS idx_runtime_actor_runs_v2_session ON runtime_actor_runs_v2(session_key, actor_run_key);
@@ -2129,23 +2124,6 @@ END;
 CREATE TRIGGER IF NOT EXISTS subagent_timeline_au AFTER UPDATE ON subagent_timeline_messages BEGIN
   INSERT INTO subagent_search_fts(subagent_search_fts, rowid, search_text) VALUES ('delete', old.id, old.search_text);
   INSERT INTO subagent_search_fts(rowid, search_text) VALUES (new.id, new.search_text);
-END;
-CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ai AFTER INSERT ON canonical_messages
-WHEN new.search_text IS NOT NULL AND trim(new.search_text) <> '' BEGIN
-  INSERT INTO canonical_message_search_fts(rowid, search_text) VALUES (new.rowid, new.search_text);
-END;
-CREATE TRIGGER IF NOT EXISTS canonical_messages_search_ad AFTER DELETE ON canonical_messages
-WHEN old.search_text IS NOT NULL AND trim(old.search_text) <> '' BEGIN
-  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
-  VALUES ('delete', old.rowid, old.search_text);
-END;
-CREATE TRIGGER IF NOT EXISTS canonical_messages_search_au AFTER UPDATE OF search_text ON canonical_messages BEGIN
-  INSERT INTO canonical_message_search_fts(canonical_message_search_fts, rowid, search_text)
-  SELECT 'delete', old.rowid, old.search_text
-  WHERE old.search_text IS NOT NULL AND trim(old.search_text) <> '';
-  INSERT INTO canonical_message_search_fts(rowid, search_text)
-  SELECT new.rowid, new.search_text
-  WHERE new.search_text IS NOT NULL AND trim(new.search_text) <> '';
 END;
 CREATE TRIGGER IF NOT EXISTS timeline_dirty_ai AFTER INSERT ON messages BEGIN
   INSERT INTO timeline_dirty_sessions(session_id, source_id, project_slug)
@@ -2397,9 +2375,9 @@ const SESSION_SUMMARY_TRIGGERS: &[&str] = &[
     "session_summary_subagents_au",
 ];
 
-/// FTS auto-sync trigger DDL, extracted so bulk-ingest can drop and
-/// recreate them around a high-volume INSERT run. Must stay byte-identical
-/// to the trigger block embedded in [`SCHEMA_SQL`] above.
+/// FTS auto-sync trigger DDL, extracted so bulk-ingest can drop and recreate
+/// them around a high-volume INSERT run. The canonical subset is deliberately
+/// also available as [`CANONICAL_FTS_TRIGGERS_SQL`] for deferred finalization.
 const FTS_TRIGGERS_SQL: &str = r#"
 CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
   INSERT INTO search_fts(rowid, text_content) VALUES (new.id, new.text_content);
@@ -2459,6 +2437,14 @@ CREATE TRIGGER IF NOT EXISTS canonical_messages_search_au AFTER UPDATE OF search
   WHERE new.search_text IS NOT NULL AND trim(new.search_text) <> '';
 END;
 "#;
+
+fn create_bootstrap_query_structures(conn: &Connection) -> Result<(), SchemaError> {
+    for (_, sql) in BOOTSTRAP_QUERY_INDEXES {
+        conn.execute_batch(sql)?;
+    }
+    conn.execute_batch(CANONICAL_FTS_TRIGGERS_SQL)?;
+    Ok(())
+}
 
 const TOKEN_ACTIVITY_TRIGGERS_SQL: &str = r#"
 CREATE TRIGGER IF NOT EXISTS token_activity_messages_ai AFTER INSERT ON messages
@@ -2999,8 +2985,12 @@ pub fn current_schema_version(conn: &Connection) -> Result<Option<u32>, SchemaEr
 /// - If the stored version is missing or `!= SCHEMA_VERSION`, drops
 ///   all legacy + current tables (and their triggers) and rebuilds from
 ///   [`SCHEMA_SQL`].
-/// - Otherwise, reruns [`SCHEMA_SQL`] (`IF NOT EXISTS` creates plus explicit
-///   `DROP INDEX IF EXISTS` retirement statements are idempotent).
+/// - If the version matches and no query bootstrap is active, reruns
+///   [`SCHEMA_SQL`] (`IF NOT EXISTS` creates plus explicit `DROP INDEX IF
+///   EXISTS` retirement statements are idempotent).
+/// - If an incomplete query bootstrap is durable, preserves its intentionally
+///   absent indexes and FTS triggers. Explicit finalization recreates and
+///   validates those structures after catalog readers have been admitted.
 /// - Writes the current [`SCHEMA_VERSION`] into `schema_meta` after a wipe.
 ///
 /// This mirrors `initializeSchema` in `packages/sdk/src/data/schema.ts`.
@@ -3012,6 +3002,7 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
 
     let current = current_schema_version(conn)?;
     let rebuilt = current != Some(SCHEMA_VERSION);
+    let bootstrap_active = !rebuilt && query_bootstrap_state(conn)?.is_some();
 
     if rebuilt {
         // Drop legacy tables from previous schema versions. Errors here are
@@ -3041,8 +3032,10 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
             "CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
         )?;
 
-        // Create all tables / indexes / FTS / triggers.
+        // Create all tables and ingestion-time structures, then install the
+        // query-only structures expected on a ready database.
         conn.execute_batch(SCHEMA_SQL)?;
+        create_bootstrap_query_structures(conn)?;
 
         // Record the new version.
         conn.execute(
@@ -3053,8 +3046,11 @@ pub fn initialize_schema(conn: &Connection) -> Result<(), SchemaError> {
     } else {
         // Version matches — make sure all current objects exist and retire
         // explicitly superseded indexes. The DDL is idempotent on a healthy
-        // database.
+        // database and deliberately excludes deferred query structures.
         conn.execute_batch(SCHEMA_SQL)?;
+        if !bootstrap_active {
+            create_bootstrap_query_structures(conn)?;
+        }
         // Refresh derived-index trigger bodies: IF NOT EXISTS cannot replace
         // a correctness-fixed definition from the same schema version.
         refresh_token_activity_triggers(conn)?;

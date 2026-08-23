@@ -551,8 +551,17 @@ impl SpaghettiEngineCore {
         let owner_lock = DatabaseOwnerLock::acquire(&database_path, owner_label)?;
         let owner = owner_lock.metadata().clone();
         let writer = WriterRuntime::start(database_path.clone())?;
-        let bootstrap_active =
-            options.defer_query_structures && writer.client().begin_query_bootstrap()?;
+        let bootstrap_active = if options.defer_query_structures {
+            writer.client().begin_query_bootstrap()?
+        } else {
+            // Strict callers retain the original crash-recovery contract:
+            // deferred query structures and their integrity checks must be
+            // complete before any reader is admitted. Catalog-first callers
+            // intentionally carry the durable marker into the running engine
+            // and finalize after catalog discovery instead.
+            writer.client().recover_query_bootstrap()?;
+            false
+        };
         // Catalog-first: admit the read pool while FTS bootstrap is still
         // incomplete. Search stays BootstrapInProgress until finalization.
         let source_pass_pool = options.source_pass_pool.clone();
@@ -2148,6 +2157,31 @@ mod tests {
         }
     }
 
+    fn seed_interrupted_query_bootstrap(database_path: &Path) {
+        let mut connection = rusqlite::Connection::open(database_path).unwrap();
+        crate::core::schema::initialize_schema(&connection).unwrap();
+        assert!(crate::core::schema::begin_query_bootstrap(&mut connection).unwrap());
+        connection
+            .execute_batch(
+                r#"
+                INSERT INTO source_instances (
+                    source_instance_id, adapter_id, stable_key, display_name,
+                    adapter_version, adapter_contract_version,
+                    source_schema_versions_json, capabilities_json,
+                    discovered_at, last_seen_at
+                ) VALUES (1, 'fixture', x'01', 'fixture', '1', 1, '[]', '[]', 1, 1);
+                INSERT INTO ingest_commits (
+                    commit_seq, source_instance_id, reason, started_at,
+                    committed_at, fact_count
+                ) VALUES (1, 1, 'bootstrap', 1, 2, 0);
+                "#,
+            )
+            .unwrap();
+        connection
+            .execute_batch("DROP INDEX idx_ingest_commits_retention")
+            .unwrap();
+    }
+
     #[test]
     fn writer_pressure_reduces_shared_source_concurrency_without_disabling_it() {
         assert_eq!(source_pass_concurrency_limit(4, 0, 0), 4);
@@ -2238,6 +2272,75 @@ mod tests {
             "wal",
             "bootstrap finalization must remain on WAL instead of rewriting the file in DELETE mode"
         );
+        assert_eq!(engine.complete_query_bootstrap().unwrap(), None);
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn deferred_reopen_admits_catalog_before_recovering_interrupted_query_bootstrap() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("deferred-recovery.db");
+        seed_interrupted_query_bootstrap(&database);
+
+        let mut bootstrap_options = options(database.clone());
+        bootstrap_options.defer_query_structures = true;
+        let engine = SpaghettiEngineCore::open(bootstrap_options).unwrap();
+
+        assert_eq!(engine.status().state, "bootstrapping");
+        assert!(engine.status().accepting_queries);
+        assert_eq!(engine.overview().unwrap().commit_seq, 1);
+        let search = engine.search_cancellable(
+            super::search_query::SearchPageRequest {
+                text: "anything".to_string(),
+                project_id: None,
+                session_id: None,
+                adapter_ids: Vec::new(),
+                roles: Vec::new(),
+                native_kinds: Vec::new(),
+                branch_kind: None,
+                cursor: None,
+                limit: 10,
+            },
+            QueryCancellationToken::default(),
+        );
+        assert!(matches!(search, Err(EngineError::BootstrapInProgress)));
+
+        let schema = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+            .unwrap()
+            .query_row(
+                "SELECT \
+                 (SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN \
+                    ('idx_change_log_topic_cursor', 'idx_fact_records_source_instance_compact', \
+                     'idx_canonical_message_blocks_session_kind', 'idx_canonical_message_blocks_session_tool', \
+                     'idx_canonical_messages_session_activity', 'idx_canonical_messages_run_activity', \
+                     'idx_usage_v2_response_session_time')), \
+                 (SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'canonical_messages_search_a_'), \
+                 (SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_ingest_commits_retention')",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .unwrap();
+        assert_eq!(schema, (0, 0, 1));
+
+        assert_eq!(engine.complete_query_bootstrap().unwrap(), Some(1));
+        assert_eq!(engine.status().state, "running");
+        engine.shutdown().unwrap();
+    }
+
+    #[test]
+    fn strict_reopen_recovers_interrupted_query_bootstrap_before_admitting_readers() {
+        let dir = tempdir().unwrap();
+        let database = dir.path().join("strict-recovery.db");
+        seed_interrupted_query_bootstrap(&database);
+
+        let engine = SpaghettiEngineCore::open(options(database)).unwrap();
+
+        assert_eq!(engine.status().state, "running");
+        assert!(engine.status().accepting_queries);
+        assert_eq!(engine.overview().unwrap().commit_seq, 1);
         assert_eq!(engine.complete_query_bootstrap().unwrap(), None);
         engine.shutdown().unwrap();
     }

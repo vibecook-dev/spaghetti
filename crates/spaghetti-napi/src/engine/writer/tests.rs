@@ -109,6 +109,59 @@ fn writer_connection_stays_alive_until_shutdown() {
 }
 
 #[test]
+fn versioned_stale_cache_is_replaced_instead_of_rewritten_in_place() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("stale-cache.db");
+    let connection = Connection::open(&database).unwrap();
+    schema::initialize_schema(&connection).unwrap();
+    connection
+        .execute(
+            "UPDATE schema_meta SET value = ?1 WHERE key = 'version'",
+            [(schema::SCHEMA_VERSION - 1).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute_batch("CREATE TABLE stale_cache_sentinel(value TEXT)")
+        .unwrap();
+    drop(connection);
+
+    let connection = open_writer(&database).unwrap();
+    assert_eq!(
+        schema::current_schema_version(&connection).unwrap(),
+        Some(schema::SCHEMA_VERSION)
+    );
+    let sentinel: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'stale_cache_sentinel'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sentinel, 0);
+}
+
+#[test]
+fn unversioned_database_is_not_eligible_for_fast_file_discard() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("unversioned.db");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch("CREATE TABLE unrelated_sentinel(value TEXT)")
+        .unwrap();
+    drop(connection);
+
+    let connection = open_writer(&database).unwrap();
+    let sentinel: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'unrelated_sentinel'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(sentinel, 1);
+}
+
+#[test]
 fn projection_administration_counts_only_durable_writer_commits() {
     let dir = tempdir().unwrap();
     let database = dir.path().join("projection-telemetry.db");
