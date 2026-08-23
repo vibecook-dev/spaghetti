@@ -5,7 +5,10 @@
     {
       "id": "X0-DB-AUTHORITY",
       "disposition": "retained",
-      "owners": ["RFC011", "RFC012"],
+      "owners": [
+        "RFC011",
+        "RFC012"
+      ],
       "legacy_behavior": "One Rust database owner and writer publish typed pure queries asynchronously.",
       "target_behavior": "The durable topology keeps the RFC 011 ownership and query laws unchanged.",
       "migration": "No semantic migration; retain the architecture ownership ratchet.",
@@ -21,7 +24,10 @@
     {
       "id": "X0-RECONCILIATION-ORDER",
       "disposition": "retained",
-      "owners": ["RFC011", "RFC012A"],
+      "owners": [
+        "RFC011",
+        "RFC012A"
+      ],
       "legacy_behavior": "Notifications are hints; generations and per-object source order govern reconciliation.",
       "target_behavior": "Both topologies retain generation and source-order authority while delivery clocks stay non-authoritative.",
       "migration": "Add common coverage fixtures without replacing durable ordering.",
@@ -52,7 +58,9 @@
     {
       "id": "X0-ADAPTER-BOUNDARY",
       "disposition": "strengthened",
-      "owners": ["RFC012A"],
+      "owners": [
+        "RFC012A"
+      ],
       "legacy_behavior": "Adapters emit storage-agnostic facts without receiving a database handle.",
       "target_behavior": "Adapters additionally receive no private watcher, cursor, queue, query, or delivery authority.",
       "migration": "Replace remaining private mechanics with declared common source and scope primitives.",
@@ -73,7 +81,10 @@
     {
       "id": "X0-DECODE-TOPOLOGY",
       "disposition": "amended",
-      "owners": ["RFC012", "RFC012A"],
+      "owners": [
+        "RFC012",
+        "RFC012A"
+      ],
       "legacy_behavior": "Backfill and live ingestion share decoders and projections.",
       "target_behavior": "Durable and scoped topologies share source-record identity, decoder, facts, provenance, and reducers but use distinct delivery projections.",
       "migration": "Add topology-parity fixtures before enabling the scoped observer.",
@@ -89,7 +100,10 @@
     {
       "id": "X0-DURABLE-ATOMICITY",
       "disposition": "retained",
-      "owners": ["RFC011", "RFC012D"],
+      "owners": [
+        "RFC011",
+        "RFC012D"
+      ],
       "legacy_behavior": "Durable cursor, fact, projection, and outbox publication is commit-atomic.",
       "target_behavior": "Durable atomicity remains; the non-persistent observer uses explicit bootstrap and epoch barriers instead.",
       "migration": "Keep durable transaction fixtures and add scoped barrier/reset fixtures.",
@@ -115,7 +129,10 @@
     {
       "id": "X0-SCOPED-OBSERVATION",
       "disposition": "amended",
-      "owners": ["RFC012", "RFC012D"],
+      "owners": [
+        "RFC012",
+        "RFC012D"
+      ],
       "legacy_behavior": "Runtime observation is delivered through durable changes after commit.",
       "target_behavior": "A non-authoritative, database-free observer may deliver the same semantic evidence for one declared session scope.",
       "migration": "Shadow the scoped observer against durable facts before Chopsticks switches.",
@@ -131,7 +148,9 @@
     {
       "id": "X0-DECLARED-ADAPTER-MECHANICS",
       "disposition": "superseded",
-      "owners": ["RFC012A"],
+      "owners": [
+        "RFC012A"
+      ],
       "legacy_behavior": "Adapters may discover sources or reconcile entities through implementation-defined callbacks.",
       "target_behavior": "Only bounded declarations, restricted joins, and common runtime mechanics are conforming.",
       "migration": "Inventory each callback and map it to an approved primitive or an unsupported disposition.",
@@ -147,7 +166,9 @@
     {
       "id": "X0-USAGE-V2",
       "disposition": "superseded",
-      "owners": ["RFC012C"],
+      "owners": [
+        "RFC012C"
+      ],
       "legacy_behavior": "Usage-bearing native rows contribute through the RFC 011 accounting model.",
       "target_behavior": "Canonical usage is a qualified response-level revision keyed primarily by native message identity.",
       "migration": "Build usage-v2 in shadow, compare with an independent response-group oracle, then switch transactionally.",
@@ -178,23 +199,28 @@
     {
       "id": "X0-CATALOG-READINESS",
       "disposition": "refined",
-      "owners": ["RFC012B"],
+      "owners": [
+        "RFC012B"
+      ],
       "legacy_behavior": "Projection readiness uses generic pack states including StaleSafe.",
-      "target_behavior": "Catalog readiness is coverage-plan-, epoch-, and snapshot-specific; unrelated packs retain their own versioned readiness.",
-      "migration": "Introduce the catalog pack and transition table beside the blocking compatibility path.",
-      "rollback": "Select blocking full-search startup and retain the last accepted durable catalog.",
+      "target_behavior": "Readiness is one vector {catalog, history, usage, capabilities, artifacts, search} derived from committed rows; the catalog field is ready or explicitly degraded long before the others converge.",
+      "migration": "Commit discovery rows per source on engine open, then derive every readiness field from them; no durable state machine or publication record is kept.",
+      "rollback": "Block startup on full convergence and serve only the history path.",
       "evidence": [
         {
           "state": "implemented",
-          "target": "packages/sdk/src/contracts/rfc012b-pages.ts",
-          "claim": "Portable catalog readiness distinguishes queryable last-complete catalog from complete-only search."
+          "target": "crates/spaghetti-napi/src/engine/catalog/readiness.rs",
+          "claim": "One readiness vector, derived from committed rows, distinguishes a queryable catalog from complete-only search."
         }
       ]
     },
     {
       "id": "X0-COMMON-FACTS",
       "disposition": "retained",
-      "owners": ["RFC012A", "RFC012C"],
+      "owners": [
+        "RFC012A",
+        "RFC012C"
+      ],
       "legacy_behavior": "Common message, content, run, and deterministic fact identities feed durable projections.",
       "target_behavior": "Existing facts remain until an explicitly versioned family contract replaces their representation.",
       "migration": "Add versioned revisions in parallel and compare reduced semantic state.",
@@ -240,7 +266,9 @@
     {
       "id": "X0-CROSS-TOPOLOGY-IDENTITY",
       "disposition": "strengthened",
-      "owners": ["RFC012A"],
+      "owners": [
+        "RFC012A"
+      ],
       "legacy_behavior": "Source instances and facts have deterministic engine-local identities.",
       "target_behavior": "Persistable external entity and semantic revision references are restart-stable and equal across durable and scoped topologies.",
       "migration": "Introduce versioned canonical references beside legacy runtime-ID-based keys, then migrate each family explicitly.",
@@ -261,7 +289,10 @@
     {
       "id": "X0-FIXED-SNAPSHOT-PAGINATION",
       "disposition": "strengthened",
-      "owners": ["RFC011", "RFC012C"],
+      "owners": [
+        "RFC011",
+        "RFC012C"
+      ],
       "legacy_behavior": "Query results carry at_commit_seq and use stable keyset pagination.",
       "target_behavior": "Aggregate-facing history/runtime continuations remain on one retained snapshot or fail with explicit expiration.",
       "migration": "Add snapshot identity to the affected cursor contracts and test concurrent commits.",
@@ -292,7 +323,10 @@
     {
       "id": "X0-DURABLE-LIVE-HANDOFF",
       "disposition": "refined",
-      "owners": ["RFC012A", "RFC012C"],
+      "owners": [
+        "RFC012A",
+        "RFC012C"
+      ],
       "legacy_behavior": "A durable commit watermark participates in live-update handoff.",
       "target_behavior": "at_commit_seq remains durable-only; semantic references and comparable source/family coverage reconcile scoped evidence.",
       "migration": "Expose common references and coverage on durable pages and observer barriers before enabling merge.",

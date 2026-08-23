@@ -125,6 +125,9 @@ export function createObservationService(options: ObservationServiceOptions): Ob
 class RustObservationService extends EventEmitter implements ObservationService {
   private host: ObservationHost | null = null;
   private initializePromise: Promise<void> | null = null;
+  /** Resolves once every supervisor is running; history reads await it. */
+  private observing: Promise<void> | null = null;
+  private observingError: unknown = null;
   private disposePromise: Promise<void> | null = null;
   private subscriptionAbort: AbortController | null = null;
   private startupAbort: AbortController | null = null;
@@ -166,12 +169,17 @@ class RustObservationService extends EventEmitter implements ObservationService 
             },
           });
           if (this.disposePromise) throw new Error('Observation service stopped during initialization.');
-          // The host returns catalog-first, before watchers have finished
-          // starting. This compatibility surface promises decoded history to
-          // its callers, so it waits; catalog-only callers use the host
-          // directly and do not.
-          this.emitProgress('reconciling', 'Starting source observation…');
-          await host.whenObserving(signal);
+          // The host returns catalog-first, so initialization does too: the
+          // catalog is committed and listable here, while watchers are still
+          // coming up. Reads that need decoded history await `observing`
+          // instead, which keeps this surface's contract without making the
+          // library wait for it.
+          this.observing = host
+            .whenObserving()
+            .then(() => undefined)
+            .catch((error: unknown) => {
+              this.observingError = error;
+            });
           this.emitProgress('reconciling', 'Reading canonical source catalog…');
           await host.client.listSources({ limit: 1 });
           if (this.options.live !== false) await this.startSubscription(host);
@@ -236,6 +244,12 @@ class RustObservationService extends EventEmitter implements ObservationService 
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  /** Block until supervisors are running, surfacing a startup failure once. */
+  private async awaitObserving(): Promise<void> {
+    if (this.observing) await this.observing;
+    if (this.observingError) throw this.observingError;
   }
 
   listCatalogProjects(options?: SpaghettiCatalogPageOptions): Promise<SpaghettiCatalogProjectPage> {
@@ -804,7 +818,13 @@ class RustObservationService extends EventEmitter implements ObservationService 
     })();
   }
 
+  /**
+   * Decoded history. Unlike the catalog, this is only complete once every
+   * supervisor has finished its scan, so it waits for that here rather than
+   * making initialization — and therefore the library — wait for it.
+   */
   private async allProjects(): Promise<SpaghettiEngineHistoryProject[]> {
+    await this.awaitObserving();
     if (this.projectLoad) return await this.projectLoad;
     const work = collectPages((cursor) =>
       this.requireHost().client.listHistoryProjects({ cursor, limit: PAGE_LIMIT }),
@@ -821,6 +841,7 @@ class RustObservationService extends EventEmitter implements ObservationService 
   }
 
   private async allSessions(projectId: string): Promise<SpaghettiEngineHistorySession[]> {
+    await this.awaitObserving();
     const pending = this.sessionLoads.get(projectId);
     if (pending) return await pending;
     const work = collectPages((cursor) =>

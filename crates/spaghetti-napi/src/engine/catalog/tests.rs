@@ -24,6 +24,7 @@ use super::{
 const SESSION_A: &str = "11111111-1111-4111-8111-111111111111";
 const SESSION_B: &str = "22222222-2222-4222-8222-222222222222";
 const SESSION_INDEX_ONLY: &str = "33333333-3333-4333-8333-333333333333";
+const SESSION_DIRECTORY_ONLY: &str = "77777777-7777-4777-8777-777777777777";
 
 /// One assistant turn the Claude decoder accepts, so a transcript that reaches
 /// the history path produces a canonical session rather than a decode error.
@@ -52,6 +53,11 @@ fn claude_tree(base: &Path) -> PathBuf {
         format!("{}\n", transcript_line(SESSION_B, "/Users/dev/beta")),
     )
     .unwrap();
+    // A session that exists only as its side-data directory: no transcript of
+    // its own, but unmistakably a session of this project.
+    std::fs::create_dir_all(beta.join(SESSION_DIRECTORY_ONLY).join("subagents")).unwrap();
+    // A session with both a transcript and a side-data directory.
+    std::fs::create_dir_all(alpha.join(SESSION_A).join("tool-results")).unwrap();
     std::fs::write(
         alpha.join("sessions-index.json"),
         session_index(&[
@@ -135,8 +141,8 @@ fn cold_catalog_is_complete_before_any_history_row_exists() {
     let sessions = sessions(&engine);
     assert_eq!(
         sessions.sessions.len(),
-        3,
-        "two transcripts plus the index-only session"
+        4,
+        "two transcripts, the index-only session, and the directory-only session"
     );
 
     // The whole point: this is true with zero decoded history.
@@ -170,12 +176,25 @@ fn cold_catalog_is_complete_before_any_history_row_exists() {
     assert_eq!(index_only.native_message_count, Some(7));
     assert!(index_only.title.is_some());
 
+    // A session whose only evidence is its side-data directory is still a
+    // catalog member; a third of real projects are discoverable only this way.
+    let directory_only = sessions
+        .sessions
+        .iter()
+        .find(|session| session.native_session_id.as_deref() == Some(SESSION_DIRECTORY_ONLY))
+        .expect("directory-only session is catalog-visible");
+    assert!(!directory_only.transcript_present);
+    assert_eq!(directory_only.association_basis, "session_directory");
+
     let backed = sessions
         .sessions
         .iter()
         .find(|session| session.native_session_id.as_deref() == Some(SESSION_A))
         .expect("transcript-backed session is catalog-visible");
-    assert!(backed.transcript_present);
+    assert!(
+        backed.transcript_present,
+        "a session with both a transcript and a side-data directory keeps its transcript"
+    );
     assert_eq!(backed.association_basis, "session_directory");
     assert_eq!(backed.association_quality, "exact");
 
@@ -209,7 +228,7 @@ fn warm_start_serves_the_last_committed_catalog_before_rescanning() {
     // Reopen and read *without* rescanning: the rows are already committed.
     let engine = open_engine(database);
     let warm = sessions(&engine);
-    assert_eq!(warm.sessions.len(), 3, "warm start serves the last catalog");
+    assert_eq!(warm.sessions.len(), 4, "warm start serves the last catalog");
 
     let warm_refs = warm
         .sessions
@@ -236,7 +255,7 @@ fn a_source_that_cannot_be_read_is_marked_degraded_and_keeps_its_rows() {
     let root = claude_tree(temp.path());
     let engine = open_engine(temp.path().join("degraded.db"));
     engine.discover_source_catalog(&configured(&root)).unwrap();
-    assert_eq!(sessions(&engine).sessions.len(), 3);
+    assert_eq!(sessions(&engine).sessions.len(), 4);
 
     // Corrupt the native index. Discovery keeps every row it already proved
     // and reports the source as degraded rather than emptying the library.
@@ -255,7 +274,7 @@ fn a_source_that_cannot_be_read_is_marked_degraded_and_keeps_its_rows() {
 
     let after = sessions(&engine);
     assert!(
-        after.sessions.len() >= 2,
+        after.sessions.len() >= 3,
         "a degraded pass retracts nothing it could not disprove"
     );
     assert!(after.sessions.iter().all(|session| session.degraded));
@@ -269,7 +288,7 @@ fn a_rescan_picks_up_a_new_transcript_and_retracts_a_deleted_one() {
     let root = claude_tree(temp.path());
     let engine = open_engine(temp.path().join("rescan.db"));
     engine.discover_source_catalog(&configured(&root)).unwrap();
-    assert_eq!(sessions(&engine).sessions.len(), 3);
+    assert_eq!(sessions(&engine).sessions.len(), 4);
 
     let gamma = root.join("projects").join("-Users-dev-gamma");
     std::fs::create_dir_all(&gamma).unwrap();
@@ -318,7 +337,7 @@ fn an_unchanged_rescan_costs_no_commit() {
         after_first,
         "rescanning an unchanged surface must not advance the watermark that open cursors bind to"
     );
-    assert_eq!(sessions(&engine).sessions.len(), 3);
+    assert_eq!(sessions(&engine).sessions.len(), 4);
 
     engine.shutdown().unwrap();
 }
@@ -510,4 +529,104 @@ fn assert_no_legacy_catalog_tables(database: &Path) {
             .unwrap();
         assert_eq!(present, 0, "{table} must not exist");
     }
+}
+
+/// Measure catalog-first startup against a real corpus.
+///
+/// Ignored by default: it needs a populated native root, which only exists on
+/// a developer machine. Run with
+/// `CATALOG_CORPUS_ROOT=~/.claude cargo test -p spaghetti-napi catalog_startup_on_a_real_corpus -- --ignored --nocapture`.
+///
+/// It prints counts and durations only — never a path, name, id, or prompt.
+#[test]
+#[ignore = "requires a populated native root"]
+fn catalog_startup_on_a_real_corpus() {
+    let Ok(root) = std::env::var("CATALOG_CORPUS_ROOT") else {
+        panic!("set CATALOG_CORPUS_ROOT to a native agent root");
+    };
+    let root = PathBuf::from(root);
+    let temp = TempDir::new().unwrap();
+    let database = temp.path().join("corpus.db");
+
+    let cold_open = std::time::Instant::now();
+    let engine = open_engine(database.clone());
+    let cold_open_ms = cold_open.elapsed().as_millis();
+    let discovery = std::time::Instant::now();
+    engine.discover_source_catalog(&configured(&root)).unwrap();
+    let cold_discovery_ms = discovery.elapsed().as_millis();
+
+    let page = std::time::Instant::now();
+    let first_page = engine
+        .catalog_projects(CatalogProjectPageRequest {
+            bounds: CatalogPageBounds::default(),
+            adapter_ids: Vec::new(),
+        })
+        .unwrap();
+    let first_page_ms = page.elapsed().as_millis();
+    let readiness_started = std::time::Instant::now();
+    let readiness = engine.readiness().unwrap();
+    let readiness_ms = readiness_started.elapsed().as_millis();
+
+    let mut projects = 0_usize;
+    let mut cursor = None;
+    loop {
+        let page = engine
+            .catalog_projects(CatalogProjectPageRequest {
+                bounds: CatalogPageBounds { cursor, limit: 500 },
+                adapter_ids: Vec::new(),
+            })
+            .unwrap();
+        projects += page.projects.len();
+        cursor = page.cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    let mut sessions = 0_usize;
+    let mut cursor = None;
+    loop {
+        let page = engine
+            .catalog_sessions(CatalogSessionPageRequest {
+                bounds: CatalogPageBounds { cursor, limit: 500 },
+                project_id: None,
+                adapter_ids: Vec::new(),
+            })
+            .unwrap();
+        sessions += page.sessions.len();
+        cursor = page.cursor;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    engine.shutdown().unwrap();
+
+    // Warm: reopen the same database and serve the last committed catalog
+    // with no rescan at all.
+    let warm_open = std::time::Instant::now();
+    let engine = open_engine(database);
+    let warm_page = engine
+        .catalog_projects(CatalogProjectPageRequest {
+            bounds: CatalogPageBounds::default(),
+            adapter_ids: Vec::new(),
+        })
+        .unwrap();
+    let warm_ms = warm_open.elapsed().as_millis();
+    let warm_rescan = std::time::Instant::now();
+    engine.rescan_catalog(None).unwrap();
+    let warm_rescan_ms = warm_rescan.elapsed().as_millis();
+    engine.shutdown().unwrap();
+
+    println!("cold_engine_open_ms={cold_open_ms}");
+    println!("cold_discovery_ms={cold_discovery_ms}");
+    println!("cold_catalog_ready_ms={}", cold_open_ms + cold_discovery_ms);
+    println!("cold_first_page_ms={first_page_ms}");
+    println!("readiness_ms={readiness_ms}");
+    println!("warm_open_to_first_page_ms={warm_ms}");
+    println!("warm_unchanged_rescan_ms={warm_rescan_ms}");
+    println!("projects={projects}");
+    println!("sessions={sessions}");
+    println!("first_page_projects={}", first_page.projects.len());
+    println!("warm_first_page_projects={}", warm_page.projects.len());
+    println!("catalog_state={}", readiness.catalog.state.as_str());
+    println!("history_state={}", readiness.history.state.as_str());
 }

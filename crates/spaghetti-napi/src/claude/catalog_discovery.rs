@@ -6,9 +6,16 @@
 //! ```text
 //! <projects>/<project-slug>/                     -> a project
 //! <projects>/<project-slug>/<uuid>.jsonl         -> a transcript-backed session
+//! <projects>/<project-slug>/<uuid>/              -> a session with side data
+//!                                                   (subagents, workflows, tool
+//!                                                   results) and possibly no
+//!                                                   transcript of its own
 //! <projects>/<project-slug>/sessions-index.json  -> sessions the agent knows about,
 //!                                                   including ones with no transcript
 //! ```
+//!
+//! A third of the projects on a real machine are discoverable only through
+//! that session-directory form, so ignoring it would silently lose them.
 //!
 //! `<project-slug>` is byte-identical to the `native_project_key` the Claude
 //! decoder derives from the same path, so a discovered row and its later
@@ -81,11 +88,8 @@ pub(super) fn discover(
     let mut index_documents = Vec::new();
 
     for entry in checkpoint.entries.values() {
-        if entry.kind != DirectoryEntryKind::File {
-            continue;
-        }
         let components = path_components(&entry.display_path);
-        let [slug, file_name] = components.as_slice() else {
+        let [slug, name] = components.as_slice() else {
             continue;
         };
         if slug.is_empty() {
@@ -99,32 +103,37 @@ pub(super) fn discover(
                 display_path: None,
             });
 
-        if file_name == SESSION_INDEX_NAME {
+        // A session directory names a session whose transcript may or may not
+        // exist beside it. Discoverability and transcript availability are
+        // different facts, so it is admitted either way.
+        if entry.kind == DirectoryEntryKind::Directory {
+            if !is_uuid(name) {
+                continue;
+            }
+            insert_session(
+                &mut sessions,
+                &mut conflicts,
+                session_row(slug, name, &entry.display_path, None),
+            );
+            continue;
+        }
+
+        if name == SESSION_INDEX_NAME {
             index_documents.push((slug.clone(), entry.display_path.clone()));
             continue;
         }
-        let Some(session_id) = file_name.strip_suffix(".jsonl").filter(|id| is_uuid(id)) else {
+        let Some(session_id) = name.strip_suffix(".jsonl").filter(|id| is_uuid(id)) else {
             continue;
         };
         insert_session(
             &mut sessions,
             &mut conflicts,
-            DiscoveredSession {
-                native_session_key: session_id.to_string(),
-                native_session_id: Some(session_id.to_string()),
-                native_project_key: slug.clone(),
-                association_basis: ProjectAssociationBasis::SessionDirectory,
-                association_quality: AssociationQuality::Exact,
-                association_provenance: entry.display_path.clone(),
-                title: None,
-                native_created_at: None,
-                native_updated_at: None,
-                native_message_count: None,
-                transcript_locator: Some(entry.display_path.clone()),
-                source_size_bytes: Some(entry.size_bytes),
-                source_modified_ms: Some(modified_ms(entry.modified_ns)),
-                transcript_present: true,
-            },
+            session_row(
+                slug,
+                session_id,
+                &entry.display_path,
+                Some((entry.size_bytes, modified_ms(entry.modified_ns))),
+            ),
         );
     }
 
@@ -154,14 +163,43 @@ pub(super) fn discover(
     })
 }
 
-/// Depth-2 selection: project directories, their transcripts, and their
-/// session indexes. Nothing else is enumerated, so a deep `subagents/` or
-/// `workflows/` tree costs nothing.
+/// One transcript-backed or directory-only session row.
+fn session_row(
+    slug: &str,
+    session_id: &str,
+    provenance: &str,
+    transcript: Option<(u64, i64)>,
+) -> DiscoveredSession {
+    DiscoveredSession {
+        native_session_key: session_id.to_string(),
+        native_session_id: Some(session_id.to_string()),
+        native_project_key: slug.to_string(),
+        association_basis: ProjectAssociationBasis::SessionDirectory,
+        association_quality: AssociationQuality::Exact,
+        association_provenance: provenance.to_string(),
+        title: None,
+        native_created_at: None,
+        native_updated_at: None,
+        native_message_count: None,
+        transcript_locator: transcript.map(|_| provenance.to_string()),
+        source_size_bytes: transcript.map(|(size, _)| size),
+        source_modified_ms: transcript.map(|(_, modified)| modified),
+        transcript_present: transcript.is_some(),
+    }
+}
+
+/// Depth-2 selection: project directories and, inside each, the transcripts,
+/// session directories, and session index. Session directories are recorded
+/// but never descended into, so a deep `subagents/` or `workflows/` tree
+/// costs nothing.
 fn catalog_selection(path: &Path, kind: DirectoryEntryKind) -> DirectorySelection {
     let components = path_components(&path.to_string_lossy());
-    match kind {
-        DirectoryEntryKind::Directory if components.len() == 1 => DirectorySelection::Recurse,
-        DirectoryEntryKind::File if components.len() == 2 => {
+    match (kind, components.len()) {
+        (DirectoryEntryKind::Directory, 1) => DirectorySelection::Recurse,
+        (DirectoryEntryKind::Directory, 2) if is_uuid(&components[1]) => {
+            DirectorySelection::Include
+        }
+        (DirectoryEntryKind::File, 2) => {
             let name = &components[1];
             if name == SESSION_INDEX_NAME || name.ends_with(".jsonl") {
                 DirectorySelection::Include
@@ -222,6 +260,11 @@ fn merge_index_entry(
 
 /// Insert a session, keeping the higher-quality association and recording the
 /// loser as an explicit conflict when the projects disagree.
+///
+/// A session commonly appears twice inside one project — once as its side-data
+/// directory and once as its transcript file — so agreeing evidence merges
+/// rather than racing: whichever arrives second still contributes its
+/// transcript.
 fn insert_session(
     sessions: &mut BTreeMap<String, DiscoveredSession>,
     conflicts: &mut Vec<DiscoveredAssociationConflict>,
@@ -233,6 +276,13 @@ fn insert_session(
         }
         Some(existing) => {
             if existing.native_project_key == candidate.native_project_key {
+                if candidate.transcript_present && !existing.transcript_present {
+                    existing.transcript_present = true;
+                    existing.transcript_locator = candidate.transcript_locator;
+                    existing.source_size_bytes = candidate.source_size_bytes;
+                    existing.source_modified_ms = candidate.source_modified_ms;
+                    existing.association_provenance = candidate.association_provenance;
+                }
                 return;
             }
             if candidate.association_quality > existing.association_quality {

@@ -16,7 +16,7 @@
       "sources": [
         {
           "kind": "code_reference",
-          "path": "crates/spaghetti-napi/src/claude/catalog_conformance/tests.rs",
+          "path": "crates/spaghetti-napi/src/claude/support_probe.rs",
           "sha256": null,
           "locator": "candidate_probe version 2.1.223"
         },
@@ -286,7 +286,7 @@
         {
           "kind": "code_reference",
           "path": "scripts/usage-v2-compatibility-window.ts",
-          "sha256": "sha256:6ff762e643ce45733d13078c442db2f725a68ecefa957ffedf0b3473706a1e8d",
+          "sha256": "sha256:18a567f50bbf1d2514f5e259f5dbcc7384766f94607cc331be9aa6debb65b7c2",
           "locator": "ephemeral source cloning, independent census ingest gate, getRuntimeUsageCompatibility sampling, and aggregate-only report"
         },
         {
