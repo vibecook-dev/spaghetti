@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 
 import { reportIngestErrors, summarizeIngestErrors } from '../ingest-error-report.js';
 import type { ErrorSink, ErrorContext } from '../../io/error-sink.js';
-import type { NativeIngestError, NativeIngestErrorReport } from '../../native.js';
+import type { NativeIngestError, NativeIngestErrorReport } from '../../legacy-native.js';
 
 function err(path: string, severity: NativeIngestError['severity'], slug?: string): NativeIngestError {
   return { path, severity, message: 'boom', ...(slug === undefined ? {} : { slug }) };

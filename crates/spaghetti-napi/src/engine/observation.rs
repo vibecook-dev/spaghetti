@@ -11,6 +11,8 @@ use std::time::Duration;
 use crate::source::DirtyReason;
 
 use super::{EngineError, QueryCancellationToken, ReconcileOutcome};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 const DEFAULT_DIRTY_INSTANCE_CAPACITY: usize = 1_024;
 const MAX_ERROR_DETAIL_CHARS: usize = 512;
@@ -40,7 +42,9 @@ impl ObservationPhase {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ObservationStatusSnapshot {
     pub state: String,
     pub reconcile_in_flight: bool,
@@ -54,9 +58,17 @@ pub struct ObservationStatusSnapshot {
     pub failed_reconciles_total: u64,
     pub retry_signals_total: u64,
     pub queue_overflows_total: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_commit_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_started_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_finished_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub last_error: Option<String>,
 }
 

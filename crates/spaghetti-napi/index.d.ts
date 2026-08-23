@@ -12,21 +12,22 @@ export declare class SpaghettiEngine {
    * zero-argument constructor from appearing in the generated declaration.
    */
   constructor(_notConstructible: never)
-  get status(): EngineStatus
+  /** Current lifecycle status as JSON (`EngineStatusSnapshot`). */
+  get status(): string
   /** Probe the writer and one query worker off the JavaScript thread. */
-  health(signal?: AbortSignal | undefined | null): Promise<EngineHealth>
+  health(signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Execute the first typed, read-only Rust query. */
-  overview(signal?: AbortSignal | undefined | null): Promise<EngineOverviewResult>
+  overview(signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Replay one bounded, snapshot-consistent page of durable projection
    * changes. Binary keys and payloads remain lossless base64 strings.
    */
-  replayChanges(options?: EngineChangeReplayOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineChangeReplay>
+  replayChanges(options?: EngineChangeReplayOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Wait off the JavaScript thread for the Rust writer to publish a newer
    * durable commit. No SQLite read is performed while the request is idle.
    */
-  waitForCommit(options: EngineCommitWaitOptions, signal?: AbortSignal | undefined | null): Promise<EngineCommitWaitResult>
+  waitForCommit(options: EngineCommitWaitOptions, signal?: AbortSignal | undefined | null): Promise<string>
   /**
    * List catalog projects — everything discoverable, complete or explicitly
    * degraded. Available seconds after `startConfiguredObservation`, without
@@ -35,14 +36,14 @@ export declare class SpaghettiEngine {
    * This is a different question from `listHistoryProjects`, which reports
    * what has been decoded. Both are kept because both are asked.
    */
-  listCatalogProjects(options?: EngineCatalogPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogProjectPage>
+  listCatalogProjects(options?: EngineCatalogPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * List catalog sessions, optionally within one project. Rows carry the
    * evidence behind their project association and any competing identity.
    */
-  listCatalogSessions(options?: EngineCatalogSessionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineCatalogSessionPage>
+  listCatalogSessions(options?: EngineCatalogSessionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Resolve a persisted external reference against the current catalog. */
-  resolveCatalogEntity(externalRef: string, signal?: AbortSignal | undefined | null): Promise<EngineCatalogResolution>
+  resolveCatalogEntity(externalRef: string, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Wait until every configured supervisor has finished starting.
    *
@@ -50,144 +51,144 @@ export declare class SpaghettiEngine {
    * so watchers are still coming up behind it. Callers that need decoded
    * history await this; callers that only need the library do not.
    */
-  awaitObservationStart(signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  awaitObservationStart(signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * The readiness vector: catalog, history, usage, capabilities, artifacts,
    * and search, each derived from committed rows.
    */
-  readiness(signal?: AbortSignal | undefined | null): Promise<EngineReadiness>
+  readiness(signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * List canonical projects in Rust-defined activity order. The cursor is
    * opaque, versioned, and valid only for this query.
    */
-  listHistoryProjects(options?: EngineHistoryPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineHistoryProjectPage>
+  listHistoryProjects(options?: EngineHistoryPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * List transcript-backed sessions for one canonical project. Native
    * session-index metadata is returned as explicitly sourced enrichment.
    */
-  listHistorySessions(options: EngineHistorySessionPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineHistorySessionPage>
+  listHistorySessions(options: EngineHistorySessionPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Read one transcript-backed canonical session and its projection counts.
    * A well-formed unknown identity returns an absent `session`.
    */
-  getSession(sessionId: string, signal?: AbortSignal | undefined | null): Promise<EngineSessionDetails>
+  getSession(sessionId: string, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Page canonical messages for one verified project/session membership.
    * Both row count and decoded JSON payload bytes are bounded in Rust.
    */
-  getMessages(options: EngineMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineMessagePage>
+  getMessages(options: EngineMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Search all canonical root and delegated messages in one FTS score
    * domain. Exact totals, filtering, snippets, and paging are Rust-owned.
    */
-  search(options: EngineSearchPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineSearchPage>
+  search(options: EngineSearchPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Read one root-and-delegated canonical timeline page plus exact session
    * facets in a single SQLite snapshot.
    */
-  getTimeline(options: EngineTimelinePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTimelinePage>
+  getTimeline(options: EngineTimelinePageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page current child-run delegation relations for one canonical session. */
-  listDelegations(options: EngineDelegationPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineDelegationPage>
+  listDelegations(options: EngineDelegationPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page canonical workflow containers for one canonical session. */
-  listWorkflows(options: EngineWorkflowPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineWorkflowPage>
+  listWorkflows(options: EngineWorkflowPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Read one workflow container and its bounded native snapshot. */
-  getWorkflow(workflowId: string, signal?: AbortSignal | undefined | null): Promise<EngineWorkflowDetails>
+  getWorkflow(workflowId: string, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page native workflow members and their explicit journal evidence. */
-  listWorkflowMembers(options: EngineWorkflowMemberPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineWorkflowMemberPage>
+  listWorkflowMembers(options: EngineWorkflowMemberPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Page canonical project-memory documents. Exact UTF-8 content and row
    * count are bounded in Rust.
    */
-  listMemoryDocuments(options: EngineMemoryDocumentPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineMemoryDocumentPage>
+  listMemoryDocuments(options: EngineMemoryDocumentPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page canonical task collections globally or under one trusted scope. */
-  listTaskCollections(options?: EngineTaskCollectionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineTaskCollectionPage>
+  listTaskCollections(options?: EngineTaskCollectionPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page canonical task items for one opaque collection identity. */
-  listTasks(options: EngineTaskPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTaskPage>
+  listTasks(options: EngineTaskPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page global plan documents. No session relation is fabricated. */
-  listPlans(options?: EngineCapabilityPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EnginePlanPage>
+  listPlans(options?: EngineCapabilityPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page persisted tool-result sidecars for one verified session. */
-  listToolResults(options: EngineToolResultPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineToolResultPage>
+  listToolResults(options: EngineToolResultPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Page session-scoped file-history artifacts. Arbitrary content is
    * represented as base64 and bounded by Rust before crossing N-API.
    */
-  listArtifacts(options: EngineArtifactPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineArtifactPage>
+  listArtifacts(options: EngineArtifactPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** List configured source instances and their durable ingest inventory. */
-  listSources(options?: EngineHistoryPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineSourcePage>
+  listSources(options?: EngineHistoryPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Return one snapshot-consistent set of canonical and source-catalog
    * counts. Compatibility-cache tables are intentionally excluded.
    */
-  getStats(signal?: AbortSignal | undefined | null): Promise<EngineCanonicalStats>
+  getStats(signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Return canonical response-level usage for one project or one verified
    * session. Supplying `from` and `to` adds the per-day series and the
    * contributions that no day can own.
    */
-  getUsage(options: EngineUsageOptions, signal?: AbortSignal | undefined | null): Promise<EngineUsage>
+  getUsage(options: EngineUsageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Page normalized RFC 012A coverage for one fact family using opaque
    * common identities. The result shares one durable commit watermark and
    * never exposes native paths or object keys.
    */
-  getFactFamilyCoverage(options: EngineFactFamilyCoverageOptions, signal?: AbortSignal | undefined | null): Promise<EngineFactFamilyCoveragePage>
+  getFactFamilyCoverage(options: EngineFactFamilyCoverageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Replace one fact family's durable evidence after a caller explicitly
    * echoes the current source, digest, and coverage commit authorization.
    */
-  replayFactFamily(options: EngineFactFamilyReplayOptions, signal?: AbortSignal | undefined | null): Promise<EngineFactFamilyReplayResult>
+  replayFactFamily(options: EngineFactFamilyReplayOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Return durable run-state and current registry-presence evidence. This
    * intentionally does not probe PIDs or synthesize freshness assessments.
    */
-  getRuntimeSnapshot(options?: EngineRuntimeSnapshotOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineRuntimeSnapshot>
+  getRuntimeSnapshot(options?: EngineRuntimeSnapshotOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Look up one canonical run without probing process liveness. A
    * well-formed unknown identity returns an absent `run`.
    */
-  getRunState(runId: string, signal?: AbortSignal | undefined | null): Promise<EngineRunStateLookup>
+  getRunState(runId: string, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** List current canonical teams, including inbox-only team identities. */
-  listTeams(options?: EngineTeamPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<EngineTeamPage>
+  listTeams(options?: EngineTeamPageOptions | undefined | null, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Read one current team configuration and its bounded member snapshot. */
-  getTeam(teamId: string, signal?: AbortSignal | undefined | null): Promise<EngineTeamDetails>
+  getTeam(teamId: string, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Page inbox summaries without returning potentially sensitive message
    * bodies in a directory listing.
    */
-  listTeamInboxes(options: EngineTeamScopedPageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTeamInboxPage>
+  listTeamInboxes(options: EngineTeamScopedPageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Page one inbox's messages in native snapshot order. */
-  listTeamInboxMessages(options: EngineTeamInboxMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<EngineTeamInboxMessagePage>
+  listTeamInboxMessages(options: EngineTeamInboxMessagePageOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Reconcile any registered adapter through the common Rust source and
    * projection transaction path.
    */
-  reconcileAdapter(options: EngineAdapterReconcileOptions, signal?: AbortSignal | undefined | null): Promise<EngineReconcileResult>
+  reconcileAdapter(options: EngineAdapterReconcileOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Register consolidated roots and supervise any registered adapter. */
-  startObservation(options: EngineAdapterObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  startObservation(options: EngineAdapterObservationOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Start the complete configured source set, catalog first: every source
    * commits its discovered projects and sessions before any watcher begins
    * a history scan.
    */
-  startConfiguredObservation(options: EngineConfiguredObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineCatalogStartup>
+  startConfiguredObservation(options: EngineConfiguredObservationOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Force one running adapter supervisor through common reconciliation. */
-  refreshObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  refreshObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Stop one adapter supervisor without disposing the engine. */
-  stopObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  stopObservation(adapterId: string, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Reconcile the adapter-declared Claude source map through the common
    * Rust drivers, decoders, projections, and durable cursor transaction.
    */
-  reconcileClaude(options: EngineReconcileOptions, signal?: AbortSignal | undefined | null): Promise<EngineReconcileResult>
+  reconcileClaude(options: EngineReconcileOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Register consolidated native roots before an initial scan, then keep
    * one bounded Rust supervisor reconciling Claude changes and polling.
    */
-  startClaudeObservation(options: EngineObservationOptions, signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  startClaudeObservation(options: EngineObservationOptions, signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Force the running Claude supervisor through its common reconcile path. */
-  refreshClaudeObservation(signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  refreshClaudeObservation(signal?: AbortSignal | undefined | null): Promise<unknown>
   /** Stop native Claude watch registration without disposing the engine. */
-  stopClaudeObservation(signal?: AbortSignal | undefined | null): Promise<EngineStatus>
+  stopClaudeObservation(signal?: AbortSignal | undefined | null): Promise<unknown>
   /**
    * Invalidate queued query requests. Requests submitted afterward use a
    * new cancellation epoch and remain valid.
@@ -197,9 +198,9 @@ export declare class SpaghettiEngine {
    * Finalize a size-gated cold bootstrap and admit the read pool only
    * after indexes, canonical FTS, and integrity checks have converged.
    */
-  completeQueryBootstrap(): Promise<EngineStatus>
+  completeQueryBootstrap(): Promise<unknown>
   /** Deterministically stop readers, stop the writer, and release ownership. */
-  dispose(): Promise<EngineStatus>
+  dispose(): Promise<unknown>
 }
 
 /**
@@ -250,79 +251,11 @@ export interface EngineAdapterReconcileOptions {
   reason?: string
 }
 
-export interface EngineArtifact {
-  artifactId: string
-  sessionId: string
-  projectId?: string
-  nativeArtifactId?: string
-  nativeFileHash?: string
-  version: number
-  trackingPath?: string
-  realParentDir?: string
-  backupTime?: string
-  backupTimeQuality?: string
-  captureStatus: string
-  contentBase64?: string
-  sizeBytes?: number
-  contentDigestBase64Url?: string
-  contentStatus: string
-  resolutionStatus: string
-  metadataFactId?: string
-  contentFactId?: string
-  metadataAdapterId?: string
-  metadataSourceInstanceId?: number
-  metadataObservedAtUnixMs?: number
-  metadataSourceObjectId?: number
-  metadataSourceGeneration?: number
-  contentAdapterId?: string
-  contentSourceInstanceId?: number
-  contentObservedAtUnixMs?: number
-  contentSourceObjectId?: number
-  contentSourceGeneration?: number
-  metadataAssertionCount: number
-  competingMetadataCount: number
-  contentAssertionCount: number
-  competingContentCount: number
-  joinConflict: boolean
-  lastCommitSeq: number
-}
-
-export interface EngineArtifactPage {
-  contractVersion: number
-  atCommitSeq: number
-  sessionId: string
-  items: Array<EngineArtifact>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
-}
-
 export interface EngineArtifactPageOptions {
   sessionId: string
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
-}
-
-export interface EngineCanonicalStats {
-  contractVersion: number
-  atCommitSeq: number
-  schemaVersion: number
-  sourceInstances: number
-  sourceStreams: number
-  sourceObjects: number
-  activeSourceObjects: number
-  sourceRecordErrors: number
-  ingestCommits: number
-  factRecords: number
-  searchableMessages: number
-  entities: Array<EngineNamedCount>
-  sourceStreamStates: Array<EngineNamedCount>
-  projectionReadiness: Array<EngineNamedCount>
-  databasePageCount: number
-  databasePageSizeBytes: number
-  allocatedDatabaseBytes: number
-  performance?: EnginePerformanceStats
 }
 
 export interface EngineCapabilityPageOptions {
@@ -331,86 +264,15 @@ export interface EngineCapabilityPageOptions {
   limit?: number
 }
 
-/** A competing project association retained next to the selected one. */
-export interface EngineCatalogIdentityConflict {
-  competingNativeProjectKey: string
-  basis: string
-  provenance: string
-}
-
+/**
+ * Page request. Not native output — the caller composes it, and its fields
+ * are optional where the resolved engine request's are not.
+ */
 export interface EngineCatalogPageOptions {
   cursor?: string
   limit?: number
   /** Restrict to these adapters. Omitted or empty means all of them. */
   adapterIds?: Array<string>
-}
-
-export interface EngineCatalogProject {
-  projectId: string
-  /** Persistable RFC 012A external reference. Stable across restarts. */
-  externalRef: string
-  adapterId: string
-  nativeProjectKey: string
-  displayName?: string
-  displayPath?: string
-  /** `discovered` | `transcript_backed` | `hydrated` | `searchable`. */
-  catalogState: string
-  degraded: boolean
-  degradedReason?: string
-  sessionCount: number
-  transcriptSessionCount: number
-  hydratedSessionCount: number
-  latestActivityAt?: string
-  lastCommitSeq: number
-}
-
-export interface EngineCatalogProjectPage {
-  projects: Array<EngineCatalogProject>
-  /** Opaque continuation token bound to `atCommitSeq`. */
-  cursor?: string
-  atCommitSeq: number
-}
-
-/**
- * Resolution of one persisted external reference. A reference whose evidence
- * was retracted resolves to `retracted`, never to a different live entity.
- */
-export interface EngineCatalogResolution {
-  /** `project` | `session` | `retracted` | `unknown`. */
-  kind: string
-  project?: EngineCatalogProject
-  session?: EngineCatalogSession
-}
-
-export interface EngineCatalogSession {
-  sessionId: string
-  projectId: string
-  externalRef: string
-  adapterId: string
-  nativeSessionId?: string
-  title?: string
-  catalogState: string
-  degraded: boolean
-  degradedReason?: string
-  /** Which native evidence produced the project association. */
-  associationBasis: string
-  associationQuality: string
-  associationProvenance: string
-  nativeCreatedAt?: string
-  nativeUpdatedAt?: string
-  /** The count the agent claims. Absent rather than zero when unknown. */
-  nativeMessageCount?: number
-  /** Messages actually decoded so far. */
-  decodedMessageCount: number
-  transcriptPresent: boolean
-  identityConflicts: Array<EngineCatalogIdentityConflict>
-  lastCommitSeq: number
-}
-
-export interface EngineCatalogSessionPage {
-  sessions: Array<EngineCatalogSession>
-  cursor?: string
-  atCommitSeq: number
 }
 
 export interface EngineCatalogSessionPageOptions {
@@ -420,31 +282,9 @@ export interface EngineCatalogSessionPageOptions {
   adapterIds?: Array<string>
 }
 
-/** What catalog-first startup committed before history began. */
-export interface EngineCatalogStartup {
-  catalogProjects: number
-  catalogSessions: number
-  /** Adapters whose discovery pass could not read their complete surface. */
-  degradedSources: Array<string>
-  supervisorsStarted: number
-  historyBackground: boolean
-  status: EngineStatus
-}
-
 export interface EngineChangeCursor {
   commitSeq: number
   ordinal: number
-}
-
-export interface EngineChangeReplay {
-  contractVersion: number
-  atCommitSeq: number
-  oldestAvailable?: EngineChangeCursor
-  changes: Array<EngineDurableChange>
-  nextCursor?: EngineChangeCursor
-  hasMore: boolean
-  payloadBytes: number
-  payloadByteLimit: number
 }
 
 export interface EngineChangeReplayOptions {
@@ -456,30 +296,11 @@ export interface EngineChangeReplayOptions {
   limit?: number
 }
 
-export interface EngineCheckpointPerformanceStats {
-  attempts: number
-  completed: number
-  blocked: number
-  failures: number
-  lastLogFrames: number
-  lastCheckpointedFrames: number
-  lastRemainingFrames: number
-  blockedByReaderMs: number
-  latency: EngineLatencyStats
-}
-
 export interface EngineCommitWaitOptions {
   /** Resolve after the sole writer publishes a strictly newer commit. */
   afterCommitSeq: number
   /** Bounded recovery timeout. Defaults to 30 seconds; maximum 5 minutes. */
   timeoutMs?: number
-}
-
-export interface EngineCommitWaitResult {
-  observedCommitSeq: number
-  /** `commit` or `timeout`. */
-  reason: string
-  waitedMs: number
 }
 
 export interface EngineConfiguredObservationOptions {
@@ -499,17 +320,6 @@ export interface EngineConfiguredObservationSourceOptions {
   reason?: string
 }
 
-export interface EngineDelegationPage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId: string
-  workflowId?: string
-  standaloneOnly: boolean
-  items: Array<EngineDelegationSummary>
-  nextCursor?: string
-}
-
 export interface EngineDelegationPageOptions {
   projectId: string
   sessionId: string
@@ -517,77 +327,6 @@ export interface EngineDelegationPageOptions {
   standaloneOnly?: boolean
   cursor?: string
   limit?: number
-}
-
-export interface EngineDelegationSummary {
-  runId: string
-  parentRunId?: string
-  projectId: string
-  sessionId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeRunId?: string
-  nativeChildId?: string
-  nativeTaskId?: string
-  agentType?: string
-  description?: string
-  nativeName?: string
-  spawnDepth?: number
-  label?: string
-  prompt?: string
-  cwd?: string
-  worktreePath?: string
-  relationKind: string
-  relationStrength: string
-  relationStatus: string
-  metadataStatus?: string
-  spawnStatus?: string
-  branchToolName?: string
-  requestedAgentType?: string
-  branchAnchorMessageId?: string
-  childPresent: boolean
-  parentPresent: boolean
-  metadataRunPresent?: boolean
-  observedRunState?: string
-  messageCount: number
-  workflowMemberCount: number
-  sourceTime?: string
-  sourceTimeQuality?: string
-  decisiveRelationFactId?: string
-  decisiveSpawnFactId?: string
-  decisiveMetadataFactId?: string
-  assertionCount: number
-  competingRelationCount: number
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineDurableChange {
-  cursor: EngineChangeCursor
-  topic: string
-  schemaVersion: number
-  entityKeyBase64Url: string
-  operation: string
-  payloadBase64: string
-}
-
-export interface EngineFactFamilyCoverageItem {
-  kind: string
-  streamRef?: string
-  objectRef?: string
-  generation?: number
-  positionKind?: string
-  positionRef?: string
-  monotonicOrder?: number
-  status?: string
-  unavailableReason?: string
-  sourceRecordRef?: string
-  semanticRevisionRef?: string
-  observedAtUnixMs?: number
-  absenceKind?: string
-  errorCode?: string
 }
 
 export interface EngineFactFamilyCoverageOptions {
@@ -603,34 +342,6 @@ export interface EngineFactFamilyCoverageOptions {
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query pack. */
   limit?: number
-}
-
-export interface EngineFactFamilyCoveragePage {
-  contractVersion: number
-  atCommitSeq: number
-  status: string
-  projectId: string
-  sessionId: string
-  ownerId: string
-  family: string
-  familyVersion: number
-  coverage?: EngineFactFamilyCoverageSetSummary
-  items: Array<EngineFactFamilyCoverageItem>
-  nextCursor?: string
-}
-
-export interface EngineFactFamilyCoverageSetSummary {
-  coverageSetContractVersion: number
-  coverageContractVersion: number
-  adapterId: string
-  sourceInstanceRef: string
-  supportReleaseId: string
-  declarationRef: string
-  membershipRevisionRef: string
-  completeness: string
-  contentDigestRef: string
-  lastCommitSeq: number
-  updatedAtUnixMs: number
 }
 
 export interface EngineFactFamilyReplayOptions {
@@ -653,132 +364,11 @@ export interface EngineFactFamilyReplayOptions {
   reason: string
 }
 
-export interface EngineFactFamilyReplayResult {
-  contractVersion: number
-  projectId: string
-  sessionId: string
-  ownerId: string
-  family: string
-  familyVersion: number
-  authorizedSourceInstanceRef: string
-  authorizedContentDigestRef: string
-  authorizedCoverageLastCommitSeq: number
-  outcome: EngineReconcileResult
-}
-
-export interface EngineHealth {
-  status: EngineStatus
-  healthy: boolean
-  detail?: string
-}
-
 export interface EngineHistoryPageOptions {
   /** Opaque keyset cursor returned by the preceding page. */
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
-}
-
-export interface EngineHistoryProject {
-  projectId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeProjectKey: string
-  transcriptSessionCount: number
-  messageCount: number
-  memoryDocumentCount: number
-  hasMemoryIndex: boolean
-  latestActivityAt?: string
-  latestActivitySource?: string
-  index?: EngineHistoryProjectIndex
-  /**
-   * Persistable RFC 012A external reference; absent until discovery has
-   * seen this project.
-   */
-  externalRef?: string
-  /**
-   * `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
-   * the same derivation the catalog page uses.
-   */
-  catalogState?: string
-  lastCommitSeq: number
-}
-
-export interface EngineHistoryProjectIndex {
-  status: string
-  originalPath?: string
-  entryCount: number
-  assertionCount: number
-  competingSnapshotCount: number
-  lastCommitSeq: number
-}
-
-export interface EngineHistoryProjectPage {
-  contractVersion: number
-  atCommitSeq: number
-  items: Array<EngineHistoryProject>
-  nextCursor?: string
-}
-
-export interface EngineHistorySession {
-  sessionId: string
-  projectId: string
-  nativeSessionId: string
-  nativeProjectKey: string
-  cwd?: string
-  gitBranch?: string
-  firstPrompt?: string
-  aiTitle?: string
-  customTitle?: string
-  messageCount: number
-  firstMessageAt?: string
-  firstMessageTimeQuality?: string
-  lastMessageAt?: string
-  lastMessageTimeQuality?: string
-  latestActivityAt?: string
-  latestActivitySource?: string
-  index?: EngineHistorySessionIndex
-  /**
-   * Persistable RFC 012A external reference; absent until discovery has
-   * seen this session.
-   */
-  externalRef?: string
-  /**
-   * `discovered` | `transcript_backed` | `hydrated` | `searchable`, from
-   * the same derivation the catalog page uses.
-   */
-  catalogState?: string
-  lastCommitSeq: number
-}
-
-export interface EngineHistorySessionIndex {
-  fullPath: string
-  fileMtimeMs: number
-  firstPrompt: string
-  summary?: string
-  messageCount: number
-  createdAt: string
-  createdAtQuality: string
-  modifiedAt: string
-  modifiedAtQuality: string
-  gitBranch: string
-  projectPath: string
-  isSidechain: boolean
-  transcriptStatus: string
-  resolutionStatus: string
-  assertionCount: number
-  competingEntryCount: number
-  identityConflict: boolean
-  joinConflict: boolean
-  lastCommitSeq: number
-}
-
-export interface EngineHistorySessionPage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  items: Array<EngineHistorySession>
-  nextCursor?: string
 }
 
 export interface EngineHistorySessionPageOptions {
@@ -790,88 +380,11 @@ export interface EngineHistorySessionPageOptions {
   limit?: number
 }
 
-export interface EngineLatencyStats {
-  samples: number
-  totalMs: number
-  meanMs: number
-  maxMs: number
-  p50UpperMs: number
-  p95UpperMs: number
-  p99UpperMs: number
-}
-
-export interface EngineMemoryDocument {
-  documentId: string
-  projectId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeProjectKey: string
-  nativeDocumentPath: string
-  title: string
-  content: string
-  sizeBytes: number
-  isIndex: boolean
-  resolutionStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingDocumentCount: number
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineMemoryDocumentPage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  items: Array<EngineMemoryDocument>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
-}
-
 export interface EngineMemoryDocumentPageOptions {
   projectId: string
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
-}
-
-export interface EngineMessageDetail {
-  messageId: string
-  sessionId: string
-  projectId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeSessionId: string
-  nativeProjectKey: string
-  nativeMessageId?: string
-  nativeKind: string
-  role: string
-  content: any
-  nativePayload: any
-  sourceTime?: string
-  sourceTimeQuality?: string
-  parentNativeMessageId?: string
-  model?: string
-  searchText?: string
-  decisiveFactId: string
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineMessagePage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId: string
-  items: Array<EngineMessageDetail>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
 }
 
 export interface EngineMessagePageOptions {
@@ -885,40 +398,11 @@ export interface EngineMessagePageOptions {
   limit?: number
 }
 
-export interface EngineNamedCount {
-  name: string
-  count: number
-}
-
-export interface EngineNamedLatencyStats {
-  name: string
-  latency: EngineLatencyStats
-}
-
 export interface EngineObservationOptions {
   /** Configured native data roots understood by the selected adapter. */
   roots: Array<string>
   /** Durable ingest reason prefix. Defaults to `native_watch`. */
   reason?: string
-}
-
-export interface EngineObservationStatus {
-  state: string
-  reconcileInFlight: boolean
-  dirtyInstances: number
-  fullReconcileRequired: boolean
-  recoveryRequired: boolean
-  supervisorsRunning: number
-  watchedInstances: number
-  watchRoots: number
-  reconcilesTotal: number
-  failedReconcilesTotal: number
-  retrySignalsTotal: number
-  queueOverflowsTotal: number
-  lastCommitSeq?: number
-  lastStartedAtUnixMs?: number
-  lastFinishedAtUnixMs?: number
-  lastError?: string
 }
 
 export interface EngineOpenOptions {
@@ -932,232 +416,11 @@ export interface EngineOpenOptions {
   bootstrapQueryStructures?: boolean
 }
 
-export interface EngineOverviewResult {
-  schemaVersion: number
-  /** Latest durable ingest commit visible to the read-only query snapshot. */
-  commitSeq: number
-  /** Transitional compatibility-table counts. */
-  projects: number
-  sessions: number
-  messages: number
-  /** Canonical history materialized by RFC 011 observation commits. */
-  canonicalSessions: number
-  canonicalMessages: number
-  /** Oldest durable change still resumable without taking a new snapshot. */
-  changeLogOldestCursor?: EngineChangeCursor
-  changeLogPrunedThroughSeq: number
-  changeLogRetainedChanges: number
-  changeLogRetainedPayloadBytes: number
-  writerDataVersion: number
-  journalMode: string
-  queryOnly: boolean
-  readOnly: boolean
-}
-
-export interface EngineOwnerMetadata {
-  protocolVersion: number
-  ownerId: string
-  ownerLabel: string
-  processId: number
-  startedAtUnixMs: number
-  databasePath: string
-  executable?: string
-  hostname?: string
-  engineVersion: string
-}
-
-export interface EnginePerformanceStats {
-  writer: EngineWriterPerformanceStats
-  queries: EngineQueryPerformanceStats
-  source: EngineSourcePerformanceStats
-  storage: EngineStoragePerformanceStats
-}
-
-export interface EnginePlan {
-  planId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativePlanId: string
-  title: string
-  content: string
-  sizeBytes: number
-  sourceTime?: string
-  sourceTimeQuality?: string
-  resolutionStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingPlanCount: number
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EnginePlanPage {
-  contractVersion: number
-  atCommitSeq: number
-  items: Array<EnginePlan>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
-}
-
-export interface EngineQueryPerformanceStats {
-  uptimeMs: number
-  requestsEnqueued: number
-  requestsCompleted: number
-  queueRejections: number
-  queueDepth: number
-  queueHighWatermark: number
-  oldestActiveMs: number
-  timings: Array<EngineNamedLatencyStats>
-}
-
-/**
- * The single readiness surface. Each field is independent: `catalog` is
- * routinely `ready` while `history` is still `indexing` and `search` is
- * `pending`, which is exactly what catalog-first startup means.
- */
-export interface EngineReadiness {
-  catalog: EngineReadinessField
-  history: EngineReadinessField
-  usage: EngineReadinessField
-  capabilities: EngineReadinessField
-  artifacts: EngineReadinessField
-  search: EngineReadinessField
-  atCommitSeq: number
-}
-
-/** One field of the readiness vector. */
-export interface EngineReadinessField {
-  /** `pending` | `indexing` | `ready` | `degraded` | `unavailable`. */
-  state: string
-  /** Commit sequence this field's evidence was read at. */
-  committedAtSeq: number
-  /** Human-readable progress or reason, when there is one to give. */
-  detail?: string
-}
-
 export interface EngineReconcileOptions {
   /** Configured native data roots understood by the selected adapter. */
   roots: Array<string>
   /** Durable ingest reason. Defaults to `manual_reconcile`. */
   reason?: string
-}
-
-export interface EngineReconcileResult {
-  instancesDiscovered: number
-  streamsReconciled: number
-  streamsUnavailable: number
-  objectsDiscovered: number
-  objectsRegistered: number
-  objectsChanged: number
-  objectsUnchanged: number
-  objectsRemoved: number
-  recordsDecoded: number
-  recordsQuarantined: number
-  retriesRequired: number
-  incompleteTailRetries: number
-  dependencyAccessAttempts: number
-  dependencyAccessDenials: number
-  dependencyAccessAbandoned: number
-  dependencyObjectsAccessed: number
-  dependencyBytesRead: number
-  dependencyRowsRead: number
-  dependencyMaxDepth: number
-  dependencyTraceEntriesDropped: number
-  commits: number
-  lastCommitSeq?: number
-}
-
-export interface EngineRunStateLookup {
-  contractVersion: number
-  atCommitSeq: number
-  run?: EngineRuntimeRun
-}
-
-export interface EngineRuntimeEntry {
-  kind: string
-  run?: EngineRuntimeRun
-  presence?: EngineRuntimePresence
-}
-
-export interface EngineRuntimePresence {
-  presenceId: string
-  sessionId: string
-  runId: string
-  projectId?: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeSessionId: string
-  nativePid: number
-  cwd: string
-  startedAt: string
-  startedAtQuality: string
-  nativeKind?: string
-  entrypoint?: string
-  name?: string
-  nativeStatus?: string
-  updatedAt?: string
-  updatedAtQuality?: string
-  statusUpdatedAt?: string
-  statusUpdatedAtQuality?: string
-  nativeProcessStartedAt?: string
-  version?: string
-  peerProtocol?: number
-  nameSource?: string
-  bridgeSessionId?: string
-  messagingSocketPath?: string
-  presenceStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingAssertionCount: number
-  observedAtUnixMs: number
-  sessionPresent: boolean
-  runPresent: boolean
-  lastCommitSeq: number
-}
-
-export interface EngineRuntimeRun {
-  runId: string
-  sessionId: string
-  projectId?: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeRunId: string
-  parentRunId?: string
-  nativeSessionId?: string
-  nativeProjectKey?: string
-  sessionPresent: boolean
-  state?: string
-  decisiveEvidence?: EngineRuntimeRunEvidence
-  evidenceCount: number
-  lastActivityAt?: string
-  terminalAt?: string
-  presenceCount: number
-  conflictingPresenceCount: number
-  lastCommitSeq: number
-}
-
-export interface EngineRuntimeRunEvidence {
-  evidenceId: string
-  kind: string
-  strength: string
-  nativeState?: string
-  sourceTime?: string
-  sourceTimeQuality?: string
-  observedAtUnixMs: number
-  sourceObjectId: number
-  lastCommitSeq: number
-}
-
-export interface EngineRuntimeSnapshot {
-  contractVersion: number
-  atCommitSeq: number
-  projectId?: string
-  sessionId?: string
-  entries: Array<EngineRuntimeEntry>
-  nextCursor?: string
 }
 
 export interface EngineRuntimeSnapshotOptions {
@@ -1176,50 +439,6 @@ export interface EngineRuntimeSnapshotOptions {
   limit?: number
 }
 
-export interface EngineSearchHit {
-  messageId: string
-  projectId?: string
-  sessionId: string
-  runId: string
-  parentRunId?: string
-  branchKind: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeProjectKey?: string
-  nativeSessionId?: string
-  nativeRunId?: string
-  nativeChildId?: string
-  nativeTaskId?: string
-  delegationStatus?: string
-  nativeMessageId?: string
-  nativeKind: string
-  role: string
-  model?: string
-  sourceTime?: string
-  sourceTimeQuality?: string
-  snippet: string
-  /** SQLite FTS5 BM25 rank. Lower values sort first. */
-  score: number
-  decisiveFactId: string
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineSearchPage {
-  contractVersion: number
-  atCommitSeq: number
-  querySyntax: string
-  scoreDirection: string
-  totalIsExact: boolean
-  total: number
-  items: Array<EngineSearchHit>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
-}
-
 export interface EngineSearchPageOptions {
   /** Search text interpreted as one literal FTS phrase. */
   text: string
@@ -1236,187 +455,6 @@ export interface EngineSearchPageOptions {
   limit?: number
 }
 
-export interface EngineSessionDetail {
-  sessionId: string
-  projectId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeSessionId: string
-  nativeProjectKey: string
-  cwd?: string
-  gitBranch?: string
-  firstPrompt?: string
-  aiTitle?: string
-  customTitle?: string
-  sourceTime?: string
-  sourceTimeQuality?: string
-  messageCount: number
-  runCount: number
-  presenceCount: number
-  taskCollectionCount: number
-  artifactCount: number
-  workflowCount: number
-  persistedToolResultCount: number
-  projectMemoryDocumentCount: number
-  index?: EngineHistorySessionIndex
-  decisiveFactId: string
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineSessionDetails {
-  contractVersion: number
-  atCommitSeq: number
-  session?: EngineSessionDetail
-}
-
-export interface EngineSourceCapability {
-  id: string
-  supportLevel: string
-  granularity: string
-  availability: string
-  notes?: string
-}
-
-export interface EngineSourceDimensionPerformanceStats {
-  adapterId: string
-  streamId: string
-  driverKind: string
-  pipeline: EngineSourcePipelineStats
-}
-
-export interface EngineSourcePage {
-  contractVersion: number
-  atCommitSeq: number
-  items: Array<EngineSourceSummary>
-  nextCursor?: string
-}
-
-export interface EngineSourcePerformanceStats {
-  uptimeMs: number
-  dimensionCapacity: number
-  dimensionOverflowAssignments: number
-  totals: EngineSourcePipelineStats
-  dimensions: Array<EngineSourceDimensionPerformanceStats>
-}
-
-export interface EngineSourcePipelineStats {
-  readAttempts: number
-  readFailures: number
-  readRetries: number
-  readContinuations: number
-  recordsRead: number
-  payloadBytesRead: number
-  decodeAttempts: number
-  decodeFailures: number
-  decodeRetries: number
-  recordsDecoded: number
-  factsEmitted: number
-  recordsQuarantined: number
-  timings: Array<EngineNamedLatencyStats>
-}
-
-export interface EngineSourceSummary {
-  sourceId: string
-  sourceInstanceId: number
-  adapterId: string
-  displayName: string
-  adapterVersion: string
-  adapterContractVersion: number
-  sourceSchemaVersions: Array<string>
-  capabilities: Array<EngineSourceCapability>
-  discoveredAtUnixMs: number
-  lastSeenAtUnixMs: number
-  streamCount: number
-  unavailableStreamCount: number
-  objectCount: number
-  activeObjectCount: number
-  recordErrorCount: number
-  factCount: number
-  commitCount: number
-  lastCommitSeq?: number
-}
-
-export interface EngineStatus {
-  state: string
-  databasePath: string
-  acceptingQueries: boolean
-  writerAlive: boolean
-  configuredQueryWorkers: number
-  aliveQueryWorkers: number
-  inFlightQueries: number
-  observation: EngineObservationStatus
-  owner?: EngineOwnerMetadata
-}
-
-export interface EngineStoragePerformanceStats {
-  databaseFileBytes: number
-  walFileBytes: number
-  sharedMemoryFileBytes: number
-}
-
-export interface EngineTask {
-  taskId: string
-  collectionId: string
-  adapterId: string
-  sourceInstanceId: number
-  itemOrdinal: number
-  nativeTaskId?: string
-  subject: string
-  description?: string
-  activeForm?: string
-  nativeOwner?: string
-  taskStatus: string
-  nativeStatus: string
-  blocks: Array<string>
-  blockedBy: Array<string>
-  resolutionStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingItemCount: number
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineTaskCollection {
-  collectionId: string
-  projectId?: string
-  sessionId?: string
-  runId?: string
-  teamId?: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeCollectionId: string
-  nativeOwnerId?: string
-  collectionKind: string
-  nativeCollectionKind: string
-  resolutionStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingMetadataCount: number
-  completeSnapshotCount: number
-  itemDocumentCount: number
-  itemCount: number
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineTaskCollectionPage {
-  contractVersion: number
-  atCommitSeq: number
-  sessionId?: string
-  runId?: string
-  teamId?: string
-  items: Array<EngineTaskCollection>
-  nextCursor?: string
-}
-
 export interface EngineTaskCollectionPageOptions {
   sessionId?: string
   runId?: string
@@ -1426,16 +464,6 @@ export interface EngineTaskCollectionPageOptions {
   limit?: number
 }
 
-export interface EngineTaskPage {
-  contractVersion: number
-  atCommitSeq: number
-  collectionId: string
-  items: Array<EngineTask>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
-}
-
 export interface EngineTaskPageOptions {
   collectionId: string
   cursor?: string
@@ -1443,126 +471,10 @@ export interface EngineTaskPageOptions {
   limit?: number
 }
 
-export interface EngineTeamConfig {
-  name: string
-  description?: string
-  createdAt: string
-  createdAtQuality: string
-  leadMemberId?: string
-  leadMemberPresent: boolean
-  nativeLeadAgentId: string
-  leadSessionId: string
-  leadSessionPresent: boolean
-  nativeLeadSessionId: string
-  configStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingSnapshotCount: number
-  memberCount: number
-  lastCommitSeq: number
-}
-
-export interface EngineTeamDetails {
-  contractVersion: number
-  atCommitSeq: number
-  team: EngineTeamSummary
-  members: Array<EngineTeamMember>
-}
-
-export interface EngineTeamInbox {
-  inboxId: string
-  teamId: string
-  recipientId: string
-  recipientPresent: boolean
-  nativeTeamId: string
-  nativeRecipientName: string
-  inboxStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingSnapshotCount: number
-  messageCount: number
-  unreadMessageCount: number
-  conflictingMessageCount: number
-  lastCommitSeq: number
-}
-
-export interface EngineTeamInboxMessage {
-  messageId: string
-  inboxId: string
-  senderId: string
-  senderPresent: boolean
-  messageOrdinal: number
-  nativeMessageId?: string
-  nativeKind?: string
-  nativeVersion?: number
-  nativeSenderName: string
-  text: string
-  summary?: string
-  color?: string
-  sourceTime: string
-  sourceTimeQuality: string
-  read: boolean
-  messageStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingMessageCount: number
-  lastCommitSeq: number
-}
-
-export interface EngineTeamInboxMessagePage {
-  contractVersion: number
-  atCommitSeq: number
-  inboxId: string
-  teamId: string
-  nativeTeamId: string
-  nativeRecipientName: string
-  items: Array<EngineTeamInboxMessage>
-  nextCursor?: string
-}
-
 export interface EngineTeamInboxMessagePageOptions {
   inboxId: string
   cursor?: string
   limit?: number
-}
-
-export interface EngineTeamInboxPage {
-  contractVersion: number
-  atCommitSeq: number
-  teamId: string
-  items: Array<EngineTeamInbox>
-  nextCursor?: string
-}
-
-export interface EngineTeamMember {
-  memberId: string
-  teamId: string
-  memberOrdinal: number
-  nativeAgentId: string
-  nativeName: string
-  agentType?: string
-  model?: string
-  prompt?: string
-  color?: string
-  planModeRequired?: boolean
-  joinedAt: string
-  joinedAtQuality: string
-  tmuxPaneId: string
-  cwd: string
-  subscriptions: Array<string>
-  backendType?: string
-  membershipStatus: string
-  decisiveFactId: string
-  assertionCount: number
-  competingMembershipCount: number
-  lastCommitSeq: number
-}
-
-export interface EngineTeamPage {
-  contractVersion: number
-  atCommitSeq: number
-  items: Array<EngineTeamSummary>
-  nextCursor?: string
 }
 
 export interface EngineTeamPageOptions {
@@ -1574,83 +486,6 @@ export interface EngineTeamScopedPageOptions {
   teamId: string
   cursor?: string
   limit?: number
-}
-
-export interface EngineTeamSummary {
-  teamId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeTeamId: string
-  config?: EngineTeamConfig
-  inboxCount: number
-  messageCount: number
-  unreadMessageCount: number
-  conflictingInboxCount: number
-  conflictingMessageCount: number
-  lastCommitSeq: number
-}
-
-export interface EngineTimelineFacets {
-  totalMessages: number
-  roles: Array<EngineNamedCount>
-  nativeKinds: Array<EngineNamedCount>
-  contentKinds: Array<EngineNamedCount>
-  toolNames: Array<EngineNamedCount>
-  branchKinds: Array<EngineNamedCount>
-}
-
-export interface EngineTimelineMessage {
-  messageId: string
-  projectId: string
-  sessionId: string
-  runId: string
-  parentRunId?: string
-  branchKind: string
-  branchAnchorMessageId?: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeProjectKey: string
-  nativeSessionId: string
-  nativeRunId?: string
-  nativeChildId?: string
-  nativeTaskId?: string
-  delegationKind?: string
-  delegationStrength?: string
-  delegationStatus?: string
-  branchToolName?: string
-  branchLabel?: string
-  requestedAgentType?: string
-  nativeMessageId?: string
-  nativeKind: string
-  role: string
-  content: any
-  contentKinds: Array<string>
-  toolNames: Array<string>
-  sourceTime?: string
-  sourceTimeQuality?: string
-  parentNativeMessageId?: string
-  model?: string
-  decisiveFactId: string
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineTimelinePage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId: string
-  order: string
-  searchSyntax: string
-  totalIsExact: boolean
-  total: number
-  facets: EngineTimelineFacets
-  items: Array<EngineTimelineMessage>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
 }
 
 export interface EngineTimelinePageOptions {
@@ -1672,115 +507,12 @@ export interface EngineTimelinePageOptions {
   limit?: number
 }
 
-export interface EngineToolResult {
-  resultId: string
-  projectId: string
-  sessionId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeProjectKey: string
-  nativeSessionId: string
-  nativeToolUseId: string
-  nativeDocumentPath: string
-  content: string
-  sizeBytes: number
-  resolutionStatus: string
-  correlationStatus: string
-  toolCallMessageId?: string
-  toolResultMessageId?: string
-  decisiveFactId: string
-  assertionCount: number
-  competingResultCount: number
-  toolCallMatchCount: number
-  toolResultMatchCount: number
-  joinConflict: boolean
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineToolResultPage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId: string
-  items: Array<EngineToolResult>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
-}
-
 export interface EngineToolResultPageOptions {
   projectId: string
   sessionId: string
   cursor?: string
   /** Page size. Defaults to 50 and is capped by the Rust query engine. */
   limit?: number
-}
-
-export interface EngineUntimedUsage {
-  aggregate: EngineUsageAggregate
-  firstObservedAtUnixMs?: number
-  lastObservedAtUnixMs?: number
-  lastCommitSeq?: number
-}
-
-export interface EngineUsage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId?: string
-  aggregate: EngineUsageAggregate
-  coverage: Array<EngineUsageCoverage>
-  firstSourceTime?: string
-  lastSourceTime?: string
-  firstObservedAtUnixMs?: number
-  lastObservedAtUnixMs?: number
-  lastCommitSeq?: number
-  /** Present only when the request carried a calendar window. */
-  window?: EngineUsageWindow
-}
-
-export interface EngineUsageAggregate {
-  exact: EngineUsageTokenValues
-  estimated: EngineUsageTokenValues
-  combined: EngineUsageTokenValues
-  quality: string
-  exactContributionCount: number
-  estimatedContributionCount: number
-  /**
-   * Responses that assert no token bucket at all. They are never summed as
-   * zero, so a consumer can tell missing evidence from real zero usage.
-   */
-  unknownContributionCount: number
-  /** Distinct responses, not native rows. */
-  contributionCount: number
-  sessionCount: number
-}
-
-export interface EngineUsageCoverage {
-  /** `input`, `output`, `cache_creation`, or `cache_read`. */
-  bucket: string
-  valueQuality: string
-  completeness: string
-  unknownReason?: string
-  authority: string
-  nativeField: string
-  model?: string
-  sourceTimeQuality?: string
-  contributionCount: number
-  tokens: number
-}
-
-export interface EngineUsageDay {
-  date: string
-  aggregate: EngineUsageAggregate
-  firstSourceTime: string
-  lastSourceTime: string
-  firstObservedAtUnixMs: number
-  lastObservedAtUnixMs: number
-  lastCommitSeq: number
 }
 
 export interface EngineUsageOptions {
@@ -1797,107 +529,10 @@ export interface EngineUsageOptions {
   to?: string
 }
 
-export interface EngineUsageTokenValues {
-  inputTokens: number
-  outputTokens: number
-  cacheCreationTokens: number
-  cacheReadTokens: number
-  /**
-   * Arithmetic sum of the four preserved native components. This is not a
-   * provider billing normalization.
-   */
-  componentTotalTokens: number
-}
-
-export interface EngineUsageWindow {
-  from: string
-  to: string
-  days: Array<EngineUsageDay>
-  /**
-   * Contributions with no structurally valid source date. They are reported
-   * rather than assigned to a fabricated day.
-   */
-  untimed: EngineUntimedUsage
-}
-
-export interface EngineWorkflowDetails {
-  contractVersion: number
-  atCommitSeq: number
-  workflow: EngineWorkflowSummary
-  defaultModel?: string
-  script?: string
-  scriptPath?: string
-  args?: string
-  summary?: string
-  error?: string
-  nativeSnapshot?: any
-  payloadBytes: number
-  payloadByteLimit: number
-}
-
-export interface EngineWorkflowMember {
-  memberId: string
-  workflowId: string
-  projectId: string
-  sessionId: string
-  childRunId: string
-  childRunPresent: boolean
-  adapterId: string
-  sourceInstanceId: number
-  nativeWorkflowId: string
-  nativeAgentId: string
-  nativeEventKey: string
-  nativeRunId?: string
-  agentType?: string
-  description?: string
-  nativeName?: string
-  worktreePath?: string
-  memberStatus: string
-  result?: any
-  resolutionStatus: string
-  observedRunState?: string
-  delegationStatus?: string
-  messageCount: number
-  decisiveStartedFactId?: string
-  decisiveResultFactId?: string
-  startedObservedAtUnixMs?: number
-  resultObservedAtUnixMs?: number
-  startedAssertionCount: number
-  competingStartedCount: number
-  resultAssertionCount: number
-  competingResultCount: number
-  eventKeyConflict: boolean
-  identityConflict: boolean
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineWorkflowMemberPage {
-  contractVersion: number
-  atCommitSeq: number
-  workflowId: string
-  projectId: string
-  sessionId: string
-  items: Array<EngineWorkflowMember>
-  payloadBytes: number
-  payloadByteLimit: number
-  nextCursor?: string
-}
-
 export interface EngineWorkflowMemberPageOptions {
   workflowId: string
   cursor?: string
   limit?: number
-}
-
-export interface EngineWorkflowPage {
-  contractVersion: number
-  atCommitSeq: number
-  projectId: string
-  sessionId: string
-  items: Array<EngineWorkflowSummary>
-  nextCursor?: string
 }
 
 export interface EngineWorkflowPageOptions {
@@ -1905,58 +540,6 @@ export interface EngineWorkflowPageOptions {
   sessionId: string
   cursor?: string
   limit?: number
-}
-
-export interface EngineWorkflowSummary {
-  workflowId: string
-  projectId: string
-  sessionId: string
-  adapterId: string
-  sourceInstanceId: number
-  nativeWorkflowId: string
-  nativeTaskId?: string
-  name?: string
-  nativeStatus?: string
-  workflowStatus?: string
-  startedAt?: string
-  startedAtQuality?: string
-  finishedAt?: string
-  finishedAtQuality?: string
-  durationMs?: number
-  agentCount?: number
-  totalTokens?: number
-  totalToolCalls?: number
-  snapshotStatus: string
-  resolutionStatus: string
-  decisiveSnapshotFactId?: string
-  provenanceFactId: string
-  snapshotAssertionCount: number
-  competingSnapshotCount: number
-  observedMemberCount: number
-  startedMemberCount: number
-  resultMemberCount: number
-  unresolvedMemberCount: number
-  conflictingMemberCount: number
-  membershipCountStatus: string
-  joinConflict: boolean
-  observedAtUnixMs: number
-  sourceObjectId: number
-  sourceGeneration: number
-  lastCommitSeq: number
-}
-
-export interface EngineWriterPerformanceStats {
-  uptimeMs: number
-  commitAttempts: number
-  committed: number
-  failed: number
-  factsCommitted: number
-  changesPublished: number
-  sqliteRowsChanged: number
-  queueDepth: number
-  queueHighWatermark: number
-  checkpoint: EngineCheckpointPerformanceStats
-  timings: Array<EngineNamedLatencyStats>
 }
 
 /** Returns the semver of the native addon. */
@@ -2000,7 +583,12 @@ export interface ObserverStatus {
  */
 export declare function observeSession(request: string | Record<string, unknown>): SpaghettiSessionObserver
 
-/** Open the persistent engine on a libuv worker thread. */
+/**
+ * Open the persistent engine on a libuv worker thread.
+ *
+ * The only entry point whose result is a handle rather than JSON, so it is
+ * also the only one that still declares its resolved type.
+ */
 export declare function openSpaghettiEngine(options: EngineOpenOptions): Promise<SpaghettiEngine>
 
 /**

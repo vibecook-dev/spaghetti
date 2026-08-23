@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::query_identity::{decode_entity_id, PROJECT_ID_PREFIX, SESSION_ID_PREFIX};
 use super::query_pool::read_committed_watermark;
 use super::EngineError;
+use ts_rs::TS;
 
 pub const FACT_FAMILY_COVERAGE_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_FACT_FAMILY_COVERAGE_PAGE_LIMIT: u32 = 50;
@@ -32,7 +33,9 @@ pub struct FactFamilyCoveragePageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct FactFamilyCoverageSetSummary {
     pub coverage_set_contract_version: u32,
     pub coverage_contract_version: u32,
@@ -47,25 +50,55 @@ pub struct FactFamilyCoverageSetSummary {
     pub updated_at_unix_ms: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct FactFamilyCoverageItem {
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub stream_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub object_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub position_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub position_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub monotonic_order: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub unavailable_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_record_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub semantic_revision_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub observed_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub absence_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub error_code: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct FactFamilyCoveragePage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -75,8 +108,12 @@ pub struct FactFamilyCoveragePage {
     pub owner_id: String,
     pub family: String,
     pub family_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub coverage: Option<FactFamilyCoverageSetSummary>,
     pub items: Vec<FactFamilyCoverageItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 

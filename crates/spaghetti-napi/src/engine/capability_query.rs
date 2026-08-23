@@ -14,6 +14,7 @@ use super::query_identity::{
 };
 use super::query_pool::read_committed_watermark;
 use super::EngineError;
+use ts_rs::TS;
 
 pub const CAPABILITY_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_CAPABILITY_PAGE_LIMIT: u32 = 50;
@@ -29,7 +30,9 @@ pub struct MemoryDocumentPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct MemoryDocumentPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -37,10 +40,14 @@ pub struct MemoryDocumentPage {
     pub items: Vec<MemoryDocument>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct MemoryDocument {
     pub document_id: String,
     pub project_id: String,
@@ -71,27 +78,49 @@ pub struct TaskCollectionPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TaskCollectionPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub team_id: Option<String>,
     pub items: Vec<TaskCollectionSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TaskCollectionSummary {
     pub collection_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub team_id: Option<String>,
     pub adapter_id: String,
     pub source_instance_id: u64,
     pub native_collection_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_owner_id: Option<String>,
     pub collection_kind: String,
     pub native_collection_kind: String,
@@ -115,7 +144,9 @@ pub struct TaskPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TaskPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -123,20 +154,32 @@ pub struct TaskPage {
     pub items: Vec<TaskDetail>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct TaskDetail {
     pub task_id: String,
     pub collection_id: String,
     pub adapter_id: String,
     pub source_instance_id: u64,
     pub item_ordinal: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_task_id: Option<String>,
     pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub active_form: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_owner: Option<String>,
     pub task_status: String,
     pub native_status: String,
@@ -158,17 +201,23 @@ pub struct PlanPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct PlanPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
     pub items: Vec<PlanDetail>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct PlanDetail {
     pub plan_id: String,
     pub adapter_id: String,
@@ -177,7 +226,11 @@ pub struct PlanDetail {
     pub title: String,
     pub content: String,
     pub size_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time_quality: Option<String>,
     pub resolution_status: String,
     pub decisive_fact_id: String,
@@ -197,7 +250,9 @@ pub struct ToolResultPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ToolResultPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -206,10 +261,14 @@ pub struct ToolResultPage {
     pub items: Vec<ToolResultDetail>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ToolResultDetail {
     pub result_id: String,
     pub project_id: String,
@@ -224,7 +283,11 @@ pub struct ToolResultDetail {
     pub size_bytes: u64,
     pub resolution_status: String,
     pub correlation_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub tool_call_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub tool_result_message_id: Option<String>,
     pub decisive_fact_id: String,
     pub assertion_count: u64,
@@ -245,7 +308,9 @@ pub struct ArtifactPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ArtifactPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -253,38 +318,86 @@ pub struct ArtifactPage {
     pub items: Vec<ArtifactDetail>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ArtifactDetail {
     pub artifact_id: String,
     pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_file_hash: Option<String>,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub tracking_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub real_parent_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub backup_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub backup_time_quality: Option<String>,
     pub capture_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub size_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_digest_base64url: Option<String>,
     pub content_status: String,
     pub resolution_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub metadata_fact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_fact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub metadata_adapter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub metadata_source_instance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub metadata_observed_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub metadata_source_object_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub metadata_source_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_adapter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_source_instance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_observed_at_unix_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_source_object_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub content_source_generation: Option<u64>,
     pub metadata_assertion_count: u64,
     pub competing_metadata_count: u64,

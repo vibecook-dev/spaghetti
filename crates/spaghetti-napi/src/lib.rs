@@ -46,10 +46,8 @@ pub mod source;
 mod unknown_evidence_reducer;
 
 pub use napi_engine::{
-    open_spaghetti_engine, EngineCommitWaitOptions, EngineCommitWaitResult, EngineHealth,
-    EngineObservationOptions, EngineObservationStatus, EngineOpenOptions, EngineOverviewResult,
-    EngineOwnerMetadata, EngineReconcileOptions, EngineReconcileResult, EngineStatus,
-    SpaghettiEngine,
+    open_spaghetti_engine, EngineCommitWaitOptions, EngineObservationOptions, EngineOpenOptions,
+    EngineReconcileOptions, SpaghettiEngine,
 };
 pub use observer::{
     observe_session, ObserveSessionRequest, ObserverEvent, SpaghettiSessionObserver,

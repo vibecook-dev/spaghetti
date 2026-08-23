@@ -17,10 +17,18 @@ use rusqlite::{Connection, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 use super::EngineError;
+use ts_rs::TS;
 
 const OWNER_PROTOCOL_VERSION: u32 = 1;
 static NEXT_OWNER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// The owner sidecar's durable contents.
+///
+/// This encoding is written to disk next to the database and read back by
+/// whichever process opens it next, including after a crash. It is versioned
+/// by `protocol_version` and is deliberately *not* the shape JavaScript reads
+/// — see [`OwnerInfo`]. Changing a field name or its presence here changes a
+/// file format; changing it in `OwnerInfo` changes an API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OwnerMetadata {
     pub protocol_version: u32,
@@ -32,6 +40,42 @@ pub struct OwnerMetadata {
     pub executable: Option<String>,
     pub hostname: Option<String>,
     pub engine_version: String,
+}
+
+/// Who owns the database, as a caller reads it from `status`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OwnerInfo {
+    pub protocol_version: u32,
+    pub owner_id: String,
+    pub owner_label: String,
+    pub process_id: u32,
+    pub started_at_unix_ms: f64,
+    pub database_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub executable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub hostname: Option<String>,
+    pub engine_version: String,
+}
+
+impl From<OwnerMetadata> for OwnerInfo {
+    fn from(value: OwnerMetadata) -> Self {
+        Self {
+            protocol_version: value.protocol_version,
+            owner_id: value.owner_id,
+            owner_label: value.owner_label,
+            process_id: value.process_id,
+            started_at_unix_ms: value.started_at_unix_ms,
+            database_path: value.database_path,
+            executable: value.executable,
+            hostname: value.hostname,
+            engine_version: value.engine_version,
+        }
+    }
 }
 
 impl OwnerMetadata {

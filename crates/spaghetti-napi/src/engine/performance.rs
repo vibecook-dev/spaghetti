@@ -4,11 +4,13 @@
 //! allocate only when exposed to a caller, and never open another SQLite
 //! connection or retain one sample per request.
 
+use serde::{Deserialize, Serialize};
 use std::array;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use ts_rs::TS;
 
 const MAX_SOURCE_PERFORMANCE_DIMENSIONS: usize = 128;
 
@@ -149,6 +151,291 @@ pub struct EnginePerformanceSnapshot {
     pub queries: QueryPerformanceSnapshot,
     pub source: SourcePerformanceSnapshot,
     pub storage: StoragePerformanceSnapshot,
+}
+
+// ── Reported shape ─────────────────────────────────────────────────────────
+//
+// The snapshots above are the recorder's own accounting and stay in
+// nanoseconds. What crosses N-API is the projection below: durations in
+// milliseconds, plus a mean the recorder never stores. These are not mirrors
+// of the snapshots — the units differ and `mean_ms` is derived — so they are
+// declared once, here, next to the numbers they convert, and `ts-rs` gives
+// TypeScript its only copy.
+
+fn ns_to_ms(value: u64) -> f64 {
+    value as f64 / 1_000_000.0
+}
+
+/// One latency histogram, in milliseconds.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LatencyStats {
+    pub samples: u64,
+    pub total_ms: f64,
+    /// Derived: `total_ms / samples`, and 0 when nothing was sampled.
+    pub mean_ms: f64,
+    pub max_ms: f64,
+    pub p50_upper_ms: f64,
+    pub p95_upper_ms: f64,
+    pub p99_upper_ms: f64,
+}
+
+impl From<LatencySnapshot> for LatencyStats {
+    fn from(value: LatencySnapshot) -> Self {
+        let total_ms = ns_to_ms(value.total_ns);
+        Self {
+            samples: value.samples,
+            total_ms,
+            mean_ms: if value.samples == 0 {
+                0.0
+            } else {
+                total_ms / value.samples as f64
+            },
+            max_ms: ns_to_ms(value.max_ns),
+            p50_upper_ms: ns_to_ms(value.p50_upper_ns),
+            p95_upper_ms: ns_to_ms(value.p95_upper_ns),
+            p99_upper_ms: ns_to_ms(value.p99_upper_ns),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NamedLatencyStats {
+    pub name: String,
+    pub latency: LatencyStats,
+}
+
+impl From<NamedLatencySnapshot> for NamedLatencyStats {
+    fn from(value: NamedLatencySnapshot) -> Self {
+        Self {
+            name: value.name,
+            latency: value.latency.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CheckpointPerformanceStats {
+    pub attempts: u64,
+    pub completed: u64,
+    pub blocked: u64,
+    pub failures: u64,
+    pub last_log_frames: u64,
+    pub last_checkpointed_frames: u64,
+    pub last_remaining_frames: u64,
+    pub blocked_by_reader_ms: f64,
+    pub latency: LatencyStats,
+}
+
+impl From<CheckpointPerformanceSnapshot> for CheckpointPerformanceStats {
+    fn from(value: CheckpointPerformanceSnapshot) -> Self {
+        Self {
+            attempts: value.attempts,
+            completed: value.completed,
+            blocked: value.blocked,
+            failures: value.failures,
+            last_log_frames: value.last_log_frames,
+            last_checkpointed_frames: value.last_checkpointed_frames,
+            last_remaining_frames: value.last_remaining_frames,
+            blocked_by_reader_ms: ns_to_ms(value.blocked_by_reader_ns),
+            latency: value.latency.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct WriterPerformanceStats {
+    pub uptime_ms: f64,
+    pub commit_attempts: u64,
+    pub committed: u64,
+    pub failed: u64,
+    pub facts_committed: u64,
+    pub changes_published: u64,
+    pub sqlite_rows_changed: u64,
+    pub queue_depth: u64,
+    pub queue_high_watermark: u64,
+    pub checkpoint: CheckpointPerformanceStats,
+    pub timings: Vec<NamedLatencyStats>,
+}
+
+impl From<WriterPerformanceSnapshot> for WriterPerformanceStats {
+    fn from(value: WriterPerformanceSnapshot) -> Self {
+        Self {
+            uptime_ms: ns_to_ms(value.uptime_ns),
+            commit_attempts: value.commit_attempts,
+            committed: value.committed,
+            failed: value.failed,
+            facts_committed: value.facts_committed,
+            changes_published: value.changes_published,
+            sqlite_rows_changed: value.sqlite_rows_changed,
+            queue_depth: value.queue_depth,
+            queue_high_watermark: value.queue_high_watermark,
+            checkpoint: value.checkpoint.into(),
+            timings: value.timings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct QueryPerformanceStats {
+    pub uptime_ms: f64,
+    pub requests_enqueued: u64,
+    pub requests_completed: u64,
+    pub queue_rejections: u64,
+    pub queue_depth: u64,
+    pub queue_high_watermark: u64,
+    pub oldest_active_ms: f64,
+    pub timings: Vec<NamedLatencyStats>,
+}
+
+impl From<QueryPerformanceSnapshot> for QueryPerformanceStats {
+    fn from(value: QueryPerformanceSnapshot) -> Self {
+        Self {
+            uptime_ms: ns_to_ms(value.uptime_ns),
+            requests_enqueued: value.requests_enqueued,
+            requests_completed: value.requests_completed,
+            queue_rejections: value.queue_rejections,
+            queue_depth: value.queue_depth,
+            queue_high_watermark: value.queue_high_watermark,
+            oldest_active_ms: ns_to_ms(value.oldest_active_ns),
+            timings: value.timings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SourcePipelineStats {
+    pub read_attempts: u64,
+    pub read_failures: u64,
+    pub read_retries: u64,
+    pub read_continuations: u64,
+    pub records_read: u64,
+    pub payload_bytes_read: u64,
+    pub decode_attempts: u64,
+    pub decode_failures: u64,
+    pub decode_retries: u64,
+    pub records_decoded: u64,
+    pub facts_emitted: u64,
+    pub records_quarantined: u64,
+    pub timings: Vec<NamedLatencyStats>,
+}
+
+impl From<SourcePipelineSnapshot> for SourcePipelineStats {
+    fn from(value: SourcePipelineSnapshot) -> Self {
+        Self {
+            read_attempts: value.read_attempts,
+            read_failures: value.read_failures,
+            read_retries: value.read_retries,
+            read_continuations: value.read_continuations,
+            records_read: value.records_read,
+            payload_bytes_read: value.payload_bytes_read,
+            decode_attempts: value.decode_attempts,
+            decode_failures: value.decode_failures,
+            decode_retries: value.decode_retries,
+            records_decoded: value.records_decoded,
+            facts_emitted: value.facts_emitted,
+            records_quarantined: value.records_quarantined,
+            timings: value.timings.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SourceDimensionPerformanceStats {
+    pub adapter_id: String,
+    pub stream_id: String,
+    pub driver_kind: String,
+    pub pipeline: SourcePipelineStats,
+}
+
+impl From<SourceDimensionPerformanceSnapshot> for SourceDimensionPerformanceStats {
+    fn from(value: SourceDimensionPerformanceSnapshot) -> Self {
+        Self {
+            adapter_id: value.adapter_id,
+            stream_id: value.stream_id,
+            driver_kind: value.driver_kind,
+            pipeline: value.pipeline.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SourcePerformanceStats {
+    pub uptime_ms: f64,
+    pub dimension_capacity: u64,
+    /// Recorder assignments routed to the fixed overflow lane after the
+    /// distinct adapter/stream cardinality cap was reached.
+    pub dimension_overflow_assignments: u64,
+    pub totals: SourcePipelineStats,
+    pub dimensions: Vec<SourceDimensionPerformanceStats>,
+}
+
+impl From<SourcePerformanceSnapshot> for SourcePerformanceStats {
+    fn from(value: SourcePerformanceSnapshot) -> Self {
+        Self {
+            uptime_ms: ns_to_ms(value.uptime_ns),
+            dimension_capacity: value.dimension_capacity,
+            dimension_overflow_assignments: value.dimension_overflow_assignments,
+            totals: value.totals.into(),
+            dimensions: value.dimensions.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StoragePerformanceStats {
+    pub database_file_bytes: u64,
+    pub wal_file_bytes: u64,
+    pub shared_memory_file_bytes: u64,
+}
+
+impl From<StoragePerformanceSnapshot> for StoragePerformanceStats {
+    fn from(value: StoragePerformanceSnapshot) -> Self {
+        Self {
+            database_file_bytes: value.database_file_bytes,
+            wal_file_bytes: value.wal_file_bytes,
+            shared_memory_file_bytes: value.shared_memory_file_bytes,
+        }
+    }
+}
+
+/// Owner-lifetime telemetry as `getStats()` reports it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PerformanceStats {
+    pub writer: WriterPerformanceStats,
+    pub queries: QueryPerformanceStats,
+    pub source: SourcePerformanceStats,
+    pub storage: StoragePerformanceStats,
+}
+
+impl From<EnginePerformanceSnapshot> for PerformanceStats {
+    fn from(value: EnginePerformanceSnapshot) -> Self {
+        Self {
+            writer: value.writer.into(),
+            queries: value.queries.into(),
+            source: value.source.into(),
+            storage: value.storage.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

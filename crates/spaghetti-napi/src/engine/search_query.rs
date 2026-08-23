@@ -12,6 +12,7 @@ use super::query_identity::{
 };
 use super::query_pool::read_committed_watermark;
 use super::EngineError;
+use ts_rs::TS;
 
 pub const SEARCH_QUERY_CONTRACT_VERSION: u32 = 1;
 pub const DEFAULT_SEARCH_PAGE_LIMIT: u32 = 50;
@@ -36,7 +37,9 @@ pub struct SearchPageRequest {
     pub limit: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SearchPage {
     pub contract_version: u32,
     pub at_commit_seq: u64,
@@ -47,32 +50,60 @@ pub struct SearchPage {
     pub items: Vec<SearchHit>,
     pub payload_bytes: u64,
     pub payload_byte_limit: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_cursor: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SearchHit {
     pub message_id: String,
     /// Absent while the referenced canonical session endpoint is unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub project_id: Option<String>,
     pub session_id: String,
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub parent_run_id: Option<String>,
     pub branch_kind: String,
     pub adapter_id: String,
     pub source_instance_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_project_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_session_id: Option<String>,
     /// Absent while the referenced canonical run endpoint is unresolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_child_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub delegation_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub native_message_id: Option<String>,
     pub native_kind: String,
     pub role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub source_time_quality: Option<String>,
     /// Plain text. FTS excerpts are separated with ` … ` and never contain
     /// markup injected by the query engine.

@@ -94,7 +94,8 @@ pub use orchestration_query::{
     MAX_ORCHESTRATION_PAGE_PAYLOAD_BYTES, ORCHESTRATION_QUERY_CONTRACT_VERSION,
 };
 use owner_lock::DatabaseOwnerLock;
-pub use owner_lock::OwnerMetadata;
+pub use owner_lock::{OwnerInfo, OwnerMetadata};
+pub use performance::PerformanceStats;
 pub use performance::{
     CheckpointPerformanceSnapshot, EnginePerformanceSnapshot, LatencySnapshot,
     NamedLatencySnapshot, QueryPerformanceSnapshot, SourceDimensionPerformanceSnapshot,
@@ -120,6 +121,7 @@ pub use search_query::{
     SearchHit, SearchPage, SearchPageRequest, DEFAULT_SEARCH_PAGE_LIMIT,
     MAX_SEARCH_PAGE_PAYLOAD_BYTES, SEARCH_QUERY_CONTRACT_VERSION,
 };
+use serde::{Deserialize, Serialize};
 pub(crate) use startup::ConfiguredObservationSource;
 use startup::ConfiguredObservationStartupRuntime;
 pub use supervisor::ObservationSupervisorOptions;
@@ -133,6 +135,7 @@ pub use timeline_query::{
     TimelineFacets, TimelineMessage, TimelinePage, TimelinePageRequest,
     DEFAULT_TIMELINE_PAGE_LIMIT, MAX_TIMELINE_PAGE_PAYLOAD_BYTES, TIMELINE_QUERY_CONTRACT_VERSION,
 };
+use ts_rs::TS;
 pub use usage_query::{
     UntimedUsageSummary, UsageAggregate, UsageCoverageSummary, UsageDay, UsageReport, UsageRequest,
     UsageTokenValues, UsageWindow, UsageWindowReport, MAX_USAGE_WINDOW_DAYS,
@@ -276,7 +279,9 @@ pub struct FactFamilyReplayCommand {
     pub reason: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct FactFamilyReplayResult {
     pub contract_version: u32,
     pub project_id: String,
@@ -319,7 +324,9 @@ struct Lifecycle {
     runtime: Option<EngineRuntime>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct EngineStatusSnapshot {
     pub state: String,
     pub database_path: String,
@@ -329,17 +336,25 @@ pub struct EngineStatusSnapshot {
     pub alive_query_workers: u32,
     pub in_flight_queries: u32,
     pub observation: ObservationStatusSnapshot,
-    pub owner: Option<OwnerMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub owner: Option<OwnerInfo>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct EngineHealthSnapshot {
     pub status: EngineStatusSnapshot,
     pub healthy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct EngineOverview {
     pub schema_version: u32,
     pub commit_seq: u64,
@@ -350,6 +365,8 @@ pub struct EngineOverview {
     /// Canonical history materialized by RFC 011 observation commits.
     pub canonical_sessions: u32,
     pub canonical_messages: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub change_log_oldest_cursor: Option<ChangeCursor>,
     pub change_log_pruned_through_seq: u64,
     pub change_log_retained_changes: u64,
@@ -360,7 +377,9 @@ pub struct EngineOverview {
     pub read_only: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct CommitWaitResult {
     pub observed_commit_seq: u64,
     pub reason: String,
@@ -649,7 +668,8 @@ impl SpaghettiEngineCore {
             alive_query_workers: usize_to_u32(alive_query_workers),
             in_flight_queries: usize_to_u32(in_flight_queries),
             observation,
-            owner: (lifecycle.phase != LifecyclePhase::Stopped).then(|| self.owner.clone()),
+            owner: (lifecycle.phase != LifecyclePhase::Stopped)
+                .then(|| OwnerInfo::from(self.owner.clone())),
         }
     }
 
@@ -1107,7 +1127,7 @@ impl SpaghettiEngineCore {
             },
         };
         let mut stats = queries.canonical_stats_cancellable(cancellation)?;
-        stats.performance = Some(performance);
+        stats.performance = Some(performance.into());
         Ok(stats)
     }
 
