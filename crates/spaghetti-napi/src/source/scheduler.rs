@@ -100,27 +100,6 @@ impl SharedSourcePassPool {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn concurrency_limit(&self) -> usize {
-        self.lock_state().concurrency_limit
-    }
-
-    #[cfg(test)]
-    pub(crate) fn available_permits(&self) -> usize {
-        let state = self.lock_state();
-        state.concurrency_limit.saturating_sub(state.active)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn queued_waiters(&self) -> usize {
-        self.lock_state().queues.iter().map(VecDeque::len).sum()
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn acquire(&self) -> SharedSourcePassPermit {
-        self.acquire_priority(IngestPriority::Interactive).await
-    }
-
     pub(crate) async fn acquire_priority(
         &self,
         priority: IngestPriority,
@@ -486,6 +465,26 @@ impl BoundedScheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test-only pool accessors; the production region stays cfg-free.
+    impl SharedSourcePassPool {
+        pub(crate) fn concurrency_limit(&self) -> usize {
+            self.lock_state().concurrency_limit
+        }
+
+        pub(crate) fn available_permits(&self) -> usize {
+            let state = self.lock_state();
+            state.concurrency_limit.saturating_sub(state.active)
+        }
+
+        pub(crate) fn queued_waiters(&self) -> usize {
+            self.lock_state().queues.iter().map(VecDeque::len).sum()
+        }
+
+        pub(crate) async fn acquire(&self) -> SharedSourcePassPermit {
+            self.acquire_priority(IngestPriority::Interactive).await
+        }
+    }
 
     fn work(name: u8, priority: IngestPriority) -> ScheduledWork {
         ScheduledWork {

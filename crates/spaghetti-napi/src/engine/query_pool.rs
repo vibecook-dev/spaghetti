@@ -3747,21 +3747,23 @@ mod tests {
         commit_revisions(&writer_client, 4);
         thread::sleep(Duration::from_millis(2));
 
-        let blocked = writer_client.checkpoint().unwrap();
-        assert!(blocked.busy || blocked.remaining_frames > 0, "{blocked:?}");
+        // The writer checkpoints as it shuts down; the pinned reader blocks it.
+        writer.shutdown().unwrap();
         assert!(queries.performance_snapshot().oldest_active_ns > 0);
-        let blocked_metrics = writer_client.performance_snapshot().checkpoint;
-        assert_eq!(blocked_metrics.attempts, 1);
-        assert_eq!(blocked_metrics.blocked, 1);
-        assert_eq!(blocked_metrics.completed, 0);
-        assert!(blocked_metrics.last_remaining_frames > 0);
-        assert!(blocked_metrics.blocked_by_reader_ns > 0);
+        let blocked = writer_client.performance_snapshot().checkpoint;
+        assert_eq!(blocked.attempts, 1);
+        assert_eq!(blocked.blocked, 1);
+        assert_eq!(blocked.completed, 0);
+        assert!(blocked.last_remaining_frames > 0);
+        assert!(blocked.blocked_by_reader_ns > 0);
 
         release_tx.send(()).unwrap();
         queries.overview().unwrap();
-        let reclaimed = writer_client.checkpoint().unwrap();
-        assert!(!reclaimed.busy, "{reclaimed:?}");
-        assert_eq!(reclaimed.remaining_frames, 0);
+
+        // A writer opened after the reader is released reclaims the whole WAL.
+        let mut reopened = WriterRuntime::start(database.clone()).unwrap();
+        let reopened_client = reopened.client();
+        reopened.shutdown().unwrap();
 
         let mut wal_path = database.as_os_str().to_os_string();
         wal_path.push("-wal");
@@ -3769,15 +3771,13 @@ mod tests {
             .map(|metadata| metadata.len())
             .unwrap_or_default();
         assert_eq!(wal_bytes, 0, "completed TRUNCATE must reclaim the WAL");
-        let recovered_metrics = writer_client.performance_snapshot().checkpoint;
-        assert_eq!(recovered_metrics.attempts, 2);
-        assert_eq!(recovered_metrics.completed, 1);
-        assert_eq!(recovered_metrics.failures, 0);
-        assert_eq!(recovered_metrics.last_remaining_frames, 0);
-        assert!(recovered_metrics.blocked_by_reader_ns > 0);
+        let reclaimed = reopened_client.performance_snapshot().checkpoint;
+        assert_eq!(reclaimed.attempts, 1);
+        assert_eq!(reclaimed.completed, 1);
+        assert_eq!(reclaimed.failures, 0);
+        assert_eq!(reclaimed.last_remaining_frames, 0);
 
         pool.shutdown().unwrap();
-        writer.shutdown().unwrap();
     }
 
     #[test]

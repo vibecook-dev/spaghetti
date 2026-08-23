@@ -1,7 +1,5 @@
 use std::path::Path;
 
-#[cfg(test)]
-use super::file::FileStamp;
 use super::file::{read_stable_file, read_stable_file_confined, stamp_revision, StableRead};
 use super::model::CursorReader;
 use super::{
@@ -190,77 +188,6 @@ impl ReplaceDocument {
             origin,
             incompatible_replacement,
         )
-    }
-
-    #[cfg(test)]
-    /// Frame content already obtained through a confined stable read. The
-    /// caller keeps ownership until every retained byte/stamp/revision bound
-    /// has passed, so another topology can fail without losing retry input.
-    pub(crate) fn frame_retained_stable(
-        &self,
-        stamp: &FileStamp,
-        bytes: &[u8],
-        revision: Revision,
-        previous: Option<&ReplaceCheckpoint>,
-        origin: &RecordOrigin,
-        incompatible_replacement: bool,
-    ) -> Result<ReplaceRead, SourceDriverError> {
-        if bytes.len() > self.config.max_document_bytes
-            || u64::try_from(bytes.len()).ok() != Some(stamp.len)
-            || Revision::digest(bytes) != revision
-        {
-            return Err(SourceDriverError::InvalidCursor(
-                "retained stable document does not match its bounded read evidence".to_string(),
-            ));
-        }
-        self.interpret_read(
-            StableRead::Stable {
-                stamp: stamp.clone(),
-                bytes: bytes.to_vec(),
-                revision,
-            },
-            previous,
-            origin,
-            incompatible_replacement,
-        )
-    }
-
-    #[cfg(test)]
-    /// Frame an already-completed confined read without reopening the native
-    /// object. Callers use this after their own access reservation has
-    /// accounted the exact outcome and byte count.
-    pub(crate) fn frame_retained_read(
-        &self,
-        read: StableRead,
-        previous: Option<&ReplaceCheckpoint>,
-        origin: &RecordOrigin,
-        incompatible_replacement: bool,
-    ) -> Result<ReplaceRead, SourceDriverError> {
-        match &read {
-            StableRead::Stable {
-                stamp,
-                bytes,
-                revision,
-            } if bytes.len() > self.config.max_document_bytes
-                || u64::try_from(bytes.len()).ok() != Some(stamp.len)
-                || Revision::digest(bytes) != *revision =>
-            {
-                return Err(SourceDriverError::InvalidCursor(
-                    "retained stable document does not match its bounded read evidence".to_string(),
-                ));
-            }
-            StableRead::Oversized(stamp) if stamp.len <= self.config.max_document_bytes as u64 => {
-                return Err(SourceDriverError::InvalidCursor(
-                    "retained oversized document does not exceed its bounded read limit"
-                        .to_string(),
-                ));
-            }
-            StableRead::Missing
-            | StableRead::Unstable
-            | StableRead::Oversized(_)
-            | StableRead::Stable { .. } => {}
-        }
-        self.interpret_read(read, previous, origin, incompatible_replacement)
     }
 
     fn interpret_read(
@@ -543,10 +470,87 @@ impl MalformedRevisionGuard {
 
 #[cfg(test)]
 mod tests {
+    use crate::source::file::FileStamp;
     use tempfile::{NamedTempFile, TempDir};
 
     use super::*;
     use crate::source::SourceMediaType;
+
+    // Test-only framing over the driver's private read path. It lives in the
+    // test module so the production region carries no `#[cfg(test)]` items.
+    impl ReplaceDocument {
+        /// Frame content already obtained through a confined stable read. The
+        /// caller keeps ownership until every retained byte/stamp/revision bound
+        /// has passed, so another topology can fail without losing retry input.
+        pub(crate) fn frame_retained_stable(
+            &self,
+            stamp: &FileStamp,
+            bytes: &[u8],
+            revision: Revision,
+            previous: Option<&ReplaceCheckpoint>,
+            origin: &RecordOrigin,
+            incompatible_replacement: bool,
+        ) -> Result<ReplaceRead, SourceDriverError> {
+            if bytes.len() > self.config.max_document_bytes
+                || u64::try_from(bytes.len()).ok() != Some(stamp.len)
+                || Revision::digest(bytes) != revision
+            {
+                return Err(SourceDriverError::InvalidCursor(
+                    "retained stable document does not match its bounded read evidence".to_string(),
+                ));
+            }
+            self.interpret_read(
+                StableRead::Stable {
+                    stamp: stamp.clone(),
+                    bytes: bytes.to_vec(),
+                    revision,
+                },
+                previous,
+                origin,
+                incompatible_replacement,
+            )
+        }
+
+        /// Frame an already-completed confined read without reopening the native
+        /// object. Callers use this after their own access reservation has
+        /// accounted the exact outcome and byte count.
+        pub(crate) fn frame_retained_read(
+            &self,
+            read: StableRead,
+            previous: Option<&ReplaceCheckpoint>,
+            origin: &RecordOrigin,
+            incompatible_replacement: bool,
+        ) -> Result<ReplaceRead, SourceDriverError> {
+            match &read {
+                StableRead::Stable {
+                    stamp,
+                    bytes,
+                    revision,
+                } if bytes.len() > self.config.max_document_bytes
+                    || u64::try_from(bytes.len()).ok() != Some(stamp.len)
+                    || Revision::digest(bytes) != *revision =>
+                {
+                    return Err(SourceDriverError::InvalidCursor(
+                        "retained stable document does not match its bounded read evidence"
+                            .to_string(),
+                    ));
+                }
+                StableRead::Oversized(stamp)
+                    if stamp.len <= self.config.max_document_bytes as u64 =>
+                {
+                    return Err(SourceDriverError::InvalidCursor(
+                        "retained oversized document does not exceed its bounded read limit"
+                            .to_string(),
+                    ));
+                }
+                StableRead::Missing
+                | StableRead::Unstable
+                | StableRead::Oversized(_)
+                | StableRead::Stable { .. } => {}
+            }
+            self.interpret_read(read, previous, origin, incompatible_replacement)
+        }
+    }
 
     fn origin() -> RecordOrigin {
         RecordOrigin {

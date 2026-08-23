@@ -7,8 +7,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
-#[cfg(test)]
-use rusqlite::Connection;
 use rusqlite::{params, params_from_iter, OptionalExtension, Params, Transaction};
 
 use crate::adapter::{
@@ -20,8 +18,6 @@ use crate::adapter::{
 };
 
 use super::artifact_projection::{apply_artifact_facts, retract_replayed_artifact_fact};
-#[cfg(test)]
-use super::commit::apply_observation_commit_with_projection;
 use super::commit::{
     apply_observation_commit_with_projection_in_transaction, ChangeEntry, CommitDetail, CommitHook,
     CommitReceipt, ObservationCommit, ProjectionCommitContext, TransactionalProjectionWork,
@@ -48,19 +44,6 @@ const CHANGE_SCHEMA_VERSION: u32 = 1;
 const FACT_INSERT_BATCH_ROWS: usize = 512;
 const MESSAGE_INSERT_BATCH_ROWS: usize = 256;
 const RUN_EVIDENCE_INSERT_BATCH_ROWS: usize = 512;
-
-/// Submit one already-decoded fact batch through the catalog/projection/cursor
-/// transaction. Public changes and the durable fact count are derived here;
-/// callers cannot supply adapter-owned event topics for typed commits.
-#[cfg(test)]
-pub(super) fn apply_fact_observation_commit(
-    connection: &mut Connection,
-    request: &ObservationCommit,
-    batch: &FactBatch,
-) -> Result<CommitReceipt, EngineError> {
-    let (request, projection) = prepare_fact_observation_commit(request, batch, None)?;
-    apply_observation_commit_with_projection(connection, &request, &projection)
-}
 
 pub(super) fn apply_fact_observation_commit_in_transaction(
     transaction: &Transaction<'_>,
@@ -3798,6 +3781,7 @@ pub(super) fn execute_cached<P: Params>(
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     use std::cell::RefCell as StdRefCell;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -3806,6 +3790,8 @@ mod tests {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
     use tempfile::TempDir;
+    #[cfg(feature = "legacy-oracle")]
+    use walkdir::WalkDir;
 
     use crate::adapter::{
         ActorAffiliationDimension, ActorAffiliationRevisionFact, ActorAffiliationState,
@@ -3834,17 +3820,31 @@ mod tests {
     };
 
     use super::*;
+    use crate::engine::commit::tests::{
+        apply_observation_commit, apply_observation_commit_with_projection,
+    };
     use crate::engine::commit::{
-        apply_observation_commit, apply_projection_version_commit, source_instance_catalog_id,
-        source_stream_catalog_id, ExpectedSourceCursor, ProjectionReadiness,
-        ProjectionVersionCommit, ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate,
-        SourceStreamSpec,
+        apply_projection_version_commit, source_instance_catalog_id, source_stream_catalog_id,
+        ExpectedSourceCursor, ProjectionReadiness, ProjectionVersionCommit,
+        ProjectionVersionUpdate, SourceInstanceSpec, SourceObjectUpdate, SourceStreamSpec,
     };
     use crate::engine::unknown_evidence_projection::{
         read_unknown_evidence_snapshot, unknown_evidence_owner,
     };
     use crate::semantic_contract::{parse_rfc012c_runtime_v1_json, RuntimeContractFixtureWire};
     use crate::unknown_evidence_reducer::UnknownEvidenceOccurrence;
+
+    /// Submit one already-decoded fact batch through the catalog/projection/cursor
+    /// transaction. Public changes and the durable fact count are derived here;
+    /// callers cannot supply adapter-owned event topics for typed commits.
+    pub(super) fn apply_fact_observation_commit(
+        connection: &mut Connection,
+        request: &ObservationCommit,
+        batch: &FactBatch,
+    ) -> Result<CommitReceipt, EngineError> {
+        let (request, projection) = prepare_fact_observation_commit(request, batch, None)?;
+        apply_observation_commit_with_projection(connection, &request, &projection)
+    }
 
     const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
     const PROJECT: &str = "-Users-fixture-project";
@@ -5148,6 +5148,19 @@ mod tests {
         }
         connection
     }
+
+    /// History parity only. Per-message token columns are gone: RFC 012C
+    /// attributes usage to a response, not to a transcript record, and the
+    /// corpus totals are proven against the independent oracle instead.
+    #[cfg(feature = "legacy-oracle")]
+    type HistoryParityRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        String,
+    );
 
     #[cfg(feature = "legacy-oracle")]
     fn normalized_json(raw: String) -> String {
