@@ -148,7 +148,9 @@ const SESSION_STATE_SQL: &str = concat!(
     CASE
         WHEN cs.transcript_present = 0 THEN 'discovered'
         WHEN can.session_key IS NULL THEN 'discovered'
-        WHEN COALESCE(msg.message_count, 0) = 0 THEN 'transcript_backed'
+        WHEN NOT "#,
+    session_hydrated_sql!(),
+    r#" THEN 'transcript_backed'
         WHEN "#,
     search_ready_sql!(),
     r#"
@@ -161,7 +163,8 @@ const SESSION_STATE_SQL: &str = concat!(
 /// SQL the history page borrows so both surfaces derive `catalog_state` from
 /// one definition. Keeping it here — rather than inline in `query_pool.rs` —
 /// is what stops the two derivations drifting apart.
-pub const HISTORY_PROJECT_CATALOG_CTE: &str = r#"
+pub const HISTORY_PROJECT_CATALOG_CTE: &str = concat!(
+    r#"
     catalog_rollup AS (
         SELECT cs.project_key,
                COUNT(*) AS catalog_sessions,
@@ -169,17 +172,16 @@ pub const HISTORY_PROJECT_CATALOG_CTE: &str = r#"
                    CASE WHEN cs.transcript_present = 1 AND can.session_key IS NOT NULL
                         THEN 1 ELSE 0 END
                ) AS backed_sessions,
-               SUM(CASE WHEN COALESCE(cmsg.message_count, 0) > 0 THEN 1 ELSE 0 END)
+               SUM(CASE WHEN "#,
+    session_hydrated_sql!(),
+    r#" THEN 1 ELSE 0 END)
                    AS hydrated_sessions
         FROM catalog_sessions cs
         LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key
-        LEFT JOIN (
-            SELECT session_key, COUNT(*) AS message_count
-            FROM canonical_messages GROUP BY session_key
-        ) cmsg ON cmsg.session_key = cs.session_key
         GROUP BY cs.project_key
     ),
-"#;
+"#
+);
 
 /// Projected columns for a history project row.
 pub const HISTORY_PROJECT_CATALOG_COLUMNS: &str = concat!(
@@ -249,10 +251,6 @@ pub fn read_project_page(
                    {SESSION_STATE_SQL} AS state
             FROM catalog_sessions cs
             LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key
-            LEFT JOIN (
-                SELECT session_key, COUNT(*) AS message_count
-                FROM canonical_messages GROUP BY session_key
-            ) msg ON msg.session_key = cs.session_key
         ),
         rollup AS (
             SELECT project_key,
@@ -363,14 +361,13 @@ pub fn read_session_page(
                cs.native_created_at, cs.native_updated_at, cs.native_message_count,
                cs.transcript_present, cs.last_commit_seq, cs.sort_time,
                {SESSION_STATE_SQL} AS state,
-               COALESCE(msg.message_count, 0) AS decoded_messages,
+               (
+                   SELECT COUNT(*) FROM canonical_messages cm
+                   WHERE cm.session_key = cs.session_key
+               ) AS decoded_messages,
                COALESCE(src.degraded, 0), src.degraded_reason
         FROM catalog_sessions cs
         LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key
-        LEFT JOIN (
-            SELECT session_key, COUNT(*) AS message_count
-            FROM canonical_messages GROUP BY session_key
-        ) msg ON msg.session_key = cs.session_key
         LEFT JOIN catalog_sources src ON src.source_instance_id = cs.source_instance_id
         WHERE cs.last_commit_seq <= ?1
           AND (?6 IS NULL OR cs.project_key = ?6)

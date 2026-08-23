@@ -340,17 +340,20 @@ fn read_evidence(connection: &Connection) -> Result<Evidence, EngineError> {
 
     let (canonical_sessions, hydrated_sessions) = connection
         .query_row(
-            r#"
+            concat!(
+                r#"
             SELECT (
                 SELECT COUNT(*) FROM catalog_sessions cs
                 JOIN canonical_sessions can ON can.session_key = cs.session_key
                 WHERE cs.transcript_present = 1
             ), (
-                SELECT COUNT(DISTINCT cs.session_key) FROM catalog_sessions cs
-                JOIN canonical_messages cm ON cm.session_key = cs.session_key
-                WHERE cs.transcript_present = 1
+                SELECT COUNT(*) FROM catalog_sessions cs
+                WHERE cs.transcript_present = 1 AND "#,
+                session_hydrated_sql!(),
+                r#"
             )
-            "#,
+            "#
+            ),
             [],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
         )

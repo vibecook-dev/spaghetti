@@ -31,6 +31,21 @@
 /// while finalization is incomplete — so every surface reads the same row
 /// instead of being handed an engine flag. One definition is what keeps the
 /// history page and the catalog page from disagreeing about one session.
+/// Whether one catalog session has any decoded message, as a SQL predicate
+/// correlated on `cs.session_key`.
+///
+/// Written as `EXISTS` rather than a counted join on purpose: presence needs
+/// one index seek per catalog row, while `COUNT(*) ... GROUP BY session_key`
+/// aggregates every message in the store. On a mid-rebuild corpus (243k
+/// messages) that difference measured 1.7 s against 1 ms, and it grows with
+/// the message table — the readiness vector is polled while that table is
+/// still filling.
+macro_rules! session_hydrated_sql {
+    () => {
+        "EXISTS (SELECT 1 FROM canonical_messages cm WHERE cm.session_key = cs.session_key)"
+    };
+}
+
 macro_rules! search_ready_sql {
     () => {
         "(SELECT COUNT(*) = 0 FROM schema_meta WHERE key = 'query_bootstrap_state')"
