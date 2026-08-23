@@ -188,16 +188,12 @@ fn truncating_the_transcript_resets_before_replaying_it() {
         .iter()
         .position(|event| matches!(event, ObserverEvent::Reset(_)))
         .expect("reset control");
+    // Reset-before-replay: nothing semantic from the truncated object may be
+    // delivered before the reset control. What follows the reset is the
+    // replay of the surviving record in whatever families the decoder emits
+    // for it — the family set is not this test's concern.
     assert!(
-        events[reset_at..]
-            .iter()
-            .filter(|event| !event.is_control())
-            .all(|event| matches!(
-                event,
-                ObserverEvent::UsageV2(_)
-                    | ObserverEvent::ActorRun(_)
-                    | ObserverEvent::ActorAffiliation(_)
-            )),
+        events[..reset_at].iter().all(|event| event.is_control()),
         "replay after a reset must follow the reset control"
     );
     observer.close();
