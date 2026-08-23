@@ -9,19 +9,19 @@ import type { ProjectListItem, SegmentChange } from '@vibecook/spaghetti-sdk';
  * are refreshed by explicit lifecycle operations (startup/rebuild), while
  * the selected project's session lane performs its own scoped live read.
  */
-export function applyProjectLiveActivity(
-  projects: readonly ProjectListItem[],
+export function applyProjectLiveActivity<T extends ProjectListItem>(
+  projects: readonly T[],
   changes: readonly SegmentChange[],
   receivedAt: number,
-): ProjectListItem[] {
-  if (changes.length === 0) return projects as ProjectListItem[];
+): T[] {
+  if (changes.length === 0) return projects as T[];
 
   const touchedMembers = new Set(
     changes.flatMap((change) =>
       change.sourceId && change.projectSlug ? [memberKey(change.sourceId, change.projectSlug)] : [],
     ),
   );
-  if (touchedMembers.size === 0) return projects as ProjectListItem[];
+  if (touchedMembers.size === 0) return projects as T[];
 
   const activityAt = new Date(receivedAt).toISOString();
   let changed = false;
@@ -31,7 +31,7 @@ export function applyProjectLiveActivity(
     changed = true;
     return { ...project, lastActiveAt: activityAt };
   });
-  return changed ? next : (projects as ProjectListItem[]);
+  return changed ? next : (projects as T[]);
 }
 
 function memberKey(sourceId: string, projectSlug: string): string {
