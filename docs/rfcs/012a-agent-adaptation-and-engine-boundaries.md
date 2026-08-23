@@ -34,9 +34,9 @@ where it is implemented. Execution authority is
 | Qualified values (missing is not zero) | implemented | per-bucket qualification in `src/engine/usage_query.rs`; see [012C](./012c-runtime-semantics-and-usage-v2.md) §3.2 |
 | Source/fact-family coverage | implemented | `SpaghettiEngine.getFactFamilyCoverage` and `replayFactFamily` in `crates/spaghetti-napi/index.d.ts` |
 | Mapping dispositions and typed-unknown preservation | implemented | `Fact::UnknownRecord`; on the observer wire as `UnknownEvidenceEvent`, carrying size and digest and never native content |
-| ADS, fixtures, support ledger, conformance, promotion | implemented | `agent-support/`, validated by `scripts/agent_support/validate.py` — 6 bundles, 1 promoted, 5 candidate |
-| Scoped-relation declarations | partial | `agent-support/claude-code/candidate-2026-08-21/scope-programs.json` declares nine session-rooted relations — root transcript, descendant transcripts and metadata, workflow records, journals and child transcripts, team config and inbox, todo snapshot — and `src/observer/runtime.rs` refuses to attach to an adapter declaring no session-rooted program. But `src/observer/scope.rs` still resolves those locators in Rust against the relation ids rather than evaluating the declared program |
-| No hand-written TypeScript mirror of native output | implemented | `pnpm generate:types` (ts-rs) with a CI diff; 13,694 lines of hand-written contracts deleted and the SDK barrel curated from 38 exports to 17 |
+| ADS, fixtures, support ledger, conformance, promotion | implemented | `agent-support/<adapter>/<date>/` with one `version` field, validated by `scripts/agent_support/validate.py` — 5 bundles valid, 1 selectable for runtime decoding. §13 below still describes the *initial* realization as `<adapter>/<candidate>/`; repository layout is an implementation detail in §3's maturity table, and this is the layout that shipped |
+| Scoped-relation declarations | implemented | `agent-support/claude-code/2026-08-21/scope-programs.json` declares nine session-rooted relations, and `src/observer/scope.rs` **evaluates** that program: every path comes from a declared relation's locator template, rendered through the confinement law in `src/source/access.rs` and bounded by the relation's own declared bounds. The module names no vendor and no path shape — relations, locators, stream bindings, selectors, and bounds all arrive from the manifest |
+| No hand-written TypeScript mirror of native output | implemented | `pnpm generate:types` (ts-rs) with a CI diff; 13,694 lines of hand-written contracts deleted and the SDK barrel curated from 38 export statements to 17 (64 generated type names, in one block) |
 
 Adapter reality check: the Claude adapter emits **all eleven** RFC 012C fact
 families, each with a typed `RuntimeSemanticValue`
@@ -50,6 +50,28 @@ in [012C](./012c-runtime-semantics-and-usage-v2.md) §7.
 Grok usage is now exact per response, read from `turn_completed` records in
 `updates.jsonl`; the session-scoped estimate path is deleted. A turn that omits
 `cacheCreationTokens` leaves that bucket `unknown` rather than inferring it.
+
+### Support releases, and why none of the real ones is promoted
+
+A bundle is `agent-support/<adapter>/<date>/` and carries one `version` field.
+The candidate/promoted pair is gone: what a release *is* and whether the engine
+may decode with it are now separate questions, and the second is answered by
+the ledger rather than by a directory name.
+
+`scripts/agent_support/validate.py` reports **5 bundles valid, 1 selectable for
+runtime decoding** — and the selectable one is `fixture-agent@2026-08-21`.
+
+Promoting a real Claude, Codex, or Grok release requires **a named independent
+sanitizer reviewer with a date, and a performance report with at least three
+repetitions**, on top of an approved review, a passing prohibited-content scan,
+finished conformance checks, no open or degraded claims, no open drift, and
+promoted ADS/source/scope documents. The reviewer field is checked against a
+placeholder blocklist — `rfc012-integrator`, `automation`, `unknown`, `pending`,
+or blank all fail — and `fixture-agent` is the one adapter exempt from it,
+which is precisely why it is the only promoted release.
+
+That is the §12 gate working, not an outstanding task. Promotion is a human act
+with evidence attached; Wave 3 owns it.
 
 ## 1. Summary
 

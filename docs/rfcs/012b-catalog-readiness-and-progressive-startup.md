@@ -99,6 +99,13 @@ the number of transcript-backed catalog sessions. `capabilities` and
 emitted by the same decode pass that produces messages, so a separate schedule
 would be a fiction. `search` is `pending` until full-text bootstrap finishes.
 
+**A pending projection is an error, not an empty result.** While search is
+still building, a search query fails with the typed `projection_pending` code
+(`packages/sdk/src/client/errors.ts`) and the playground renders
+`Building the search index…`. Partial search must never masquerade as complete
+search, and zero hits from a half-built index is exactly that — so the boundary
+refuses rather than answers.
+
 ## 4. Shipped interface
 
 Types are generated from Rust by `pnpm generate:types`; nothing below is
@@ -173,8 +180,16 @@ unchanged` (whole-response equality against a pre-landing baseline), and
 ## 6. Performance, measured
 
 On the production-shaped Claude corpus, catalog listable in **122 ms cold /
-8 ms warm** against the landing-plan §6 budgets of 10 s and 1 s. The playground
-library screen renders from the catalog path in 491 ms.
+8 ms warm** against the landing-plan §6 budgets of 10 s and 1 s — 258 ms cold on
+a 3.2 GB copy. The playground library screen renders from the catalog path in
+491 ms.
+
+What catalog-first buys is now measurable end to end: on that 3.2 GB corpus the
+catalog is listable in a quarter of a second while complete history arrives at
+193 s and search at 202 s. The gap between those numbers is the whole point of
+this RFC, and it closed from roughly three hours to three minutes when durable
+ingest went from 70 to 11,653 records/s
+([the performance report](./012-landing-perf-report.md)).
 
 The draft's §14 table of experiment targets is superseded by these numbers and
 by landing plan §6; no numeric value here is a ratified release ceiling.

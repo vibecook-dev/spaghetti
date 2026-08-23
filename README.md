@@ -72,8 +72,9 @@ full-text search converge in the background.
 
 While that happens, `spag projects` and `spag sessions` already work. Rows show
 what the native surface claims and how far decoding has got; a count nothing has
-proven yet is shown as unknown rather than as zero. Search is labelled
-unavailable until its index finishes.
+proven yet is shown as unknown rather than as zero. Search says
+`Building the search index…` until its index finishes, rather than returning
+partial results as if they were complete.
 
 `spag doctor` prints the **readiness vector** — six independent fields
 (`catalog`, `history`, `usage`, `capabilities`, `artifacts`, `search`), each
@@ -82,10 +83,10 @@ its evidence was read at. A source that cannot be read completely is reported
 `degraded` with the reason and keeps the rows it has.
 
 > **First run after upgrading to 0.8.0 rebuilds the index.** The schema changed,
-> so the whole corpus is re-read. The catalog is back in about a second, but
-> history and search take as long as a first-ever index — on a large corpus,
-> currently hours. Nothing is lost; the database is a pure function of your
-> agent files.
+> so the whole corpus is re-read. The catalog is back in about a second, and the
+> rest is **minutes, not hours** — a 3.2 GB Claude corpus reaches complete
+> history in about 3 minutes and full-text search a few seconds later. Nothing
+> is lost; the database is a pure function of your agent files.
 
 ## Token usage is counted per response
 

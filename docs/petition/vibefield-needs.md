@@ -18,7 +18,12 @@ names and a working example for each item, is
 | Stable semantic event/revision IDs (§1.2) | shipped | `SemanticRevisionRef`, equal across durable queries and the scoped observer; `isSameRevision()` |
 | Scoped observer epoch + full-replacement resync (§1.3) | shipped | `scope_epoch`, `overflow`, `resync_complete` with a per-family manifest and digest |
 
-Four caveats a Phase A integrator needs:
+"Stable" in row five means stable *going forward*, and 0.8.0 is the boundary:
+revision ids changed for eight runtime families when their identity started
+naming the record that proved the value. Entity references did not change. A
+consumer that persisted revision ids rebuilds that state once — see caveat 5.
+
+Five caveats a Phase A integrator needs:
 
 1. **The reference shape is not the one §1.1 proposed.** The petition sketched a
    structured `{ adapterId, sourceInstanceId, sessionKey, nativeSessionId }`.
@@ -43,6 +48,15 @@ Four caveats a Phase A integrator needs:
    `tool_result` whose call fell outside the bounded correlation window keeps
    content-block evidence without a guessed tool name. Both are recorded in
    [RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §7.
+5. **Revision ids for eight families changed in 0.8.0.** `message`,
+   `content_block`, `tool`, `user_input_request`, `plan`, `task`,
+   `native_marker`, and `effective_state` now derive a revision from the record
+   that proved the value, because those entities outlive any one record and two
+   records can otherwise collapse into a single revision. Entity references —
+   the §1.1 surface — are unchanged; only `fact_revision_id` moved, and only for
+   those families. Anything VibeField persisted or keyed by those ids must be
+   rebuilt once. The rule is
+   [RFC 012C](../rfcs/012c-runtime-semantics-and-usage-v2.md) §3.1.
 
 Phases B–D are untouched: no contribution facts, no `code.activity` family, and
 no Git or workspace observation exist in Spaghetti, which is what §5 asked for.

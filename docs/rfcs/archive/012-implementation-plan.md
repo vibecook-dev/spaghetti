@@ -1705,7 +1705,7 @@ Current landing status (2026-08-16):
   declared transcript objects produced complete coverage and Ready v1; six
   retained `claude_typed_projection_loss` diagnostics correctly remained
   audit evidence outside usage-v2 coverage. The aggregate-only report is
-  [`usage-v2-private-parity-v1.json`](../../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-private-parity-v1.json)
+  [`usage-v2-private-parity-v1.json`](../../../agent-support/claude-code/2026-08-21/reports/usage-v2-private-parity-v1.json)
   (`sha256:2d84af3dd9bcfb91e727b8d0e067679b1637e61b0a343957a09b8f42c303176e`);
 - added decoder contract 20's native team-to-actor correlation. Team configs
   affiliate the root through `leadSessionId` plus an exactly-one lead-member
@@ -1736,7 +1736,7 @@ Current landing status (2026-08-16):
   census found 965 exact complete semantic repeats, 135,981 counter-equal
   metadata corrections, and 262 non-consecutive semantic reversions among
   344,160 usage rows; its aggregate-only report is
-  [`usage-v2-semantic-revision-census-v1.json`](../../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-census-v1.json)
+  [`usage-v2-semantic-revision-census-v1.json`](../../../agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-census-v1.json)
   (`sha256:4dee1d89f0f5a474458cbe257f3607b28e0911bf38d7f8c26dadfe83550edf9d`).
 - added decoder contract 22's RFC 012C root actor identity correction before
   promotion. One common derivation now binds the final base session key, the
@@ -1752,7 +1752,7 @@ Current landing status (2026-08-16):
   parity, zero final foreign-key violations, and complete Ready coverage for
   150,757 responses across 5,201 transcript objects in 358.25 seconds. The
   report is
-  [`usage-v2-semantic-revision-parity-v1.json`](../../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-semantic-revision-parity-v1.json)
+  [`usage-v2-semantic-revision-parity-v1.json`](../../../agent-support/claude-code/2026-08-21/reports/usage-v2-semantic-revision-parity-v1.json)
   (`sha256:3f3e0606e1dd228771f0778c9299a9cdbd62fbb11b555352a36d693bdcf7ad76`);
   and
 - kept the candidate capability `unsupported`: portable remaining runtime
@@ -1768,7 +1768,7 @@ durable reducer rows, Claude-decoded `getRuntimeUsageV2` pages, and selected
 scoped envelopes, including A→B usage correction, affiliation present→removed,
 generation reset, and partial coverage that cannot prove absence. The
 digest-bound report is
-[`runtime-selected-family-durable-scoped-parity-v1.json`](../../../agent-support/claude-code/candidate-2026-08-15/reports/runtime-selected-family-durable-scoped-parity-v1.json)
+[`runtime-selected-family-durable-scoped-parity-v1.json`](../../../agent-support/claude-code/2026-08-21/reports/runtime-selected-family-durable-scoped-parity-v1.json)
 (`sha256:2dc73693fbaab8e5e6f56840545f3f1897a43280fe8bd5327ead62cfa40aad2f`).
 Fixture-adapter facts still do not bind `getRuntimeUsageV2` membership;
 durable actor-run/affiliation coverage stays `not_materialized`; Candidate
@@ -1885,7 +1885,7 @@ mixed, complete rollback restores legacy, and v2 shadow rows survive.
 
 The representative external compatibility-window gate is now closed by the
 privacy-reduced report
-[`usage-v2-compatibility-window-v1.json`](../../../agent-support/claude-code/candidate-2026-08-15/reports/usage-v2-compatibility-window-v1.json)
+[`usage-v2-compatibility-window-v1.json`](../../../agent-support/claude-code/2026-08-21/reports/usage-v2-compatibility-window-v1.json)
 (`sha256:3f4eaa7c8144fe078c9df71ca6cb72a3b0c9a9e5390bcecb7433b455e1087a83`).
 On a stable ephemeral clone, an independent census and durable ingest matched
 exactly across 153,525 responses, 5,141 actors, 911 usage sessions, all four

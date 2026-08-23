@@ -43,12 +43,46 @@ re-read.
 - The **catalog** — every project and session — is committed first and is
   listable in roughly 100 ms. `spag projects`, `spag sessions`, and the library
   screen work immediately.
-- **History, usage, artifacts, and search** converge in the background. On a
-  large corpus this currently takes **hours**, not minutes. Ingest throughput is
-  a known regression against the 2026-08-15 profile and is being fixed; until
-  then, expect a long tail on the first run and plan an upgrade accordingly.
+- **History, usage, artifacts, and search** converge in the background, in
+  **minutes rather than hours**: a 3.2 GB Claude corpus reaches complete history
+  in 193 s and queryable search at 202 s. Durable ingest went from 70 to 11,653
+  records/s on a frozen 301 MB corpus — **166×** — this release; the
+  measurements, both root causes, and the trade-offs accepted are in
+  [the performance report](docs/rfcs/012-landing-perf-report.md).
+- **Search is unavailable, not partial, during the rebuild.** Queries return a
+  typed `projection_pending` error and the playground shows
+  `Building the search index…`, rather than answering from an incomplete index.
 - Nothing is lost. The database is a pure function of your agent files, and
   `spag doctor` shows exactly which fields are still `indexing`.
+
+### ⚠ BREAKING — fact revision identities changed for eight runtime families
+
+`message`, `content_block`, `tool`, `user_input_request`, `plan`, `task`,
+`native_marker`, and `effective_state` now derive their revision identity from
+the **record that proved the value**, not from the value alone.
+
+This is a correctness fix. These families key facts by an entity that outlives
+any single record — an actor's model, a tool call answered several records
+later — so two records can legitimately prove the same value for one entity, and
+only the record distinguishes those revisions. Binding the value alone collapsed
+them into one revision.
+
+What this means for you:
+
+- **Entity identities are unchanged.** `CanonicalFactId`, `ExternalEntityRef`,
+  session and project references all keep their values.
+- **`FactRevisionId` changed** for those eight families, and therefore so did
+  the `SemanticRevisionRef.fact_revision_id` they appear in. Usage,
+  actor-affiliation, and artifact-snapshot revisions are unchanged — a repeated
+  value there is deliberately one revision.
+- Locally the schema v64 rebuild regenerates everything. **A downstream
+  consumer that persisted or derived state from those revision ids must rebuild
+  it**; the old and new ids do not compare equal, and nothing translates
+  between them.
+
+The rule now lives in one place — `Fact::revision_binding` in
+`crates/spaghetti-napi/src/adapter/semantic.rs` — so the durable coordinator,
+the scoped observer, and the RFC 012C reducers cannot disagree about it.
 
 ### ⚠ BREAKING — the SDK entry point is an allowlist
 
@@ -120,6 +154,21 @@ modules are generated from Rust and exported from the same entry point.
   `isSameEntity`, `isSameRevision`, `isSameNativeIdentity`, with generated
   `SessionRef` / `ProjectRef` / `SemanticRevisionRef` / `NativeIdentity`. See
   [docs/integration/vibefield-phase-a.md](docs/integration/vibefield-phase-a.md).
+- **The RFC 012C value types are importable by name** — `RuntimeSemanticValue`
+  and every per-family `*Fact` type, 46 names in all, so a handler signature can
+  say `ToolRevisionFact` instead of deriving it from `SemanticEvent['value']`.
+
+### Fixed
+
+- **One spelling for an opaque reference.** Catalog and history rows used to
+  spell an entity reference `"1:<digest>"` while `ExternalEntityRef.entity_key`
+  spelled the same digest `"v1:<digest>"`, so comparing the two silently failed.
+  Everything now uses the RFC 012A `"v1:"` form, and the SDK tests pin it.
+- **A startup failure says what failed.** A configured observation that dies
+  during startup now surfaces the underlying `EngineError::WorkerFailed` cause
+  instead of the generic "worker is unavailable".
+- **A truncated plan step no longer fails a decode.** It stays a canonical
+  runtime key rather than aborting the record.
 
 ### Deprecated
 
@@ -133,7 +182,10 @@ modules are generated from Rust and exported from the same entry point.
 Design: [RFC 012](docs/rfcs/012-evidence-backed-adapters-and-progressive-readiness.md)
 and its children [012B](docs/rfcs/012b-catalog-readiness-and-progressive-startup.md),
 [012C](docs/rfcs/012c-runtime-semantics-and-usage-v2.md),
-[012D](docs/rfcs/012d-session-scoped-observation.md).
+[012D](docs/rfcs/012d-session-scoped-observation.md). Measurements:
+[the performance report](docs/rfcs/012-landing-perf-report.md). Known
+follow-ups, none of them blockers:
+[landing plan §8a](docs/rfcs/012-landing-plan.md#8a-follow-ups-filed-during-the-landing-not-blockers).
 
 <!-- End standing notice. -->
 

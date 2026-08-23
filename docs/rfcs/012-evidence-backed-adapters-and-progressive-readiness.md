@@ -42,9 +42,12 @@ where each umbrella decision now lives, so a reader can tell an implemented
 invariant from an intention.
 
 **Execution authority is [the RFC 012 landing plan](./012-landing-plan.md)**:
-§3 is the landing surface (what the program must deliver, per consumer) and §8
-is the per-lane status with commits and measurements. The plans this RFC's
-front matter used to point at are retired and archived.
+§3 is the landing surface (what the program must deliver, per consumer), §8 is
+the per-lane status with commits and measurements, and
+[§8a](./012-landing-plan.md#8a-follow-ups-filed-during-the-landing-not-blockers)
+lists the follow-ups filed during the landing — none of them blockers.
+Measurements live in [the performance report](./012-landing-perf-report.md).
+The plans this RFC's front matter used to point at are retired and archived.
 
 | §3 umbrella decision | State | Where it lives |
 | --- | --- | --- |
@@ -63,23 +66,40 @@ front matter used to point at are retired and archived.
 | 13. Actor identity and qualified evidence on runtime facts | implemented | `ActorRef` on every observer event; qualified buckets in `usage_query.rs` |
 | 14. Response-level Claude usage | implemented | 78.52B → 36.88B tokens, 2.129× — [012C](./012c-runtime-semantics-and-usage-v2.md) §6 |
 | 15. Explicit observer continuity | implemented | watch-before-scan, reset-before-replay, epochs, overflow → full replacement; 28 behavioural tests |
-| 16. Aggregators join evidence, not delivery accidents | implemented as types; no shipped joiner | `ExternalEntityRef`, `SemanticRevisionRef`, `atCommitSeq` — [docs/integration/vibefield-phase-a.md](../integration/vibefield-phase-a.md) |
+| 16. Aggregators join evidence, not delivery accidents | implemented as types; no shipped joiner | one `v1:` spelling for every opaque reference; `ExternalEntityRef`, `SemanticRevisionRef`, `atCommitSeq` — [docs/integration/vibefield-phase-a.md](../integration/vibefield-phase-a.md) |
 | 17. Product identity and contribution stay downstream | held | nothing shipped decides aliases, cross-device groups, or contribution |
 | 18. Physical extraction is incremental | held | still one crate; the ratchets in `scripts/code_shape/` enforce shape instead |
 
-Two things a reader should not infer from the table.
+Three things a reader should not infer from the table.
 
-`SCHEMA_VERSION` 64 forces a full rebuild at first start: the catalog appears in
-about 100 ms, but history and search converge in the background, which on a
-large corpus currently takes hours until lane L7 lands.
+**The rebuild is minutes, not hours.** `SCHEMA_VERSION` 64 forces a full rebuild
+at first start: the catalog appears in about 100 ms, and history and search
+converge in the background — 193 s and 202 s on a 3.2 GB Claude corpus, after
+durable ingest went from 70 to 11,653 records/s (166×) on a frozen 301 MB
+corpus. Both root causes and the trade-offs accepted are in
+[the performance report](./012-landing-perf-report.md).
 
-And "implemented" for the fact families means all eleven are emitted with typed
-values — not that every family has equally strong native evidence. Two
+**"Implemented" for the fact families means all eleven are emitted with typed
+values** — not that every family has equally strong native evidence. Two
 documented limits: plan revisions come from `ExitPlanMode`/`EnterPlanMode` tool
 evidence rather than from `plans/<slug>.md` sidecars, which stay snapshot facts
 with no actor binding; and a `tool_result` whose call fell outside the bounded
 correlation window keeps its content-block evidence without a guessed tool
 name. Both are in [012C](./012c-runtime-semantics-and-usage-v2.md) §7.
+
+**Revision identities changed for eight of those families.** `message`,
+`content_block`, `tool`, `user_input_request`, `plan`, `task`, `native_marker`,
+and `effective_state` now derive a revision from the record that proved the
+value rather than from the value alone, because those entities outlive any one
+record. Entity identities are unchanged; `FactRevisionId` for those families is
+not. See [012C](./012c-runtime-semantics-and-usage-v2.md) §3.1.
+
+Two process facts that are part of the architecture, not incidental to it:
+support releases are `agent-support/<adapter>/<date>/` with a single `version`
+field, and **promoting a real Claude, Codex, or Grok release requires a named
+human sanitizer review plus a performance report** — the validator refuses
+placeholders, so `fixture-agent` remains the only promoted release
+([012A](./012a-agent-adaptation-and-engine-boundaries.md) landing status).
 
 ## 1. Summary
 

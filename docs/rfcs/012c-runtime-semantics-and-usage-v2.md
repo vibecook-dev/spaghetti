@@ -71,6 +71,31 @@ construction: it imports no database and no observer type. It owns
   excludes epoch, sequence, phase, and observation time, so a clean bootstrap
   and a completed resync at equal coverage produce equal digests.
 
+**What makes two facts for one entity two revisions** is a per-family rule,
+decided once in `Fact::revision_binding`
+(`crates/spaghetti-napi/src/adapter/semantic.rs`) so the durable coordinator,
+the scoped observer, and the reducers cannot disagree while reaching a fact by
+different paths:
+
+| Binding | Families | Rule |
+| --- | --- | --- |
+| `ValueAtSourceRecord` | message, content block, tool, user-input request, plan, task, native marker, effective state | the revision composes the value key **with the record that proved it** |
+| `Value` | every other family — usage-v2, actor run, actor affiliation, artifact snapshot, … | a repeated value is deliberately *one* revision |
+| `SourceRecord` | any fact with no revision key | the record is the revision |
+
+The first group keys facts by an entity that outlives any single record — an
+actor's model, a tool call answered several records later — so two records can
+legitimately prove the same value, and only the record tells those revisions
+apart. The second is idempotent by construction: re-asserted usage, an
+unchanged affiliation, and a re-read snapshot are one revision however often
+they are observed.
+
+Entity identity is unaffected: `CanonicalFactId` and every `ExternalEntityRef`
+are the same under either rule, and only `FactRevisionId` — hence
+`SemanticRevisionRef.fact_revision_id` — differs. Changing a binding is a
+semantic-version change forcing a replay, which `SCHEMA_VERSION` 64 does
+locally; a downstream consumer holding those ids rebuilds its own derived state.
+
 ### 3.2 Usage
 
 `crates/spaghetti-napi/src/engine/usage_query.rs` holds the query side.
@@ -181,8 +206,7 @@ real corpus slice (5,238 responses).
 **End to end, native decode to typed TypeScript.**
 `packages/sdk/src/__tests__/observe-session-families.test.ts` drives a real
 `.claude`-shaped tree through the observer and asserts the families arrive with
-typed values, plus that the bootstrap barrier reports the families it actually
-reduced.
+typed values, and that the bootstrap barrier reports what it actually reduced.
 
 ## 6. The correction, in numbers
 

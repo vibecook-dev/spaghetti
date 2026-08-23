@@ -49,7 +49,11 @@ artifact layers are not there, and §8 says so.
    replacement snapshot in a new epoch.
 8. **Semantic revisions carry `SemanticRevisionRef`** — the same value a
    durable query returns for the same revision. That is the join identity;
-   `event_id` is the delivery idempotency key and is not a substitute.
+   `event_id` is the delivery idempotency key and is not a substitute. What
+   makes two facts for one entity two revisions is a per-family rule, and for
+   eight of the eleven it now names the record that proved the value — see
+   [012C](./012c-runtime-semantics-and-usage-v2.md) §3.1, which a consumer
+   persisting revision ids must read before upgrading.
 9. **No native content leaves the observer.** Transcript streams are declared
    `HashOnly`: an event carries the record's digest and byte range, not its
    bytes.
@@ -197,9 +201,15 @@ that the bootstrap barrier reports the families it actually reduced.
   pre-check sweep.
 - Object opens during bootstrap: 21,254 → **1,428**.
 - Root bootstrap of a 43.7 MB tree: **635 ms**, decoder-bound — adapter 64%,
-  I/O 22%, reduce 10%. That was measured before the L5 decoder work; whether it
-  now meets the landing plan §6 budget of 500 ms for a 50 MB tree is for lane
-  L7's perf report to state, not this document.
+  I/O 22%, reduce 10%. This is the one landing-plan §6 budget the landing
+  **missed** (500 ms for a 50 MB tree, so ~15 ms/MB against a ~11 ms/MB target).
+  It is a decode cost, not a durable-ingest one, and it is filed as a follow-up:
+  a primed blake3 hasher and a per-batch key prefix in `adapter/facts.rs`
+  ([landing plan §8a](./012-landing-plan.md#8a-follow-ups-filed-during-the-landing-not-blockers)).
+
+Every number here, and the durable-ingest work that does not touch the
+observer's serial bootstrap, is in
+[the performance report](./012-landing-perf-report.md).
 
 ## 7. Superseded sections of the 2026-08-15 draft
 
