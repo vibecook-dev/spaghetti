@@ -16,7 +16,6 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use crate::adapter::{
     AgentAdapter, CanonicalEntityKey, DiscoveryContext, Fact, FactSemanticRevision, SourceInstance,
 };
-use crate::claude::ClaudeCodeAdapter;
 
 use super::event::{
     ClosedEvent, ObjectCoverage, ObserverBarrier, ObserverErrorEvent, ObserverEvent,
@@ -49,7 +48,10 @@ pub(crate) enum Wake {
 /// `open()` fails fast on a bad request rather than in the background.
 pub(crate) struct ObserverRuntime {
     request: ResolvedRequest,
-    adapter: ClaudeCodeAdapter,
+    /// Injected by the binding layer. The observer names no vendor: it needs a
+    /// decoder, a stream declaration, and a scope program, and any adapter that
+    /// declares a session-rooted program can supply them.
+    adapter: Arc<dyn AgentAdapter>,
     instance: SourceInstance,
     catalog: StreamCatalog,
     scope: ScopeIdentity,
@@ -71,10 +73,9 @@ pub(crate) struct ObserverRuntime {
 impl ObserverRuntime {
     pub(crate) fn attach(
         request: ResolvedRequest,
+        adapter: Arc<dyn AgentAdapter>,
         delivery: Arc<Delivery>,
     ) -> Result<Self, ObserverError> {
-        let adapter = ClaudeCodeAdapter::new();
-
         // Evaluate a declared scope program, not an ad-hoc path rule. The
         // adapter's compiled-in manifest is the authority for what a session
         // scope may reach.
@@ -221,7 +222,12 @@ impl ObserverRuntime {
             if !self.objects.contains_key(&key) {
                 let local_object_id = self.next_local_object_id;
                 self.next_local_object_id += 1;
-                match ObservedObject::bind(&self.adapter, &self.instance, member, local_object_id) {
+                match ObservedObject::bind(
+                    self.adapter.as_ref(),
+                    &self.instance,
+                    member,
+                    local_object_id,
+                ) {
                     Ok(Some(object)) => {
                         self.objects.insert(key.clone(), object);
                     }
@@ -247,7 +253,7 @@ impl ObserverRuntime {
             let Some(object) = self.objects.get_mut(&key) else {
                 continue;
             };
-            let pass = object.reconcile(&self.adapter, observed_at);
+            let pass = object.reconcile(self.adapter.as_ref(), observed_at);
             let generation = object.generation();
             more |= pass.more_available;
 

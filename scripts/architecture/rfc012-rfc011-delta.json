@@ -107,8 +107,8 @@
         },
         {
           "state": "implemented",
-          "target": "crates/spaghetti-napi/src/scoped_observation.rs",
-          "claim": "Scoped delivery tests reject overflow without partial offer and discard reoverflowed incomplete replacement stages."
+          "target": "crates/spaghetti-napi/src/observer/queue.rs",
+          "claim": "Scoped delivery invalidates a saturated epoch explicitly and republishes a complete replacement snapshot rather than offering a partial one."
         }
       ]
     },
@@ -123,8 +123,8 @@
       "evidence": [
         {
           "state": "implemented",
-          "target": "packages/sdk/src/sources/claude-code/live/session-observation-shadow.ts",
-          "claim": "Feature-flagged shadow compares scoped usage envelopes beside watchSessionTranscript and rolls back to the legacy tail."
+          "target": "packages/sdk/src/__tests__/session-observer.test.ts",
+          "claim": "The store-free observer is reachable from Node and delivers typed revisions for a real session tree; watchSessionTranscript remains the fallback tail until the downstream migration lands."
         }
       ]
     },

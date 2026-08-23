@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 use super::support::{
-    assistant_record, collect_until, drain_bootstrap, subagent_record, user_record, SessionFixture,
-    SESSION,
+    assistant_record, collect_until, drain_bootstrap, open_observer, subagent_record, user_record,
+    SessionFixture, SESSION,
 };
-use crate::observer::{ObserverEvent, ObserverHandle};
+use crate::observer::ObserverEvent;
 
 fn coverage_paths(events: &[ObserverEvent]) -> Vec<String> {
     events
@@ -107,7 +107,7 @@ fn a_transcript_outside_the_projects_root_is_refused_before_any_watch() {
         .join(format!("{SESSION}.jsonl"))
         .to_string_lossy()
         .into_owned();
-    let Err(error) = ObserverHandle::open(&request) else {
+    let Err(error) = open_observer(&request) else {
         panic!("a locator outside the projects root must be refused");
     };
     assert!(
@@ -121,7 +121,7 @@ fn a_declared_session_id_that_disagrees_with_the_locator_fails_attachment() {
     let fixture = SessionFixture::new();
     let mut request = fixture.request();
     request.native_session_id = Some("11111111-2222-3333-4444-555555555555".to_string());
-    let Err(error) = ObserverHandle::open(&request) else {
+    let Err(error) = open_observer(&request) else {
         panic!("a declared session id that disagrees with the locator must be fatal");
     };
     assert!(

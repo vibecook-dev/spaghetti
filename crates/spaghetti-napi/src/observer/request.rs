@@ -84,8 +84,8 @@ impl ResolvedRequest {
 }
 
 impl ObserveSessionRequest {
-    pub(crate) fn resolve(&self) -> Result<ResolvedRequest, ObserverError> {
-        if self.adapter_id != "claude-code" {
+    pub(crate) fn resolve(&self, adapter_id: &str) -> Result<ResolvedRequest, ObserverError> {
+        if self.adapter_id != adapter_id {
             return Err(ObserverError::UnsupportedAdapter(self.adapter_id.clone()));
         }
         let agent_root = std::fs::canonicalize(&self.agent_root).map_err(|error| {

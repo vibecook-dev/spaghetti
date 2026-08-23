@@ -3,10 +3,32 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::adapter::{AdapterId, AgentAdapter};
+
 use napi::bindgen_prelude::{AsyncTask, Env, Error, Result, Status, Task};
 use napi_derive::napi;
 
-use super::{ObserveSessionRequest, ObserverEvent, ObserverHandle, ObserverStatus};
+use super::{ObserveSessionRequest, ObserverEvent, ObserverHandle};
+
+/// What the observer is currently doing, for a consumer's health surface.
+///
+/// This one crosses N-API as an object rather than through `ts-rs`, because
+/// napi-rs already generates its TypeScript from the same declaration.
+#[napi_derive::napi(object)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObserverStatus {
+    pub scope_epoch: i64,
+    /// Highest sequence admitted so far. Not comparable across attachments and
+    /// never comparable to a durable commit sequence.
+    pub offered_through_sequence: i64,
+    pub queued_semantic: u32,
+    pub queued_control: u32,
+    pub retained_bytes: u32,
+    /// False between continuity loss and the completion of the replacement
+    /// epoch. Ordinary semantic delivery is suspended while it is false.
+    pub epoch_valid: bool,
+    pub closed: bool,
+}
 
 /// Ceiling on one `poll` batch, so a caller cannot ask for an unbounded
 /// serialization in one call.
@@ -115,7 +137,7 @@ impl Task for CloseObserver {
 /// unsupported adapter fails here rather than as an error event later.
 #[napi(
     js_name = "observeSession",
-    ts_args_type = "request: ObserveSessionRequest | string"
+    ts_args_type = "request: string | Record<string, unknown>"
 )]
 pub fn observe_session(request: serde_json::Value) -> Result<SpaghettiSessionObserver> {
     let request: ObserveSessionRequest = match request {
@@ -128,11 +150,27 @@ pub fn observe_session(request: serde_json::Value) -> Result<SpaghettiSessionObs
             format!("observeSession request is invalid: {error}"),
         )
     })?;
-    let handle = ObserverHandle::open(&request)
+    let adapter = resolve_adapter(&request.adapter_id)?;
+    let handle = ObserverHandle::open(&request, adapter)
         .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
     Ok(SpaghettiSessionObserver {
         handle: Arc::new(handle),
     })
+}
+
+/// The binding layer is the composition root: it is the only part of the
+/// observer that knows which adapters are compiled in.
+fn resolve_adapter(adapter_id: &str) -> Result<Arc<dyn AgentAdapter>> {
+    let id = AdapterId::new(adapter_id)
+        .map_err(|error| Error::new(Status::InvalidArg, error.to_string()))?;
+    let catalog = crate::napi_engine::verified_builtin_support_catalog()
+        .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
+    let registry = crate::napi_engine::verified_builtin_registry(Arc::new(catalog))
+        .map_err(|error| Error::new(Status::GenericFailure, error.to_string()))?;
+    registry
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| Error::new(Status::InvalidArg, format!("unknown adapter {adapter_id}")))
 }
 
 fn batch_size(max: Option<u32>) -> usize {

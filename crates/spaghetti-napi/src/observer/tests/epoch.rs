@@ -3,10 +3,10 @@
 use std::time::Duration;
 
 use super::support::{
-    assistant_record, barrier_manifest, collect_until, drain_bootstrap, semantic_ids,
-    SessionFixture,
+    assistant_record, barrier_manifest, collect_until, drain_bootstrap, open_observer,
+    semantic_ids, SessionFixture,
 };
-use crate::observer::{ObserverEvent, ObserverHandle};
+use crate::observer::ObserverEvent;
 
 /// Enough records that a two-event queue cannot hold the live batch.
 fn burst(count: usize) -> Vec<String> {
@@ -25,7 +25,7 @@ fn a_saturated_live_queue_reports_continuity_loss_instead_of_dropping_events() {
     // loss has to be explicit.
     let mut request = fixture.request();
     request.max_queued_events = Some(2);
-    let observer = ObserverHandle::open(&request).expect("observer attaches");
+    let observer = open_observer(&request).expect("observer attaches");
     let _bootstrap = drain_bootstrap(&observer);
 
     fixture.append(&fixture.transcript(), &burst(40)[4..].to_vec());
@@ -76,7 +76,7 @@ fn a_replacement_snapshot_equals_a_clean_bootstrap_at_the_same_coverage() {
     // so the observer is fully caught up before the burst below.
     let mut request = fixture.request();
     request.max_queued_events = Some(1);
-    let observer = ObserverHandle::open(&request).expect("observer attaches");
+    let observer = open_observer(&request).expect("observer attaches");
     let _bootstrap = drain_bootstrap(&observer);
 
     // Written in one call so the observer reads the file at an exact watermark:
@@ -130,7 +130,7 @@ fn close_is_idempotent_and_reports_what_it_discarded() {
 
     let mut request = fixture.request();
     request.max_queued_events = Some(2);
-    let observer = ObserverHandle::open(&request).expect("observer attaches");
+    let observer = open_observer(&request).expect("observer attaches");
 
     // Close with work still queued and undelivered.
     observer.close();

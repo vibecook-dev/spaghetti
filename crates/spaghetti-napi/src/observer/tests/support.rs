@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+use crate::claude::ClaudeCodeAdapter;
 use crate::observer::{ObserveSessionRequest, ObserverEvent, ObserverHandle};
 
 pub(crate) const SESSION: &str = "01234567-89ab-cdef-0123-456789abcdef";
@@ -144,8 +145,15 @@ impl SessionFixture {
     }
 
     pub(crate) fn open(&self) -> ObserverHandle {
-        ObserverHandle::open(&self.request()).expect("observer attaches")
+        open_observer(&self.request()).expect("observer attaches")
     }
+}
+
+/// The binding layer injects the adapter at runtime; tests do it directly.
+pub(crate) fn open_observer(
+    request: &ObserveSessionRequest,
+) -> Result<ObserverHandle, crate::observer::ObserverError> {
+    ObserverHandle::open(request, std::sync::Arc::new(ClaudeCodeAdapter::new()))
 }
 
 /// A minimal user record. `sessionId` must match the transcript locator or the

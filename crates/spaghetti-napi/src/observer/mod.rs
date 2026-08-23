@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-pub use bindings::{observe_session, SpaghettiSessionObserver};
+pub use bindings::{observe_session, ObserverStatus, SpaghettiSessionObserver};
 use crossbeam_channel::Sender;
 pub use event::{
     ClosedEvent, FamilyManifestEntry, ObjectCoverage, ObserverBarrier, ObserverErrorEvent,
@@ -63,26 +63,6 @@ pub enum ObserverError {
     Source(String),
 }
 
-/// What the observer is currently doing, for a consumer's health surface.
-///
-/// This one crosses N-API as an object rather than through `ts-rs`, because
-/// napi-rs already generates its TypeScript from the same declaration.
-#[napi_derive::napi(object)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObserverStatus {
-    pub scope_epoch: i64,
-    /// Highest sequence admitted so far. Not comparable across attachments and
-    /// never comparable to a durable commit sequence.
-    pub offered_through_sequence: i64,
-    pub queued_semantic: u32,
-    pub queued_control: u32,
-    pub retained_bytes: u32,
-    /// False between continuity loss and the completion of the replacement
-    /// epoch. Ordinary semantic delivery is suspended while it is false.
-    pub epoch_valid: bool,
-    pub closed: bool,
-}
-
 /// A live attachment. Cloning the handle shares one scope; dropping every
 /// clone cancels the owner thread, but only `close()` waits for it.
 pub struct ObserverHandle {
@@ -94,13 +74,17 @@ pub struct ObserverHandle {
 impl ObserverHandle {
     /// Attach synchronously, then hand the scope to its owner thread.
     ///
-    /// Identity, adapter support, and the declared scope program are all
+    /// The caller supplies the adapter, which is the only place a vendor is
+    /// named. Identity, adapter support, and the declared scope program are all
     /// settled here, so a bad request fails the call rather than surfacing as
     /// an error event later.
-    pub fn open(request: &ObserveSessionRequest) -> Result<Self, ObserverError> {
-        let resolved = request.resolve()?;
+    pub fn open(
+        request: &ObserveSessionRequest,
+        adapter: Arc<dyn crate::adapter::AgentAdapter>,
+    ) -> Result<Self, ObserverError> {
+        let resolved = request.resolve(adapter.manifest().id.as_str())?;
         let delivery = Arc::new(Delivery::new(resolved.queue));
-        let runtime = ObserverRuntime::attach(resolved, Arc::clone(&delivery))?;
+        let runtime = ObserverRuntime::attach(resolved, adapter, Arc::clone(&delivery))?;
         let (sender, receiver) = wake_channel();
         let hint = sender.clone();
         let owner = std::thread::Builder::new()
