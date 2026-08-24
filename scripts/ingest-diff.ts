@@ -842,10 +842,17 @@ function dumpSchemaShape(db: DatabaseSync, table: string): Row {
     rows.map((row) => Object.fromEntries(Object.entries(row as Record<string, unknown>)));
   const columns = plainRows(db.prepare('SELECT * FROM pragma_table_info(?) ORDER BY cid').all(table));
   const foreignKeys = plainRows(db.prepare('SELECT * FROM pragma_foreign_key_list(?) ORDER BY id, seq').all(table));
-  const indexes = plainRows(db.prepare('SELECT * FROM pragma_index_list(?) ORDER BY name').all(table)).map((index) => ({
-    ...index,
-    columns: plainRows(db.prepare('SELECT * FROM pragma_index_info(?) ORDER BY seqno').all(String(index.name))),
-  }));
+  // `seq` is pragma_index_list's creation-order position — an artifact of
+  // when an index was created, not of what it is. The engines create the
+  // deferred query indexes at finalization while TS creates them inline, so
+  // the positions legitimately differ; name/uniqueness/origin/partiality and
+  // the column list are the semantic surface.
+  const indexes = plainRows(db.prepare('SELECT * FROM pragma_index_list(?) ORDER BY name').all(table)).map(
+    ({ seq: _seq, ...index }) => ({
+      ...index,
+      columns: plainRows(db.prepare('SELECT * FROM pragma_index_info(?) ORDER BY seqno').all(String(index.name))),
+    }),
+  );
   return { columns, foreignKeys, indexes };
 }
 
