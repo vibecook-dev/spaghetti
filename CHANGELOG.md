@@ -55,6 +55,14 @@ re-read.
   `Building the search index…`, rather than answering from an incomplete index.
 - Nothing is lost. The database is a pure function of your agent files, and
   `spag doctor` shows exactly which fields are still `indexing`.
+- The rebuild runs with `synchronous=OFF` for speed (about 30% faster; normal
+  durability returns the moment the build completes). The accepted trade: a
+  power loss or kernel panic **during the rebuild** can corrupt the index file
+  itself, not just lose recent progress. Most such damage is caught by the
+  integrity check that gates completion, and a failed check now wipes and
+  rebuilds automatically on the next start. If a restart after an unclean
+  power-off keeps failing instead, delete the index database and let it
+  rebuild — your agent files are the source of truth and are never written to.
 
 ### ⚠ BREAKING — fact revision identities changed for eight runtime families
 

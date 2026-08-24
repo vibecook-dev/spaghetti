@@ -296,7 +296,13 @@ it is the largest and depends on L2's codegen).
   NOT acceptable for this workload). Remaining: page_size 4096 → 16384 (projected win
   on that same wal-index walk; schema-bump item); crash mid-finalization resumes with
   deferred structures live (the slow regime) — re-drop them when resuming an
-  interrupted finalize.
+  interrupted finalize; `synchronous=OFF` detection gap — corruption born during the
+  OFF-mode build that surfaces as `SQLITE_CORRUPT` during a *resumed* ingest, before
+  finalization's quick_check can poison the marker, has no self-heal path yet:
+  intercept corruption errors while the bootstrap marker exists and stamp
+  `validation_failed`, or quick_check at writer open when a hot WAL meets an active
+  marker. The post-completion case is documented in the 0.8.0 CHANGELOG (delete the
+  database after a persistent unclean-power-off failure).
 - Observer bootstrap is decode-bound (~15 ms/MB, 635 ms @ 43.7 MB vs the 500 ms @ 50 MB
   budget): primed blake3 hasher / per-batch key prefix in `adapter/facts.rs` — matters for
   the observer's serial bootstrap and CPU, not durable ingest (writer-bound).
