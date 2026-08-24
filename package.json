@@ -1,6 +1,6 @@
 {
   "name": "spaghetti",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Local-first Claude Code explorer for searching sessions, browsing agent artifacts, and querying your history from the terminal",
