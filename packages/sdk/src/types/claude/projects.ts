@@ -77,7 +77,8 @@ export type SessionMessageType =
   | 'system'
   | 'summary'
   | 'queue-operation'
-  | 'last-prompt';
+  | 'last-prompt'
+  | 'atis-latch';
 
 export type SessionMessage =
   | AgentNameMessage
@@ -98,7 +99,8 @@ export type SessionMessage =
   | SystemMessage
   | SummaryMessage
   | QueueOperationMessage
-  | LastPromptMessage;
+  | LastPromptMessage
+  | AtisLatchMessage;
 
 export interface AgentNameMessage {
   type: 'agent-name';
@@ -127,6 +129,14 @@ export interface AiTitleMessage {
 export interface ModeMessage {
   type: 'mode';
   mode: string;
+  sessionId: string;
+}
+
+/** Opaque anti-tamper latch token Claude Code stamps into the transcript
+ * (first observed 2026-08-24). Carried, never interpreted. */
+export interface AtisLatchMessage {
+  type: 'atis-latch';
+  atis: string;
   sessionId: string;
 }
 

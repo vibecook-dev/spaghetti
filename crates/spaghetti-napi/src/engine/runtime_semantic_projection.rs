@@ -341,6 +341,30 @@ fn require_value_semantic_revision(
 /// fail the commit: that turned one such record into a permanent startup
 /// crash loop (2026-08-24 playground). Keep the accepted row, record the
 /// rejection where per-record loss already lives, and continue.
+/// A usage-v2 upsert the acceptance guard turned away. An identical accepted
+/// revision is a replay no-op; anything else lost the acceptance race and is
+/// recorded, never fatal — the same live-corpus hazard as the actor-run guard.
+pub(super) fn handle_rejected_usage_revision(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    envelope: &FactEnvelope,
+    semantic: &crate::adapter::FactSemanticRevision,
+) -> Result<(), EngineError> {
+    use rusqlite::OptionalExtension as _;
+    let accepted_revision = transaction
+        .query_row(
+            "SELECT fact_revision_id FROM usage_v2_response_contributions WHERE usage_key = ?1",
+            [semantic.fact_id.as_bytes().as_slice()],
+            |row| row.get::<_, Vec<u8>>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read rejected usage-v2 revision", error))?;
+    if accepted_revision.as_deref() == Some(semantic.fact_revision_id.as_bytes().as_slice()) {
+        return Ok(());
+    }
+    record_rejected_revision(transaction, context, envelope, 0, "usage-v2")
+}
+
 pub(super) fn record_rejected_revision(
     transaction: &Transaction<'_>,
     context: &ProjectionCommitContext,

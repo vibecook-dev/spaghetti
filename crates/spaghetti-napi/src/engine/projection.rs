@@ -22,7 +22,9 @@ use super::commit::{
 };
 use super::memory_projection::apply_project_memory_facts;
 use super::presence_projection::apply_presence_facts;
-use super::runtime_semantic_projection::apply_runtime_semantic_v2_facts;
+use super::runtime_semantic_projection::{
+    apply_runtime_semantic_v2_facts, handle_rejected_usage_revision,
+};
 use super::session_index_projection::apply_session_index_facts;
 use super::settings_projection::apply_interpretation_settings_facts;
 use super::storage_codec::{omitted, BlobEncoder, EncodedBlob};
@@ -3302,28 +3304,7 @@ fn apply_usage_v2_facts(
         )
         .map_err(|error| sqlite_error("write usage-v2 response contribution", error))?;
         if affected == 0 {
-            let accepted_revision = transaction
-                .query_row(
-                    "SELECT fact_revision_id FROM usage_v2_response_contributions WHERE usage_key = ?1",
-                    [semantic.fact_id.as_bytes().as_slice()],
-                    |row| row.get::<_, Vec<u8>>(0),
-                )
-                .optional()
-                .map_err(|error| sqlite_error("read rejected usage-v2 revision", error))?;
-            if accepted_revision.as_deref() == Some(semantic.fact_revision_id.as_bytes().as_slice())
-            {
-                continue;
-            }
-            // Same live-corpus hazard as the actor-run guard: losing the
-            // acceptance race must not fail the commit, or one conflicting
-            // record permanently kills every startup that replays it.
-            super::runtime_semantic_projection::record_rejected_revision(
-                transaction,
-                context,
-                envelope,
-                0,
-                "usage-v2",
-            )?;
+            handle_rejected_usage_revision(transaction, context, envelope, &semantic)?;
             continue;
         }
         if affected != 1 {
