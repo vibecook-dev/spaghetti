@@ -266,7 +266,8 @@ pub fn read_project_page(
             SELECT cs.project_key,
                    cs.session_key,
                    cs.sort_time,
-                   {session_state} AS state
+                   {session_state} AS state,
+                   can.cwd AS decoded_cwd
             FROM catalog_sessions cs
             LEFT JOIN canonical_sessions can ON can.session_key = cs.session_key
         ),
@@ -275,7 +276,8 @@ pub fn read_project_page(
                    COUNT(*) AS session_count,
                    SUM(CASE WHEN state != 'discovered' THEN 1 ELSE 0 END) AS transcript_count,
                    SUM(CASE WHEN state IN ('hydrated', 'searchable') THEN 1 ELSE 0 END) AS hydrated_count,
-                   MAX(sort_time) AS latest_activity
+                   MAX(sort_time) AS latest_activity,
+                   MAX(decoded_cwd) AS decoded_cwd
             FROM session_facts GROUP BY project_key
         )
         SELECT p.project_key, p.external_ref, p.adapter_id, p.native_project_key,
@@ -283,7 +285,8 @@ pub fn read_project_page(
                COALESCE(r.session_count, 0), COALESCE(r.transcript_count, 0),
                COALESCE(r.hydrated_count, 0),
                COALESCE(r.latest_activity, ''),
-               COALESCE(src.degraded, 0), src.degraded_reason
+               COALESCE(src.degraded, 0), src.degraded_reason,
+               r.decoded_cwd
         FROM catalog_projects p
         LEFT JOIN rollup r ON r.project_key = p.project_key
         LEFT JOIN catalog_sources src ON src.source_instance_id = p.source_instance_id
@@ -561,6 +564,14 @@ fn read_conflicts(
         .map_err(|error| sqlite_error("decode catalog conflict", error))
 }
 
+/// The last path segment of a decoded working directory, tolerant of both
+/// separators. A cwd that yields no segment falls back to the whole string.
+fn cwd_basename(cwd: &str) -> &str {
+    cwd.rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(cwd)
+}
+
 fn decode_project_row(row: &Row<'_>) -> rusqlite::Result<(CatalogProjectRow, Vec<u8>)> {
     let project_key: Vec<u8> = row.get(0)?;
     let external_ref: Vec<u8> = row.get(1)?;
@@ -569,14 +580,27 @@ fn decode_project_row(row: &Row<'_>) -> rusqlite::Result<(CatalogProjectRow, Vec
     let transcript_count: i64 = row.get(8)?;
     let hydrated_count: i64 = row.get(9)?;
     let degraded: i64 = row.get(11)?;
+    // Claude discovery has no name to offer — the directory name is a lossy
+    // path flattening — but every decoded session carries its real cwd. Fall
+    // back to that evidence so a project stops rendering as its slug the
+    // moment one of its sessions decodes.
+    let display_name: Option<String> = row.get(4)?;
+    let display_path: Option<String> = row.get(5)?;
+    let decoded_cwd: Option<String> = row.get(13)?;
+    let display_name = display_name.or_else(|| {
+        decoded_cwd
+            .as_deref()
+            .map(|cwd| cwd_basename(cwd).to_string())
+    });
+    let display_path = display_path.or_else(|| decoded_cwd.clone());
     Ok((
         CatalogProjectRow {
             project_id: encode_entity_id(PROJECT_ID_PREFIX, &project_key),
             external_ref: encode_external_ref(&external_ref),
             adapter_id: row.get(2)?,
             native_project_key: row.get(3)?,
-            display_name: row.get(4)?,
-            display_path: row.get(5)?,
+            display_name,
+            display_path,
             catalog_state: project_state(session_count, transcript_count, hydrated_count),
             degraded: degraded != 0,
             degraded_reason: row.get(12)?,

@@ -597,6 +597,17 @@ fn history_convergence_promotes_the_catalog_state_of_a_transcript() {
         "a metadata-only session never gains fabricated history"
     );
 
+    // Claude discovery offers no display name — the directory name is a lossy
+    // path flattening — so once a session decodes, the project takes its name
+    // and path from the decoded cwd instead of rendering as its slug.
+    let named = projects(&engine);
+    let alpha = named
+        .projects
+        .iter()
+        .find(|project| project.display_name.as_deref() == Some("alpha"))
+        .expect("a decoded project is named from its sessions' cwd");
+    assert_eq!(alpha.display_path.as_deref(), Some("/Users/dev/alpha"));
+
     assert_no_legacy_catalog_tables(&database);
     engine.shutdown().unwrap();
 }
