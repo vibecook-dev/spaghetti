@@ -253,11 +253,19 @@ it is the largest and depends on L2's codegen).
   - `orchestration_query.rs` counts `canonical_workflow_members` by `child_run_key` per
     delegation row, but that table only has `workflow_key`-leading indexes — a full scan
     of that (small) table always, independent of bootstrap.
-  - **`canonical_message_content_blocks` is never populated on the Claude ingest path**
-    (verified: real reconcile, 3 canonical messages incl. a tool_use → 0 block rows, while
-    `projection.rs` has the insert and `block_metadata` maps every kind — something
-    upstream delivers `Fact::Message` with empty content). Timeline content-kind/tool-name
-    facets and block include/exclude filters are silently empty for real sessions.
+  - **Resolved 2026-08-24 — the "content blocks never populated" report was a fixture
+    defect, not a product regression.** Real corpus verified healthy (674k block rows;
+    0 of 20,000 sampled assistant messages missing blocks). The hand-written test
+    fixtures omitted the inner envelope's required `"type":"message"`, so every
+    fixture assistant line silently took the typed-projection-loss path (content
+    dropped, `claude_typed_projection_loss` recorded — the diagnostics worked
+    exactly as designed). `catalog/tests.rs` now writes valid lines, asserts block
+    facets non-empty after finalization, and pins `source_record_errors == 0` so a
+    fixture that fails the decode can never silently downgrade tests again.
+    Remaining follow-up: audit the other hand-written transcript fixtures
+    (observer/tests/support.rs, coordinator/tests.rs, usage_query/tests.rs,
+    project_parser.rs) for the same omission where the test intends a decoded
+    message.
   - `supervisor.rs` initial scan holds one shared source-pass permit across the entire
     adapter reconcile — the pool's contract is *bounded* passes; scope the permit per
     pass so pressure-limited capacity (limit=1 under checkpoint debt) cannot be pinned

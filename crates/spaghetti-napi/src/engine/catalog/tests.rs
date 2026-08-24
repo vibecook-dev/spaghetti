@@ -30,9 +30,33 @@ const SESSION_DIRECTORY_ONLY: &str = "77777777-7777-4777-8777-777777777777";
 /// One assistant turn the Claude decoder accepts, so a transcript that reaches
 /// the history path produces a canonical session rather than a decode error.
 fn transcript_line(session_id: &str, cwd: &str) -> String {
+    // The inner envelope's `"type":"message"` is required by the typed decoder
+    // and present on every real transcript line. Omitting it silently routes
+    // the record through the projection-loss path (content dropped, error
+    // recorded) — which is how this fixture once made every test downstream
+    // exercise degraded messages while believing they were decoded.
     format!(
-        r#"{{"type":"assistant","uuid":"{session_id}","sessionId":"{session_id}","timestamp":"2026-08-01T00:00:00.000Z","cwd":"{cwd}","message":{{"id":"msg_1","role":"assistant","model":"claude-test","content":[{{"type":"text","text":"hello"}}],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
+        r#"{{"type":"assistant","uuid":"{session_id}","sessionId":"{session_id}","timestamp":"2026-08-01T00:00:00.000Z","cwd":"{cwd}","message":{{"id":"msg_1","type":"message","role":"assistant","model":"claude-test","content":[{{"type":"text","text":"hello"}},{{"type":"tool_use","id":"toolu_1","name":"Bash","input":{{}}}}],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}"#
     )
+}
+
+/// A fixture that fails the typed decode is a silent downgrade of every test
+/// that uses it: messages still get canonical rows, so counts pass while
+/// content, blocks, and search text are gone. Pin fixture validity instead.
+fn assert_no_source_record_errors(database: &Path) {
+    let connection =
+        Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let (count, first): (i64, Option<String>) = connection
+        .query_row(
+            "SELECT COUNT(*), MIN(error_message) FROM source_record_errors",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "fixture records must survive the typed decode; first error: {first:?}"
+    );
 }
 
 /// A Claude source root: two transcript-backed sessions in one project and a
@@ -680,7 +704,8 @@ fn deferred_structures_keep_catalog_and_history_queries_degraded_not_probing() {
 fn deferred_structures_keep_detail_timeline_and_delegation_queries_degraded() {
     let temp = TempDir::new().unwrap();
     let root = claude_tree(temp.path());
-    let engine = open_deferred_engine(temp.path().join("deferred-detail.db"));
+    let database = temp.path().join("deferred-detail.db");
+    let engine = open_deferred_engine(database.clone());
     engine.discover_source_catalog(&configured(&root)).unwrap();
     engine
         .reconcile_adapter(
@@ -784,16 +809,16 @@ fn deferred_structures_keep_detail_timeline_and_delegation_queries_degraded() {
     );
     let timeline_after = timeline(&engine);
     assert_eq!(timeline_after.facets.total_messages, after.message_count);
-    // The message facets carry real counts again. The block facets stay empty
-    // because this ingest path writes no `canonical_message_content_blocks`
-    // rows at all — a separate gap, not a property of deferral.
     assert!(
         !timeline_after.facets.roles.is_empty()
             && !timeline_after.facets.native_kinds.is_empty()
-            && !timeline_after.facets.branch_kinds.is_empty(),
-        "facets are exact again after finalization: {:?}",
+            && !timeline_after.facets.branch_kinds.is_empty()
+            && !timeline_after.facets.content_kinds.is_empty()
+            && !timeline_after.facets.tool_names.is_empty(),
+        "message and block facets are exact again after finalization: {:?}",
         timeline_after.facets
     );
+    assert_no_source_record_errors(&database);
     engine.shutdown().unwrap();
 }
 
