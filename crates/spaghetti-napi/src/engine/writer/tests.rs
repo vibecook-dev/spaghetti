@@ -560,9 +560,9 @@ fn bootstrap_defers_checkpoints_until_the_large_wal_threshold() {
 }
 
 #[test]
-fn reader_free_bootstrap_checkpoint_copies_and_reclaims_the_wal() {
+fn bootstrap_checkpoint_copies_and_rewinds_the_wal_in_place() {
     let dir = tempdir().unwrap();
-    let database = dir.path().join("reader-free-checkpoint.db");
+    let database = dir.path().join("bootstrap-checkpoint.db");
     let connection = open_writer(&database).unwrap();
     connection
         .execute_batch(
@@ -576,23 +576,77 @@ fn reader_free_bootstrap_checkpoint_copies_and_reclaims_the_wal() {
     let mut wal_path = database.as_os_str().to_os_string();
     wal_path.push("-wal");
     let wal_path = PathBuf::from(wal_path);
-    assert!(
-        std::fs::metadata(&wal_path)
+    let wal_len = |path: &PathBuf| {
+        std::fs::metadata(path)
             .map(|metadata| metadata.len())
             .unwrap_or_default()
-            > 0,
-        "fixture must create WAL frames before the checkpoint"
-    );
+    };
+    let peak = wal_len(&wal_path);
+    assert!(peak > 0, "fixture must create WAL frames");
 
-    let checkpoint = reader_free_checkpoint(&connection).unwrap();
+    let checkpoint = bootstrap_checkpoint(&connection).unwrap();
     assert!(!checkpoint.busy, "{checkpoint:?}");
     assert_eq!(checkpoint.remaining_frames, 0);
-    assert_eq!(
-        std::fs::metadata(wal_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or_default(),
-        0,
-        "reader-free TRUNCATE must reclaim the WAL"
+
+    // RESTART rewinds the WAL instead of truncating it: the next write reuses
+    // the existing allocation from the start rather than re-extending a file
+    // that was just deleted.
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE; \
+             INSERT INTO checkpoint_fixture(value) VALUES (zeroblob(1048576)); \
+             COMMIT;",
+        )
+        .unwrap();
+    assert!(
+        wal_len(&wal_path) <= peak,
+        "a rewound WAL is reused, not extended past its previous peak"
+    );
+}
+
+#[test]
+fn bootstrap_checkpoint_reports_busy_instead_of_waiting_behind_a_reader() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("bootstrap-checkpoint-reader.db");
+    let connection = open_writer(&database).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE checkpoint_fixture(value BLOB NOT NULL); \
+                 BEGIN IMMEDIATE; \
+                 INSERT INTO checkpoint_fixture(value) VALUES (zeroblob(262144)); \
+                 COMMIT;",
+        )
+        .unwrap();
+
+    // A live read snapshot pins the WAL — catalog-first startup admits readers
+    // during bootstrap, so this is the normal case, not an edge case.
+    let reader = rusqlite::Connection::open(&database).unwrap();
+    reader.execute_batch("BEGIN;").unwrap();
+    let _: i64 = reader
+        .query_row("SELECT COUNT(*) FROM checkpoint_fixture", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE; \
+             INSERT INTO checkpoint_fixture(value) VALUES (zeroblob(262144)); \
+             COMMIT;",
+        )
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    let checkpoint = bootstrap_checkpoint(&connection).unwrap();
+    let elapsed = started.elapsed();
+    reader.execute_batch("COMMIT;").unwrap();
+
+    assert!(
+        checkpoint.busy,
+        "a pinned reader leaves the checkpoint incomplete: {checkpoint:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the bootstrap checkpoint must never block behind a reader; took {elapsed:?}"
     );
 }
 

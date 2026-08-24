@@ -279,8 +279,24 @@ it is the largest and depends on L2's codegen).
   `effective_at` never carries native time into runtime facts (RFC 012C §9 evidence gap).
 - `EngineError::BootstrapInProgress` is matched on message text in the SDK; give it a stable
   token prefix like `RESET_REQUIRED`.
-- Cold-build WAL reached ~2 GiB at 400k records with 2/3 checkpoints reader-blocked (27 s);
-  run the bounded-cadence experiment (08-15 E2) now that real-corpus runs work.
+- **Resolved 2026-08-24 — write-path measurement program (raw data: SamsungRed
+  scratch/walbench) + fixes.** Baseline cold build 247.9 s / 4,674 rec/s with
+  checkpoints 40% of wall, fsync-dominated. Landed: (1) bootstrap checkpoints were
+  TRUNCATE-with-readers — catalog-first admits readers during bootstrap, so one pinned
+  90 s reader froze ingest for 84 s (the "reader-blocked 27 s" case and the runaway-WAL
+  resumes); now PASSIVE-copy + zero-wait RESTART, never blocking. (2) `synchronous=OFF`
+  during the cold build (measured −30% wall, +43% rec/s; NORMAL restored at
+  finalization; a corrupting crash mid-build is caught by finalization validation,
+  which now self-heals). (3) A finalization validation failure (e.g. FK orphans from
+  `foreign_keys=OFF` + generation-replacement deletes) used to wedge the database
+  permanently; it now stamps `validation_failed` and the next open wipes and rebuilds.
+  Negative results, do not revisit without new data: moving checkpoints off the writer
+  thread measured −13.5%; disabling/raising the WAL target is catastrophic (20.6 GB WAL
+  decayed writer throughput 140 → 32 MB/s inside the wal-index walk — large WALs are
+  NOT acceptable for this workload). Remaining: page_size 4096 → 16384 (projected win
+  on that same wal-index walk; schema-bump item); crash mid-finalization resumes with
+  deferred structures live (the slow regime) — re-drop them when resuming an
+  interrupted finalize.
 - Observer bootstrap is decode-bound (~15 ms/MB, 635 ms @ 43.7 MB vs the 500 ms @ 50 MB
   budget): primed blake3 hasher / per-batch key prefix in `adapter/facts.rs` — matters for
   the observer's serial bootstrap and CPU, not durable ingest (writer-bound).

@@ -998,12 +998,12 @@ impl CheckpointController {
         &mut self,
         connection: &Connection,
         telemetry: &WriterTelemetry,
-        reader_free: bool,
+        bootstrap: bool,
     ) -> Result<CheckpointOutcome, EngineError> {
         self.last_attempt = Some(Instant::now());
         let started = Instant::now();
-        let result = if reader_free {
-            reader_free_checkpoint(connection)
+        let result = if bootstrap {
+            bootstrap_checkpoint(connection)
         } else {
             controlled_checkpoint(connection)
         };
@@ -1544,34 +1544,59 @@ fn controlled_checkpoint(connection: &Connection) -> Result<CheckpointOutcome, E
     })
 }
 
-/// Bootstrap has no query readers by construction, so one TRUNCATE operation
-/// can copy and reclaim the WAL. The live controller must retain its two-step
-/// nonblocking PASSIVE/TRUNCATE protocol because a pinned reader is normal
-/// there; applying that protocol to a reader-free multi-gigabyte build merely
-/// pays a second synchronization boundary for every checkpoint.
-fn reader_free_checkpoint(connection: &Connection) -> Result<CheckpointOutcome, EngineError> {
-    let checkpoint = read_checkpoint_row(
+/// Bootstrap checkpoints run with live readers: catalog-first startup admits
+/// the query pool while the build is still ingesting, so a blocking TRUNCATE
+/// here starves the writer behind every pinned read snapshot (measured: one
+/// 90 s reader froze ingest for 84 s and collapsed WAL absorption from
+/// 107 MB/s to 2.4 MB/s). Copy with PASSIVE, then rewind the multi-gigabyte
+/// WAL in place with a zero-wait RESTART — never truncate it, because the
+/// bootstrap journal target means the file would only be re-extended, and
+/// never wait behind a reader.
+fn bootstrap_checkpoint(connection: &Connection) -> Result<CheckpointOutcome, EngineError> {
+    let passive = read_checkpoint_row(
         connection,
-        "PRAGMA wal_checkpoint(TRUNCATE)",
-        "run reader-free WAL checkpoint",
+        "PRAGMA wal_checkpoint(PASSIVE)",
+        "run passive bootstrap WAL checkpoint",
     )?;
-    let remaining_frames = if checkpoint.busy {
-        let uncopied = checkpoint
-            .log_frames
-            .saturating_sub(checkpoint.checkpointed_frames);
-        if uncopied == 0 {
-            checkpoint.log_frames
-        } else {
-            uncopied
-        }
-    } else {
-        0
-    };
+    let passive_remaining = passive
+        .log_frames
+        .saturating_sub(passive.checkpointed_frames);
+    if passive.busy || passive_remaining > 0 {
+        return Ok(CheckpointOutcome {
+            busy: true,
+            log_frames: passive.log_frames,
+            checkpointed_frames: passive.checkpointed_frames,
+            remaining_frames: passive_remaining,
+        });
+    }
+
+    connection
+        .busy_timeout(Duration::ZERO)
+        .map_err(|error| EngineError::Sqlite {
+            operation: "disable busy wait for bootstrap WAL restart",
+            detail: error.to_string(),
+        })?;
+    let restart = read_checkpoint_row(
+        connection,
+        "PRAGMA wal_checkpoint(RESTART)",
+        "restart checkpointed bootstrap WAL",
+    );
+    let restore = connection
+        .busy_timeout(WRITER_BUSY_TIMEOUT)
+        .map_err(|error| EngineError::Sqlite {
+            operation: "restore writer busy timeout after bootstrap WAL restart",
+            detail: error.to_string(),
+        });
+    let restart = restart?;
+    restore?;
+
     Ok(CheckpointOutcome {
-        busy: checkpoint.busy,
-        log_frames: checkpoint.log_frames,
-        checkpointed_frames: checkpoint.checkpointed_frames,
-        remaining_frames,
+        busy: restart.busy,
+        log_frames: passive.log_frames,
+        checkpointed_frames: passive.checkpointed_frames,
+        // A busy RESTART means a reader still pins the current WAL generation
+        // even though PASSIVE copied every frame into the main database.
+        remaining_frames: if restart.busy { passive.log_frames } else { 0 },
     })
 }
 
