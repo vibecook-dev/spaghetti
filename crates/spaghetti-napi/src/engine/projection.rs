@@ -3314,9 +3314,17 @@ fn apply_usage_v2_facts(
             {
                 continue;
             }
-            return Err(EngineError::InvalidCommit(
-                "usage-v2 revision conflicts with its stable contribution identity or arrived behind the accepted source revision".to_string(),
-            ));
+            // Same live-corpus hazard as the actor-run guard: losing the
+            // acceptance race must not fail the commit, or one conflicting
+            // record permanently kills every startup that replays it.
+            super::runtime_semantic_projection::record_rejected_revision(
+                transaction,
+                context,
+                envelope,
+                0,
+                "usage-v2",
+            )?;
+            continue;
         }
         if affected != 1 {
             return Err(EngineError::InvalidCommit(format!(
@@ -7397,34 +7405,25 @@ mod tests {
         batch
     }
 
-    fn rfc012c_rejected_durable_correction(
-        connection: &mut Connection,
-        record: &SourceRecord,
-        batch: &FactBatch,
-        clock: i64,
-    ) -> String {
-        let error = apply_fact_observation_commit(
-            connection,
-            &request(
-                ExpectedSourceCursor::At {
-                    generation: 1,
-                    committed_cursor: SourceCursor::append_offset(4).into_bytes(),
-                },
-                1,
-                record.cursor_end.as_bytes().to_vec(),
-                clock,
-            ),
-            batch,
-        )
-        .unwrap_err();
-        match error {
-            EngineError::InvalidCommit(message) => message,
-            other => panic!("expected invalid semantic correction, got {other:?}"),
-        }
+    fn revision_rejections(connection: &Connection) -> i64 {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM source_record_errors WHERE error_class = 'revision_rejected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 
+    /// Identity drift on an already-accepted revision is rejected and
+    /// recorded, never fatal: a live corpus legitimately produces conflicting
+    /// assertions (a session's actor runs asserted by more than one member
+    /// object), and failing the commit turned one such record into a
+    /// permanent startup crash loop (2026-08-24 playground). The accepted row
+    /// must survive unchanged and the rejection must be visible in
+    /// `source_record_errors`.
     #[test]
-    fn rfc012c_durable_selected_identity_drift_fails_closed() {
+    fn rfc012c_durable_selected_identity_drift_is_rejected_and_recorded() {
         let fixture = rfc012c_runtime_fixture();
         let context = rfc012c_semantic_context();
         let mut connection = database();
@@ -7460,32 +7459,25 @@ mod tests {
                 Fact::ActorRunRevision(actor_drift),
             )
             .unwrap();
-        assert!(rfc012c_rejected_durable_correction(
-            &mut connection,
-            &correction,
-            &actor_batch,
-            13,
-        )
-        .contains("actor-run revision conflicts"));
+        // The drifted revision loses the acceptance race; the commit itself
+        // succeeds and the loss is recorded.
+        commit_direct_batch(&mut connection, &correction, 1, 4, 13, &actor_batch);
+        assert_eq!(revision_rejections(&connection), 1);
 
+        let correction2 = direct_record(1, 7, 9, 14, b"{}");
         let mut affiliation_drift = fixture.affiliations.child_workflow_present.revision.clone();
         affiliation_drift.dimension = ActorAffiliationDimension::Team;
         let mut affiliation_batch =
             FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap();
         affiliation_batch
             .push_native(
-                &correction,
+                &correction2,
                 b"fixture-child-actor/workflow/fixture-workflow-1",
                 Fact::ActorAffiliationRevision(affiliation_drift),
             )
             .unwrap();
-        assert!(rfc012c_rejected_durable_correction(
-            &mut connection,
-            &correction,
-            &affiliation_batch,
-            14,
-        )
-        .contains("actor-affiliation revision conflicts"));
+        commit_direct_batch(&mut connection, &correction2, 1, 7, 14, &affiliation_batch);
+        assert_eq!(revision_rejections(&connection), 2);
 
         let usage_a = &fixture.usage.response_revisions.a;
         let mut usage_drift = usage_a.revision.clone();
@@ -7493,22 +7485,18 @@ mod tests {
         usage_drift.response_key = b"retargeted-response".to_vec();
         usage_drift.native_message_id = Some("retargeted-response".to_string());
         let usage_revision_key = usage_drift.semantic_revision_key().unwrap();
+        let correction3 = direct_record(1, 9, 11, 15, b"{}");
         let mut usage_batch = FactBatch::new_with_semantic_context(1, 1, context.clone()).unwrap();
         usage_batch
             .push_native_object_scoped_with_revision(
-                &correction,
+                &correction3,
                 &usage_stable_key,
                 &usage_revision_key,
                 Fact::UsageRevisionV2(usage_drift),
             )
             .unwrap();
-        assert!(rfc012c_rejected_durable_correction(
-            &mut connection,
-            &correction,
-            &usage_batch,
-            15,
-        )
-        .contains("stable contribution identity"));
+        commit_direct_batch(&mut connection, &correction3, 1, 9, 15, &usage_batch);
+        assert_eq!(revision_rejections(&connection), 3);
 
         assert_eq!(count(&connection, "runtime_actor_runs_v2"), 2);
         assert_eq!(count(&connection, "runtime_actor_affiliations_v2"), 2);
@@ -7550,23 +7538,24 @@ mod tests {
         usage_attribution.actor_run = fixture.actors.root.revision.actor_run;
         let usage_stable_key = usage_attribution.response_key.clone();
         let usage_revision_key = usage_attribution.semantic_revision_key().unwrap();
+        let correction4 = direct_record(1, 11, 13, 16, b"{}");
         let mut valid_batch = FactBatch::new_with_semantic_context(2, 1, context).unwrap();
         valid_batch
             .push_native(
-                &correction,
+                &correction4,
                 b"fixture-child-actor",
                 Fact::ActorRunRevision(actor_correction),
             )
             .unwrap();
         valid_batch
             .push_native_object_scoped_with_revision(
-                &correction,
+                &correction4,
                 &usage_stable_key,
                 &usage_revision_key,
                 Fact::UsageRevisionV2(usage_attribution),
             )
             .unwrap();
-        commit_direct_batch(&mut connection, &correction, 1, 4, 16, &valid_batch);
+        commit_direct_batch(&mut connection, &correction4, 1, 11, 16, &valid_batch);
         assert_eq!(
             connection
                 .query_row(

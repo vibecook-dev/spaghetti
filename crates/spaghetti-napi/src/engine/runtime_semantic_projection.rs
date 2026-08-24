@@ -156,7 +156,7 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                         ],
                     )
                     .map_err(|error| sqlite_error("write actor run", error))?;
-                require_accepted(affected, "actor-run")?;
+                record_rejected_revision(transaction, context, envelope, affected, "actor-run")?;
             }
             Fact::ActorAffiliationRevision(fact) => {
                 fact.validate().map_err(|error| {
@@ -268,7 +268,13 @@ pub(super) fn apply_runtime_semantic_v2_facts(
                         ],
                     )
                     .map_err(|error| sqlite_error("write actor affiliation", error))?;
-                require_accepted(affected, "actor-affiliation")?;
+                record_rejected_revision(
+                    transaction,
+                    context,
+                    envelope,
+                    affected,
+                    "actor-affiliation",
+                )?;
             }
             _ => {}
         }
@@ -327,14 +333,54 @@ fn require_value_semantic_revision(
     Ok(())
 }
 
-fn require_accepted(affected: usize, fact_name: &str) -> Result<(), EngineError> {
+/// A revision the acceptance guard turned away: the accepted row is pinned to
+/// a different member object of the same session, or the incoming record sits
+/// behind the accepted cursor after a rewrite. Both are properties of a live
+/// corpus — a session whose actor runs are asserted by more than one member
+/// object is normal for multi-agent sessions — so losing the race must not
+/// fail the commit: that turned one such record into a permanent startup
+/// crash loop (2026-08-24 playground). Keep the accepted row, record the
+/// rejection where per-record loss already lives, and continue.
+pub(super) fn record_rejected_revision(
+    transaction: &Transaction<'_>,
+    context: &ProjectionCommitContext,
+    envelope: &FactEnvelope,
+    affected: usize,
+    fact_name: &str,
+) -> Result<(), EngineError> {
     if affected == 1 {
-        Ok(())
-    } else {
-        Err(EngineError::InvalidCommit(format!(
-            "{fact_name} revision conflicts with a different source or arrived behind the accepted source cursor"
-        )))
+        return Ok(());
     }
+    transaction
+        .execute(
+            r#"
+            INSERT INTO source_record_errors (
+                source_object_id, generation, cursor_start, cursor_end,
+                payload_hash, media_type, raw_payload, error_class,
+                error_message, adapter_version, contract_version,
+                first_commit_seq, last_retry_at, retry_count
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'application/x-spaghetti-fact', NULL,
+                      'revision_rejected', ?6, 'engine', 0, ?7, NULL, 0)
+            ON CONFLICT(source_object_id, generation, cursor_start, cursor_end) DO UPDATE SET
+                error_class = excluded.error_class,
+                error_message = excluded.error_message,
+                retry_count = source_record_errors.retry_count + 1
+            "#,
+            params![
+                sqlite_u64(context.source_object_id, "source object id")?,
+                sqlite_u64(context.generation, "source generation")?,
+                envelope.provenance.cursor_start,
+                envelope.provenance.cursor_end,
+                envelope.provenance.record_hash.as_slice(),
+                format!(
+                    "{fact_name} revision rejected: the accepted row is pinned to a \
+                     different source object or a later source cursor"
+                ),
+                sqlite_u64(context.commit_seq, "commit sequence")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("record rejected semantic revision", error))?;
+    Ok(())
 }
 
 fn actor_run_role(role: ActorRunRole) -> &'static str {
